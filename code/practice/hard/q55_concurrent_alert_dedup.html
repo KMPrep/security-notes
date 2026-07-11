@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q55_concurrent_alert_dedup.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q55_concurrent_alert_dedup.py</h1>
+  <p class="file-path">Source: code\practice\hard\q55_concurrent_alert_dedup.py</p>
+  <p class="line-count">385 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q55 [Hard] — Concurrent Alert Deduplication Cache
+=============================================================================
+
+PROBLEM
+-------
+Implement a thread-safe cache to suppress duplicate security alerts:
+  1. Multiple workers process alert streams concurrently.
+  2. An alert is considered a &quot;duplicate&quot; if an identical (or similar)
+     alert for the same key was seen within a suppression window.
+  3. First occurrence is passed through; subsequent duplicates are suppressed.
+  4. After the window expires, the next occurrence is again passed through.
+  5. Memory-bounded: evict expired entries to avoid OOM.
+  6. Support composite dedup keys (alert_type + source_ip + rule_id).
+
+CLARIFYING QUESTIONS
+--------------------
+1. What defines &quot;same&quot; alert?
+   → Composite key: (alert_type, source_ip, rule_id).
+2. Suppression window? → Configurable per alert type; default 5 minutes.
+3. Thread model? → Python threading; per-key locking preferred.
+4. Persistence? → In-memory only; distributed cache in production.
+5. Output of check()? → (is_new: bool, first_seen: float).
+
+=============================================================================
+APPROACH 1 — NAIVE (global lock, dict of timestamps)
+=============================================================================
+  Single global lock + dict. All workers serialize. Under high alert volume
+  this becomes a bottleneck.
+
+=============================================================================
+APPROACH 2 — PER-SHARD LOCKING (OPTIMAL)
+=============================================================================
+  Shard the dedup dict into N buckets by hash(key) % N.
+  Each shard has its own lock → only threads hitting the same shard block.
+  Background cleanup thread evicts expired entries periodically.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_WINDOW_S  = 300     # 5-minute suppression window
+DEFAULT_SHARDS    = 16      # number of lock shards
+CLEANUP_INTERVAL  = 60.0    # seconds between cleanup sweeps
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AlertKey:
+    alert_type: str
+    source_ip: str
+    rule_id: str
+
+    def to_str(self) -&gt; str:
+        return f&quot;{self.alert_type}|{self.source_ip}|{self.rule_id}&quot;
+
+
+@dataclass
+class DeduplicationResult:
+    is_new: bool
+    key_str: str
+    first_seen: float       # monotonic timestamp of first occurrence
+    suppressed_count: int   # how many duplicates suppressed in this window
+
+
+@dataclass
+class _DedupEntry:
+    first_seen: float
+    expires_at: float
+    suppressed: int = 0
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveAlertDedup:
+    &quot;&quot;&quot;Single global lock; all threads serialize.&quot;&quot;&quot;
+
+    def __init__(self, window_s: float = DEFAULT_WINDOW_S):
+        self._window = window_s
+        self._lock   = threading.Lock()
+        self._seen:  Dict[str, float] = {}   # key → first_seen
+
+    def check(self, key: AlertKey) -&gt; DeduplicationResult:
+        k   = key.to_str()
+        now = time.monotonic()
+        with self._lock:
+            first = self._seen.get(k)
+            if first is not None and now - first &lt; self._window:
+                return DeduplicationResult(
+                    is_new=False, key_str=k, first_seen=first, suppressed_count=0
+                )
+            self._seen[k] = now
+            return DeduplicationResult(
+                is_new=True, key_str=k, first_seen=now, suppressed_count=0
+            )
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Sharded dedup cache
+# ---------------------------------------------------------------------------
+
+class _Shard:
+    def __init__(self):
+        self.lock    = threading.Lock()
+        self.entries: Dict[str, _DedupEntry] = {}
+
+
+class ShardedAlertDedup:
+    &quot;&quot;&quot;
+    Thread-safe alert dedup cache with per-shard locking.
+
+    Algorithm:
+      1. Hash the key to a shard index.
+      2. Lock only that shard.
+      3. Check if entry exists and is within suppression window.
+         → Yes: increment suppressed_count; return is_new=False.
+         → No:  create new entry; return is_new=True.
+      4. Background cleanup thread removes expired entries.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        window_s: float   = DEFAULT_WINDOW_S,
+        num_shards: int   = DEFAULT_SHARDS,
+        per_type_windows: Optional[Dict[str, float]] = None,
+    ):
+        self._window      = window_s
+        self._per_type    = per_type_windows or {}
+        self._shards      = [_Shard() for _ in range(num_shards)]
+        self._num_shards  = num_shards
+        self._stop_event  = threading.Event()
+        self._cleanup_thr = threading.Thread(
+            target=self._cleanup_loop, daemon=True, name=&quot;dedup-cleanup&quot;
+        )
+        self._cleanup_thr.start()
+
+    # --- Public API ---------------------------------------------------------
+
+    def check(self, key: AlertKey) -&gt; DeduplicationResult:
+        k_str  = key.to_str()
+        shard  = self._get_shard(k_str)
+        window = self._per_type.get(key.alert_type, self._window)
+        now    = time.monotonic()
+
+        with shard.lock:
+            entry = shard.entries.get(k_str)
+
+            if entry is not None and now &lt; entry.expires_at:
+                entry.suppressed += 1
+                return DeduplicationResult(
+                    is_new=False,
+                    key_str=k_str,
+                    first_seen=entry.first_seen,
+                    suppressed_count=entry.suppressed,
+                )
+
+            # New or expired → reset
+            new_entry = _DedupEntry(
+                first_seen=now,
+                expires_at=now + window,
+                suppressed=0,
+            )
+            shard.entries[k_str] = new_entry
+            return DeduplicationResult(
+                is_new=True,
+                key_str=k_str,
+                first_seen=now,
+                suppressed_count=0,
+            )
+
+    def force_expire(self, key: AlertKey) -&gt; bool:
+        &quot;&quot;&quot;Manually expire a key so the next occurrence is treated as new.&quot;&quot;&quot;
+        k_str = key.to_str()
+        shard = self._get_shard(k_str)
+        with shard.lock:
+            if k_str in shard.entries:
+                del shard.entries[k_str]
+                return True
+            return False
+
+    def stats(self) -&gt; Dict[str, int]:
+        total = sum(len(s.entries) for s in self._shards)
+        return {&quot;tracked_keys&quot;: total, &quot;num_shards&quot;: self._num_shards}
+
+    def stop(self) -&gt; None:
+        self._stop_event.set()
+
+    # --- Internal -----------------------------------------------------------
+
+    def _get_shard(self, key_str: str) -&gt; _Shard:
+        idx = int(hashlib.md5(key_str.encode(), usedforsecurity=False).hexdigest(), 16)
+        return self._shards[idx % self._num_shards]
+
+    def _cleanup_loop(self) -&gt; None:
+        while not self._stop_event.wait(CLEANUP_INTERVAL):
+            self._purge_expired()
+
+    def _purge_expired(self) -&gt; int:
+        now    = time.monotonic()
+        purged = 0
+        for shard in self._shards:
+            with shard.lock:
+                expired = [k for k, e in shard.entries.items() if now &gt;= e.expires_at]
+                for k in expired:
+                    del shard.entries[k]
+                    purged += 1
+        return purged
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _key(t: str = &quot;sql_injection&quot;, ip: str = &quot;1.2.3.4&quot;, rule: str = &quot;R001&quot;) -&gt; AlertKey:
+    return AlertKey(alert_type=t, source_ip=ip, rule_id=rule)
+
+
+def test_first_alert_passes():
+    d = ShardedAlertDedup(window_s=60)
+    r = d.check(_key())
+    assert r.is_new
+    assert r.suppressed_count == 0
+    print(&quot;First alert passes: passed&quot;)
+    d.stop()
+
+
+def test_duplicate_suppressed():
+    d = ShardedAlertDedup(window_s=60)
+    r1 = d.check(_key())
+    r2 = d.check(_key())
+    r3 = d.check(_key())
+    assert r1.is_new
+    assert not r2.is_new
+    assert r3.suppressed_count == 2
+    print(&quot;Duplicate suppressed: passed&quot;)
+    d.stop()
+
+
+def test_different_keys_independent():
+    d  = ShardedAlertDedup(window_s=60)
+    r1 = d.check(_key(ip=&quot;1.1.1.1&quot;))
+    r2 = d.check(_key(ip=&quot;2.2.2.2&quot;))
+    assert r1.is_new and r2.is_new
+    print(&quot;Different keys independent: passed&quot;)
+    d.stop()
+
+
+def test_expiry_allows_new():
+    d  = ShardedAlertDedup(window_s=0.05)
+    r1 = d.check(_key())
+    assert r1.is_new
+    time.sleep(0.1)
+    r2 = d.check(_key())
+    assert r2.is_new
+    print(&quot;Expiry allows new alert: passed&quot;)
+    d.stop()
+
+
+def test_force_expire():
+    d  = ShardedAlertDedup(window_s=60)
+    k  = _key()
+    d.check(k)
+    assert not d.check(k).is_new
+    d.force_expire(k)
+    assert d.check(k).is_new
+    print(&quot;Force expire: passed&quot;)
+    d.stop()
+
+
+def test_concurrent_workers():
+    &quot;&quot;&quot;Many threads dedup the same key; only the first should be is_new.&quot;&quot;&quot;
+    d       = ShardedAlertDedup(window_s=60)
+    k       = _key()
+    new_cnt = []
+    dup_cnt = []
+    lock    = threading.Lock()
+    errors  = []
+
+    def worker():
+        try:
+            r = d.check(k)
+            with lock:
+                if r.is_new:
+                    new_cnt.append(1)
+                else:
+                    dup_cnt.append(1)
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    threads = [threading.Thread(target=worker) for _ in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    # Exactly one thread should see is_new=True
+    assert len(new_cnt) == 1, f&quot;Expected 1 new, got {len(new_cnt)}&quot;
+    assert len(dup_cnt) == 49
+    print(f&quot;Concurrent: new={len(new_cnt)}, dup={len(dup_cnt)} — passed&quot;)
+    d.stop()
+
+
+def test_per_type_window():
+    d = ShardedAlertDedup(
+        window_s=60,
+        per_type_windows={&quot;brute_force&quot;: 0.05},
+    )
+    k = _key(t=&quot;brute_force&quot;)
+    d.check(k)
+    assert not d.check(k).is_new
+    time.sleep(0.1)
+    assert d.check(k).is_new    # expired; new window
+    print(&quot;Per-type window: passed&quot;)
+    d.stop()
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+ALERT DEDUPLICATION IN SECURITY OPERATIONS
+-------------------------------------------
+Why it matters:
+  A single attacker action (e.g., port scan, brute force) triggers
+  thousands of identical alerts within seconds. Without dedup:
+  - SIEM queue overflows.
+  - Analysts become desensitized (alert fatigue).
+  - Critical new alerts buried under noise.
+
+SUPPRESSION WINDOW TUNING
+--------------------------
+  Too short (&lt; 1 min): duplicate storms overwhelm the analyst.
+  Too long (&gt; 24h): new occurrences of the same attack are silently dropped.
+  Best practice: per-rule, per-severity tuning.
+  Critical rules: short windows (1–5 min) or no suppression.
+  Noisy info rules: long windows (1–4 h).
+
+DEDUP KEY DESIGN
+-----------------
+  Granularity matters:
+    Too broad:  (&quot;sql_injection&quot;, *, *)  → ALL SQLi from any source suppressed.
+    Too narrow: (type, ip, rule, port, payload_hash) → nearly no dedup.
+  Good default: (alert_type, source_ip, rule_id) with a 5-min window.
+  For credential stuffing: (alert_type, target_account) instead of source_ip
+    to dedup across IP rotation.
+
+DISTRIBUTED DEDUP
+-----------------
+  Redis SET NX + EXPIRE:
+    result = redis.set(key, 1, nx=True, ex=window_s)
+    is_new = (result == True)
+  This is atomic (SET NX = set if not exists).
+  For count tracking: INCR + EXPIRE on first write.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_first_alert_passes()
+    test_duplicate_suppressed()
+    test_different_keys_independent()
+    test_expiry_allows_new()
+    test_force_expire()
+    test_concurrent_workers()
+    test_per_type_window()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSH Hardening</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: os\Unix-Linux\SSH-Hardening\README.md</p>
+<h1 id="ssh-hardening">SSH Hardening</h1>
+<p><strong>Category:</strong> Unix/Linux Security, Remote Access<br />
+<strong>Parent:</strong> <a href="../README.md">os/Unix-Linux/README.md</a></p>
+<h2 id="overview">Overview</h2>
+<p>SSH (Secure Shell) is the primary remote administration protocol for Linux systems. It is also one of the most targeted attack surfaces on internet-facing hosts. SSH hardening has two goals:</p>
+<ol>
+<li><strong>Reduce authentication attack surface</strong> — prevent brute force, credential spraying, and weak-key authentication.</li>
+<li><strong>Minimize post-authentication privilege</strong> — limit what an authenticated user can do and where they can go.</li>
+</ol>
+<p>At scale, SSH hardening should be enforced via configuration management (Ansible, Puppet) with automated compliance scanning, not applied manually per host.</p>
+<hr />
+<h2 id="sshd_config-critical-security-settings">sshd_config: Critical Security Settings</h2>
+<pre><code class="language-bash"># /etc/ssh/sshd_config
+
+# --- Authentication ---
+
+# Disable root login entirely
+PermitRootLogin no
+# If root login is needed for recovery: PermitRootLogin prohibit-password (key only, no password)
+
+# Disable password authentication — require key-based auth
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no    # Also disables keyboard-interactive methods
+
+# Disable empty passwords (extra safety)
+PermitEmptyPasswords no
+
+# Limit authentication attempts per connection
+MaxAuthTries 3
+
+# Disconnect if no successful auth within 60 seconds
+LoginGraceTime 60
+
+# Maximum number of concurrent unauthenticated connections
+MaxStartups 10:30:60    # start:rate:full — throttle new connections
+
+# --- Access Control ---
+
+# Allow only specific users or groups
+AllowUsers alice bob deploy-user
+AllowGroups sshusers
+
+# Deny specific users
+DenyUsers guest nobody
+
+# Restrict to specific source IPs (if AllowUsers is insufficient)
+# This is done per-user via Match block (see below)
+
+# --- Network ---
+
+# Listen on non-default port (security through obscurity — reduces scan noise)
+Port 2222   # or keep 22; matter of policy
+
+# Bind to specific interface only (if multi-homed)
+ListenAddress 10.0.1.5
+
+# Disable protocol 1 (already default off, but explicit)
+Protocol 2
+
+# Disable GSSAPI authentication (reduces attack surface if not using Kerberos)
+GSSAPIAuthentication no
+
+# --- Ciphers and Algorithms ---
+# Restrict to strong algorithms only (remove legacy ciphers)
+Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+
+# --- Forwarding (restrict to reduce pivot paths) ---
+AllowAgentForwarding no    # Disable SSH agent forwarding (lateral movement risk)
+AllowTcpForwarding no      # Disable TCP tunneling
+GatewayPorts no            # Prevent remote forwarding binding to 0.0.0.0
+X11Forwarding no           # Disable X11 forwarding
+
+# --- Session Hardening ---
+# Disconnect idle sessions after 5 minutes
+ClientAliveInterval 300
+ClientAliveCountMax 2
+# Client will be disconnected after 300 * 2 = 600 seconds of inactivity
+
+# Disable TCP keepalives (use ClientAlive instead)
+TCPKeepAlive no
+
+# Log verbosity (INFO is baseline; VERBOSE adds key fingerprints)
+LogLevel VERBOSE
+
+# Disable user environment file (~/.ssh/environment) — can be used to set LD_PRELOAD
+PermitUserEnvironment no
+
+# Disable .rhosts and /etc/hosts.equiv (legacy trust mechanisms)
+IgnoreRhosts yes
+HostbasedAuthentication no
+
+# --- Subsystem restriction ---
+# Restrict SFTP to a chroot (for file transfer accounts)
+Subsystem sftp /usr/lib/openssh/sftp-server
+</code></pre>
+<hr />
+<h2 id="match-blocks-per-user-and-per-ip-restrictions">Match Blocks: Per-User and Per-IP Restrictions</h2>
+<pre><code class="language-bash"># Allow a deploy account only from a specific IP range
+Match User deploy-user Address 10.0.1.0/24
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    ForceCommand /usr/local/bin/deploy-hook.sh
+    PermitTTY no
+
+# Allow jump host to use TCP forwarding (bastion)
+Match Group bastion-users
+    AllowTcpForwarding yes
+    AllowAgentForwarding no
+    PermitTTY no
+
+# Chroot SFTP users to their home directory
+Match Group sftp-only
+    ForceCommand internal-sftp
+    ChrootDirectory /home/%u
+    PermitTTY no
+    AllowAgentForwarding no
+    AllowTcpForwarding no
+</code></pre>
+<hr />
+<h2 id="ssh-key-management">SSH Key Management</h2>
+<h3 id="generating-strong-keys">Generating Strong Keys</h3>
+<pre><code class="language-bash"># Ed25519 — best for new deployments (compact, fast, strong)
+ssh-keygen -t ed25519 -C &quot;user@host-$(date +%Y-%m-%d)&quot;
+
+# RSA 4096 — still acceptable; needed for compatibility with some systems
+ssh-keygen -t rsa -b 4096 -C &quot;user@host&quot;
+
+# Never use: DSA, ECDSA with P-256 (if you suspect NIST curves), RSA &lt; 2048
+</code></pre>
+<h3 id="authorized_keys-restrictions">authorized_keys Restrictions</h3>
+<p>Each line in <code>~/.ssh/authorized_keys</code> can carry per-key restrictions:</p>
+<pre><code># Restrict to specific source IPs and specific command
+from=&quot;10.0.1.100&quot;,command=&quot;/usr/local/bin/backup.sh&quot;,no-agent-forwarding,no-port-forwarding,no-pty,no-X11-forwarding ssh-ed25519 AAAA... backup-key-2025
+
+# Restrict a monitoring key — no shell, no forwarding
+command=&quot;/usr/local/bin/monitor.sh&quot;,no-agent-forwarding,no-port-forwarding,no-pty ssh-ed25519 AAAA... monitor-2025
+</code></pre>
+<h3 id="key-rotation-policy">Key Rotation Policy</h3>
+<table>
+<thead>
+<tr>
+<th>Key type</th>
+<th>Rotation frequency</th>
+<th>Enforcement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User SSH keys</td>
+<td>Annually or on role change</td>
+<td>Managed via configuration management or PAM</td>
+</tr>
+<tr>
+<td>Host keys</td>
+<td>On OS reinstall; immediately after suspected compromise</td>
+<td><code>ssh-keygen -A</code> regenerates; update known_hosts</td>
+</tr>
+<tr>
+<td>Bastion/jump host keys</td>
+<td>Annually</td>
+<td>SSH certificate authority simplifies this</td>
+</tr>
+<tr>
+<td>Service account keys</td>
+<td>Short-lived preferred (certificate-based)</td>
+<td>Use SSH CAs with short TTL</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="ssh-certificate-authority-ca-model">SSH Certificate Authority (CA) Model</h2>
+<p>SSH certificates solve the key management problem at scale. Instead of distributing host keys to every client's <code>known_hosts</code> and distributing user keys to every server's <code>authorized_keys</code>, a CA signs certificates that servers and clients trust.</p>
+<pre class="mermaid">
+flowchart LR
+    CA[SSH Certificate Authority] -->|Sign user cert with TTL| UCERT[User certificate - valid 8 hours]
+    CA -->|Sign host cert| HCERT[Host certificate - valid 1 year]
+    U[User] -->|Present UCERT| S[Server]
+    S -->|Verify UCERT against CA pub key| OK[Auth allowed]
+    U -->|Check HCERT against CA pub key| TRUST[Host trusted - no known_hosts needed]
+</pre>
+<pre><code class="language-bash"># Create a CA key pair (stored securely in HSM or offline)
+ssh-keygen -t ed25519 -f /etc/ssh/ca_key -C &quot;company-ssh-ca&quot;
+
+# Sign a user's public key with 8-hour TTL
+ssh-keygen -s /etc/ssh/ca_key \
+    -I &quot;alice@host-2025-06-05&quot; \
+    -n &quot;alice,servers-prod&quot; \
+    -V +8h \
+    ~/.ssh/id_ed25519.pub
+# Outputs: ~/.ssh/id_ed25519-cert.pub
+
+# Sign a host key
+ssh-keygen -s /etc/ssh/ca_key \
+    -I &quot;web-01.example.com&quot; \
+    -h \
+    -V +52w \
+    /etc/ssh/ssh_host_ed25519_key.pub
+
+# sshd_config: trust certificates signed by the CA
+TrustedUserCAKeys /etc/ssh/ca_user_key.pub
+
+# Client ~/.ssh/known_hosts: trust host certs signed by the CA
+@cert-authority *.example.com ssh-ed25519 AAAA...ca-public-key
+</code></pre>
+<p><strong>Benefits:</strong></p>
+<ul>
+<li>Certificates expire automatically — compromised keys self-expire</li>
+<li>No per-server <code>authorized_keys</code> management</li>
+<li>Audit who accessed what via certificate principal logging</li>
+<li>Immediate revocation via <code>RevokedKeys</code> list or KRL (Key Revocation List)</li>
+</ul>
+<hr />
+<h2 id="brute-force-and-scanning-defense">Brute Force and Scanning Defense</h2>
+<h3 id="fail2ban">fail2ban</h3>
+<p><code>fail2ban</code> monitors SSH log files and bans IPs that exceed failed authentication attempts:</p>
+<pre><code class="language-bash"># /etc/fail2ban/jail.local
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+maxretry = 3
+findtime = 300
+bantime = 3600    # 1 hour; use -1 for permanent ban
+</code></pre>
+<h3 id="ufw-iptables-rate-limiting">UFW / iptables Rate Limiting</h3>
+<pre><code class="language-bash"># Rate limit SSH connections using iptables
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+
+# UFW rate limiting (simpler)
+ufw limit ssh
+</code></pre>
+<h3 id="port-knocking">Port Knocking</h3>
+<p>Port knocking hides SSH behind a firewall rule that only opens after a secret sequence of connection attempts to closed ports. Reduces automated scan noise but is security through obscurity — not a primary control.</p>
+<hr />
+<h2 id="ssh-audit-checking-configuration-quality">SSH Audit: Checking Configuration Quality</h2>
+<pre><code class="language-bash"># ssh-audit: comprehensive cipher and configuration audit
+ssh-audit localhost
+
+# Test specific cipher/MAC/kex support
+nmap --script ssh2-enum-algos -p 22 &lt;target&gt;
+
+# Check what algorithms the server offers
+ssh -vvv user@host 2&gt;&amp;1 | grep -E &quot;(kex|cipher|mac|host key)&quot;
+
+# Verify no root login
+grep PermitRootLogin /etc/ssh/sshd_config
+
+# Verify password auth disabled
+grep PasswordAuthentication /etc/ssh/sshd_config
+</code></pre>
+<hr />
+<h2 id="ssh-as-a-lateral-movement-vector">SSH as a Lateral Movement Vector</h2>
+<p>Once on a compromised host, attackers use SSH aggressively to pivot:</p>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>How</th>
+<th>Detection</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Agent hijacking</td>
+<td>If agent forwarding is enabled, any root user on the hop host can use the agent socket to authenticate as the user to other hosts</td>
+<td><code>SSH_AUTH_SOCK</code> in process environment; <code>AuthorizedKeysFile</code> modifications</td>
+</tr>
+<tr>
+<td>Stolen private keys</td>
+<td>Read <code>~/.ssh/id_*</code> on compromised host</td>
+<td>File access audit on .ssh/ files</td>
+</tr>
+<tr>
+<td>SSH ProxyJump / tunneling</td>
+<td>Use compromised host as a jump host</td>
+<td>Unusual port forwarding; internal network connections from SSH session</td>
+</tr>
+<tr>
+<td>Known hosts pivoting</td>
+<td>Read <code>~/.ssh/known_hosts</code> to discover reachable systems</td>
+<td>known_hosts file enumeration</td>
+</tr>
+<tr>
+<td>Authorized keys scraping</td>
+<td>Read <code>/home/*/.ssh/authorized_keys</code> across fleet</td>
+<td>Cross-correlate who can auth where</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Hardening against lateral movement:</strong></p>
+<ul>
+<li><code>AllowAgentForwarding no</code> in sshd_config</li>
+<li><code>AllowTcpForwarding no</code> unless bastion-specific</li>
+<li>Read-protect <code>~/.ssh/</code> directories (chmod 700)</li>
+<li>Use SSH certificate-based auth with short TTLs instead of persistent keys</li>
+</ul>
+<hr />
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Root Cause</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PasswordAuthentication yes</code> on internet-facing host</td>
+<td>Default or required for old clients</td>
+<td>Brute force / credential spray attacks</td>
+</tr>
+<tr>
+<td><code>PermitRootLogin yes</code></td>
+<td>Operational convenience</td>
+<td>Direct root compromise from SSH attack</td>
+</tr>
+<tr>
+<td><code>AllowAgentForwarding yes</code> without need</td>
+<td>Default on many systems</td>
+<td>Agent hijacking enables lateral movement</td>
+</tr>
+<tr>
+<td>Weak host key algorithm (DSA)</td>
+<td>Old config not updated</td>
+<td>Forged host identity; MITM</td>
+</tr>
+<tr>
+<td>No key rotation</td>
+<td>No process for key lifecycle</td>
+<td>Stale compromised keys remain active indefinitely</td>
+</tr>
+<tr>
+<td>No <code>MaxAuthTries</code> limit</td>
+<td>Default is 6</td>
+<td>Brute force easier per connection</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li><code>PasswordAuthentication no</code> + <code>PermitRootLogin no</code> are the two non-negotiable baseline settings.</li>
+<li>SSH certificate authorities eliminate the <code>authorized_keys</code> management problem at scale and enable short-lived credentials.</li>
+<li><code>AllowAgentForwarding no</code> prevents SSH agent hijacking — a major lateral movement vector.</li>
+<li>fail2ban or iptables rate limiting is standard on internet-facing SSH ports.</li>
+<li>Run <code>ssh-audit</code> against all exposed SSH services as part of the security posture review.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

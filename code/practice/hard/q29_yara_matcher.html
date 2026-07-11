@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q29_yara_matcher.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q29_yara_matcher.py</h1>
+  <p class="file-path">Source: code\practice\hard\q29_yara_matcher.py</p>
+  <p class="line-count">567 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q29 [Hard] — Build a Simple YARA-Like Rule Matcher
+=============================================================================
+
+PROBLEM
+-------
+Implement a simplified YARA-style rule engine that:
+  1. Parses rules with `strings:` and `condition:` sections.
+  2. Supports string types: literal, hex byte pattern, regex pattern.
+  3. Supports conditions: `any of them`, `all of them`, `N of them`,
+     `$str at offset`, `$str`, boolean AND/OR/NOT.
+  4. Match against a byte buffer (file content / memory dump).
+  5. Return list of matching rules with match offsets.
+
+YARA rule format (subset):
+  rule RuleName {
+      meta:
+          author = &quot;...&quot;
+      strings:
+          $a = &quot;hello world&quot;
+          $b = { 4D 5A ?? 00 }
+          $c = /evil\.exe/i
+      condition:
+          any of them
+  }
+
+CLARIFYING QUESTIONS
+--------------------
+1. Full YARA syntax or subset?
+   → Subset: no modules, no external vars, no for loops.
+2. Hex pattern wildcards?
+   → &quot;??&quot; matches any single byte; &quot;?a&quot; matches low-nibble a.
+3. Regex anchoring?
+   → Inline YARA flags: /pattern/i → re.IGNORECASE.
+4. Boolean operators in condition?
+   → AND, OR, NOT, parentheses.
+5. Performance?
+   → O(S × D) per rule (S = strings, D = data size); optimise for batch.
+
+=============================================================================
+APPROACH 1 — NAIVE (eval all strings, eval condition with Python eval)
+=============================================================================
+  Compile each string pattern.  Find all matches.  Evaluate condition
+  by substituting boolean results into a Python expression.
+  Simple but uses eval() → security risk; acceptable for trusted rules only.
+
+=============================================================================
+APPROACH 2 — SAFE RECURSIVE DESCENT PARSER (RECOMMENDED)
+=============================================================================
+  Parse condition with a proper recursive-descent evaluator.
+  No eval() → no code injection risk.
+  Supports: boolean AND/OR/NOT, &quot;N of them&quot;, &quot;any/all of them&quot;,
+            &quot;$var at offset&quot;, &quot;$var contains N&quot; style expressions.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+import struct
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StringDef:
+    name: str          # e.g. &quot;$a&quot;
+    kind: str          # &quot;literal&quot; | &quot;hex&quot; | &quot;regex&quot;
+    pattern: Any       # bytes (literal), list of Optional[int] (hex), re.Pattern (regex)
+    flags: int = 0     # re flags (for regex kind)
+
+
+@dataclass
+class MatchOffset:
+    string_name: str
+    offset: int
+    length: int
+
+
+@dataclass
+class RuleMatch:
+    rule_name: str
+    matches: List[MatchOffset] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Hex Pattern Parser
+# ---------------------------------------------------------------------------
+
+def _parse_hex_pattern(hex_str: str) -&gt; List[Optional[int]]:
+    &quot;&quot;&quot;
+    Parse YARA hex string like &quot;4D 5A ?? 0F&quot; into list of Optional[int].
+    None = wildcard byte (??).
+    Raises ValueError on bad syntax.
+    &quot;&quot;&quot;
+    tokens = hex_str.strip().split()
+    result: List[Optional[int]] = []
+    for tok in tokens:
+        if tok == &quot;??&quot;:
+            result.append(None)
+        elif len(tok) == 2:
+            result.append(int(tok, 16))
+        else:
+            raise ValueError(f&quot;Invalid hex token: {tok!r}&quot;)
+    return result
+
+
+def _match_hex_pattern(data: bytes, pattern: List[Optional[int]]) -&gt; List[int]:
+    &quot;&quot;&quot;Return all start offsets where hex pattern matches in data.&quot;&quot;&quot;
+    offsets = []
+    plen = len(pattern)
+    for i in range(len(data) - plen + 1):
+        for j, b in enumerate(pattern):
+            if b is not None and data[i + j] != b:
+                break
+        else:
+            offsets.append(i)
+    return offsets
+
+
+# ---------------------------------------------------------------------------
+# Rule Parser (simple regex-based)
+# ---------------------------------------------------------------------------
+
+_RULE_RE = re.compile(
+    r&quot;rule\s+(\w+)\s*\{(.*?)\}&quot;,
+    re.DOTALL,
+)
+_STRINGS_SECTION_RE = re.compile(r&quot;strings\s*:(.*?)(?:condition\s*:|meta\s*:)&quot;, re.DOTALL)
+_CONDITION_SECTION_RE = re.compile(r&quot;condition\s*:(.*?)(?:\}|$)&quot;, re.DOTALL)
+_STRING_DEF_RE = re.compile(
+    r&#x27;(\$\w+)\s*=\s*(?:&quot;((?:[^&quot;\\]|\\.)*)&quot;|{([^}]+)}|(/(?:[^/\\]|\\.)*/)([i]*))&#x27;,
+)
+
+
+def _parse_strings(section: str) -&gt; Dict[str, StringDef]:
+    defs: Dict[str, StringDef] = {}
+    for m in _STRING_DEF_RE.finditer(section):
+        name = m.group(1)
+        if m.group(2) is not None:
+            # Literal string
+            val = m.group(2).encode(&quot;latin-1&quot;)
+            defs[name] = StringDef(name=name, kind=&quot;literal&quot;, pattern=val)
+        elif m.group(3) is not None:
+            # Hex pattern
+            pat = _parse_hex_pattern(m.group(3))
+            defs[name] = StringDef(name=name, kind=&quot;hex&quot;, pattern=pat)
+        elif m.group(4) is not None:
+            # Regex
+            flags = 0
+            if &quot;i&quot; in (m.group(5) or &quot;&quot;):
+                flags |= re.IGNORECASE
+            pat = re.compile(m.group(4)[1:-1].encode(&quot;latin-1&quot;), flags)
+            defs[name] = StringDef(name=name, kind=&quot;regex&quot;, pattern=pat, flags=flags)
+    return defs
+
+
+def _parse_rule(rule_text: str) -&gt; Optional[Tuple[str, Dict[str, StringDef], str]]:
+    &quot;&quot;&quot;Returns (name, string_defs, condition_text) or None.&quot;&quot;&quot;
+    m = _RULE_RE.search(rule_text)
+    if not m:
+        return None
+    name = m.group(1)
+    body = m.group(2)
+    strings_defs: Dict[str, StringDef] = {}
+    sm = _STRINGS_SECTION_RE.search(body)
+    if sm:
+        strings_defs = _parse_strings(sm.group(1))
+    cm = _CONDITION_SECTION_RE.search(body)
+    condition = cm.group(1).strip() if cm else &quot;true&quot;
+    return name, strings_defs, condition
+
+
+# ---------------------------------------------------------------------------
+# String Matching
+# ---------------------------------------------------------------------------
+
+def _find_matches(data: bytes, sdef: StringDef) -&gt; List[MatchOffset]:
+    offsets: List[MatchOffset] = []
+    if sdef.kind == &quot;literal&quot;:
+        pat: bytes = sdef.pattern
+        start = 0
+        while True:
+            idx = data.find(pat, start)
+            if idx == -1:
+                break
+            offsets.append(MatchOffset(sdef.name, idx, len(pat)))
+            start = idx + 1
+    elif sdef.kind == &quot;hex&quot;:
+        for off in _match_hex_pattern(data, sdef.pattern):
+            offsets.append(MatchOffset(sdef.name, off, len(sdef.pattern)))
+    elif sdef.kind == &quot;regex&quot;:
+        for m in sdef.pattern.finditer(data):
+            offsets.append(MatchOffset(sdef.name, m.start(), len(m.group())))
+    return offsets
+
+
+# ---------------------------------------------------------------------------
+# Condition Evaluator (recursive descent, no eval())
+# ---------------------------------------------------------------------------
+
+class _ConditionParser:
+    &quot;&quot;&quot;
+    Parse and evaluate condition expressions.
+    Grammar (simplified):
+      expr     := or_expr
+      or_expr  := and_expr (&#x27;or&#x27; and_expr)*
+      and_expr := not_expr (&#x27;and&#x27; not_expr)*
+      not_expr := &#x27;not&#x27; not_expr | atom
+      atom     := &#x27;(&#x27; expr &#x27;)&#x27; | &#x27;true&#x27; | &#x27;false&#x27;
+               | &#x27;any&#x27; &#x27;of&#x27; &#x27;them&#x27; | &#x27;all&#x27; &#x27;of&#x27; &#x27;them&#x27; | N &#x27;of&#x27; &#x27;them&#x27;
+               | STRING_ID &#x27;at&#x27; NUMBER | STRING_ID
+    &quot;&quot;&quot;
+
+    def __init__(self, condition: str,
+                 match_sets: Dict[str, List[MatchOffset]]) -&gt; None:
+        # Tokenise
+        self._tokens = re.findall(
+            r&quot;\$\w+|\d+|[A-Za-z]+|[(),]&quot;, condition.lower()
+        )
+        self._pos = 0
+        self._match_sets = match_sets
+
+    def _peek(self) -&gt; Optional[str]:
+        return self._tokens[self._pos] if self._pos &lt; len(self._tokens) else None
+
+    def _consume(self, expected: Optional[str] = None) -&gt; str:
+        tok = self._tokens[self._pos]
+        if expected and tok != expected:
+            raise SyntaxError(f&quot;Expected {expected!r}, got {tok!r}&quot;)
+        self._pos += 1
+        return tok
+
+    def evaluate(self) -&gt; bool:
+        result = self._parse_expr()
+        return result
+
+    def _parse_expr(self) -&gt; bool:
+        return self._parse_or()
+
+    def _parse_or(self) -&gt; bool:
+        left = self._parse_and()
+        while self._peek() == &quot;or&quot;:
+            self._consume(&quot;or&quot;)
+            right = self._parse_and()
+            left = left or right
+        return left
+
+    def _parse_and(self) -&gt; bool:
+        left = self._parse_not()
+        while self._peek() == &quot;and&quot;:
+            self._consume(&quot;and&quot;)
+            right = self._parse_not()
+            left = left and right
+        return left
+
+    def _parse_not(self) -&gt; bool:
+        if self._peek() == &quot;not&quot;:
+            self._consume(&quot;not&quot;)
+            return not self._parse_not()
+        return self._parse_atom()
+
+    def _parse_atom(self) -&gt; bool:
+        tok = self._peek()
+
+        if tok == &quot;(&quot;:
+            self._consume(&quot;(&quot;)
+            val = self._parse_expr()
+            self._consume(&quot;)&quot;)
+            return val
+
+        if tok == &quot;true&quot;:
+            self._consume()
+            return True
+
+        if tok == &quot;false&quot;:
+            self._consume()
+            return False
+
+        if tok == &quot;any&quot;:
+            self._consume(&quot;any&quot;)
+            self._consume(&quot;of&quot;)
+            self._consume(&quot;them&quot;)
+            return any(bool(v) for v in self._match_sets.values())
+
+        if tok == &quot;all&quot;:
+            self._consume(&quot;all&quot;)
+            self._consume(&quot;of&quot;)
+            self._consume(&quot;them&quot;)
+            return all(bool(v) for v in self._match_sets.values())
+
+        if tok and tok.isdigit():
+            n = int(self._consume())
+            self._consume(&quot;of&quot;)
+            self._consume(&quot;them&quot;)
+            matched = sum(1 for v in self._match_sets.values() if v)
+            return matched &gt;= n
+
+        if tok and tok.startswith(&quot;$&quot;):
+            var = self._consume()
+            # Handle &quot;$var at OFFSET&quot;
+            if self._peek() == &quot;at&quot;:
+                self._consume(&quot;at&quot;)
+                offset = int(self._consume())
+                offsets = [m.offset for m in self._match_sets.get(var, [])]
+                return offset in offsets
+            return bool(self._match_sets.get(var))
+
+        # Unknown token — treat as true (permissive default)
+        if tok:
+            self._consume()
+        return False
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive matcher (uses Python eval with safe namespace)
+# ---------------------------------------------------------------------------
+
+class NaiveYaraMatcher:
+    &quot;&quot;&quot;
+    Parses YARA rules and matches against data.
+    Condition evaluated via Python expression with sanitised namespace.
+    WARNING: Only safe for trusted rule input.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._rules: List[Tuple[str, Dict[str, StringDef], str]] = []
+
+    def add_rule(self, rule_text: str) -&gt; None:
+        parsed = _parse_rule(rule_text)
+        if parsed:
+            self._rules.append(parsed)
+
+    def match(self, data: bytes) -&gt; List[RuleMatch]:
+        results = []
+        for name, sdefs, condition in self._rules:
+            match_sets: Dict[str, List[MatchOffset]] = {}
+            for sname, sdef in sdefs.items():
+                match_sets[sname] = _find_matches(data, sdef)
+
+            # Build safe eval namespace
+            ns = {k[1:]: bool(v) for k, v in match_sets.items()}
+            ns[&quot;any_of_them&quot;] = any(ns.values()) if ns else False
+            ns[&quot;all_of_them&quot;] = all(ns.values()) if ns else False
+
+            # Sanitise condition for eval
+            cond = condition.lower()
+            cond = re.sub(r&quot;any of them&quot;, &quot;any_of_them&quot;, cond)
+            cond = re.sub(r&quot;all of them&quot;, &quot;all_of_them&quot;, cond)
+            cond = re.sub(r&quot;\$(\w+)&quot;, r&quot;\1&quot;, cond)
+
+            try:
+                # Restrict builtins to prevent code injection
+                matched = bool(eval(cond, {&quot;__builtins__&quot;: {}}, ns))
+            except Exception:
+                matched = False
+
+            if matched:
+                all_offsets = [m for lst in match_sets.values() for m in lst]
+                results.append(RuleMatch(rule_name=name, matches=all_offsets))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Safe recursive-descent matcher
+# ---------------------------------------------------------------------------
+
+class YaraMatcher:
+    &quot;&quot;&quot;
+    Safe YARA-like matcher with recursive-descent condition evaluator.
+    No eval() → no code injection from malicious rule files.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._rules: List[Tuple[str, Dict[str, StringDef], str]] = []
+
+    def add_rule(self, rule_text: str) -&gt; None:
+        parsed = _parse_rule(rule_text)
+        if parsed:
+            self._rules.append(parsed)
+
+    def add_rules_from_text(self, text: str) -&gt; int:
+        &quot;&quot;&quot;Parse multiple rules from a single text block.&quot;&quot;&quot;
+        count = 0
+        for m in _RULE_RE.finditer(text):
+            full_rule = m.group(0)
+            parsed = _parse_rule(full_rule)
+            if parsed:
+                self._rules.append(parsed)
+                count += 1
+        return count
+
+    def match(self, data: bytes) -&gt; List[RuleMatch]:
+        results = []
+        for name, sdefs, condition in self._rules:
+            match_sets: Dict[str, List[MatchOffset]] = {}
+            for sname, sdef in sdefs.items():
+                match_sets[sname] = _find_matches(data, sdef)
+
+            try:
+                parser = _ConditionParser(condition, match_sets)
+                matched = parser.evaluate()
+            except Exception:
+                matched = False
+
+            if matched:
+                all_offsets = [m for lst in match_sets.values() for m in lst]
+                results.append(RuleMatch(rule_name=name, matches=all_offsets))
+        return results
+
+    def __len__(self) -&gt; int:
+        return len(self._rules)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+SAMPLE_RULE_1 = &quot;&quot;&quot;
+rule DetectMZHeader {
+    strings:
+        $mz = { 4D 5A }
+    condition:
+        $mz at 0
+}
+&quot;&quot;&quot;
+
+SAMPLE_RULE_2 = &quot;&quot;&quot;
+rule DetectEvilString {
+    strings:
+        $a = &quot;evil.exe&quot;
+        $b = &quot;malware&quot;
+    condition:
+        any of them
+}
+&quot;&quot;&quot;
+
+SAMPLE_RULE_3 = &quot;&quot;&quot;
+rule DetectBothStrings {
+    strings:
+        $a = &quot;hello&quot;
+        $b = &quot;world&quot;
+    condition:
+        all of them
+}
+&quot;&quot;&quot;
+
+SAMPLE_RULE_4 = &quot;&quot;&quot;
+rule DetectRegex {
+    strings:
+        $ip = /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/
+    condition:
+        $ip
+}
+&quot;&quot;&quot;
+
+
+def test_mz_at_offset():
+    m = YaraMatcher()
+    m.add_rule(SAMPLE_RULE_1)
+    data = b&quot;\x4D\x5A\x90\x00\x03&quot;  # MZ header
+    results = m.match(data)
+    assert results and results[0].rule_name == &quot;DetectMZHeader&quot;
+    print(&quot;MZ at offset 0: passed&quot;)
+
+
+def test_any_of_them():
+    m = YaraMatcher()
+    m.add_rule(SAMPLE_RULE_2)
+    data = b&quot;loading evil.exe process&quot;
+    results = m.match(data)
+    assert results and results[0].rule_name == &quot;DetectEvilString&quot;
+    print(&quot;any of them: passed&quot;)
+
+
+def test_all_of_them():
+    m = YaraMatcher()
+    m.add_rule(SAMPLE_RULE_3)
+    data_match = b&quot;hello world&quot;
+    data_nomatch = b&quot;hello there&quot;
+    assert m.match(data_match), &quot;Expected match for &#x27;hello world&#x27;&quot;
+    assert not m.match(data_nomatch), &quot;Expected no match (only &#x27;hello&#x27;)&quot;
+    print(&quot;all of them: passed&quot;)
+
+
+def test_regex():
+    m = YaraMatcher()
+    m.add_rule(SAMPLE_RULE_4)
+    data = b&quot;connecting to 192.168.1.1 on port 443&quot;
+    results = m.match(data)
+    assert results and results[0].rule_name == &quot;DetectRegex&quot;
+    print(&quot;Regex: passed&quot;)
+
+
+def test_no_match():
+    m = YaraMatcher()
+    m.add_rule(SAMPLE_RULE_2)
+    data = b&quot;completely clean file content&quot;
+    assert not m.match(data)
+    print(&quot;No match: passed&quot;)
+
+
+def test_multiple_rules():
+    m = YaraMatcher()
+    m.add_rules_from_text(SAMPLE_RULE_1 + SAMPLE_RULE_2)
+    data = b&quot;\x4D\x5A&quot; + b&quot;evil.exe&quot;
+    results = m.match(data)
+    names = {r.rule_name for r in results}
+    assert &quot;DetectMZHeader&quot; in names
+    assert &quot;DetectEvilString&quot; in names
+    print(&quot;Multiple rules: passed&quot;)
+
+
+def test_naive_matcher():
+    m = NaiveYaraMatcher()
+    m.add_rule(SAMPLE_RULE_2)
+    data = b&quot;malware found&quot;
+    results = m.match(data)
+    assert results
+    print(&quot;Naive matcher: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+YARA IN SECURITY
+
+YARA is the de-facto standard for malware signature matching.
+Used by: VirusTotal, CrowdStrike, Elastic SIEM, Velociraptor, osquery.
+
+RULE TYPES
+  - Literal strings: fast Boyer-Moore Horspool matching internally.
+  - Hex patterns: byte-level with wildcard support (common for shellcode).
+  - Regex: powerful but slow; avoid complex regexes → see Q31 (ReDoS safety).
+
+CONDITION POWER
+  - `$pe at 0` → PE file detection.
+  - `2 of ($key_*)` → detect if 2+ of a named family of strings found.
+  - `filesize &lt; 1MB` → scope rules to reasonable sizes (not implemented here).
+
+SECURITY RISKS OF RULES-AS-CODE
+  - If rule files are loaded from untrusted sources and eval&#x27;d, code injection.
+  - Our recursive-descent parser avoids eval() entirely.
+  - Always validate rule files before loading in production systems.
+
+PERFORMANCE OPTIMISATIONS
+  - Aho-Corasick multi-pattern search for literal strings (Q30).
+  - Group rules by string fingerprint; avoid re-scanning per rule.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_mz_at_offset()
+    test_any_of_them()
+    test_all_of_them()
+    test_regex()
+    test_no_match()
+    test_multiple_rules()
+    test_naive_matcher()
+</code></pre>
+</body>
+</html>

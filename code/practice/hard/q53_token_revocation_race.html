@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q53_token_revocation_race.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q53_token_revocation_race.py</h1>
+  <p class="file-path">Source: code\practice\hard\q53_token_revocation_race.py</p>
+  <p class="line-count">384 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q53 [Hard] — Race Condition in Token Revocation
+=============================================================================
+
+PROBLEM
+-------
+Implement thread-safe token validation against a revocation list:
+  1. Tokens are issued with an expiry.
+  2. Tokens can be revoked at any time (stored in a revocation set).
+  3. Concurrent requests may try to use the same token simultaneously.
+  4. Revocation must be atomic; validation must not race with revocation.
+  5. Support bulk revocation (revoke all tokens for a given user).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Token format? → Opaque random string (not JWT for simplicity).
+2. Persistence? → In-memory (distributed cache in production).
+3. Race conditions to prevent?
+   → Check-then-act (TOCTOU): validate passes, then token gets revoked
+     between check and use.
+   → Double revocation (idempotent).
+   → Concurrent issue + immediate revoke.
+4. How to detect TOCTOU? → Lock around check+use; or atomic pop.
+5. Thread model? → Python threading; use threading.RLock.
+
+=============================================================================
+APPROACH 1 — NAIVE (no locking)
+=============================================================================
+  Separate set for active tokens; check `in` then pop.
+  TOCTOU: thread A checks (valid), thread B revokes, thread A uses.
+
+=============================================================================
+APPROACH 2 — ATOMIC CHECK-AND-USE WITH LOCKING (OPTIMAL)
+=============================================================================
+  1. tokens: dict[token → TokenRecord].
+  2. revoked: set[token].
+  3. user_tokens: dict[user_id → set[token]] for bulk revocation.
+  4. RLock protects all mutations.
+  5. validate_and_use(): checks expiry + revocation inside lock.
+     Returns a short-lived &quot;claim&quot; — caller must not cache it.
+  6. revoke(): adds to revoked set + removes from user_tokens inside lock.
+  7. revoke_all_for_user(): bulk revoke inside single lock acquisition.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import secrets
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Set
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_TOKEN_TTL_S = 3600   # 1 hour
+TOKEN_BYTES         = 32
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TokenRecord:
+    token: str
+    user_id: str
+    issued_at: float
+    expires_at: float
+    scope: str = &quot;default&quot;
+
+
+@dataclass
+class ValidationResult:
+    valid: bool
+    user_id: str = &quot;&quot;
+    scope: str = &quot;&quot;
+    reason: str = &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (TOCTOU vulnerable)
+# ---------------------------------------------------------------------------
+
+class NaiveTokenStore:
+    &quot;&quot;&quot;
+    No locking. Susceptible to TOCTOU race between check and revoke.
+    &quot;&quot;&quot;
+
+    def __init__(self):
+        self._tokens: Dict[str, TokenRecord] = {}
+        self._revoked: Set[str] = set()
+
+    def issue(self, user_id: str, ttl_s: float = DEFAULT_TOKEN_TTL_S) -&gt; str:
+        token = secrets.token_urlsafe(TOKEN_BYTES)
+        now   = time.monotonic()
+        self._tokens[token] = TokenRecord(
+            token=token, user_id=user_id,
+            issued_at=now, expires_at=now + ttl_s,
+        )
+        return token
+
+    def validate(self, token: str) -&gt; bool:
+        # TOCTOU: another thread may revoke between these two checks
+        if token in self._revoked:
+            return False
+        rec = self._tokens.get(token)
+        if rec is None or time.monotonic() &gt; rec.expires_at:
+            return False
+        return True
+
+    def revoke(self, token: str) -&gt; None:
+        self._revoked.add(token)
+        self._tokens.pop(token, None)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Thread-safe token store
+# ---------------------------------------------------------------------------
+
+class TokenRevocationStore:
+    &quot;&quot;&quot;
+    Thread-safe token store with atomic revocation and validation.
+
+    Key design:
+      - Single RLock protects all state.
+      - validate_and_use() performs check inside lock (no TOCTOU).
+      - revoke() and revoke_all_for_user() are atomic.
+      - Lazy expiry cleanup via _purge_expired() on issue.
+    &quot;&quot;&quot;
+
+    def __init__(self):
+        self._lock        = threading.RLock()
+        self._tokens:      Dict[str, TokenRecord] = {}
+        self._revoked:     Set[str]               = set()
+        self._user_tokens: Dict[str, Set[str]]    = {}
+
+    # --- Issue ---------------------------------------------------------------
+
+    def issue(
+        self,
+        user_id: str,
+        ttl_s: float = DEFAULT_TOKEN_TTL_S,
+        scope: str   = &quot;default&quot;,
+    ) -&gt; str:
+        token = secrets.token_urlsafe(TOKEN_BYTES)
+        now   = time.monotonic()
+        record = TokenRecord(
+            token=token, user_id=user_id,
+            issued_at=now, expires_at=now + ttl_s,
+            scope=scope,
+        )
+        with self._lock:
+            self._tokens[token] = record
+            self._user_tokens.setdefault(user_id, set()).add(token)
+            self._purge_expired_locked()
+        return token
+
+    # --- Atomic validate + mark-used ----------------------------------------
+
+    def validate_and_use(self, token: str) -&gt; ValidationResult:
+        &quot;&quot;&quot;
+        Atomically validates and consumes a single-use token.
+        If the token is valid, it is NOT removed (multi-use).
+        Revocation and expiry are checked inside the lock.
+        &quot;&quot;&quot;
+        with self._lock:
+            if token in self._revoked:
+                return ValidationResult(valid=False, reason=&quot;revoked&quot;)
+            rec = self._tokens.get(token)
+            if rec is None:
+                return ValidationResult(valid=False, reason=&quot;not_found&quot;)
+            if time.monotonic() &gt; rec.expires_at:
+                # Lazy cleanup
+                self._remove_token_locked(token)
+                return ValidationResult(valid=False, reason=&quot;expired&quot;)
+            return ValidationResult(
+                valid=True,
+                user_id=rec.user_id,
+                scope=rec.scope,
+            )
+
+    # --- Revoke -------------------------------------------------------------
+
+    def revoke(self, token: str) -&gt; bool:
+        &quot;&quot;&quot;Revoke a specific token. Returns True if it was active.&quot;&quot;&quot;
+        with self._lock:
+            was_active = token in self._tokens and token not in self._revoked
+            self._revoked.add(token)
+            self._remove_token_locked(token)
+            return was_active
+
+    def revoke_all_for_user(self, user_id: str) -&gt; int:
+        &quot;&quot;&quot;Bulk-revoke all tokens for a user. Returns count revoked.&quot;&quot;&quot;
+        with self._lock:
+            tokens = list(self._user_tokens.get(user_id, set()))
+            for t in tokens:
+                self._revoked.add(t)
+                self._remove_token_locked(t)
+            return len(tokens)
+
+    # --- Internal helpers ---------------------------------------------------
+
+    def _remove_token_locked(self, token: str) -&gt; None:
+        &quot;&quot;&quot;Must be called with self._lock held.&quot;&quot;&quot;
+        rec = self._tokens.pop(token, None)
+        if rec:
+            user_set = self._user_tokens.get(rec.user_id)
+            if user_set:
+                user_set.discard(token)
+
+    def _purge_expired_locked(self) -&gt; None:
+        &quot;&quot;&quot;Remove expired tokens. Must hold lock.&quot;&quot;&quot;
+        now     = time.monotonic()
+        expired = [t for t, r in self._tokens.items() if now &gt; r.expires_at]
+        for t in expired:
+            self._remove_token_locked(t)
+
+    @property
+    def active_count(self) -&gt; int:
+        with self._lock:
+            return len(self._tokens)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_basic_issue_validate():
+    store = TokenRevocationStore()
+    token = store.issue(&quot;user1&quot;)
+    r = store.validate_and_use(token)
+    assert r.valid, r.reason
+    assert r.user_id == &quot;user1&quot;
+    print(&quot;Basic issue+validate: passed&quot;)
+
+
+def test_revoke_makes_token_invalid():
+    store = TokenRevocationStore()
+    token = store.issue(&quot;user2&quot;)
+    assert store.validate_and_use(token).valid
+    store.revoke(token)
+    r = store.validate_and_use(token)
+    assert not r.valid
+    assert r.reason == &quot;revoked&quot;
+    print(&quot;Revoke makes token invalid: passed&quot;)
+
+
+def test_expired_token():
+    store = TokenRevocationStore()
+    token = store.issue(&quot;user3&quot;, ttl_s=0.01)
+    time.sleep(0.05)
+    r = store.validate_and_use(token)
+    assert not r.valid
+    assert r.reason == &quot;expired&quot;
+    print(&quot;Expired token: passed&quot;)
+
+
+def test_bulk_revoke():
+    store = TokenRevocationStore()
+    tokens = [store.issue(&quot;user4&quot;) for _ in range(5)]
+    count = store.revoke_all_for_user(&quot;user4&quot;)
+    assert count == 5
+    for t in tokens:
+        assert not store.validate_and_use(t).valid
+    print(&quot;Bulk revoke: passed&quot;)
+
+
+def test_concurrent_revoke_validate():
+    &quot;&quot;&quot;
+    Stress test: concurrent threads validate and revoke the same token.
+    No panics or data corruption expected.
+    &quot;&quot;&quot;
+    store   = TokenRevocationStore()
+    token   = store.issue(&quot;user5&quot;, ttl_s=60)
+    results = []
+    errors  = []
+
+    def validator():
+        try:
+            r = store.validate_and_use(token)
+            results.append(r.valid)
+        except Exception as e:
+            errors.append(str(e))
+
+    def revoker():
+        try:
+            store.revoke(token)
+        except Exception as e:
+            errors.append(str(e))
+
+    threads = [threading.Thread(target=validator) for _ in range(10)]
+    threads += [threading.Thread(target=revoker)  for _ in range(3)]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f&quot;Errors during concurrent access: {errors}&quot;
+    # At most 1 valid result expected (token revoked after first revoke)
+    valid_count = results.count(True)
+    print(f&quot;Concurrent revoke+validate: valid_count={valid_count}, errors={errors}&quot;)
+    print(&quot;Concurrent stress test: passed&quot;)
+
+
+def test_double_revoke_idempotent():
+    store = TokenRevocationStore()
+    token = store.issue(&quot;user6&quot;)
+    assert store.revoke(token) == True
+    assert store.revoke(token) == False  # already revoked; not active
+    print(&quot;Double revoke idempotent: passed&quot;)
+
+
+def test_unknown_token():
+    store = TokenRevocationStore()
+    r = store.validate_and_use(&quot;not_a_real_token_xyz&quot;)
+    assert not r.valid
+    assert r.reason == &quot;not_found&quot;
+    print(&quot;Unknown token: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+TOCTOU (TIME-OF-CHECK TO TIME-OF-USE) IN TOKEN REVOCATION
+-----------------------------------------------------------
+Race Condition:
+  Thread A: check(token) → valid       ← check happens here
+  Thread B: revoke(token)              ← revoke happens here
+  Thread A: use(token)                 ← use happens AFTER revocation
+
+  Result: Thread A uses a revoked token.
+  Fix: wrap check + use in the same lock acquisition.
+
+REAL-WORLD EXAMPLES
+-------------------
+  JWT revocation with in-memory blocklist:
+    check-then-act without locking allows ~1ms window.
+  Session invalidation on logout:
+    Load balancer may route next request to a node with stale session cache.
+    Fix: use distributed revocation store (Redis SET with TTL).
+
+DISTRIBUTED TOKEN REVOCATION PATTERNS
+---------------------------------------
+1. Blocklist (pull model): all validators query Redis/DynamoDB for revocation.
+   Latency: O(1) lookup per request.
+   Consistency: eventual (new nodes may not see revocation immediately).
+
+2. Short-lived tokens + introspection:
+   Tokens expire quickly (5 min); revocation only needs to last until expiry.
+   OAuth 2 Token Introspection (RFC 7662): real-time status check.
+
+3. Version counter:
+   Each user has a version number. Token encodes version.
+   Revocation = increment user version. Validate token.version == current.
+
+4. Event stream:
+   Revocation published to Kafka; consumers update local cache.
+   Window = Kafka consumer lag (typically &lt;1s).
+
+LOCK GRANULARITY
+-----------------
+  Global lock (this implementation): simple; bottleneck at high throughput.
+  Per-user lock: better concurrency; manage lock map carefully.
+  Lock-free (CAS on atomic set): most scalable; harder to implement correctly.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic_issue_validate()
+    test_revoke_makes_token_invalid()
+    test_expired_token()
+    test_bulk_revoke()
+    test_concurrent_revoke_validate()
+    test_double_revoke_idempotent()
+    test_unknown_token()
+</code></pre>
+</body>
+</html>

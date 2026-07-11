@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q40_json_schema_validator.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q40_json_schema_validator.py</h1>
+  <p class="file-path">Source: code\practice\hard\q40_json_schema_validator.py</p>
+  <p class="line-count">473 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q40 [Hard] — Build Safe JSON Schema Validator
+=============================================================================
+
+PROBLEM
+-------
+Validate security-event JSON against a schema that defines:
+  - Required fields and their types
+  - Allowed enum values
+  - Numeric range constraints
+  - String length constraints
+  - Nested object and array schemas
+  - No arbitrary code execution (no eval, no exec)
+
+Use case: validate incoming SIEM events before ingestion.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Schema format? JSON Schema standard or custom?
+   → Custom lightweight subset (avoids jsonschema dependency):
+     type, required, properties, enum, minLength, maxLength,
+     minimum, maximum, items (for arrays), additionalProperties.
+2. Partial schema (extra keys allowed)?
+   → additionalProperties: false rejects unknown keys.
+3. Error behaviour: fail-fast or collect all errors?
+   → Collect all errors; return full report.
+4. Recursion depth limit?
+   → Yes; default 10 to prevent DoS via deeply nested schema.
+5. Security events can be large?
+   → Cap at MAX_EVENT_BYTES before parsing.
+
+=============================================================================
+APPROACH 1 — NAIVE (isinstance checks only)
+=============================================================================
+  Manual per-field isinstance + range check scattered in validation code.
+  Problem: not reusable, easy to forget a check, no schema-driven approach.
+
+=============================================================================
+APPROACH 2 — SCHEMA-DRIVEN RECURSIVE VALIDATOR (OPTIMAL)
+=============================================================================
+  1. Schema as a Python dict (equivalent to JSON Schema subset).
+  2. Validate(data, schema) recursively.
+  3. Collect all violations; return ValidationResult.
+  4. Depth limit to prevent infinite recursion on circular schemas.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+MAX_EVENT_BYTES  = 1 * 1024 * 1024  # 1 MB
+MAX_DEPTH        = 10
+MAX_STRING_LEN   = 65_536           # default max string length
+
+
+@dataclass
+class ValidationError:
+    path: str
+    message: str
+
+    def __str__(self) -&gt; str:
+        return f&quot;{self.path}: {self.message}&quot;
+
+
+@dataclass
+class ValidationResult:
+    valid: bool
+    errors: List[ValidationError] = field(default_factory=list)
+
+    def add(self, path: str, msg: str) -&gt; None:
+        self.valid = False
+        self.errors.append(ValidationError(path=path, message=msg))
+
+    def __str__(self) -&gt; str:
+        if self.valid:
+            return &quot;OK&quot;
+        return &quot;; &quot;.join(str(e) for e in self.errors)
+
+
+# Type mapping
+_TYPE_MAP: Dict[str, type] = {
+    &quot;string&quot;:  str,
+    &quot;integer&quot;: int,
+    &quot;number&quot;:  (int, float),  # type: ignore[assignment]
+    &quot;boolean&quot;: bool,
+    &quot;array&quot;:   list,
+    &quot;object&quot;:  dict,
+    &quot;null&quot;:    type(None),
+}
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (manual per-field checks)
+# ---------------------------------------------------------------------------
+
+def validate_security_event_naive(event: dict) -&gt; Tuple[bool, List[str]]:
+    &quot;&quot;&quot;Hardcoded checks; not reusable or schema-driven.&quot;&quot;&quot;
+    errors: List[str] = []
+    if &quot;event_id&quot; not in event:
+        errors.append(&quot;Missing event_id&quot;)
+    if &quot;timestamp&quot; not in event:
+        errors.append(&quot;Missing timestamp&quot;)
+    if &quot;severity&quot; in event and event[&quot;severity&quot;] not in (&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;):
+        errors.append(&quot;Invalid severity&quot;)
+    return len(errors) == 0, errors
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Schema-driven recursive validator
+# ---------------------------------------------------------------------------
+
+class SchemaValidator:
+    &quot;&quot;&quot;
+    Validates a data object against a schema dict.
+
+    Schema keys supported:
+      type           : &quot;string&quot;|&quot;integer&quot;|&quot;number&quot;|&quot;boolean&quot;|&quot;array&quot;|&quot;object&quot;|&quot;null&quot;
+      required       : list of required property names
+      properties     : {name: sub-schema}
+      additionalProperties : bool (default True)
+      enum           : list of allowed values
+      minLength      : minimum string length
+      maxLength      : maximum string length
+      minimum        : minimum numeric value (inclusive)
+      maximum        : maximum numeric value (inclusive)
+      items          : sub-schema for array elements
+      minItems       : minimum array length
+      maxItems       : maximum array length
+      pattern        : regex pattern for string values
+      nullable       : bool — allow null in addition to declared type
+    &quot;&quot;&quot;
+
+    def validate(self, data: Any, schema: dict, path: str = &quot;$&quot;) -&gt; ValidationResult:
+        result = ValidationResult(valid=True)
+        self._validate(data, schema, path, result, depth=0)
+        return result
+
+    def validate_json_bytes(self, raw: bytes, schema: dict) -&gt; ValidationResult:
+        result = ValidationResult(valid=True)
+        if len(raw) &gt; MAX_EVENT_BYTES:
+            result.add(&quot;$&quot;, f&quot;Input too large: {len(raw)} bytes &gt; {MAX_EVENT_BYTES}&quot;)
+            return result
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            result.add(&quot;$&quot;, f&quot;Invalid JSON: {e}&quot;)
+            return result
+        self._validate(data, schema, &quot;$&quot;, result, depth=0)
+        return result
+
+    # ------------------------------------------------------------------
+
+    def _validate(
+        self,
+        data: Any,
+        schema: dict,
+        path: str,
+        result: ValidationResult,
+        depth: int,
+    ) -&gt; None:
+        if depth &gt; MAX_DEPTH:
+            result.add(path, &quot;Schema depth limit exceeded&quot;)
+            return
+
+        nullable = schema.get(&quot;nullable&quot;, False)
+
+        # Handle null
+        if data is None:
+            if nullable or schema.get(&quot;type&quot;) == &quot;null&quot;:
+                return
+            result.add(path, &quot;Value is null but nullable=false&quot;)
+            return
+
+        # Type check
+        schema_type = schema.get(&quot;type&quot;)
+        if schema_type:
+            expected = _TYPE_MAP.get(schema_type)
+            if expected is None:
+                result.add(path, f&quot;Unknown schema type: {schema_type!r}&quot;)
+                return
+            # bool is subclass of int in Python; check bool explicitly
+            if schema_type == &quot;integer&quot; and isinstance(data, bool):
+                result.add(path, f&quot;Expected integer, got boolean&quot;)
+                return
+            if schema_type == &quot;number&quot;:
+                if not isinstance(data, (int, float)) or isinstance(data, bool):
+                    result.add(path, f&quot;Expected number, got {type(data).__name__}&quot;)
+                    return
+            elif not isinstance(data, expected):  # type: ignore[arg-type]
+                result.add(
+                    path,
+                    f&quot;Expected {schema_type}, got {type(data).__name__}&quot;,
+                )
+                return
+
+        # Enum check
+        enum_values = schema.get(&quot;enum&quot;)
+        if enum_values is not None:
+            if data not in enum_values:
+                result.add(path, f&quot;Value {data!r} not in enum {enum_values}&quot;)
+
+        # String checks
+        if isinstance(data, str):
+            min_len = schema.get(&quot;minLength&quot;, 0)
+            max_len = schema.get(&quot;maxLength&quot;, MAX_STRING_LEN)
+            if len(data) &lt; min_len:
+                result.add(path, f&quot;String length {len(data)} &lt; minLength {min_len}&quot;)
+            if len(data) &gt; max_len:
+                result.add(path, f&quot;String length {len(data)} &gt; maxLength {max_len}&quot;)
+            pattern = schema.get(&quot;pattern&quot;)
+            if pattern:
+                try:
+                    if not re.fullmatch(pattern, data):
+                        result.add(path, f&quot;String {data!r} does not match pattern {pattern!r}&quot;)
+                except re.error as e:
+                    result.add(path, f&quot;Invalid regex pattern {pattern!r}: {e}&quot;)
+
+        # Numeric checks
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            minimum = schema.get(&quot;minimum&quot;)
+            maximum = schema.get(&quot;maximum&quot;)
+            if minimum is not None and data &lt; minimum:
+                result.add(path, f&quot;Value {data} &lt; minimum {minimum}&quot;)
+            if maximum is not None and data &gt; maximum:
+                result.add(path, f&quot;Value {data} &gt; maximum {maximum}&quot;)
+
+        # Object checks
+        if isinstance(data, dict):
+            # Required fields
+            for req_field in schema.get(&quot;required&quot;, []):
+                if req_field not in data:
+                    result.add(path, f&quot;Missing required field: {req_field!r}&quot;)
+
+            # Validate properties
+            props_schema: dict = schema.get(&quot;properties&quot;, {})
+            for key, value in data.items():
+                child_path = f&quot;{path}.{key}&quot;
+                if key in props_schema:
+                    self._validate(value, props_schema[key], child_path, result, depth + 1)
+                elif schema.get(&quot;additionalProperties&quot;) is False:
+                    result.add(child_path, f&quot;Additional property not allowed: {key!r}&quot;)
+
+        # Array checks
+        if isinstance(data, list):
+            min_items = schema.get(&quot;minItems&quot;, 0)
+            max_items = schema.get(&quot;maxItems&quot;, 2**31)
+            if len(data) &lt; min_items:
+                result.add(path, f&quot;Array length {len(data)} &lt; minItems {min_items}&quot;)
+            if len(data) &gt; max_items:
+                result.add(path, f&quot;Array length {len(data)} &gt; maxItems {max_items}&quot;)
+            items_schema = schema.get(&quot;items&quot;)
+            if items_schema:
+                for i, item in enumerate(data):
+                    self._validate(item, items_schema, f&quot;{path}[{i}]&quot;, result, depth + 1)
+
+
+# ---------------------------------------------------------------------------
+# Example schema: security event
+# ---------------------------------------------------------------------------
+
+SECURITY_EVENT_SCHEMA: dict = {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;required&quot;: [&quot;event_id&quot;, &quot;timestamp&quot;, &quot;severity&quot;, &quot;source_ip&quot;, &quot;event_type&quot;],
+    &quot;additionalProperties&quot;: False,
+    &quot;properties&quot;: {
+        &quot;event_id&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;minLength&quot;: 1,
+            &quot;maxLength&quot;: 64,
+            &quot;pattern&quot;: r&quot;[a-zA-Z0-9\-_]+&quot;,
+        },
+        &quot;timestamp&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;minLength&quot;: 20,
+            &quot;maxLength&quot;: 32,
+        },
+        &quot;severity&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;enum&quot;: [&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;],
+        },
+        &quot;source_ip&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;minLength&quot;: 7,
+            &quot;maxLength&quot;: 45,  # IPv6
+        },
+        &quot;event_type&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;enum&quot;: [
+                &quot;auth_failure&quot;, &quot;port_scan&quot;, &quot;exfil_attempt&quot;,
+                &quot;privilege_escalation&quot;, &quot;malware_detected&quot;,
+            ],
+        },
+        &quot;confidence&quot;: {
+            &quot;type&quot;: &quot;number&quot;,
+            &quot;minimum&quot;: 0.0,
+            &quot;maximum&quot;: 1.0,
+        },
+        &quot;tags&quot;: {
+            &quot;type&quot;: &quot;array&quot;,
+            &quot;items&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;maxLength&quot;: 64},
+            &quot;maxItems&quot;: 20,
+        },
+        &quot;metadata&quot;: {
+            &quot;type&quot;: &quot;object&quot;,
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_valid_event():
+    v = SchemaValidator()
+    event = {
+        &quot;event_id&quot;: &quot;evt-001&quot;,
+        &quot;timestamp&quot;: &quot;2026-05-30T12:00:00Z&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+        &quot;source_ip&quot;: &quot;192.168.1.100&quot;,
+        &quot;event_type&quot;: &quot;port_scan&quot;,
+        &quot;confidence&quot;: 0.92,
+        &quot;tags&quot;: [&quot;recon&quot;, &quot;network&quot;],
+    }
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert r.valid, str(r)
+    print(&quot;Valid event: passed&quot;)
+
+
+def test_missing_required():
+    v = SchemaValidator()
+    event = {&quot;event_id&quot;: &quot;evt-002&quot;, &quot;timestamp&quot;: &quot;2026-05-30T12:00:00Z&quot;}
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    missing = {e.message for e in r.errors}
+    assert any(&quot;severity&quot; in m for m in missing)
+    assert any(&quot;source_ip&quot; in m for m in missing)
+    print(f&quot;Missing required fields: passed ({[str(e) for e in r.errors]})&quot;)
+
+
+def test_invalid_enum():
+    v = SchemaValidator()
+    event = {
+        &quot;event_id&quot;: &quot;evt-003&quot;,
+        &quot;timestamp&quot;: &quot;2026-05-30T12:00:00Z&quot;,
+        &quot;severity&quot;: &quot;CRITICAL&quot;,  # wrong case
+        &quot;source_ip&quot;: &quot;10.0.0.1&quot;,
+        &quot;event_type&quot;: &quot;port_scan&quot;,
+    }
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert any(&quot;enum&quot; in str(e) for e in r.errors)
+    print(f&quot;Invalid enum: passed&quot;)
+
+
+def test_additional_property_rejected():
+    v = SchemaValidator()
+    event = {
+        &quot;event_id&quot;: &quot;evt-004&quot;,
+        &quot;timestamp&quot;: &quot;2026-05-30T12:00:00Z&quot;,
+        &quot;severity&quot;: &quot;low&quot;,
+        &quot;source_ip&quot;: &quot;10.0.0.1&quot;,
+        &quot;event_type&quot;: &quot;port_scan&quot;,
+        &quot;evil_field&quot;: &quot;injected&quot;,
+    }
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert any(&quot;evil_field&quot; in str(e) for e in r.errors)
+    print(f&quot;Additional property rejected: passed&quot;)
+
+
+def test_out_of_range_confidence():
+    v = SchemaValidator()
+    event = {
+        &quot;event_id&quot;: &quot;evt-005&quot;,
+        &quot;timestamp&quot;: &quot;2026-05-30T12:00:00Z&quot;,
+        &quot;severity&quot;: &quot;medium&quot;,
+        &quot;source_ip&quot;: &quot;10.0.0.1&quot;,
+        &quot;event_type&quot;: &quot;port_scan&quot;,
+        &quot;confidence&quot;: 1.5,  # &gt; 1.0
+    }
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert any(&quot;maximum&quot; in str(e) for e in r.errors)
+    print(f&quot;Out-of-range confidence: passed&quot;)
+
+
+def test_invalid_json_bytes():
+    v = SchemaValidator()
+    r = v.validate_json_bytes(b&quot;{bad json&quot;, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert any(&quot;JSON&quot; in str(e) for e in r.errors)
+    print(&quot;Invalid JSON bytes: passed&quot;)
+
+
+def test_oversized_input():
+    v = SchemaValidator()
+    r = v.validate_json_bytes(b&quot;x&quot; * (MAX_EVENT_BYTES + 1), SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert any(&quot;too large&quot; in str(e) for e in r.errors)
+    print(&quot;Oversized input: passed&quot;)
+
+
+def test_collect_all_errors():
+    v = SchemaValidator()
+    event = {
+        # Missing: event_id, timestamp, source_ip, event_type
+        &quot;severity&quot;: &quot;INVALID&quot;,
+    }
+    r = v.validate(event, SECURITY_EVENT_SCHEMA)
+    assert not r.valid
+    assert len(r.errors) &gt;= 4
+    print(f&quot;Collect all errors: passed ({len(r.errors)} errors)&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+JSON SCHEMA VALIDATION AS A SECURITY CONTROL
+---------------------------------------------
+1. Mass assignment / parameter pollution:
+   additionalProperties: false rejects unexpected fields, preventing
+   attackers from injecting fields like &quot;role&quot;:&quot;admin&quot; into event objects.
+
+2. Type confusion:
+   type validation prevents integer/string confusion exploits.
+   E.g., API expects a numeric ID but attacker sends {&quot;id&quot;: &quot;../../config&quot;}.
+
+3. Prototype pollution (Node.js):
+   JSON.parse() can inject __proto__ keys.
+   Schema with additionalProperties:false + explicit field allowlist
+   prevents __proto__ from reaching object construction.
+
+4. Billion laughs / deeply nested JSON:
+   A schema bomb: {&quot;a&quot;:{&quot;b&quot;:{&quot;c&quot;:...}}} with depth 10000.
+   Our MAX_DEPTH=10 and MAX_EVENT_BYTES limits prevent DoS.
+
+5. Malicious enum bypass:
+   Attackers probe for accepted values via brute force.
+   Enum validation should use constant-time comparison where values
+   are security-sensitive (e.g., role names).
+
+PRODUCTION HARDENING
+--------------------
+  • Use jsonschema library (Draft-2020-12) for full JSON Schema support.
+  • Add $ref and $defs support only if needed; they add recursion risk.
+  • Log validation errors as potential attack indicators (WAF-style).
+  • Never include raw user input in error messages returned to callers.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_event()
+    test_missing_required()
+    test_invalid_enum()
+    test_additional_property_rejected()
+    test_out_of_range_confidence()
+    test_invalid_json_bytes()
+    test_oversized_input()
+    test_collect_all_errors()
+</code></pre>
+</body>
+</html>

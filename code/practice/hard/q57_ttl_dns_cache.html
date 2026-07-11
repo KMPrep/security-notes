@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q57_ttl_dns_cache.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q57_ttl_dns_cache.py</h1>
+  <p class="file-path">Source: code\practice\hard\q57_ttl_dns_cache.py</p>
+  <p class="line-count">428 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q57 [Hard] — TTL Cache for DNS Reputation
+=============================================================================
+
+PROBLEM
+-------
+Implement a TTL cache where each DNS reputation result expires after a
+configured time-to-live:
+  1. Lookup domain → returns cached ReputationResult or None on miss.
+  2. Each entry has its own TTL (set either globally or from the DNS response).
+  3. Expired entries are treated as misses; auto-purged in the background.
+  4. Thread-safe for concurrent DNS resolvers.
+  5. Negative caching: NXDOMAIN/clean results cached with shorter TTL.
+  6. Size limit: cap total entries; evict soonest-to-expire on overflow.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Key? → Domain name (lowercased, stripped).
+2. TTL source? → Configurable default; can be overridden per entry.
+3. Thread model? → threading module.
+4. Eviction on overflow? → Min-heap by expires_at (smallest TTL first).
+5. Background cleanup? → Daemon thread running every N seconds.
+
+=============================================================================
+APPROACH 1 — NAIVE (dict + time check, no eviction, not thread-safe)
+=============================================================================
+  Simple dict; TTL checked on access only; no background cleanup; unbounded.
+
+=============================================================================
+APPROACH 2 — HEAP-BASED TTL CACHE WITH LAZY EXPIRY (OPTIMAL)
+=============================================================================
+  1. dict[domain → _Entry] for O(1) lookup.
+  2. min-heap[(expires_at, domain)] for O(log N) overflow eviction.
+  3. Lazy expiry: check TTL on every get(); also background thread purges.
+  4. Overflow: before inserting, heappop the min-expiry entry.
+  5. RLock protects all state.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import heapq
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_CAPACITY      = 50_000
+DEFAULT_TTL_S         = 300.0    # 5 minutes
+NEGATIVE_TTL_S        = 60.0     # 1 minute for NXDOMAIN / clean
+CLEANUP_INTERVAL_S    = 30.0     # background cleanup frequency
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+class DnsReputation(Enum):
+    UNKNOWN   = &quot;unknown&quot;
+    CLEAN     = &quot;clean&quot;
+    SUSPICIOUS= &quot;suspicious&quot;
+    MALICIOUS = &quot;malicious&quot;
+    NXDOMAIN  = &quot;nxdomain&quot;
+
+
+@dataclass
+class ReputationResult:
+    domain: str
+    reputation: DnsReputation
+    categories: List[str]
+    confidence: float           # 0.0–1.0
+    ttl_s: Optional[float] = None   # override cache TTL from DNS response
+
+
+@dataclass
+class _Entry:
+    result: ReputationResult
+    expires_at: float    # monotonic timestamp
+
+
+@dataclass
+class CacheStats:
+    hits: int       = 0
+    misses: int     = 0
+    evictions: int  = 0
+    expirations: int = 0
+
+    @property
+    def hit_rate(self) -&gt; float:
+        total = self.hits + self.misses
+        return self.hits / total if total else 0.0
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveDnsReputationCache:
+    &quot;&quot;&quot;Not thread-safe; unbounded; TTL only checked on access.&quot;&quot;&quot;
+
+    def __init__(self, default_ttl_s: float = DEFAULT_TTL_S):
+        self._ttl  = default_ttl_s
+        self._data: Dict[str, _Entry] = {}
+
+    def get(self, domain: str) -&gt; Optional[ReputationResult]:
+        e = self._data.get(domain.lower())
+        if e and time.monotonic() &lt;= e.expires_at:
+            return e.result
+        return None
+
+    def put(self, result: ReputationResult) -&gt; None:
+        ttl = result.ttl_s or self._ttl
+        self._data[result.domain.lower()] = _Entry(result, time.monotonic() + ttl)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Heap-based TTL cache
+# ---------------------------------------------------------------------------
+
+class DnsReputationCache:
+    &quot;&quot;&quot;
+    Thread-safe DNS reputation TTL cache.
+
+    Internals:
+      _cache:  dict[domain → _Entry]      — O(1) lookup
+      _heap:   min-heap[(expires_at, domain)]  — overflow eviction
+
+    Overflow policy: evict the soonest-expiring entry (weakest TTL).
+    This retains long-lived, highly confident results while shedding
+    entries that were about to expire anyway.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        capacity:       int   = DEFAULT_CAPACITY,
+        default_ttl_s:  float = DEFAULT_TTL_S,
+        negative_ttl_s: float = NEGATIVE_TTL_S,
+        cleanup_interval_s: float = CLEANUP_INTERVAL_S,
+    ):
+        if capacity &lt;= 0:
+            raise ValueError(&quot;capacity must be positive&quot;)
+        self._capacity       = capacity
+        self._default_ttl    = default_ttl_s
+        self._negative_ttl   = negative_ttl_s
+        self._lock           = threading.RLock()
+        self._cache:  Dict[str, _Entry]            = {}
+        self._heap:   List[Tuple[float, str]]      = []   # (expires_at, domain)
+        self._stats          = CacheStats()
+        self._stop           = threading.Event()
+        self._bg             = threading.Thread(
+            target=self._cleanup_loop, daemon=True, name=&quot;dns-ttl-cleanup&quot;
+        )
+        self._bg.start()
+
+    # --- Public API ---------------------------------------------------------
+
+    def get(self, domain: str) -&gt; Optional[ReputationResult]:
+        key = domain.strip().lower()
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                self._stats.misses += 1
+                return None
+            if time.monotonic() &gt; entry.expires_at:
+                del self._cache[key]
+                self._stats.misses      += 1
+                self._stats.expirations += 1
+                return None
+            self._stats.hits += 1
+            return entry.result
+
+    def put(self, result: ReputationResult) -&gt; None:
+        key = result.domain.strip().lower()
+        ttl = result.ttl_s
+
+        if ttl is None:
+            if result.reputation in (DnsReputation.CLEAN, DnsReputation.NXDOMAIN,
+                                      DnsReputation.UNKNOWN):
+                ttl = self._negative_ttl
+            else:
+                ttl = self._default_ttl
+
+        now        = time.monotonic()
+        expires_at = now + ttl
+        entry      = _Entry(result=result, expires_at=expires_at)
+
+        with self._lock:
+            if key not in self._cache and len(self._cache) &gt;= self._capacity:
+                self._evict_one_locked()
+
+            self._cache[key] = entry
+            heapq.heappush(self._heap, (expires_at, key))
+
+    def invalidate(self, domain: str) -&gt; bool:
+        key = domain.strip().lower()
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                return True
+            return False
+
+    def purge_expired(self) -&gt; int:
+        now    = time.monotonic()
+        purged = 0
+        with self._lock:
+            # Drain heap of already-expired or stale references
+            while self._heap and self._heap[0][0] &lt;= now:
+                exp, key = heapq.heappop(self._heap)
+                entry = self._cache.get(key)
+                # Only delete if this heap entry matches the current entry
+                if entry is not None and entry.expires_at &lt;= now:
+                    del self._cache[key]
+                    purged += 1
+            self._stats.expirations += purged
+        return purged
+
+    def stop(self) -&gt; None:
+        self._stop.set()
+
+    @property
+    def size(self) -&gt; int:
+        with self._lock:
+            return len(self._cache)
+
+    @property
+    def stats(self) -&gt; CacheStats:
+        with self._lock:
+            return CacheStats(
+                hits=self._stats.hits,
+                misses=self._stats.misses,
+                evictions=self._stats.evictions,
+                expirations=self._stats.expirations,
+            )
+
+    # --- Internal -----------------------------------------------------------
+
+    def _evict_one_locked(self) -&gt; None:
+        &quot;&quot;&quot;Evict the soonest-expiring entry. Must hold lock.&quot;&quot;&quot;
+        while self._heap:
+            exp, key = heapq.heappop(self._heap)
+            if key in self._cache:
+                del self._cache[key]
+                self._stats.evictions += 1
+                return
+
+    def _cleanup_loop(self) -&gt; None:
+        while not self._stop.wait(CLEANUP_INTERVAL_S):
+            self.purge_expired()
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+def _result(
+    domain: str,
+    rep: DnsReputation = DnsReputation.MALICIOUS,
+    ttl: Optional[float] = None,
+) -&gt; ReputationResult:
+    return ReputationResult(
+        domain=domain, reputation=rep,
+        categories=[&quot;malware&quot;], confidence=0.95, ttl_s=ttl,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_basic_put_get():
+    cache = DnsReputationCache(capacity=100)
+    cache.put(_result(&quot;evil.example.com&quot;))
+    r = cache.get(&quot;evil.example.com&quot;)
+    assert r is not None
+    assert r.reputation == DnsReputation.MALICIOUS
+    print(&quot;Basic put/get: passed&quot;)
+    cache.stop()
+
+
+def test_miss_on_unknown():
+    cache = DnsReputationCache(capacity=100)
+    assert cache.get(&quot;unknown.domain&quot;) is None
+    assert cache.stats.misses == 1
+    print(&quot;Miss on unknown: passed&quot;)
+    cache.stop()
+
+
+def test_ttl_expiry():
+    cache = DnsReputationCache(capacity=100, default_ttl_s=0.05)
+    cache.put(_result(&quot;short.ttl.com&quot;))
+    assert cache.get(&quot;short.ttl.com&quot;) is not None
+    time.sleep(0.1)
+    assert cache.get(&quot;short.ttl.com&quot;) is None
+    print(&quot;TTL expiry: passed&quot;)
+    cache.stop()
+
+
+def test_negative_ttl():
+    cache = DnsReputationCache(capacity=100, negative_ttl_s=0.05)
+    cache.put(_result(&quot;safe.com&quot;, rep=DnsReputation.CLEAN))
+    assert cache.get(&quot;safe.com&quot;) is not None
+    time.sleep(0.1)
+    assert cache.get(&quot;safe.com&quot;) is None
+    print(&quot;Negative TTL (clean): passed&quot;)
+    cache.stop()
+
+
+def test_per_entry_ttl_override():
+    cache = DnsReputationCache(capacity=100, default_ttl_s=60)
+    cache.put(_result(&quot;short.custom.com&quot;, ttl=0.05))
+    time.sleep(0.1)
+    assert cache.get(&quot;short.custom.com&quot;) is None
+    print(&quot;Per-entry TTL override: passed&quot;)
+    cache.stop()
+
+
+def test_overflow_eviction():
+    cache = DnsReputationCache(capacity=3)
+    for i in range(3):
+        cache.put(_result(f&quot;d{i}.com&quot;, ttl=300))
+    assert cache.size == 3
+    cache.put(_result(&quot;d3.com&quot;, ttl=300))
+    assert cache.size == 3   # still at capacity; one was evicted
+    assert cache.stats.evictions == 1
+    print(&quot;Overflow eviction: passed&quot;)
+    cache.stop()
+
+
+def test_case_insensitive():
+    cache = DnsReputationCache(capacity=100)
+    cache.put(_result(&quot;Evil.EXAMPLE.COM&quot;))
+    assert cache.get(&quot;evil.example.com&quot;) is not None
+    assert cache.get(&quot;EVIL.EXAMPLE.COM&quot;) is not None
+    print(&quot;Case-insensitive lookup: passed&quot;)
+    cache.stop()
+
+
+def test_invalidate():
+    cache = DnsReputationCache(capacity=100)
+    cache.put(_result(&quot;bad.com&quot;))
+    assert cache.invalidate(&quot;bad.com&quot;) == True
+    assert cache.get(&quot;bad.com&quot;) is None
+    print(&quot;Invalidate: passed&quot;)
+    cache.stop()
+
+
+def test_concurrent_access():
+    cache   = DnsReputationCache(capacity=500)
+    errors  = []
+    lock    = threading.Lock()
+
+    def worker(n):
+        try:
+            domain = f&quot;domain{n % 20}.com&quot;
+            cache.put(_result(domain, ttl=60))
+            cache.get(domain)
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(100)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f&quot;Errors: {errors}&quot;
+    s = cache.stats
+    print(f&quot;Concurrent: hits={s.hits}, misses={s.misses} — passed&quot;)
+    cache.stop()
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+DNS REPUTATION CACHING IN SECURITY
+-------------------------------------
+Use cases:
+  1. Block malicious domains at DNS resolver level (RPZ — Response Policy Zones).
+  2. Inline TI lookup on every DNS query (cache hit = ~0ms; miss = 50–200ms).
+  3. Detect DGA (Domain Generation Algorithm) domains: entropy-high, new.
+
+TTL POLICY DESIGN
+-----------------
+  Malicious domain:  Long TTL (5–15 min) — these rarely flip to clean.
+  NXDOMAIN:          Short TTL (1–5 min) — may be registered soon (DGA).
+  Clean domain:      Medium TTL (5–10 min) — may become malicious (takeover).
+  Infrastructure IPs: Longer TTL (1h) — IPs change slowly.
+
+DNS CACHE POISONING (UNRELATED TO TI CACHE)
+--------------------------------------------
+  Attacker injects forged DNS responses into resolver cache.
+  Result: victim&#x27;s browser goes to attacker&#x27;s IP for &quot;bank.com&quot;.
+  Defenses:
+    - DNSSEC: cryptographically signs DNS records.
+    - DNS-over-HTTPS / DNS-over-TLS: prevents interception.
+    - Random source port + query ID entropy (Kaminsky-resistant resolvers).
+
+STALE WHILE REVALIDATE (PRODUCTION PATTERN)
+--------------------------------------------
+  Serve stale cache result while asynchronously re-fetching from TI API.
+  Prevents cold-start latency spikes; safe because:
+    - TI verdicts rarely reverse instantly.
+    - TTL expiry is a soft deadline.
+  Dangerous if: you use stale results to authorize (not just detect).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic_put_get()
+    test_miss_on_unknown()
+    test_ttl_expiry()
+    test_negative_ttl()
+    test_per_entry_ttl_override()
+    test_overflow_eviction()
+    test_case_insensitive()
+    test_invalidate()
+    test_concurrent_access()
+</code></pre>
+</body>
+</html>

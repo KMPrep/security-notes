@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q15_suspicious_login_report.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q15_suspicious_login_report.py</h1>
+  <p class="file-path">Source: code\day5\answers\q15_suspicious_login_report.py</p>
+  <p class="line-count">440 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q15. Suspicious Login Report Generator
+========================================
+Complete Python script:
+
+1. GENERATE a sample auth.log (50+ lines) containing:
+   - Users with 3+ consecutive failures
+   - Users logging in from 2+ different IPs in the same hour
+   - Logins outside business hours (before 8am or after 8pm)
+
+2. ANALYZE the log and produce a formatted report:
+
+   === Suspicious Login Report ===
+   Brute Force Candidates:
+     alice: 7 consecutive failures from 10.0.0.1
+
+   Multi-IP Logins:
+     bob: logged in from [10.0.0.2, 172.16.0.5] within 1 hour
+
+   After-Hours Logins:
+     charlie: login at 02:13am from 192.168.1.99
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;This is an end-to-end problem. Write a complete working script.&quot;
+
+--- CANDIDATE FIRST RESPONSE (verbal walk-through) ---
+&quot;I&#x27;d break this into three parts:
+ 1. A generator to create the sample log.
+ 2. A parser to read the log into structured records.
+ 3. Three detection functions, one per suspicious pattern.
+ Then a report formatter.&quot;
+
+Follow-up: &quot;Good structure. What does each detection function look like?
+Start with brute force.&quot;
+
+--- CANDIDATE WORKS THROUGH BRUTE FORCE ---
+&quot;Track consecutive failures per user. When we see OK, reset. If streak &gt;= 3,
+flag the user. Store the src_ip of the failing attempts.&quot;
+
+Follow-up: &quot;Multi-IP logins within one hour — how do you implement that?&quot;
+&quot;Group successful logins by (user, hour). Collect the set of source IPs per
+(user, hour). If len(ips) &gt;= 2, flag it.&quot;
+
+Follow-up: &quot;After-hours — what counts as &#x27;business hours&#x27;?&quot;
+&quot;Before 8:00 or after 20:00 (8pm). Parse the timestamp hour and check.&quot;
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Full working script: generator + parser + three detectors + report.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import random
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+BUSINESS_START_HOUR = 8   # 08:00
+BUSINESS_END_HOUR   = 20  # 20:00
+BRUTE_FORCE_THRESHOLD = 3  # consecutive failures to flag
+MULTI_IP_THRESHOLD    = 2  # distinct IPs in one hour to flag
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 1 — SAMPLE LOG GENERATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_sample_log():
+    &quot;&quot;&quot;
+    Generate a realistic auth.log covering all three suspicious patterns.
+    Returns list of log lines (strings).
+    Lines are timestamped in chronological order.
+    &quot;&quot;&quot;
+    random.seed(42)  # deterministic output
+
+    base = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+    lines = []
+
+    def ts(offset_seconds):
+        return (base + timedelta(seconds=offset_seconds)).strftime(
+            &quot;%Y-%m-%dT%H:%M:%SZ&quot;
+        )
+
+    def make_line(offset, user, result, src):
+        return f&quot;{ts(offset)} auth: user={user} result={result} src={src}&quot;
+
+    t = 0   # running offset in seconds
+
+    # ── Normal users (background noise) ──────────────────────────────────────
+    normal_events = [
+        (3600,  &quot;dave&quot;,  &quot;OK&quot;,   &quot;10.10.0.1&quot;),    # 01:00
+        (7200,  &quot;eve&quot;,   &quot;OK&quot;,   &quot;10.10.0.2&quot;),    # 02:00
+        (10800, &quot;frank&quot;, &quot;OK&quot;,   &quot;10.10.0.3&quot;),    # 03:00
+        (14400, &quot;grace&quot;, &quot;OK&quot;,   &quot;10.10.0.4&quot;),    # 04:00
+        (32400, &quot;dave&quot;,  &quot;OK&quot;,   &quot;10.10.0.1&quot;),    # 09:00
+        (36000, &quot;eve&quot;,   &quot;OK&quot;,   &quot;10.10.0.2&quot;),    # 10:00
+        (39600, &quot;frank&quot;, &quot;OK&quot;,   &quot;10.10.0.3&quot;),    # 11:00
+        (43200, &quot;grace&quot;, &quot;OK&quot;,   &quot;10.10.0.4&quot;),    # 12:00
+    ]
+    for offset, user, result, src in normal_events:
+        lines.append((offset, make_line(offset, user, result, src)))
+
+    # ── PATTERN 1: Brute force — alice: 7 consecutive failures ───────────────
+    # Start at 02:30
+    t = 9000
+    for i in range(7):
+        lines.append((t, make_line(t, &quot;alice&quot;, &quot;FAIL&quot;, &quot;10.0.0.1&quot;)))
+        t += 10
+    lines.append((t, make_line(t, &quot;alice&quot;, &quot;OK&quot;, &quot;10.0.0.1&quot;)))   # eventually succeeds
+    t += 30
+
+    # ── PATTERN 2a: bob — 3 consecutive failures ─────────────────────────────
+    t = 18000  # 05:00
+    for i in range(3):
+        lines.append((t, make_line(t, &quot;bob&quot;, &quot;FAIL&quot;, &quot;192.168.2.1&quot;)))
+        t += 5
+    lines.append((t, make_line(t, &quot;bob&quot;, &quot;OK&quot;, &quot;192.168.2.1&quot;)))
+    t += 30
+
+    # ── PATTERN 3: Multi-IP — bob logs in from 2 IPs in same hour ────────────
+    # Bob logs in at 10:00 from two different IPs
+    t = 36000   # 10:00
+    lines.append((t, make_line(t, &quot;bob&quot;, &quot;OK&quot;, &quot;10.0.0.2&quot;)))
+    t += 1200   # +20 minutes
+    lines.append((t, make_line(t, &quot;bob&quot;, &quot;OK&quot;, &quot;172.16.0.5&quot;)))
+
+    # ── PATTERN 4: carol — multi-IP login (3 different IPs) ──────────────────
+    t = 39600   # 11:00
+    ips = [&quot;10.1.0.1&quot;, &quot;10.1.0.2&quot;, &quot;10.1.0.3&quot;]
+    for ip in ips:
+        lines.append((t, make_line(t, &quot;carol&quot;, &quot;OK&quot;, ip)))
+        t += 300   # 5 minutes apart — all within same hour
+
+    # ── PATTERN 5: After-hours logins ────────────────────────────────────────
+    # charlie logs in at 02:13
+    t = 7980    # 02:13:00
+    lines.append((t, make_line(t, &quot;charlie&quot;, &quot;OK&quot;, &quot;192.168.1.99&quot;)))
+
+    # heidi logs in at 23:45
+    t = 85500   # 23:45:00
+    lines.append((t, make_line(t, &quot;heidi&quot;, &quot;OK&quot;, &quot;172.16.99.1&quot;)))
+
+    # ivan logs in at 06:30 (before 8am)
+    t = 23400   # 06:30:00
+    lines.append((t, make_line(t, &quot;ivan&quot;, &quot;OK&quot;, &quot;10.9.9.9&quot;)))
+
+    # ── More noise ────────────────────────────────────────────────────────────
+    noise_users = [&quot;judy&quot;, &quot;kevin&quot;, &quot;linda&quot;, &quot;mike&quot;, &quot;nancy&quot;]
+    t_noise = 32400  # start at 09:00
+    for u in noise_users:
+        ip = f&quot;10.0.{random.randint(1,50)}.{random.randint(1,250)}&quot;
+        lines.append((t_noise, make_line(t_noise, u, &quot;OK&quot;, ip)))
+        t_noise += 300
+        # one fail each
+        lines.append((t_noise, make_line(t_noise, u, &quot;FAIL&quot;, ip)))
+        t_noise += 10
+        lines.append((t_noise, make_line(t_noise, u, &quot;OK&quot;, ip)))
+        t_noise += 290
+
+    # Sort by timestamp offset
+    lines.sort(key=lambda x: x[0])
+    return [line for _, line in lines]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 2 — PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LINE_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+auth:\s+user=(?P&lt;user&gt;\S+)&#x27;
+    r&#x27;\s+result=(?P&lt;result&gt;FAIL|OK)\s+src=(?P&lt;src&gt;\S+)&#x27;
+)
+
+
+def parse_line(raw: str):
+    &quot;&quot;&quot;Returns dict or None.&quot;&quot;&quot;
+    m = LINE_RE.search(raw.strip())
+    if not m:
+        return None
+    ts_str = m.group(&quot;ts&quot;).replace(&quot;Z&quot;, &quot;+00:00&quot;)
+    try:
+        dt = datetime.fromisoformat(ts_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return {
+        &quot;ts&quot;:     dt,
+        &quot;user&quot;:   m.group(&quot;user&quot;),
+        &quot;result&quot;: m.group(&quot;result&quot;),
+        &quot;src&quot;:    m.group(&quot;src&quot;),
+    }
+
+
+def parse_all(lines):
+    &quot;&quot;&quot;Parse all lines; return list of event dicts and malformed count.&quot;&quot;&quot;
+    events   = []
+    malformed = 0
+    for raw in lines:
+        ev = parse_line(raw)
+        if ev is None:
+            malformed += 1
+        else:
+            events.append(ev)
+    return events, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 3 — DETECTION FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_brute_force(events):
+    &quot;&quot;&quot;
+    Flag users who had &gt;= BRUTE_FORCE_THRESHOLD consecutive failures.
+    Returns list of dicts: { user, max_streak, src_ips }
+    &quot;&quot;&quot;
+    current_streak = defaultdict(int)
+    max_streak     = defaultdict(int)
+    streak_ips     = defaultdict(set)
+    all_fail_ips   = defaultdict(set)
+    flagged        = set()
+
+    for ev in events:
+        user   = ev[&quot;user&quot;]
+        result = ev[&quot;result&quot;]
+        src    = ev[&quot;src&quot;]
+
+        if result == &quot;FAIL&quot;:
+            current_streak[user] += 1
+            streak_ips[user].add(src)
+            all_fail_ips[user].add(src)
+            if current_streak[user] &gt; max_streak[user]:
+                max_streak[user] = current_streak[user]
+            if current_streak[user] &gt;= BRUTE_FORCE_THRESHOLD:
+                flagged.add(user)
+        else:
+            current_streak[user] = 0
+            streak_ips[user]     = set()
+
+    return [
+        {
+            &quot;user&quot;:       u,
+            &quot;max_streak&quot;: max_streak[u],
+            &quot;src_ips&quot;:    sorted(all_fail_ips[u]),
+        }
+        for u in sorted(flagged)
+    ]
+
+
+def detect_multi_ip(events):
+    &quot;&quot;&quot;
+    Flag users who had &gt;= MULTI_IP_THRESHOLD distinct source IPs for
+    SUCCESSFUL logins within the same calendar hour.
+    Returns list of dicts: { user, hour, ips }
+    &quot;&quot;&quot;
+    # Group by (user, hour-bucket)
+    hour_ips = defaultdict(set)   # (user, hour_key) → set of IPs
+
+    for ev in events:
+        if ev[&quot;result&quot;] != &quot;OK&quot;:
+            continue
+        # Round timestamp down to the hour
+        dt     = ev[&quot;ts&quot;]
+        hour_key = dt.strftime(&quot;%Y-%m-%dT%H:00Z&quot;)
+        hour_ips[(ev[&quot;user&quot;], hour_key)].add(ev[&quot;src&quot;])
+
+    results = []
+    for (user, hour_key), ips in sorted(hour_ips.items()):
+        if len(ips) &gt;= MULTI_IP_THRESHOLD:
+            results.append({
+                &quot;user&quot;:     user,
+                &quot;hour&quot;:     hour_key,
+                &quot;ips&quot;:      sorted(ips),
+            })
+
+    return results
+
+
+def detect_after_hours(events):
+    &quot;&quot;&quot;
+    Flag SUCCESSFUL logins outside business hours (before 8am or &gt;= 8pm).
+    Returns list of dicts: { user, ts, src }
+    &quot;&quot;&quot;
+    results = []
+    for ev in events:
+        if ev[&quot;result&quot;] != &quot;OK&quot;:
+            continue
+        hour = ev[&quot;ts&quot;].hour
+        if hour &lt; BUSINESS_START_HOUR or hour &gt;= BUSINESS_END_HOUR:
+            results.append({
+                &quot;user&quot;:   ev[&quot;user&quot;],
+                &quot;ts&quot;:     ev[&quot;ts&quot;],
+                &quot;src&quot;:    ev[&quot;src&quot;],
+            })
+    return sorted(results, key=lambda x: x[&quot;ts&quot;])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 4 — REPORT FORMATTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(brute_force, multi_ip, after_hours):
+    print(&quot;\n&quot; + &quot;=&quot; * 50)
+    print(&quot;   === Suspicious Login Report ===&quot;)
+    print(&quot;=&quot; * 50)
+
+    # ── Brute Force ──────────────────────────────────────────────────────────
+    print(f&quot;\nBrute Force Candidates (&gt;= {BRUTE_FORCE_THRESHOLD} consecutive failures):&quot;)
+    if not brute_force:
+        print(&quot;  (none detected)&quot;)
+    else:
+        for rec in brute_force:
+            ips_str = &quot;, &quot;.join(rec[&quot;src_ips&quot;])
+            print(f&quot;  {rec[&#x27;user&#x27;]}: {rec[&#x27;max_streak&#x27;]} consecutive failures&quot;
+                  f&quot; from [{ips_str}]&quot;)
+
+    # ── Multi-IP ─────────────────────────────────────────────────────────────
+    print(f&quot;\nMulti-IP Logins (&gt;= {MULTI_IP_THRESHOLD} different IPs in same hour):&quot;)
+    if not multi_ip:
+        print(&quot;  (none detected)&quot;)
+    else:
+        for rec in multi_ip:
+            ips_str = &quot;, &quot;.join(rec[&quot;ips&quot;])
+            print(f&quot;  {rec[&#x27;user&#x27;]}: logged in from [{ips_str}]&quot;
+                  f&quot; within hour starting {rec[&#x27;hour&#x27;]}&quot;)
+
+    # ── After-Hours ───────────────────────────────────────────────────────────
+    print(f&quot;\nAfter-Hours Logins (before {BUSINESS_START_HOUR:02d}:00&quot;
+          f&quot; or after {BUSINESS_END_HOUR:02d}:00 UTC):&quot;)
+    if not after_hours:
+        print(&quot;  (none detected)&quot;)
+    else:
+        for rec in after_hours:
+            time_str = rec[&quot;ts&quot;].strftime(&quot;%I:%M%p&quot;).lower()
+            print(f&quot;  {rec[&#x27;user&#x27;]}: login at {time_str} from {rec[&#x27;src&#x27;]}&quot;)
+
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        # Read from file
+        filepath = sys.argv[1]
+        try:
+            with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+                log_lines = fh.readlines()
+            print(f&quot;[INFO] Read {len(log_lines)} lines from {filepath}&quot;)
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Generate sample log
+        print(&quot;[INFO] Generating sample auth.log ...\n&quot;)
+        log_lines = generate_sample_log()
+
+        # Show generated log (truncated for readability)
+        print(f&quot;Generated {len(log_lines)} log lines. First 10:&quot;)
+        for line in log_lines[:10]:
+            print(f&quot;  {line}&quot;)
+        print(f&quot;  ... and {len(log_lines) - 10} more lines.\n&quot;)
+
+        # Optionally write to file for inspection
+        output_path = &quot;generated_auth.log&quot;
+        try:
+            with open(output_path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fh:
+                for line in log_lines:
+                    fh.write(line + &quot;\n&quot;)
+            print(f&quot;[INFO] Sample log written to: {output_path}\n&quot;)
+        except OSError as exc:
+            print(f&quot;[WARN] Could not write sample log: {exc}&quot;, file=sys.stderr)
+
+    # Parse
+    events, malformed = parse_all(log_lines)
+    print(f&quot;[INFO] Parsed {len(events)} events ({malformed} malformed skipped)\n&quot;)
+
+    if not events:
+        print(&quot;[WARN] No events to analyze.&quot;, file=sys.stderr)
+        sys.exit(1)
+
+    # Detect
+    brute_force  = detect_brute_force(events)
+    multi_ip     = detect_multi_ip(events)
+    after_hours  = detect_after_hours(events)
+
+    # Report
+    print_report(brute_force, multi_ip, after_hours)
+
+    # Summary counts
+    print(f&quot;Summary:&quot;)
+    print(f&quot;  Brute force candidates : {len(brute_force)}&quot;)
+    print(f&quot;  Multi-IP login users   : {len(multi_ip)}&quot;)
+    print(f&quot;  After-hours logins     : {len(after_hours)}&quot;)
+    print()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Parsing      : O(L) where L = log lines
+# Brute force  : O(E) — single pass over events
+# Multi-IP     : O(E + U*H) where U = users, H = hours spanned (small)
+# After-hours  : O(E)
+# Report       : O(output size)
+# Overall      : O(L + E)  — linear in input
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;How would you run this as a continuous process on a streaming log?&quot;
+#     → Tail the log file (inotify/FSEvents) and process new lines as they
+#       arrive. Keep per-user state in memory. Emit alerts immediately on
+#       threshold crossing rather than in a batch.
+# - &quot;How would you store these alerts so analysts can query them later?&quot;
+#     → Write to a structured format: JSONL, or directly to a SIEM (Splunk,
+#       Chronicle). Include enough context: user, time, IPs, detection rule name.
+# - &quot;What if business hours differ by timezone or by user&#x27;s home region?&quot;
+#     → Tag each user with their timezone at login time. Convert timestamps
+#       to local time before the after-hours check.
+# - &quot;What&#x27;s the false positive rate for after-hours detection?&quot;
+#     → High — many legitimate use cases (on-call engineers, global teams).
+#       Combine with other signals: is this IP unknown? Is this a new device?
+#       Has this user never logged in at this hour before?
+# - &quot;Alice had 7 failures but then succeeded. Is that brute force?&quot;
+#     → Depends on policy. Some orgs require account lockout after N fails
+#       regardless of eventual success. Flag and let the analyst decide.
+# =============================================================================
+</code></pre>
+</body>
+</html>

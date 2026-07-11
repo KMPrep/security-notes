@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Q24 — Compliance-as-Code for PCI-DSS on AWS</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\1_hour_long\Q24\README.md</p>
+<h1 id="q24-compliance-as-code-for-pci-dss-on-aws">Q24 — Compliance-as-Code for PCI-DSS on AWS</h1>
+<h2 id="the-ask">The Ask</h2>
+<blockquote>
+<p>"Design a Compliance-as-Code platform for a company that must maintain continuous<br />
+PCI-DSS v4.0 compliance across 30 AWS accounts. The platform must automate evidence<br />
+collection for QSA audits, enforce IaC security policies before deployment, detect<br />
+configuration drift in real time, and provide a compliance dashboard for the CISO.<br />
+The company runs Terraform for infrastructure and deploys via a CI/CD pipeline."</p>
+</blockquote>
+<hr />
+<h2 id="clarifying-questions-i-would-ask-first-phase-1-5-min">Clarifying Questions I Would Ask First (Phase 1 — 5 min)</h2>
+<ul>
+<li>
+<p><strong>Q:</strong> What scope of PCI-DSS applies — only the Cardholder Data Environment (CDE), or are all 30 accounts in scope?<br />
+<strong>Impact:</strong> PCI-DSS applies to CDE accounts AND accounts that can impact CDE security. A typical org: 3-5 accounts in CDE scope + 10-15 "connected-to-CDE" accounts. All 30 accounts may have baseline requirements (PCI-DSS network segmentation, logging) but the strictest requirements apply only to CDE accounts. This drives the compliance enforcement strategy.</p>
+</li>
+<li>
+<p><strong>Q:</strong> Is there a QSA engaged for annual assessment, and what is their preferred evidence format?<br />
+<strong>Impact:</strong> Some QSAs accept AWS Audit Manager automated evidence directly (native integration). Others require spreadsheet export or NIST-format control evidence. AWS Audit Manager generates evidence in JSON + PDF — most QSAs accept this. Understanding the QSA workflow prevents building custom evidence formats.</p>
+</li>
+<li>
+<p><strong>Q:</strong> What Terraform version and state backend is in use, and is there a central CI/CD platform (GitHub Actions, Jenkins, GitLab CI)?<br />
+<strong>Impact:</strong> Terraform &gt;= 1.x + GitHub Actions: use tfsec + Checkov + OPA Rego policies as GitHub Actions workflow steps. Policy failures block the PR. Terraform Cloud / Sentinel: Sentinel policies (HashiCorp-native policy framework) can enforce compliance. Jenkins: different pipeline hooks. The policy enforcement integration differs significantly.</p>
+</li>
+<li>
+<p><strong>Q:</strong> What is the organization's current approach to exceptions — do they have a formal exception process, and how are exceptions tracked?<br />
+<strong>Impact:</strong> Every PCI-DSS compliance program needs an exception process (some deviations are business-justified). The compliance platform must: track exceptions (who approved, what risk is accepted, when it expires), exclude exceptions from compliance dashboards (else dashboard shows permanent red), and feed exceptions to the QSA as documented compensating controls.</p>
+</li>
+<li>
+<p><strong>Q:</strong> Is there a desire for preventive controls (block non-compliant deployments) or just detective controls (alert on drift)?<br />
+<strong>Impact:</strong> Preventive (preferred): Terraform policy checks in CI/CD + SCPs. Detective: AWS Config + Security Hub. For PCI-DSS: BOTH are required (preventive reduces drift, detective catches manual changes). Starting with detective-only is a common phased approach (enable without breaking existing deployments first).</p>
+</li>
+</ul>
+<hr />
+<h2 id="initial-architecture-design-phase-2-15-min">Initial Architecture Design (Phase 2 — 15 min)</h2>
+<h3 id="design-assumptions">Design Assumptions</h3>
+<ol>
+<li>Terraform + GitHub Actions for CI/CD.</li>
+<li>AWS Audit Manager for automated evidence collection.</li>
+<li>AWS Config + Security Hub for runtime compliance detection.</li>
+<li>OPA (Open Policy Agent) / Rego for IaC policy enforcement in CI/CD.</li>
+<li>Config Conformance Pack for per-account PCI-DSS baseline.</li>
+</ol>
+<hr />
+<h3 id="core-architecture-data-flow-narrative">Core Architecture — Data Flow Narrative</h3>
+<pre><code>[LAYER 1: PREVENTIVE — IaC POLICY ENFORCEMENT IN CI/CD]
+
+Developer workflow:
+  git push → GitHub PR → GitHub Actions pipeline triggers
+
+GitHub Actions workflow:
+  Step 1: tfsec (static analysis)
+    tfsec --format=json --minimum-severity=HIGH terraform/
+    Example finding: &quot;aws_s3_bucket - Bucket does not have encryption enabled&quot;
+    GitHub Actions: if tfsec finds CRITICAL or HIGH → FAIL the PR (cannot merge)
+
+  Step 2: Checkov (CIS/PCI-DSS rule set)
+    checkov -d terraform/ --framework terraform --check CKV_AWS_* --compact --output json
+    PCI-DSS specific checks:
+      CKV_AWS_2 (ALB: HTTPS only, no HTTP listeners)
+      CKV_AWS_34 (CloudFront: HTTPS only)
+      CKV_AWS_130 (VPC: VPC flow logs enabled)
+      CKV_AWS_18 (S3: access logging enabled)
+      CKV_AWS_119 (DynamoDB: encryption enabled)
+    Blocking: any PCI-DSS required check failure → FAIL PR
+
+  Step 3: OPA/Conftest (custom organizational policies)
+    conftest test terraform/ --policy policies/pci-dss/ --output json
+
+    Custom PCI-DSS Rego policies:
+
+    # Policy: all EC2 in CDE must use approved AMI
+    package pci.ec2
+    deny[msg] {
+      resource := input.resource.aws_instance[name]
+      not startswith(resource.ami, &quot;ami-golden-&quot;)  # must use golden AMI
+      msg := sprintf(&quot;EC2 instance %v must use approved golden AMI&quot;, [name])
+    }
+
+    # Policy: no security group allows 0.0.0.0/0 ingress in CDE accounts
+    package pci.networking
+    deny[msg] {
+      resource := input.resource.aws_security_group_rule[name]
+      resource.type == &quot;ingress&quot;
+      resource.cidr_blocks[_] == &quot;0.0.0.0/0&quot;
+      msg := sprintf(&quot;SG rule %v: 0.0.0.0/0 ingress is not PCI compliant&quot;, [name])
+    }
+
+    # Policy: all RDS instances must have deletion_protection = true
+    package pci.rds
+    deny[msg] {
+      resource := input.resource.aws_db_instance[name]
+      not resource.deletion_protection
+      msg := sprintf(&quot;RDS %v must have deletion_protection=true&quot;, [name])
+    }
+
+    # Policy: CloudTrail log encryption must use KMS CMK (not SSE-S3)
+    package pci.cloudtrail
+    deny[msg] {
+      resource := input.resource.aws_cloudtrail[name]
+      not resource.kms_key_id
+      msg := sprintf(&quot;CloudTrail %v must use KMS CMK for log encryption&quot;, [name])
+    }
+
+  Step 4: Terraform plan security scan
+    terraform plan -out=plan.tfplan
+    tfsec --scan-module-links --include-passed plan.tfplan
+
+  Step 5: SBOM for Terraform providers
+    providers.lock file: verify all Terraform providers match pinned hashes
+    New provider version: requires explicit approval (supply chain security)
+
+  Blocking vs. Warning policy:
+    CRITICAL/required PCI controls → block PR
+    Advisory controls → warning comment on PR (cannot block — informational)
+
+  Exception handling in CI/CD:
+    Terraform resource tag: pci_exception = &quot;approved&quot; + exception_id = &quot;EXC-2024-001&quot;
+    OPA policy: if resource has pci_exception tag with valid exception ID in DynamoDB exceptions table → skip check
+    Exception DynamoDB: { exceptionId, control, approvedBy, expiryDate, riskAcceptance }
+
+[LAYER 2: DETECTIVE — RUNTIME CONFIG COMPLIANCE]
+
+AWS Config (all 30 accounts, Config Aggregator in audit account):
+
+  Config rule deployment:
+    AWS Organizations + CloudFormation StackSets:
+      Deploy Config Conformance Pack &quot;Operational Best Practices for PCI DSS 4&quot; to all 30 accounts
+      StackSet: same template, all accounts, all regions
+
+  PCI-DSS Config rules (select key ones):
+    pci-dss-4-cloudtrail-enabled: CloudTrail multi-region enabled in all accounts
+    pci-dss-4-cloudtrail-log-file-validation: log file integrity validation enabled
+    pci-dss-4-encrypted-volumes: all EBS volumes encrypted
+    pci-dss-4-rds-encryption-enabled: all RDS instances encrypted
+    pci-dss-4-s3-server-side-encryption-enabled: all S3 buckets encrypted
+    pci-dss-4-restricted-ssh: no SG allows 0.0.0.0/0 on port 22
+    pci-dss-4-restricted-rdp: no SG allows 0.0.0.0/0 on port 3389
+    pci-dss-4-vpc-flow-logs-enabled: VPC flow logs enabled in all VPCs
+    pci-dss-4-mfa-enabled-for-iam-console-access: all IAM users with console access have MFA
+    pci-dss-4-access-keys-rotated: IAM access keys rotated within 90 days
+    pci-dss-4-password-policy: IAM password policy meets PCI requirements (8+ chars, complexity)
+
+  Custom Config rules (Lambda-backed):
+    pci-cde-only-approved-instance-types: CDE account EC2 must use approved instance types
+      Lambda: check if instance type in approved_types list (no GPU instances in CDE — not needed + higher risk)
+    pci-cardholder-data-not-in-logs: Macie integration — verify no PAN in CloudWatch Logs
+    pci-no-root-account-activity: SNS alert if root account used
+
+  Config Aggregator (audit account):
+    Aggregates compliance data from all 30 accounts
+    Athena-queryable: compliance snapshots for trend analysis
+
+  Non-compliant resource auto-remediation:
+    Config rule: restricted-ssh
+    Remediation: SSM Automation document AWS-DisableIncomingSSHOnPort22
+      → automatically modifies the SG to remove port 22 0.0.0.0/0 rule
+
+    Config rule: s3-server-side-encryption-enabled
+    Remediation: SSM Automation → put bucket encryption configuration
+
+    NOT auto-remediated (manual review required):
+      Any change that could break production (e.g., modifying SGs on production EKS nodes)
+      Exception: only auto-remediate dev/test accounts (not production CDE accounts)
+
+[LAYER 3: CONTINUOUS COMPLIANCE REPORTING — SECURITY HUB]
+
+Security Hub (audit account, aggregated):
+  PCI-DSS standard: Security Hub → Enable PCI DSS standard
+    400+ controls across all PCI requirements
+    Per-control status: PASSED/FAILED/NOT_AVAILABLE + compliance score
+
+  Aggregation:
+    All 30 member accounts forward Security Hub findings to audit account
+    Cross-region aggregation: enabled (us-east-1 + eu-west-1 findings in one view)
+
+  Custom Security Hub insight:
+    CISO dashboard insight:
+      &quot;PCI-DSS Compliance Score by Account&quot;
+        Filter: ProductName = Security Hub, ComplianceStatus = FAILED
+        Group by: AwsAccountId
+        Metric: count of FAILED controls per account
+
+    &quot;PCI-DSS Critical Controls Failing&quot;
+        Filter: Severity = CRITICAL, ComplianceStatus = FAILED, ProductName = SecurityHub
+        Grouped: by Control ID
+
+  EventBridge: Security Hub FAILED finding → SQS → Lambda
+    Lambda: check if this control is newly failed (was PASSED before)?
+    If newly failed: create Jira ticket (tag: pci-drift) + Slack alert to #pci-compliance
+    If persistently failed (acknowledged exception): update DynamoDB exception tracker
+
+[LAYER 4: AUTOMATED EVIDENCE COLLECTION — AWS AUDIT MANAGER]
+
+AWS Audit Manager:
+  Framework: PCI DSS v4.0 (AWS-managed framework)
+    400+ automated controls mapped to PCI requirements
+
+  Assessment scope:
+    Accounts: all 30 accounts in scope
+    Services: EC2, RDS, S3, CloudTrail, IAM, VPC, KMS, ALB, GuardDuty, Config
+
+  Evidence collection (automated):
+    Config compliance snapshots: captured daily → stored in Audit Manager evidence folder
+    CloudTrail events: specific API calls mapped to PCI controls (e.g., kms:EnableKey → Req 3.5 evidence)
+    Security Hub findings: compliance assessment results → Audit Manager evidence
+    AWS Config rule evaluations → evidence for each config-related PCI control
+
+  Manual evidence collection:
+    Penetration testing report: upload PDF → linked to PCI Req 11.4
+    Network diagrams: upload → linked to PCI Req 1.1
+    Approved compensating controls: upload risk acceptance → linked to specific requirement
+
+  Evidence folder structure:
+    PCI DSS v4.0 &gt; Req 1 (Network) &gt; Control 1.3.1 &gt; Evidence:
+      - aws_config_vpc_flow_logs_enabled_2024-01-15.json (automated)
+      - aws_config_restricted_ssh_2024-01-15.json (automated)
+    PCI DSS v4.0 &gt; Req 3 (Protection of Stored Data) &gt; Control 3.5.1 &gt; Evidence:
+      - aws_config_rds_encryption_enabled_2024-01-15.json (automated)
+      - aws_config_encrypted_volumes_2024-01-15.json (automated)
+      - kms_key_rotation_cloudtrail_2024-01-15.json (automated from CloudTrail)
+
+  Assessment report generation (for QSA):
+    Audit Manager: generate assessment report (PDF/CSV)
+    Report includes: control ID, status (PASS/FAIL), evidence items, timestamp, resource ARN
+    QSA: receives 90-day assessment window report automatically
+
+  Evidence readiness:
+    Audit Manager Insights dashboard: &quot;Ready for audit&quot; evidence percentage
+    Target: &gt;95% of controls have automated evidence (&lt; 5% require manual collection)
+
+[LAYER 5: CISO COMPLIANCE DASHBOARD — QUICKSIGHT]
+
+QuickSight PCI-DSS Compliance Dashboard:
+
+  Data sources:
+    Security Hub compliance findings → Kinesis Firehose → S3 → Athena → QuickSight
+    Config Aggregator snapshots → S3 → Athena → QuickSight
+    Audit Manager assessment results → S3 → Athena → QuickSight
+    Jira exceptions → Lambda daily export → S3 → Athena → QuickSight
+
+  Dashboard panels:
+    Panel 1: Overall PCI-DSS Compliance Score (%) — rolling 90-day trend
+    Panel 2: Compliance by PCI Requirement (1-12) — bar chart with PASS/FAIL per requirement
+    Panel 3: Per-Account Compliance Score — heatmap (30 accounts)
+    Panel 4: Newly Drifted Resources (last 24h) — table with resource ARN + failed control
+    Panel 5: Open Exceptions — count by severity and expiry date
+    Panel 6: Remediation Trend — count of auto-remediated vs. manually resolved vs. outstanding
+    Panel 7: Evidence Collection Readiness — % of QSA evidence ready
+
+  Automated CISO report:
+    Lambda: weekly report generation → Athena query → HTML email via SES
+    &quot;PCI-DSS Weekly Summary: 94.2% compliance score, 3 new drift events, 12 auto-remediated,
+    2 open exceptions (both approved by CISO), QSA audit readiness: 97%&quot;
+
+[EXCEPTION MANAGEMENT WORKFLOW]
+
+Exception request:
+  Team submits: Jira ticket (pci-exception type)
+    Fields: affected resource ARN, PCI control ID, business justification, compensating controls, expiry date
+
+  Approval workflow:
+    Step Functions: engineering-lead review (5 days) → CISO approval
+    For CDE exceptions: also requires QSA acknowledgment (upload signed exception form)
+    Approved: stored in DynamoDB exceptions-registry
+
+  Exception suppression:
+    Config rule: custom Lambda-backed rule: if resource ARN in exceptions-registry AND exception not expired → COMPLIANT
+    Security Hub: findings suppression rule: suppress FAILED finding for specific resource if exception active
+    CI/CD OPA: exception_id tag → skip corresponding policy check
+
+  Exception tracking:
+    Daily Lambda: scan DynamoDB exceptions-registry → find exceptions expiring in 14 days
+    Email: exception owner + CISO: &quot;PCI exception EXC-2024-001 expires in 14 days. Review and renew or remediate.&quot;
+    Expired exceptions: immediately re-appear as FAILED in Security Hub and Config
+</code></pre>
+<hr />
+<h3 id="key-aws-services-selected-and-why">Key AWS Services Selected and Why</h3>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>Role in Architecture</th>
+<th>Why this over alternatives</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>AWS Audit Manager</strong></td>
+<td>Automated evidence collection mapped to PCI-DSS controls</td>
+<td>Pre-built PCI DSS v4.0 framework; automated evidence from Config, CloudTrail, Security Hub; generates QSA-ready reports</td>
+</tr>
+<tr>
+<td><strong>AWS Config + Conformance Packs</strong></td>
+<td>Real-time configuration compliance detection + drift alerts</td>
+<td>200+ managed rules; custom Lambda rules; remediation documents; org-wide deployment via StackSets</td>
+</tr>
+<tr>
+<td><strong>Security Hub PCI DSS Standard</strong></td>
+<td>400+ PCI controls continuously evaluated, aggregated across accounts</td>
+<td>Native AWS; aggregated view across 30 accounts; trend analysis; custom insights</td>
+</tr>
+<tr>
+<td><strong>OPA/Conftest + Checkov in CI/CD</strong></td>
+<td>Preventive policy enforcement in Terraform pipeline</td>
+<td>Language-agnostic Rego policies; checks plan before apply; open source with PCI rule sets</td>
+</tr>
+<tr>
+<td><strong>Amazon QuickSight</strong></td>
+<td>CISO compliance dashboard with trend analysis</td>
+<td>ML-powered anomaly detection; self-service reporting; direct Athena integration</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="security-deep-dive-phase-3-15-min">Security Deep Dive (Phase 3 — 15 min)</h2>
+<h3 id="1-identity-and-access-management">1. Identity and Access Management</h3>
+<pre><code>Compliance platform roles:
+  audit-manager-role: AuditManagerAdmin (Audit Manager built-in) + read-only in all accounts
+  config-aggregator-role: config:BatchGetAggregateResourceConfig (read-only)
+  security-hub-aggregator-role: securityhub:GetFindings (read-only)
+
+  Separation of duties (PCI-DSS Req 7):
+    ci-cd-compliance-role: can read Config + Security Hub findings but CANNOT remediate
+    compliance-remediation-role: can execute SSM Automation documents but CANNOT change policies
+    compliance-admin-role: can modify Config rules + create exception workflows
+
+  No developer access to compliance platform:
+    Developers: can see their own account's compliance status (via Security Hub member account view)
+    Developers: cannot modify Config rules or suppress Security Hub findings
+    Modification of compliance rules: requires compliance-admin-role (restricted to compliance team)
+</code></pre>
+<h3 id="2-encryption">2. Encryption</h3>
+<pre><code>Audit Manager evidence: SSE-KMS (audit-evidence-key)
+  Key policy: only Audit Manager service principal + CISO + QSA-reviewer-role can decrypt
+
+Config snapshots: SSE-KMS on Config delivery S3 bucket
+CloudTrail: SSE-KMS (already required by PCI-DSS Req 10.5)
+Security Hub findings: stored encrypted within Security Hub service (AWS-managed)
+
+IaC compliance:
+  Terraform state: S3 bucket with SSE-KMS + DynamoDB state lock
+  Terraform state read: only CI/CD role + infrastructure team (Terraform state contains resource IDs)
+</code></pre>
+<h3 id="3-network-isolation">3. Network Isolation</h3>
+<pre><code>Compliance monitoring traffic:
+  Config Agent: uses VPC endpoint for Config (no internet)
+  Audit Manager: AWS-managed service (no network configuration needed by customer)
+  Security Hub: VPC endpoint available (uses it in CDE accounts)
+
+GitHub Actions (CI/CD):
+  GitHub Actions runners: AWS-hosted or self-hosted in private VPC
+  Self-hosted runners (preferred for CDE): runners in compliance VPC (no internet, VPC endpoints for GitHub API)
+  tfsec/Checkov/conftest: run in container in runner — no external calls during scan
+</code></pre>
+<h3 id="4-logging-and-audit-trail">4. Logging and Audit Trail</h3>
+<pre><code>Compliance platform audit trail:
+  Every Config rule change: CloudTrail (putConfigRule, deleteConfigRule)
+  Every Security Hub control enablement/suppression: CloudTrail + Security Hub audit log
+  Every exception approved in DynamoDB: Step Functions execution history + CloudTrail
+  Every Audit Manager evidence collection: Audit Manager activity log
+
+Immutable audit trail:
+  CloudTrail → S3 Object Lock WORM (PCI-DSS requires log tamper protection)
+  Audit Manager evidence folder: S3 Object Lock WORM (evidence cannot be deleted or modified)
+
+QSA access to audit trail:
+  QSA-reviewer-role: read-only access to Audit Manager assessment + evidence S3 bucket
+  Time-bound: STS session credential for QSA (active only during assessment period)
+  CloudTrail: logs QSA access (what evidence they accessed + when)
+</code></pre>
+<h3 id="5-least-privilege-and-blast-radius">5. Least Privilege and Blast Radius</h3>
+<pre><code>Compliance drift auto-remediation scope:
+  ONLY auto-remediate: specifically safe, reversible actions (add bucket encryption, remove permissive SG rule)
+  NEVER auto-remediate: any action that could cause production disruption
+  Production accounts: remediation = human approval required (via Step Functions + Slack)
+  Dev accounts: fully automated remediation
+
+Compromise of compliance platform:
+  If audit-manager-role is compromised: attacker has read-only access to compliance data
+  Cannot: modify resources, delete evidence, change Config rules
+  Impact: data exposure (compliance gaps visible to attacker) — not a system compromise
+</code></pre>
+<h3 id="6-compliance-mapping">6. Compliance Mapping</h3>
+<table>
+<thead>
+<tr>
+<th>PCI-DSS v4.0 Requirement</th>
+<th>Control</th>
+<th>AWS Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Req 1.3.2 — Network segmentation validated</td>
+<td>Config: vpc-sg-open-only-to-authorized-ports</td>
+<td>SG compliance rule</td>
+</tr>
+<tr>
+<td>Req 3.5.1 — PAN rendered unreadable</td>
+<td>Config: rds-storage-encrypted, encrypted-volumes</td>
+<td>Encryption enforcement</td>
+</tr>
+<tr>
+<td>Req 6.3.2 — Software inventory</td>
+<td>SSM Inventory + Inspector SBOM</td>
+<td>Automated inventory</td>
+</tr>
+<tr>
+<td>Req 6.3.3 — Security patches</td>
+<td>Inspector v2 patch compliance</td>
+<td>Vulnerability scanning</td>
+</tr>
+<tr>
+<td>Req 7.2.1 — Least privilege access</td>
+<td>IAM Access Analyzer + Config iam-user-no-policies-check</td>
+<td>IAM policy compliance</td>
+</tr>
+<tr>
+<td>Req 10.2 — Audit logs</td>
+<td>Config cloudtrail-enabled, cloudtrail-log-file-validation-enabled</td>
+<td>Log compliance</td>
+</tr>
+<tr>
+<td>Req 11.3.1 — Internal vulnerability scans</td>
+<td>Inspector v2 quarterly scans</td>
+<td>Automated scanning</td>
+</tr>
+<tr>
+<td>Req 12.3.2 — Compliance assessment</td>
+<td>Audit Manager PCI DSS v4.0 framework</td>
+<td>Automated evidence</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="scale-and-resilience-phase-4-10-min">Scale and Resilience (Phase 4 — 10 min)</h2>
+<p><strong>30-account scale:</strong><br />
+- Config Aggregator: supports up to 10,000 accounts. 30 accounts is trivial.<br />
+- Security Hub aggregation: same — supports org-wide aggregation.<br />
+- Audit Manager: assessment scope can include all 30 accounts (multi-account assessment).</p>
+<p><strong>Evidence volume:</strong><br />
+- Daily Config snapshots across 30 accounts, 5 regions: ~500MB/day in S3. Athena partitioned by account/date.<br />
+- Athena queries for CISO dashboard: partition pruning by date → fast queries. QuickSight SPICE mode caches results (no Athena query per dashboard load).</p>
+<p><strong>CI/CD scale:</strong><br />
+- 50 engineers committing Terraform: each PR triggers tfsec + Checkov + OPA. Parallel GitHub Actions runners: each PR gets its own runner. tfsec scan of typical module: &lt; 30 seconds.</p>
+<hr />
+<h2 id="threat-model-and-operations-phase-5-15-min">Threat Model and Operations (Phase 5 — 15 min)</h2>
+<table>
+<thead>
+<tr>
+<th>Threat</th>
+<th>Attack Path</th>
+<th>Preventive Control</th>
+<th>Detective Control</th>
+<th>Response Playbook</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Terraform pipeline poisoning</strong></td>
+<td>Attacker modifies tfsec/Checkov configuration to suppress PCI checks</td>
+<td>Pin tool versions in requirements.txt + verify SHA-256 of downloaded binaries; code review for all CI/CD config changes</td>
+<td>GitHub Actions: build step hashes of scanning tools at start; verify before running; audit trail of pipeline changes</td>
+<td>Revert malicious CI/CD config change; retroactively scan all commits since the pipeline was modified</td>
+</tr>
+<tr>
+<td><strong>Manual console change bypassing IaC</strong></td>
+<td>Developer directly modifies security group via console (bypasses Terraform policy checks)</td>
+<td>SCP: deny manual changes to security groups in CDE accounts (only allow via tagged Terraform IAM role)</td>
+<td>Config drift detection: resource changes detected within 15 minutes; Config rule NonCompliant; Jira ticket created</td>
+<td>Auto-remediate if safe (restore original SG rule); investigate who made the change and why</td>
+</tr>
+<tr>
+<td><strong>Exception abuse</strong></td>
+<td>Team creates exception for a critical control, exceeds expiry without renewal</td>
+<td>Exception expiry: hard TTL in DynamoDB (exception suppression auto-expires)</td>
+<td>14-day warning email to exception owner; CISO dashboard shows expiring exceptions</td>
+<td>Expired exception: immediately re-appears as FAILED in Security Hub; compliance team must resolve or formally renew</td>
+</tr>
+<tr>
+<td><strong>QSA access credential sharing</strong></td>
+<td>External QSA shares temporary credentials with unauthorized person</td>
+<td>QSA credentials: time-bound STS session (7-day maximum) + IP restriction (QSA office IP only)</td>
+<td>CloudTrail: every action by QSA role; unusual access location → alert</td>
+<td>Revoke STS session; issue new credentials to QSA; investigate potential unauthorized access</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="aws-services-to-master-for-this-question">AWS Services to Master for This Question</h2>
+<p><code>AWS Audit Manager (PCI DSS framework, evidence collection, assessment reports, data sources)</code><br />
+<code>AWS Config + Conformance Packs (managed rules, custom Lambda-backed rules, aggregator, remediation)</code><br />
+<code>Security Hub PCI DSS standard (controls, aggregation, suppression, custom insights)</code><br />
+<code>AWS CloudFormation StackSets (multi-account, multi-region deployment of compliance infrastructure)</code><br />
+<code>OPA/Rego (Terraform policy-as-code, conftest, deny rules, exception handling patterns)</code></p>
+<hr />
+<h2 id="self-evaluation-checklist">Self-Evaluation Checklist</h2>
+<ul>
+<li>[ ] Did I cover all four layers (IaC preventive, runtime detective, evidence collection, dashboard)?</li>
+<li>[ ] Did I describe AWS Audit Manager for QSA evidence (not just Config)?</li>
+<li>[ ] Did I explain the exception management workflow (approval, suppression, expiry)?</li>
+<li>[ ] Did I cover PCI-DSS-specific controls (not generic "use Config rules")?</li>
+<li>[ ] Did I describe auto-remediation with appropriate safeguards (dev vs. prod accounts)?</li>
+<li>[ ] Did I explain the CISO dashboard (QuickSight on Athena)?</li>
+<li>[ ] Did I mention CloudFormation StackSets for deploying compliance controls at scale?</li>
+</ul>
+<hr />
+<h2 id="trade-off-analysis-the-hard-choices">Trade-off Analysis — The Hard Choices</h2>
+<h3 id="decision-1-preventive-block-in-cicd-vs-detective-alert-on-drift-which-to-implement-first">Decision 1: Preventive (Block in CI/CD) vs. Detective (Alert on Drift) — Which to Implement First?</h3>
+<table>
+<thead>
+<tr>
+<th>Factor</th>
+<th>Preventive First</th>
+<th>Detective First</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Existing non-compliant resources</td>
+<td>Cannot block new deployments to fix existing issues</td>
+<td>Reveals all existing issues immediately</td>
+</tr>
+<tr>
+<td>Risk of false positives</td>
+<td>Blocks legitimate deployments if rules misconfigured</td>
+<td>Only generates alerts (doesn't disrupt)</td>
+</tr>
+<tr>
+<td>Compliance maturity required</td>
+<td>High (requires tuned rules before enabling)</td>
+<td>Low (can enable immediately)</td>
+</tr>
+<tr>
+<td><strong>Recommendation</strong></td>
+<td><strong>Detective first</strong> for 60 days (discover all gaps, tune rules, reduce false positives) → then enable <strong>preventive</strong> (CI/CD block) after rules are validated. Run both in parallel permanently.</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="decision-2-aws-security-hub-pci-standard-vs-third-party-cspm-prisma-cloud-wiz">Decision 2: AWS Security Hub PCI Standard vs. Third-Party CSPM (Prisma Cloud, Wiz)</h3>
+<table>
+<thead>
+<tr>
+<th>Factor</th>
+<th>Security Hub PCI Standard</th>
+<th>Third-Party CSPM (Wiz, Prisma Cloud)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PCI-DSS coverage</td>
+<td>400+ controls (good coverage)</td>
+<td>Often more controls + CIS Benchmarks + custom</td>
+</tr>
+<tr>
+<td>AWS integration</td>
+<td>Native (no API keys needed)</td>
+<td>Requires API/role integration</td>
+</tr>
+<tr>
+<td>Multi-cloud</td>
+<td>AWS only</td>
+<td>AWS + Azure + GCP</td>
+</tr>
+<tr>
+<td>Cost</td>
+<td>Included in Security Hub pricing</td>
+<td>$50K-$200K+/year</td>
+</tr>
+<tr>
+<td><strong>Recommendation</strong></td>
+<td><strong>Security Hub</strong> as primary (cost-effective, native) + Wiz or Prisma Cloud if multi-cloud compliance or advanced attack path analysis is needed</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="decision-3-oparego-vs-sentinel-vs-checkov-for-terraform-policy-enforcement">Decision 3: OPA/Rego vs. Sentinel vs. Checkov for Terraform Policy Enforcement</h3>
+<table>
+<thead>
+<tr>
+<th>Factor</th>
+<th>OPA/Rego</th>
+<th>HashiCorp Sentinel</th>
+<th>Checkov</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Open source</td>
+<td>Yes</td>
+<td>No (Terraform Cloud/Enterprise)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Flexibility</td>
+<td>Very high (any policy)</td>
+<td>High (but Terraform-specific)</td>
+<td>Pre-built CIS/PCI rules</td>
+</tr>
+<tr>
+<td>Learning curve</td>
+<td>High (Rego syntax)</td>
+<td>Medium</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>Custom policy support</td>
+<td>Full</td>
+<td>Full</td>
+<td>Limited (Python custom rules)</td>
+</tr>
+<tr>
+<td><strong>Recommendation</strong></td>
+<td><strong>Checkov</strong> for fast PCI-DSS coverage (pre-built rules); <strong>OPA/Rego</strong> for complex custom organizational policies; <strong>Sentinel</strong> only if already using Terraform Enterprise</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="common-mistakes-to-avoid">Common Mistakes to Avoid</h2>
+<ol>
+<li><strong>Not distinguishing PCI-DSS "in scope" vs "connected to CDE."</strong> Treating all 30 accounts identically is expensive and unnecessary. CDE accounts (3-5): strictest controls, no auto-remediation exceptions. Connected accounts: medium controls. Out-of-scope accounts: baseline security only. Scoping is a PCI-DSS design decision — demonstrate awareness.</li>
+<li><strong>Ignoring the exception management workflow.</strong> PCI-DSS in practice always has legitimate exceptions (vendor hardware that can't be patched, legacy systems). A compliance platform without exception management will show 100% red forever because not all findings are fixable immediately. The exception process (approval, documentation, expiry) is what makes compliance sustainable.</li>
+<li><strong>Treating AWS Audit Manager as optional.</strong> Audit Manager is the KEY service for QSA audit readiness — it automates evidence collection into a QSA-ready format. Candidates who design a compliance platform using only Config + Security Hub and say "we'll manually collect evidence" are significantly understating the QSA audit preparation effort (weeks of manual evidence collection vs. automated).</li>
+<li><strong>Forgetting that Security Hub PCI Standard and Config Conformance Packs overlap.</strong> Both should be used (Security Hub provides the 400+ control view + aggregation; Config provides the underlying compliance data + auto-remediation). They complement each other — Security Hub USES Config data for its control evaluations.</li>
+</ol>
+<hr />
+<h2 id="likely-follow-up-questions">Likely Follow-up Questions</h2>
+<p><strong>Q1: How do you handle a new PCI-DSS v4.0 requirement that has no existing AWS Config rule?</strong><br />
+Custom Config rule development: (1) When a new PCI-DSS requirement doesn't have an AWS-managed Config rule: write a Lambda-backed custom Config rule. Config calls the Lambda on: resource creation/change, periodic evaluation (daily), or on-demand. (2) Example: PCI-DSS v4.0 Req 12.6.1 — Security awareness training program documentation (non-technical control, no AWS resource). Custom Config rule: Lambda checks: does the "security-training-current-year" SSM Parameter exist? (teams update this parameter after completing training). If parameter is missing or older than 1 year: NON_COMPLIANT. (3) Technical example: PCI-DSS Req 8.3.9 — Access tokens expire within 15 minutes for CDE. Custom Config rule: Lambda: call cognito:DescribeUserPoolClient for CDE user pools → check AccessTokenValidity &lt;= 15 minutes. If any CDE user pool has longer token validity: NON_COMPLIANT. (4) Publish to AWS Config rule repository: contribute as Config Custom Rule to internal catalog (reusable across accounts). Deploy via StackSets. (5) Test the rule: create a known-compliant resource + known-non-compliant resource in a test account → verify rule evaluates correctly → enable in production.</p>
+<p><strong>Q2: How do you maintain compliance after a major AWS service update changes behavior?</strong><br />
+Compliance resilience to AWS changes: (1) AWS managed Config rules: AWS maintains the rule logic. When AWS updates a managed rule (e.g., new PCI-DSS v4.0 requirements): the updated rule is deployed automatically. Watch for: AWS Config rule changelog (AWS publishes updates to managed rules). (2) Checkov/tfsec updates: pin specific versions in CI/CD: <code>checkov==3.1.x</code>. When updating to a new version: run in "warning mode" first (don't block PR) → review new findings → tune exceptions → enable blocking mode. (3) Security Hub PCI standard updates: new controls automatically appear when AWS adds them. New controls start as "NOT_AVAILABLE" → transition to PASSED/FAILED as resources are evaluated. Monitor: Security Hub controls summary weekly → identify any new controls in FAILED state. (4) Breaking changes: if an AWS service update (e.g., S3 default encryption behavior change) causes a previously-passing control to FAIL: Config immediately detects the change and marks resources as NON_COMPLIANT. Alert: Jira ticket auto-created. Investigation: is this a genuine compliance gap or a rule interpretation change? (5) Annual PCI-DSS standard review: before annual QSA assessment: run full Security Hub PCI standard assessment → review all FAILED controls → determine if any are new or changed since last year → brief CISO on scope changes.</p>
+<p><strong>Q3: How do you prove to a QSA that the compliance evidence hasn't been tampered with?</strong><br />
+Evidence integrity and chain of custody: (1) Audit Manager evidence: stored in S3 with Object Lock (WORM mode, COMPLIANCE class). Neither the compliance team nor AWS can modify or delete evidence once stored. QSA can verify: S3 Object Lock retention configuration. (2) CloudTrail log integrity validation: CloudTrail generates SHA-256 digest files every hour. Each digest file contains hashes of all log files in that period. CloudTrail provides <code>validate-logs</code> CLI command: <code>aws cloudtrail validate-logs --trail-arn &lt;arn&gt; --start-time &lt;start&gt;</code>. QSA can run this command to verify no log files were modified. (3) Config configuration snapshots: Config stores JSON snapshots at each change + daily. S3 Object Lock: configuration snapshots immutable. SHA-256 hash of each snapshot stored in Config metadata. (4) Audit Manager assessment immutability: once an assessment report is generated, it's signed (Audit Manager generates a PDF with a unique assessment ID + generation timestamp). Any regenerated report would have a different timestamp — QSA can verify the original report timestamp matches the assessment period. (5) QSA access logs: CloudTrail logs every action taken by the QSA-reviewer-role during their assessment period. QSA receives the access log as part of the assessment package — this proves what they accessed (no hidden modifications). (6) Cross-account evidence: if a non-compliance finding was remediated AFTER the evidence collection snapshot: Audit Manager shows BOTH the original NonCompliant evidence AND the subsequent Compliant evidence. Timeline is preserved — QSA sees the full history.</p>
+<p><strong>Q4: How do you handle Terraform modules that are shared across PCI-in-scope and out-of-scope accounts?</strong><br />
+Module security classification: (1) Problem: a shared Terraform module for an S3 bucket may be used in CDE accounts (needs strict encryption + logging) AND dev accounts (relaxed requirements). A single policy would either block dev usage or allow insecure CDE usage. (2) Solution: module variables for compliance level: variable <code>compliance_profile</code>: default = "standard", options = ["pci-cde", "standard", "dev"]. Module logic: <code>count = var.compliance_profile == "pci-cde" ? 1 : 0</code> for strict controls (KMS encryption, access logging, versioning, Object Lock). (3) OPA policy with compliance_profile check: Rego: if resource is in CDE account (account_id in cde_accounts list) AND compliance_profile != "pci-cde" → DENY. CI/CD: account ID is an environment variable → OPA checks if this is a CDE account → applies stricter rules. (4) Module catalog: internal module catalog (Terraform Registry private module) with compliance metadata: module "s3_bucket_cde" (compliance_profile=pci-cde, pre-certified for CDE use). Engineering teams: use the CDE module in CDE accounts (pre-approved), standard module in dev. (5) Module versioning: CDE modules: semantic versioning with security review gates. Version 1.0 → 1.1 (patch fix): no QSA re-review. Version 1.0 → 2.0 (major change): security team review + QSA acknowledgment for CDE accounts.</p>
+<p><strong>Q5: How do you demonstrate continuous compliance (not just point-in-time) to the QSA?</strong><br />
+Continuous compliance evidence: (1) AWS Audit Manager continuous evidence collection: Audit Manager collects evidence DAILY for the entire assessment period (typically 90 days before annual audit). QSA receives evidence from every single day — proving continuous compliance, not just day-of-audit compliance. (2) Security Hub trend data: Security Hub provides compliance score history. QSA can see: on Day 1 = 94% compliance, on Day 45 = 96% compliance, on Day 90 = 97% compliance (improving trend). Any dips (drift events) visible with corresponding remediation timestamps. (3) Config timeline: for each resource: Config shows the full change history. For a KMS-encrypted RDS instance: Config shows it has been encrypted at every daily evaluation for the past 365 days (unbroken chain). Any day it shows as non-compliant: has corresponding Jira ticket + remediation timestamp. (4) CloudTrail 365-day retention: QSA can query any past day's API calls → proves consistent operational security posture. (5) Audit Manager assessment window: NEVER start the Audit Manager assessment 2 weeks before QSA engagement (looks like you only ran it right before the audit). Run assessment continuously (365 days). QSA receives 90-day evidence extract — the fact that it was running for 365 days is visible in the assessment history.</p>
+<p><strong>Q6: How do you manage compliance for ephemeral resources (Lambda functions, containers) that don't persist long enough for Config to evaluate?</strong><br />
+Ephemeral resource compliance: (1) Lambda functions: Inspector v2 continuously scans Lambda functions for CVEs in code packages. Scan happens at deployment time (triggered by Lambda deployment EventBridge event). Evidence: Inspector v2 finding history = proof that Lambda functions are scanned continuously. (2) ECS Fargate containers: Inspector v2 scans container images in ECR (at push time + on new CVE publication). The IMAGE is what's scanned (not the running container). Compliance evidence: ECR image scan history = proof of image compliance at deployment time. (3) Config for Lambda: AWS Config rule <code>lambda-function-settings-check</code> evaluates deployed Lambda functions. But: if a Lambda function is deployed and replaced within 15 minutes (faster than Config periodic evaluation), Config may miss it. Solution: Lambda EventBridge rule → compliance check Lambda → write compliance result to DynamoDB (compliance registry). Evidence: DynamoDB table shows compliance check result for every Lambda deployment. (4) CI/CD as the control point: for ephemeral resources: the PRIMARY control is at build/deploy time (not runtime). tfsec scans the Terraform that defines the Lambda → blocks non-compliant configurations before deployment. CI/CD pipeline produces a signed "compliance attestation" per deployment (signed by CI/CD IAM role) → stored in S3 as evidence. (5) GuardDuty for ephemeral: even if Lambda runs for only 60 seconds, GuardDuty Lambda Protection detects anomalous API calls in real time. Evidence: GuardDuty finding count = 0 for Lambda executions = negative evidence of no detected anomalies.</p>
+<p><strong>Q7: How do you handle a scenario where a developer accidentally deploys PAN (card numbers) to a non-CDE environment?</strong><br />
+Accidental PAN in non-CDE environment: (1) Detection: Amazon Macie: scheduled daily classification job on ALL S3 buckets (including dev/test) → detects PAN pattern (credit card regex: 4-digit groups totaling 15-16 digits + Luhn algorithm check). Alert: Macie finding "SensitiveData:S3Object/Financial" in non-CDE account → Security Hub finding → P1 alert. (2) Immediate containment: Lambda auto-remediation: if S3 object in non-CDE account matches PAN pattern → block S3 object public access (if any) + restrict bucket to VPC-only access. ServiceNow P1 ticket + Slack alert to compliance team + DLP team. (3) Evidence preservation: DO NOT delete the PAN data immediately (potential legal hold if QSA requires evidence of breach). Instead: restrict access + preserve metadata. Legal + compliance team decision on deletion. (4) Investigation: CloudTrail: who wrote the PAN data to this bucket? (s3:PutObject event) → identify the engineer + the source. Was it test data using real PANs? (prohibited) or was it a production data leak? (5) Remediation: replace real PANs with synthetic test data (tools: Faker library, Synthea for synthetic data generation). S3 lifecycle rule: delete the original object after replacement confirmed. (6) Process improvement: Checkov/tfsec OPA policy: detect Terraform configurations that create S3 buckets in non-CDE accounts that might receive real data (e.g., S3 bucket with prefix "test-payments" should not receive IAM write permissions from production roles). Also: DLP policy in CI/CD: scan code for literal PAN patterns (regular expression) before committing.</p>
+<p><strong>Q8: How do you conduct a scope reduction exercise to minimize PCI-DSS CDE surface area?</strong><br />
+PCI-DSS scope reduction: (1) Current state assessment: map all AWS accounts and identify data flows. Which accounts process, store, or transmit cardholder data (PAN, SAD)? These are in-scope. Which accounts could impact the security of CDE accounts? These are "connected to CDE" (also in partial scope). All others: out of scope. (2) Tokenization to reduce scope: replace PAN with tokens BEFORE data enters AWS. Tokenization service (external or on-premises): customer → HTTPS → tokenization gateway → PAN replaced with token. Token stored in AWS (non-CDE). Only the tokenization gateway handles real PAN (very small CDE scope). AWS scope: only the tokenization service and token vault (1-2 accounts) are in full CDE scope. (3) Network segmentation validation: PCI-DSS Req 11.4.5 — segment CDE from out-of-scope networks. AWS: separate VPCs for CDE vs. non-CDE. No VPC peering between CDE and non-CDE (direct connectivity puts non-CDE in scope). TGW: separate route tables — CDE VPC has no route to non-CDE VPCs. Firewall: stateful firewall (AWS Network Firewall) between CDE and any connected systems. (4) Scoping documentation: network diagram showing CDE boundary (required by PCI-DSS Req 1.1). AWS: generate VPC topology diagram (AWS Reachability Analyzer + custom documentation). Zone segmentation: color-code CDE (red), connected-to-CDE (orange), out-of-scope (green). QSA reviews diagram → confirms scope boundaries. (5) Annual scoping review: before each QSA assessment: re-examine scope. New microservices added? Do any non-CDE services now call CDE services? Updated network flows? Scope should DECREASE over time (as tokenization matures, fewer systems touch raw PAN). Track: CDE account count per year (target: reducing from 30 to 5 accounts over 3 years via tokenization + segmentation).</p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

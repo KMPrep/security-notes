@@ -1,0 +1,1433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phishing and Business Email Compromise (BEC) — Defensive Deep Dive</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Email-Security\Phishing-and-BEC\README.md</p>
+<h1 id="phishing-and-business-email-compromise-bec-defensive-deep-dive">Phishing and Business Email Compromise (BEC) — Defensive Deep Dive</h1>
+<p><strong>Category:</strong> Web / Email Security<br />
+<strong>MITRE ATT&amp;CK:</strong> T1566 (Phishing), T1566.001 (Attachment), T1566.002 (Link), T1566.003 (via Service), T1534 (Internal Spearphishing), T1114 (Email Collection), T1078 (Valid Accounts)<br />
+<strong>Standards &amp; refs:</strong> NIST SP 800-177r1 (Trustworthy Email), RFC 7208 (SPF), RFC 6376 (DKIM), RFC 7489 (DMARC), FIDO2/WebAuthn, CISA guidance on AiTM/MFA-fatigue<br />
+<strong>Cross-references:</strong> <code>web/Email-Security/Email-Authentication/README.md</code> (SPF/DKIM/DMARC), <code>auth_authz/Authentication/WebAuthn-Passkeys/README.md</code>, <code>auth_authz/Authentication/MFA/README.md</code>, <code>network/Layer7/SMTP/README.md</code></p>
+<blockquote>
+<p>This note is written <strong>defensively</strong>. It explains how to recognize, prevent, detect, and respond to phishing and BEC. It deliberately avoids operational attacker tooling; conceptual attack anatomy is included only to the depth needed to build defenses and detections.</p>
+</blockquote>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>Phishing is social engineering delivered (usually) over email that tricks a human into revealing credentials, running malware, approving an MFA prompt, or authorizing a financial or data action. Business Email Compromise (BEC) is the high-value, low-malware subclass: an attacker impersonates a trusted party — a CEO, a vendor, a payroll provider, an attorney — and manipulates a business process, most often a wire transfer or a change to bank/direct-deposit details. Phishing matters at scale because it is the single most common initial-access vector for breaches (Verizon DBIR consistently ranks it in the top two), and BEC matters because it produces the <strong>largest aggregate financial losses of any cybercrime category</strong> tracked by the FBI. According to the FBI IC3, BEC has caused well over <strong>$50 billion in exposed losses globally between 2013 and 2023</strong>, dwarfing ransomware in raw dollars, precisely because it needs no exploit — just a convincing message and a broken verification process.</p>
+<p>The modern threat has shifted in two important ways that this note centers on. First, <strong>adversary-in-the-middle (AiTM) phishing</strong> now defeats traditional one-time-password (OTP) MFA by proxying the real login page and stealing the post-authentication <strong>session cookie</strong>, not the password. Second, <strong>MFA-fatigue (push bombing)</strong> exploits push-approval MFA by spamming prompts until a tired user taps "Approve." Both mean that "we have MFA" is no longer a sufficient defense — only <strong>phishing-resistant, origin-bound authentication (FIDO2/passkeys)</strong> truly closes the loop.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- Phishing is the top initial-access vector; <strong>BEC is the top financial-loss category</strong> (FBI IC3, tens of billions of dollars) because it attacks <em>process</em>, not technology.<br />
+- <strong>Email authentication (SPF + DKIM + DMARC at <code>p=reject</code>) stops exact-domain spoofing but NOT lookalike domains or display-name spoofing</strong> — those need SEG heuristics and user vigilance.<br />
+- <strong>AiTM phishing steals session tokens and defeats OTP/push MFA.</strong> The durable fix is <strong>phishing-resistant MFA (FIDO2/passkeys)</strong>, which is origin-bound and cannot be proxied.<br />
+- <strong>BEC is defeated by process, not by filters:</strong> mandatory <strong>out-of-band verification</strong> for any payment or bank-detail change, dual authorization, and known-good callback numbers.<br />
+- Defense-in-depth = authentication + gateway + phishing-resistant MFA + user reporting + financial controls + detection (mailbox-rule abuse, impossible travel) + fast takedown.</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works-defensive-mechanics">2. How It Works (Defensive Mechanics)</h2>
+<h3 id="21-taxonomy-of-phishing-and-bec">2.1 Taxonomy of phishing and BEC</h3>
+<p>Understanding the taxonomy is the first defensive skill: each variant has a different signal and a different control that stops it.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Variant</th>
+<th>Target / Scale</th>
+<th>Primary Goal</th>
+<th>What defeats it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Bulk / commodity phishing</td>
+<td>Millions, untargeted</td>
+<td>Credential harvest, malware</td>
+<td>SEG reputation filtering, DMARC, URL sandboxing</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Spear phishing</td>
+<td>Named individual, researched</td>
+<td>Credentials, foothold</td>
+<td>User training, DMARC, attachment sandbox</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Whaling</td>
+<td>Executives / board</td>
+<td>High-value access, wire fraud</td>
+<td>Executive protection program, VIP display-name rules</td>
+</tr>
+<tr>
+<td>4</td>
+<td>BEC — CEO fraud</td>
+<td>Finance/HR staff</td>
+<td>Fraudulent wire, gift cards</td>
+<td>Out-of-band verification, dual approval</td>
+</tr>
+<tr>
+<td>5</td>
+<td>BEC — vendor/invoice fraud (VEC)</td>
+<td>AP / procurement</td>
+<td>Redirect legit payments</td>
+<td>Bank-change verification, vendor callback</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Payroll diversion</td>
+<td>HR / payroll</td>
+<td>Redirect direct deposit</td>
+<td>Self-service change alerts, out-of-band confirm</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Attorney/legal impersonation</td>
+<td>Finance, urgency framing</td>
+<td>Rushed confidential wire</td>
+<td>Process controls, urgency-as-red-flag training</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Clone phishing</td>
+<td>Reply-chain hijack</td>
+<td>Trust from a real prior thread</td>
+<td>Thread anomaly detection, link re-scan</td>
+</tr>
+<tr>
+<td>9</td>
+<td>AiTM / reverse-proxy phishing</td>
+<td>Credential + session token</td>
+<td>Bypass OTP/push MFA</td>
+<td><strong>FIDO2/passkeys</strong>, token-binding, CA policies</td>
+</tr>
+<tr>
+<td>10</td>
+<td>MFA fatigue / push bombing</td>
+<td>Users with push MFA</td>
+<td>Approve fraudulent login</td>
+<td>Number matching, passkeys, rate-limit prompts</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Consent phishing (OAuth)</td>
+<td>M365/Google users</td>
+<td>Grant malicious app scopes</td>
+<td>App-consent governance, publisher verification</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Smishing / vishing / quishing</td>
+<td>SMS, voice, QR codes</td>
+<td>Multi-channel social eng.</td>
+<td>Awareness, QR-URL inspection, callback policy</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Callback phishing (TOAD)</td>
+<td>"Call this number" lure</td>
+<td>Voice-driven fraud/malware</td>
+<td>Never-call-numbers-in-email policy</td>
+</tr>
+</tbody>
+</table>
+<p>Two families deserve special attention defensively: <strong>BEC</strong> (variants 4–7) because of financial impact, and <strong>AiTM + MFA-fatigue</strong> (variants 9–10) because they break the MFA control most orgs rely on.</p>
+<h3 id="22-why-bec-causes-the-largest-losses">2.2 Why BEC causes the largest losses</h3>
+<p>BEC bypasses nearly every technical control because it frequently contains <strong>no attachment, no link, and no malware</strong> — just plausible text from a plausible-looking address. The attacker's leverage is entirely social and procedural:</p>
+<ul>
+<li><strong>Authority + urgency:</strong> "The CEO needs this wire before the board call." Pressure short-circuits verification.</li>
+<li><strong>Legitimate-looking sender:</strong> display-name spoofing (<code>"Jane Doe, CEO" &lt;random@gmail.com&gt;</code>), lookalike domain (<code>rn</code> for <code>m</code>, <code>paypa1</code>), or an actually-compromised real mailbox (the hardest case — email authentication passes because it <em>is</em> the real domain).</li>
+<li><strong>Process gaps:</strong> no mandatory out-of-band confirmation for payment/bank changes; single-person authorization for large wires.</li>
+<li><strong>Reply-to / thread hijack:</strong> attacker inserts into a real invoice thread after compromising a vendor mailbox, so context and history are genuine.</li>
+</ul>
+<p>The FBI IC3 Internet Crime Report has for several years listed BEC as the category with the <strong>highest reported dollar loss</strong> — far exceeding ransomware — with annual BEC losses in the range of <strong>$2.7–2.9 billion reported in the US alone</strong> in recent reporting years, and cumulative global exposed losses exceeding <strong>$50 billion</strong>. The defensive takeaway: because the exploit is a <em>business process</em>, the strongest control is also a business process, not a spam filter.</p>
+<h3 id="23-the-defense-stack-concepts-table">2.3 The defense stack (concepts table)</h3>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Control</th>
+<th>Defends against</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity of sender</td>
+<td>SPF, DKIM, DMARC (<code>p=reject</code>)</td>
+<td>Exact-domain spoofing</td>
+<td>Does NOT stop lookalikes / display-name</td>
+</tr>
+<tr>
+<td>Alignment / brand</td>
+<td>DMARC + BIMI, ARC</td>
+<td>Spoof, forwarding breakage</td>
+<td>BIMI incentivizes DMARC enforcement</td>
+</tr>
+<tr>
+<td>Gateway inspection</td>
+<td>SEG / ICES</td>
+<td>Malicious links, attachments, lures</td>
+<td>Reputation, NLP, anomaly, lookalike detection</td>
+</tr>
+<tr>
+<td>Content detonation</td>
+<td>URL + attachment sandboxing</td>
+<td>Weaponized files, delayed-arm URLs</td>
+<td>Time-of-click re-checking is key</td>
+</tr>
+<tr>
+<td>Authentication</td>
+<td><strong>FIDO2 / passkeys</strong></td>
+<td>AiTM token theft, MFA fatigue</td>
+<td>Origin-bound; the durable AiTM fix</td>
+</tr>
+<tr>
+<td>Access policy</td>
+<td>Conditional Access, device compliance</td>
+<td>Stolen-token replay</td>
+<td>Bind sessions to managed device</td>
+</tr>
+<tr>
+<td>Human layer</td>
+<td>Training + one-click report button</td>
+<td>Novel lures, BEC text</td>
+<td>Reporting turns users into sensors</td>
+</tr>
+<tr>
+<td>Process</td>
+<td>Out-of-band verification, dual control</td>
+<td>BEC wire/bank fraud</td>
+<td>The only control that stops pure-text BEC</td>
+</tr>
+<tr>
+<td>Detection</td>
+<td>Mailbox-rule / OAuth / travel analytics</td>
+<td>Post-compromise activity</td>
+<td>Catches what prevention missed</td>
+</tr>
+<tr>
+<td>Response</td>
+<td>Takedown, session revoke, wire recall</td>
+<td>Active incident</td>
+<td>Speed determines whether money is recoverable</td>
+</tr>
+</tbody>
+</table>
+<h3 id="24-conceptual-anatomy-of-an-aitm-phishing-attack-for-defenders">2.4 Conceptual anatomy of an AiTM phishing attack (for defenders)</h3>
+<p>To detect and defeat AiTM, defenders must understand — at a conceptual level — why OTP MFA fails against it. The attacker stands up a reverse proxy between the victim and the real service. The victim sees the <em>genuine</em> login page (proxied in real time), enters username, password, and even a valid OTP or approves a push. All of it flows through to the real service, which issues a valid <strong>session cookie</strong>. The proxy captures that cookie and replays it, gaining an authenticated session without ever needing to re-satisfy MFA.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant V as Victim browser
+    participant P as Attacker proxy
+    participant S as Real service
+    V->>P: Enter username and password
+    P->>S: Relay credentials
+    S-->>P: Prompt for OTP
+    P-->>V: Relay OTP prompt
+    V->>P: Enter valid OTP
+    P->>S: Relay OTP
+    S-->>P: Issue session cookie
+    P-->>V: Relay page, attacker keeps cookie
+    Note over P,S: Attacker replays stolen cookie as an authenticated session
+</pre>
+<p>The defensive insight is precise: <strong>the password and the OTP were both correct and both stolen; the failure was that neither was bound to the origin the user actually visited.</strong> FIDO2/passkeys break this because the authenticator signs a challenge that includes the <em>real</em> relying-party origin (RP ID). When the browser talks to the attacker proxy's origin, the signature either won't be produced (no matching credential for that origin) or won't validate at the real service. The proxy cannot forge it. See <code>auth_authz/Authentication/WebAuthn-Passkeys/README.md</code> for the cryptographic detail.</p>
+<h3 id="25-conceptual-anatomy-of-bec-mfa-fatigue">2.5 Conceptual anatomy of BEC / MFA-fatigue</h3>
+<pre class="mermaid">
+flowchart TD
+    A[Recon: identify finance and vendor relationships] --> B{Impersonation method}
+    B -->|Lookalike domain| C[Register domain that resembles real one]
+    B -->|Display-name spoof| D[Free mailbox with executive name]
+    B -->|Compromised real mailbox| E[Thread hijack from inside vendor]
+    C --> F[Send urgent payment or bank-change request]
+    D --> F
+    E --> F
+    F --> G{Victim verifies out of band}
+    G -->|No verification| H[Funds wired to mule account]
+    G -->|Out-of-band callback to known number| I[Fraud detected and stopped]
+</pre>
+<p>For MFA-fatigue, the attacker already has the password (from an earlier phish or credential dump) and simply triggers repeated push approvals. The defensive controls are <strong>number matching</strong> (user must type a code shown on the login screen, so blind approval fails), <strong>prompt rate-limiting/lockout</strong>, and ultimately <strong>passkeys</strong> (no approvable push exists to spam). This is the exact technique used against Uber (2022) and in the 0ktapus/Scattered Spider campaigns.</p>
+<h3 id="26-where-email-authentication-fits-and-its-limits">2.6 Where email authentication fits (and its limits)</h3>
+<pre class="mermaid">
+flowchart LR
+    A[Inbound message] --> B{SPF pass and aligned}
+    A --> C{DKIM valid and aligned}
+    B --> D[DMARC evaluation]
+    C --> D
+    D -->|Aligned pass| E[Deliver, sender identity trusted]
+    D -->|Fail and p equals reject| F[Reject at gateway]
+    E --> G{Lookalike domain check}
+    G -->|Similar to protected brand| H[Quarantine and flag]
+    G -->|Clean| I[Content and URL analysis]
+</pre>
+<p>The critical nuance for real systems: <strong>DMARC only validates the domain in the <code>From:</code> header the user sees, and only for your own protected domains you publish policy for.</strong> It does <strong>nothing</strong> against a <em>different</em> lookalike domain (<code>acme-corp.com</code> vs <code>acmecorp.com</code>) — that domain can have its own perfectly valid SPF/DKIM/DMARC. Lookalike defense is a separate control layer (SEG heuristics, newly-registered-domain scoring, homoglyph detection). Full mechanics in <code>web/Email-Security/Email-Authentication/README.md</code>.</p>
+<hr />
+<h2 id="3-real-world-incidents-case-studies">3. Real-World Incidents &amp; Case Studies</h2>
+<table>
+<thead>
+<tr>
+<th>Incident</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Defensive lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ubiquiti Networks BEC</td>
+<td>2015</td>
+<td>CEO/finance impersonation, no out-of-band check</td>
+<td>~$46.7M wired; dual control + callback would have stopped it</td>
+</tr>
+<tr>
+<td>Google &amp; Facebook (Evaldas Rimasauskas)</td>
+<td>2013–15</td>
+<td>Fake vendor (Quanta) invoices</td>
+<td>~$100M+ paid; vendor bank-change verification is essential</td>
+</tr>
+<tr>
+<td>Toyota Boshoku BEC</td>
+<td>2019</td>
+<td>Persuasive payment-change request</td>
+<td>~$37M loss; process, not tech, was the gap</td>
+</tr>
+<tr>
+<td>Twitter admin-tool phish</td>
+<td>2020</td>
+<td>Vishing + credential phish of employees</td>
+<td>Internal tool access via social eng.; phishing-resistant MFA + least privilege</td>
+</tr>
+<tr>
+<td>Uber breach</td>
+<td>2022</td>
+<td>MFA-fatigue push bombing + social eng.</td>
+<td>Number matching / passkeys defeat push bombing</td>
+</tr>
+<tr>
+<td>0ktapus / Scattered Spider</td>
+<td>2022–23</td>
+<td>SMS phishing + AiTM against 130+ orgs</td>
+<td>Passkeys and hardened help-desk verification are the countermeasures</td>
+</tr>
+<tr>
+<td>Microsoft AiTM campaigns</td>
+<td>2021–23</td>
+<td>Reverse-proxy token theft at scale</td>
+<td>Origin-bound FIDO2 auth is the durable fix</td>
+</tr>
+<tr>
+<td>Colonial Pipeline (adjacent)</td>
+<td>2021</td>
+<td>Leaked VPN credential, no MFA</td>
+<td>Not phishing per se, but shows single-factor risk</td>
+</tr>
+<tr>
+<td>Retool / Fortune-crypto SMS phish</td>
+<td>2023</td>
+<td>Smishing + AiTM harvesting Okta sessions</td>
+<td>Session binding + passkeys; MFA sync-code weakness</td>
+</tr>
+<tr>
+<td>Pathé BEC</td>
+<td>2018</td>
+<td>CEO-fraud emails to Dutch subsidiary</td>
+<td>~€19M loss; cross-border urgency exploited</td>
+</tr>
+</tbody>
+</table>
+<h3 id="case-study-1-google-facebook-vendor-fraud-20132015">Case study 1 — Google &amp; Facebook vendor fraud (2013–2015)</h3>
+<p>Evaldas Rimasauskas registered a company with the <em>same name</em> as a real hardware vendor (Quanta Computer) that both Google and Facebook used, then sent fraudulent but professionally-formatted invoices to the companies' accounts-payable teams. Over roughly two years the two firms paid out <strong>more than $100 million</strong> to attacker-controlled accounts before the fraud was noticed. There was no malware and no exploit — the emails came from lookalike infrastructure and referenced a genuine business relationship. <strong>What would have stopped it:</strong> a mandatory vendor bank-account-change verification process (out-of-band callback to a <em>previously known</em> vendor contact, not a number in the email), plus dual authorization for payments above a threshold, plus AP reconciliation that flags a known vendor suddenly using new banking details. This is the archetypal BEC — the control is procedural.</p>
+<h3 id="case-study-2-uber-mfa-fatigue-2022">Case study 2 — Uber MFA-fatigue (2022)</h3>
+<p>An Uber contractor's password was likely purchased from a dark-web broker after a prior malware infection. The attacker then repeatedly triggered Uber's push-based MFA. When the contractor did not approve, the attacker contacted them over WhatsApp posing as Uber IT and told them the prompts would stop if they approved one. The contractor approved, granting the attacker a valid session, which was pivoted into internal tooling and secrets. <strong>What would have stopped it:</strong> phishing-resistant MFA (FIDO2 security keys / passkeys) has no approvable push to spam, and number-matching would have required the attacker to know a code only shown on the legitimate login screen. Combined with device-bound Conditional Access, the stolen session could not have been established from an unmanaged device.</p>
+<h3 id="case-study-3-aitm-session-token-theft-microsoft-tracked-20212023">Case study 3 — AiTM session-token theft (Microsoft-tracked, 2021–2023)</h3>
+<p>Microsoft documented large-scale campaigns in which reverse-proxy phishing kits (commercially sold as phishing-as-a-service) proxied Microsoft 365 login pages, harvested credentials <em>and the post-MFA session cookie</em>, and used the cookie to access mailboxes — frequently then launching internal BEC by creating hidden inbox rules that auto-deleted the victim's replies. The MFA (OTP/push) was satisfied and still bypassed. <strong>What would have stopped it:</strong> FIDO2/passkey authentication (origin-bound, non-proxyable), token-protection/binding that ties the session cookie to the device, and Conditional Access requiring a compliant/managed device — plus detection of the tell-tale malicious inbox rule creation that follows a successful AiTM.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Exact-domain spoof of your brand</td>
+<td>T1566 / Spoofing</td>
+<td>No DMARC enforcement (<code>p=none</code>)</td>
+<td>Brand abuse, credential theft</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Lookalike / cousin-domain phishing</td>
+<td>T1566.002</td>
+<td>Homoglyph/typosquat not detected</td>
+<td>Convincing credential lure</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Display-name spoofing</td>
+<td>T1566</td>
+<td>No VIP/display-name policy</td>
+<td>Executive impersonation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>AiTM session-token theft</td>
+<td>T1566.002 / T1539</td>
+<td>OTP/push MFA not origin-bound</td>
+<td>Full account takeover</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>MFA fatigue / push bombing</td>
+<td>T1621</td>
+<td>Push MFA without number matching</td>
+<td>Account takeover</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>CEO-fraud wire transfer</td>
+<td>T1566 / BEC</td>
+<td>No out-of-band verification</td>
+<td>Direct financial loss</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Vendor/invoice bank-change fraud</td>
+<td>T1566 / BEC</td>
+<td>No vendor-change verification</td>
+<td>Large financial loss</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Payroll direct-deposit diversion</td>
+<td>T1566 / BEC</td>
+<td>Self-service change, no alert</td>
+<td>Salary theft</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Malicious attachment (macro/HTA/ISO)</td>
+<td>T1566.001</td>
+<td>No attachment detonation</td>
+<td>Malware, ransomware entry</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Malicious / time-bomb URL</td>
+<td>T1566.002</td>
+<td>No time-of-click re-scan</td>
+<td>Credential harvest, drive-by</td>
+<td>High</td>
+</tr>
+<tr>
+<td>11</td>
+<td>OAuth consent phishing</td>
+<td>T1566.002 / T1528</td>
+<td>Unrestricted app consent</td>
+<td>Persistent mailbox access</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Reply-chain / thread hijack</td>
+<td>T1566 / T1534</td>
+<td>Compromised upstream mailbox</td>
+<td>High-trust fraud</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Malicious inbox-rule creation</td>
+<td>T1114 / T1564.008</td>
+<td>No mailbox-rule auditing</td>
+<td>Hidden BEC, evidence deletion</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Internal spear phishing post-ATO</td>
+<td>T1534</td>
+<td>Trust of internal sender</td>
+<td>Lateral phishing spread</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td>QR-code phishing (quishing)</td>
+<td>T1566.002</td>
+<td>QR bypasses URL scanners</td>
+<td>Credential theft on mobile</td>
+<td>Rising</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Callback phishing (TOAD)</td>
+<td>T1566 / T1598</td>
+<td>No "never call email numbers" policy</td>
+<td>Voice-driven fraud/malware</td>
+<td>Rising</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Newly-registered-domain campaign</td>
+<td>T1566</td>
+<td>No NRD scoring</td>
+<td>Short-lived phishing infra</td>
+<td>High</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Forwarding breaks SPF/DKIM</td>
+<td>Detection gap</td>
+<td>No ARC support</td>
+<td>Legit mail rejected, alert fatigue</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Over-permissive allow-lists</td>
+<td>Misconfiguration</td>
+<td>Bypass rules on SEG</td>
+<td>Filter evasion</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Weak help-desk identity proofing</td>
+<td>T1598 / Social eng.</td>
+<td>Resets without strong verification</td>
+<td>MFA reset → ATO</td>
+<td>Medium</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Exact-domain spoof</td>
+<td>DMARC <code>p=reject</code> + SPF <code>-all</code> + DKIM</td>
+<td>DNS / gateway</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Lookalike domain</td>
+<td>Homoglyph + NRD detection, domain monitoring</td>
+<td>SEG / ICES / brand monitoring</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Display-name spoof</td>
+<td>VIP display-name impersonation rules</td>
+<td>SEG policy</td>
+</tr>
+<tr>
+<td>4</td>
+<td>AiTM token theft</td>
+<td><strong>FIDO2 / passkeys</strong> + token binding + CA device compliance</td>
+<td>IdP / auth</td>
+</tr>
+<tr>
+<td>5</td>
+<td>MFA fatigue</td>
+<td>Number matching, rate limits, passkeys</td>
+<td>IdP</td>
+</tr>
+<tr>
+<td>6</td>
+<td>CEO-fraud wire</td>
+<td>Out-of-band verification + dual authorization</td>
+<td>Finance process</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Vendor bank-change</td>
+<td>Callback to known-good number, change-request workflow</td>
+<td>AP / procurement process</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Payroll diversion</td>
+<td>Change alerts + out-of-band confirm</td>
+<td>HR / payroll system</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Malicious attachment</td>
+<td>Sandbox detonation, macro blocking, MOTW enforcement</td>
+<td>SEG / endpoint</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Malicious URL</td>
+<td>Time-of-click rewriting + re-scan</td>
+<td>SEG / ICES</td>
+</tr>
+<tr>
+<td>11</td>
+<td>OAuth consent phish</td>
+<td>App-consent governance, admin-consent workflow, verified publishers</td>
+<td>IdP / SaaS admin</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Thread hijack</td>
+<td>Anomaly detection, link re-scan on replies</td>
+<td>ICES</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Malicious inbox rule</td>
+<td>Audit-log alerting on rule creation</td>
+<td>SIEM / UEBA</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Internal spear phish</td>
+<td>Internal-mail scanning, ATO detection</td>
+<td>ICES / IdP</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Quishing</td>
+<td>QR image extraction + URL analysis</td>
+<td>SEG / mobile</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Callback phishing</td>
+<td>Policy + awareness, block phone-number-only lures</td>
+<td>Training / SEG</td>
+</tr>
+<tr>
+<td>17</td>
+<td>NRD campaigns</td>
+<td>Newly-registered-domain scoring</td>
+<td>SEG / DNS</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Forwarding breakage</td>
+<td>ARC (Authenticated Received Chain)</td>
+<td>Gateway</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Allow-list bypass</td>
+<td>Periodic allow-list audit, remove blanket rules</td>
+<td>SEG governance</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Help-desk weakness</td>
+<td>Strong identity proofing, callback, video verify for high-risk resets</td>
+<td>Help-desk process</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-controls-in-depth">Top 5 controls in depth</h3>
+<p><strong>1) Phishing-resistant MFA (FIDO2 / passkeys) — the AiTM and MFA-fatigue killer.</strong><br />
+FIDO2/WebAuthn replaces shared secrets with public-key cryptography where the private key never leaves the authenticator and every assertion is <strong>origin-bound</strong>: the browser includes the actual relying-party origin (RP ID) in the data the authenticator signs, and the authenticator only unlocks a credential registered for that exact origin. Against AiTM, the attacker's proxy runs on a <em>different</em> origin, so the authenticator either has no matching credential or produces a signature the real service rejects — the proxy cannot relay a valid assertion. Against MFA-fatigue there is simply no "approve" push to spam. Enrollment concept:</p>
+<pre><code class="language-text"># Conceptual policy intent (Entra ID / Okta phrasing varies):
+# Require FIDO2 / passkey for privileged roles and finance staff.
+# Disallow OTP/SMS fallback for these groups.
+authenticationStrength: phishingResistantMfa
+appliesTo:
+  - group: Finance-and-AP
+  - role: GlobalAdmin, PrivilegedRoleAdmin
+allowedMethods:
+  - fido2
+  - windowsHelloForBusiness
+  - deviceBoundPasskey
+disallowedMethods:
+  - sms
+  - voice
+  - oathTotp   # still phishable via AiTM relay
+</code></pre>
+<p><em>Trade-offs:</em> requires hardware keys or platform authenticators and a credential-recovery story (multiple keys enrolled, secure re-enrollment). Roaming/kiosk scenarios need planning. But it is the only control that <em>structurally</em> defeats AiTM; everything else is probabilistic. See <code>auth_authz/Authentication/WebAuthn-Passkeys/README.md</code> and <code>auth_authz/Authentication/MFA/README.md</code>.</p>
+<p><strong>2) DMARC enforcement at <code>p=reject</code> with SPF and DKIM.</strong><br />
+DMARC ties the visible <code>From:</code> domain to an authenticated identity by requiring SPF or DKIM to both <em>pass</em> and <em>align</em> with that domain, then telling receivers what to do on failure. Publishing <code>v=DMARC1; p=reject; rua=...; ruf=...</code> instructs the world to <em>reject</em> mail that spoofs your exact domain, and the aggregate (<code>rua</code>) reports let you find and fix legitimate senders before enforcing. The staged rollout is <code>p=none</code> (monitor) → <code>p=quarantine; pct=25</code> → <code>p=reject</code>.</p>
+<pre><code class="language-dns">; SPF — authorize only your real senders, hard-fail the rest
+acme.com.  IN TXT &quot;v=spf1 include:_spf.google.com include:sendgrid.net -all&quot;
+
+; DMARC — reject exact-domain spoofs, collect reports
+_dmarc.acme.com. IN TXT &quot;v=DMARC1; p=reject; rua=mailto:dmarc-agg@acme.com; ruf=mailto:dmarc-forensic@acme.com; fo=1; adkim=s; aspf=s&quot;
+</code></pre>
+<p><em>Trade-offs / limits:</em> DMARC stops <strong>exact-domain</strong> spoofing only. It does nothing about lookalike domains or display-name spoofing, and it can break third-party senders and mailing-list forwarding (mitigate with ARC and by inventorying senders first). It is necessary but not sufficient — pair it with §5.3.</p>
+<p><strong>3) Out-of-band verification and dual control for financial actions.</strong><br />
+The single most effective anti-BEC control is procedural: <strong>any</strong> payment above a threshold, and <strong>any</strong> change to bank/routing/direct-deposit details, requires verification through a <em>second, independent</em> channel — a callback to a phone number already on file (never a number supplied in the email), plus a second approver. Because BEC is a process attack, the process is the defense.</p>
+<pre><code class="language-text">Payment / bank-change control (policy pseudocode):
+IF request.type in {new_payee, bank_detail_change, wire &gt; $10,000}:
+    REQUIRE out_of_band_callback(number = vendor_record.known_phone)  # not email-supplied
+    REQUIRE second_approver != request.initiator
+    LOG verification_ref, approver_ids
+    IF vendor_record.bank_details_changed_within(days=30):
+        ESCALATE to fraud_review
+</code></pre>
+<p><em>Trade-offs:</em> adds friction and needs finance buy-in and accurate vendor contact records; attackers try to socially defeat it ("use this new number") — training must stress <em>known-good</em> numbers only.</p>
+<p><strong>4) Secure email gateway / ICES with sandboxing and time-of-click URL protection.</strong><br />
+A modern gateway (or Integrated Cloud Email Security layered via API on M365/Google) applies reputation, DMARC/authentication verdicts, NLP-based BEC/impersonation detection, attachment <strong>detonation</strong> in a sandbox, and <strong>URL rewriting with time-of-click re-scanning</strong> so a link that was benign at delivery but weaponized later is still caught when the user clicks. Lookalike-domain and NRD scoring catch what DMARC cannot.</p>
+<pre><code class="language-text">Gateway policy priorities (conceptual):
+- Authentication: honor DMARC reject; quarantine DMARC-fail from lookalikes.
+- Impersonation: flag display-name match to VIP list from external/unaligned domain.
+- Attachments: detonate Office/PDF/archive/ISO; block macros from internet.
+- URLs: rewrite all links; re-scan at click; block NRD &lt; 30 days for finance dept.
+- Newly observed domain + payment keywords =&gt; quarantine + analyst review.
+</code></pre>
+<p><em>Trade-offs:</em> sandbox evasion (password-protected archives, delayed detonation) and false positives; API-based ICES sees internal/lateral mail that a perimeter-only gateway misses — prefer defense in depth with both authentication and content analysis.</p>
+<p><strong>5) User reporting button + fast triage/takedown (turning users into sensors).</strong><br />
+Prevention is never perfect, so a <strong>one-click "Report Phish" button</strong> wired into the SOC/SOAR pipeline converts every employee into a detection sensor. A single report can trigger automated clustering (find all recipients of the same campaign), auto-quarantine of unread copies org-wide, URL/domain takedown requests, and IOC enrichment. Metrics that matter: report rate, time-to-triage, and time-to-remediate. This is the human layer of detection and it materially shrinks dwell time.</p>
+<p><em>Trade-offs:</em> generates analyst workload — needs SOAR automation and triage tiers to avoid alert fatigue; must be paired with feedback so reporters stay engaged.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="61-what-to-log-telemetry-sources">6.1 What to log / telemetry sources</h3>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Key fields / events</th>
+<th>Detects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mail gateway / message trace</td>
+<td>sender, <code>From:</code> vs envelope, DMARC/DKIM/SPF result, URL verdict, attachment hash</td>
+<td>Spoofing, malicious content</td>
+</tr>
+<tr>
+<td>IdP sign-in logs (Entra/Okta)</td>
+<td>user, IP, ASN, geo, device, MFA method, session id, user-agent</td>
+<td>AiTM, impossible travel, MFA anomalies</td>
+</tr>
+<tr>
+<td>Mailbox audit (M365 <code>UnifiedAuditLog</code> / Google)</td>
+<td><code>New-InboxRule</code>, <code>Set-InboxRule</code>, <code>MailItemsAccessed</code>, forwarding</td>
+<td>Post-ATO BEC, hidden rules</td>
+</tr>
+<tr>
+<td>OAuth / app consent logs</td>
+<td><code>Consent to application</code>, granted scopes, publisher</td>
+<td>Consent phishing</td>
+</tr>
+<tr>
+<td>Web proxy / DNS</td>
+<td>domain age, category, homoglyph score</td>
+<td>Lookalike/NRD access</td>
+</tr>
+<tr>
+<td>User reports</td>
+<td>reported message, verdict</td>
+<td>Novel campaigns, BEC text</td>
+</tr>
+<tr>
+<td>Wire/payment system</td>
+<td>payee changes, bank-detail edits</td>
+<td>BEC financial anomaly</td>
+</tr>
+</tbody>
+</table>
+<h3 id="62-sample-detections">6.2 Sample detections</h3>
+<p><strong>A) Malicious inbox rule after sign-in (KQL — the classic post-AiTM/BEC tell).</strong><br />
+Attackers who take over a mailbox almost always create a hidden rule that moves or deletes replies containing words like "invoice," "payment," or the victim's own name, so the victim never sees fraud responses. This is one of the highest-fidelity BEC signals.</p>
+<pre><code class="language-kql">OfficeActivity
+| where Operation in (&quot;New-InboxRule&quot;, &quot;Set-InboxRule&quot;)
+| extend params = tostring(Parameters)
+| where params has_any (&quot;DeleteMessage&quot;, &quot;MoveToFolder&quot;, &quot;MarkAsRead&quot;)
+    and params has_any (&quot;invoice&quot;, &quot;payment&quot;, &quot;bank&quot;, &quot;wire&quot;, &quot;swift&quot;, &quot;refund&quot;)
+| project TimeGenerated, UserId, ClientIP, Operation, params
+| order by TimeGenerated desc
+</code></pre>
+<p><strong>B) Impossible travel / AiTM session anomaly (KQL).</strong><br />
+Successful sign-in followed by activity from a geographically implausible location within a short window — a hallmark of a stolen session cookie replayed by an AiTM operator from a different country.</p>
+<pre><code class="language-kql">let window = 1h;
+SigninLogs
+| where ResultType == 0
+| project UserPrincipalName, TimeGenerated, IPAddress,
+          City = tostring(LocationDetails.city),
+          Country = tostring(LocationDetails.countryOrRegion)
+| order by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend prevCountry = prev(Country), prevTime = prev(TimeGenerated),
+         prevUser = prev(UserPrincipalName)
+| where UserPrincipalName == prevUser
+    and Country != prevCountry
+    and datetime_diff('minute', TimeGenerated, prevTime) &lt; 60
+| project UserPrincipalName, prevCountry, Country, prevTime, TimeGenerated, IPAddress
+</code></pre>
+<p><strong>C) Inbound impersonation / spoof (Sigma).</strong><br />
+Flags external mail whose display name matches an executive VIP list but whose authenticated domain does not align — the display-name-spoof signal DMARC alone cannot catch.</p>
+<pre><code class="language-yaml">title: Executive Display-Name Impersonation From Unaligned Domain
+status: experimental
+logsource:
+  product: email
+  service: gateway
+detection:
+  selection_vip:
+    from_display_name|contains:
+      - 'CEO'
+      - 'Jane Doe'
+      - 'CFO'
+  filter_external:
+    dmarc_result: 'fail'
+    sender_domain|endswith: '@acme.com'
+  condition: selection_vip and not filter_external and dmarc_result != 'pass'
+fields:
+  - from_display_name
+  - sender_domain
+  - dmarc_result
+level: high
+</code></pre>
+<p><strong>D) BEC keyword + payment-change heuristic (SQL over gateway data).</strong></p>
+<pre><code class="language-sql">SELECT msg_id, sender, recipient, subject, dmarc_result, sender_domain_age_days
+FROM inbound_mail
+WHERE (LOWER(body) LIKE '%change%bank%' OR LOWER(body) LIKE '%update%routing%'
+       OR LOWER(body) LIKE '%new%account%details%' OR LOWER(body) LIKE '%urgent%wire%')
+  AND recipient_group IN ('accounts-payable','payroll','finance')
+  AND (dmarc_result &lt;&gt; 'pass' OR sender_domain_age_days &lt; 30)
+ORDER BY received_time DESC;
+</code></pre>
+<h3 id="63-response-playbook">6.3 Response playbook</h3>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Report
+    Report --> Triage
+    Triage --> Contain
+    Contain --> Eradicate
+    Eradicate --> Recover
+    Recover --> LessonsLearned
+    LessonsLearned --> [*]
+    Triage --> FalsePositive
+    FalsePositive --> [*]
+</pre>
+<ol>
+<li><strong>Detect / report.</strong> User reports via button, or a detection fires (inbox rule, impossible travel, gateway verdict). Open a case; capture the original message with full headers.</li>
+<li><strong>Triage.</strong> Confirm scope: cluster by subject/sender/URL to find every recipient. Determine whether it is credential-phish, malware, or BEC-text; identify if any account is already compromised.</li>
+<li><strong>Contain.</strong></li>
+<li>Org-wide <strong>purge/quarantine</strong> of all unread copies of the campaign.</li>
+<li>If account takeover: <strong>revoke sessions/tokens</strong> (invalidate refresh tokens), force password reset, and disable any attacker-created inbox rules and forwarding.</li>
+<li>Block sender domain, URLs, and file hashes at the gateway and proxy.</li>
+<li><strong>If BEC wire in progress:</strong> immediately contact the bank to <strong>recall/freeze</strong> the wire and file an FBI IC3 complaint — the IC3 Recovery Asset Team can freeze funds if reported within ~72 hours.</li>
+<li><strong>Eradicate.</strong> Remove malicious mailbox rules, revoke malicious OAuth grants, remediate any malware on endpoints, rotate exposed credentials/secrets, submit <strong>domain/URL takedown</strong> requests to registrar/host and browser safe-browsing feeds.</li>
+<li><strong>Recover.</strong> Restore normal mail flow, re-enable the account with phishing-resistant MFA re-enrolled, verify no residual forwarding/delegation, and monitor the affected user and finance systems closely.</li>
+<li><strong>Lessons learned.</strong> Root-cause: why did prevention miss it? Tune DMARC/gateway rules, add IOCs, update VIP lists, run a targeted awareness nudge, and (for BEC) review whether the financial-process control was followed.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What is the difference between phishing and BEC, and why does BEC cause larger financial losses?</strong><br />
+Phishing is broad social engineering — usually email — that tricks a user into revealing credentials, running malware, or approving an action. BEC is a specific subclass where an attacker impersonates a trusted party to manipulate a <em>business process</em>, most often a wire transfer or bank-detail change. BEC causes larger losses because it typically contains no malware or link — just persuasive text — so it evades technical filters, and each successful attack can divert hundreds of thousands to millions of dollars in a single transaction. The FBI IC3 consistently ranks BEC as the highest-dollar-loss cybercrime category, above ransomware.<br />
+<em>Signal: understands that BEC attacks process, not technology.</em></p>
+<p><strong>Q2. What do SPF, DKIM, and DMARC each do, and what can't they stop?</strong><br />
+SPF authorizes which IPs may send for a domain; DKIM cryptographically signs the message so tampering and origin can be verified; DMARC requires SPF or DKIM to pass <em>and align</em> with the visible <code>From:</code> domain and tells receivers what to do on failure (<code>none</code>/<code>quarantine</code>/<code>reject</code>). Together at <code>p=reject</code> they stop <strong>exact-domain spoofing</strong> of your brand. They cannot stop lookalike/cousin domains (which have their own valid auth), display-name spoofing, or a genuinely compromised legitimate mailbox — those need gateway heuristics, VIP rules, and process controls.<br />
+<em>Signal: knows the precise scope and limits of email authentication.</em></p>
+<p><strong>Q3. Why does traditional MFA (OTP/SMS/push) fail against AiTM phishing?</strong><br />
+AiTM uses a reverse proxy that relays the real login page, so the victim enters a valid password and a valid OTP or approves a push — all of which flow to the real service, which issues a session cookie the proxy steals and replays. The MFA was satisfied; the flaw is that neither the password nor the OTP is bound to the origin the user actually visited, so a man-in-the-middle can relay them. Only origin-bound authentication (FIDO2/passkeys) prevents this.<br />
+<em>Signal: understands token theft vs credential theft.</em></p>
+<p><strong>Q4. What is MFA fatigue and how do you defend against it?</strong><br />
+MFA fatigue (push bombing) is when an attacker who already has the password spams push-approval prompts until a tired or confused user taps "Approve." Defenses: <strong>number matching</strong> (user must type a code shown only on the legitimate login screen), prompt rate-limiting and lockout, showing app/location context, and ultimately migrating to passkeys where there is no approvable push to spam. Uber (2022) was compromised this way.<br />
+<em>Signal: knows the human-factor MFA weakness and its fixes.</em></p>
+<p><strong>Q5. What is the single most effective control against BEC wire fraud, and why?</strong><br />
+Out-of-band verification with dual authorization: any payment over a threshold or any bank-detail change must be confirmed via an independent channel — a callback to a phone number <em>already on file</em> (never one from the email) — plus a second approver. Because BEC is a process attack with no malware to catch, a process control is the only reliable defense; filters and authentication can all be bypassed by a lookalike domain or a compromised real mailbox.<br />
+<em>Signal: reaches for process controls, not just technology.</em></p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design an anti-phishing program for a 50,000-employee company. What layers and in what order?</strong><br />
+I'd build defense-in-depth and sequence by impact-per-effort. First, <strong>email authentication</strong>: publish and enforce DMARC <code>p=reject</code> with aligned SPF/DKIM (staged from <code>p=none</code> using aggregate reports to avoid breaking legit senders). Second, deploy a <strong>SEG/ICES</strong> with sandboxing, time-of-click URL protection, impersonation/VIP rules, and lookalike/NRD scoring — API-based so it also sees internal/lateral mail. Third — and highest durability — roll out <strong>phishing-resistant MFA (FIDO2/passkeys)</strong> starting with admins and finance, with Conditional Access requiring managed devices. Fourth, <strong>financial process controls</strong>: out-of-band verification and dual approval for payments and bank changes. Fifth, the <strong>human layer</strong>: continuous training plus a one-click report button wired to SOAR. Sixth, <strong>detection &amp; response</strong>: mailbox-rule and impossible-travel analytics, automated campaign purge, and a takedown pipeline. I'd sequence auth + DMARC + passkeys first because they remove entire attack classes, then layer detection for the residual.<br />
+<em>Signal: prioritization, defense-in-depth, structural vs probabilistic controls.</em></p>
+<p><strong>Q7. Your CEO wants "just turn on MFA everywhere" to stop phishing. What do you tell them?</strong><br />
+MFA is necessary but not sufficient: OTP/SMS/push MFA is defeated by AiTM (token theft) and push bombing, both actively used in the wild (Uber, 0ktapus). I'd agree MFA everywhere is the baseline but argue for <strong>phishing-resistant MFA (FIDO2/passkeys)</strong> for at least privileged and finance users, because it's origin-bound and structurally immune to proxy relay and fatigue. I'd also note MFA does nothing against BEC, which needs no login at all — so process controls and gateway detection are still required. The message: MFA yes, but the <em>type</em> of MFA matters enormously, and MFA is one layer, not the whole answer.<br />
+<em>Signal: nuance about MFA types; avoids silver-bullet thinking.</em></p>
+<p><strong>Q8. How would you detect account takeover from an AiTM phish that already succeeded?</strong><br />
+Prevention failed, so I lean on post-compromise telemetry. Signals: <strong>impossible travel</strong> (successful sign-in then activity from an implausible geography within the hour), a new sign-in from an anonymizing/hosting ASN reusing the same session, <strong>malicious inbox-rule creation</strong> (auto-delete/move of messages containing "invoice/payment/wire"), mass <code>MailItemsAccessed</code>, new mail forwarding, or anomalous OAuth grants. I'd correlate IdP sign-in logs with the unified mailbox audit log in the SIEM, alert on the inbox-rule + finance-keyword combination (highest fidelity), and auto-trigger session revocation on high-confidence hits.<br />
+<em>Signal: knows the post-ATO indicators and log sources.</em></p>
+<p><strong>Q9. A vendor emails accounts payable that their bank details changed. Walk me through the control that should trigger.</strong><br />
+This is the classic vendor-email-compromise (VEC) scenario. The change request must enter a <strong>bank-change verification workflow</strong>: AP does not act on the email. They initiate an out-of-band callback to the vendor's <em>known-good</em> phone number from the vendor master record (not any number in the email), confirm the change with a named contact, require a second approver, and flag that the vendor's banking details changed — many systems auto-escalate a bank change within N days of a prior one to fraud review. Only after independent confirmation is the vendor master updated. This exact control would have stopped the Google/Facebook $100M+ fraud.<br />
+<em>Signal: operationalizes out-of-band verification concretely.</em></p>
+<p><strong>Q10. What are the trade-offs of enforcing DMARC <code>p=reject</code>, and how do you roll it out safely?</strong><br />
+Benefit: eliminates exact-domain spoofing of your brand. Risks: legitimate third-party senders (marketing platforms, ticketing, SaaS) not covered by SPF/DKIM get rejected, and mailing-list forwarding breaks SPF/DKIM alignment. Safe rollout: start <code>p=none</code> with <code>rua</code> aggregate reporting, inventory every legitimate sender from the reports, get each aligned (add to SPF, enable DKIM signing), move to <code>p=quarantine; pct=</code> ramping up, then <code>p=reject</code>. Deploy <strong>ARC</strong> to preserve authentication across forwarders. The reports-first, staged approach avoids blackholing real mail.<br />
+<em>Signal: understands operational risk and the staged methodology.</em></p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. Explain cryptographically why FIDO2/passkeys defeat AiTM when OTP does not.</strong><br />
+In WebAuthn, registration creates an asymmetric key pair bound to a specific <strong>relying-party ID (origin)</strong>; the private key stays in the authenticator. At login, the browser passes the <em>actual</em> origin it's talking to plus a server challenge; the authenticator signs an assertion that includes <code>clientDataJSON</code> containing that origin and the challenge, and it will only use a credential registered for that origin. When an AiTM proxy sits at <code>login-acme.evil.com</code>, the browser reports <em>that</em> origin — so either no credential matches, or the resulting signature carries the wrong origin and the real service rejects it. The proxy cannot substitute the correct origin because it doesn't control the victim's browser's view of the URL bar. OTP, by contrast, is a bearer value with no origin binding: whoever receives it can replay it. That origin binding is the whole game. (See <code>auth_authz/Authentication/WebAuthn-Passkeys/README.md</code>.)<br />
+<em>Signal: real cryptographic/protocol understanding of origin binding.</em></p>
+<p><strong>Q12. Passkeys are great, but what residual risks remain, and how do you cover them?</strong><br />
+Even with passkeys: (a) <strong>synced passkeys</strong> ride the cloud account (Apple/Google), so that account and its recovery become the new attack surface — protect it and consider device-bound keys for the highest tier. (b) <strong>Account recovery / help-desk</strong> becomes the weak link — attackers social-engineer a reset to enroll their own key, so recovery needs strong identity proofing (0ktapus abused help desks). (c) <strong>Session-token theft via endpoint malware</strong> (infostealers grabbing cookies post-auth) bypasses the login entirely — mitigate with token binding/protection and device compliance. (d) BEC still needs no login. (e) <strong>Non-passkey fallback methods</strong> left enabled re-introduce phishability — you must <em>disable</em> OTP/SMS fallback for protected groups. So passkeys close AiTM but you still need recovery hardening, endpoint protection, token binding, and process controls.<br />
+<em>Signal: sees beyond the primary control to recovery and endpoint gaps.</em></p>
+<p><strong>Q13. How do you detect and prevent OAuth consent phishing (illicit application grant)?</strong><br />
+Consent phishing tricks a user into granting a malicious OAuth app real scopes (e.g., <code>Mail.Read</code>, <code>offline_access</code>), giving the attacker persistent, password-independent mailbox access that survives password resets. Prevention: restrict end-user consent to verified publishers and low-risk scopes, route anything else through an <strong>admin-consent workflow</strong>, and block unverified apps. Detection: alert on consent grants to newly-registered or unverified apps, grants of high-risk scopes, or a spike in grants across users (campaign). Response: revoke the service principal's grants and tokens, not just the user password — because the OAuth token is the access, resetting the password alone does nothing. This is a favorite persistence technique after an AiTM.<br />
+<em>Signal: understands token-based persistence distinct from credential theft.</em></p>
+<p><strong>Q14. AiTM is defeated by passkeys, so attackers pivot. What's the next move and your defense?</strong><br />
+When origin-bound auth blocks credential/session relay at login, attackers shift to (a) <strong>infostealer malware</strong> that exfiltrates already-authenticated session cookies from the endpoint — defended by token binding/DPoP, device-compliance Conditional Access, short session lifetimes, and re-auth on sensitive actions; (b) <strong>help-desk social engineering</strong> to reset MFA and enroll their own passkey — defended by strong recovery identity proofing (video/manager attestation, callback); (c) <strong>OAuth consent phishing</strong> for token persistence — defended by consent governance; and (d) pure <strong>BEC</strong> that never touches your login — defended by financial process controls and impersonation detection. The strategic point: hardening auth pushes attackers toward the endpoint, the recovery flow, and the human/process layer, so a mature program invests there too.<br />
+<em>Signal: threat-model maturity; anticipates attacker adaptation.</em></p>
+<p><strong>Q15. Money just left via a BEC wire. Walk me through the first-hour response and what determines recovery.</strong><br />
+Speed is everything. First, contact the <strong>originating bank's fraud department immediately</strong> to attempt a recall/freeze, and have the recipient bank flagged. File an <strong>FBI IC3 complaint</strong> without delay — IC3's Recovery Asset Team can trigger a Financial Fraud Kill Chain to freeze funds, and success drops sharply after roughly 72 hours. In parallel: determine if a mailbox was compromised (was this thread hijack from a real account?) — if so, revoke sessions/tokens, reset with phishing-resistant MFA, and hunt for malicious inbox rules and forwarding that hid the fraud. Preserve evidence (full headers, audit logs). Notify legal, finance leadership, and insurer. Root-cause whether the out-of-band verification control existed and was bypassed or skipped, and close that gap. Recovery odds depend almost entirely on reporting speed and whether the mule account is still funded.<br />
+<em>Signal: knows IC3 kill-chain, the 72-hour window, and parallel containment.</em></p>
+<hr />
+<h2 id="8-ecosystem-mapping">8. Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Microsoft 365</th>
+<th>Google Workspace</th>
+<th>Standalone / other</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Email authentication</td>
+<td>Exchange Online auth + DMARC</td>
+<td>Gmail auth + DMARC</td>
+<td>RFC 7208/6376/7489</td>
+</tr>
+<tr>
+<td>Native anti-phish</td>
+<td>Defender for Office 365</td>
+<td>Gmail Advanced Protection / Security Sandbox</td>
+<td>Proofpoint, Mimecast, Abnormal (ICES)</td>
+</tr>
+<tr>
+<td>Time-of-click URL</td>
+<td>Safe Links</td>
+<td>Gmail link protection</td>
+<td>Cloudflare Area 1, Proofpoint URL Defense</td>
+</tr>
+<tr>
+<td>Attachment detonation</td>
+<td>Safe Attachments</td>
+<td>Security Sandbox</td>
+<td>FireEye/Trellix, Proofpoint TAP</td>
+</tr>
+<tr>
+<td>Phishing-resistant MFA</td>
+<td>Entra ID FIDO2 / passkeys</td>
+<td>Google passkeys / Titan keys</td>
+<td>Okta FastPass, YubiKey</td>
+</tr>
+<tr>
+<td>Number matching</td>
+<td>Microsoft Authenticator</td>
+<td>Google prompt matching</td>
+<td>Duo Verified Push</td>
+</tr>
+<tr>
+<td>Conditional Access</td>
+<td>Entra Conditional Access</td>
+<td>Context-Aware Access</td>
+<td>Okta / Ping policies</td>
+</tr>
+<tr>
+<td>Mailbox-rule audit</td>
+<td>UnifiedAuditLog</td>
+<td>Admin audit / Alert Center</td>
+<td>SIEM ingestion</td>
+</tr>
+<tr>
+<td>OAuth consent control</td>
+<td>App consent policies</td>
+<td>App access control / API controls</td>
+<td>SaaS security posture mgmt</td>
+</tr>
+<tr>
+<td>Report button</td>
+<td>Report Phishing add-in</td>
+<td>"Report phishing" in Gmail</td>
+<td>KnowBe4 PhishER, Cofense</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>BEC is the largest financial-loss cybercrime category</strong> (FBI IC3, tens of billions cumulative) because it attacks business <em>process</em>, contains no malware, and evades technical filters.</li>
+<li><strong>Email authentication (SPF/DKIM/DMARC <code>p=reject</code>) stops exact-domain spoofing only</strong> — not lookalike domains, not display-name spoofing, not compromised real mailboxes.</li>
+<li><strong>AiTM phishing steals session tokens and defeats OTP/SMS/push MFA</strong>; MFA fatigue defeats push MFA socially. Both are widely used in the wild (Uber, 0ktapus, Microsoft-tracked kits).</li>
+<li><strong>Phishing-resistant MFA (FIDO2/passkeys) is the only structural fix for AiTM</strong> because assertions are origin-bound and non-proxyable — everything else is probabilistic. Disable OTP/SMS fallback for protected groups.</li>
+<li><strong>Out-of-band verification with dual authorization is the definitive BEC control</strong> — callbacks to known-good numbers, never numbers from the email.</li>
+<li><strong>Turn users into sensors:</strong> a one-click report button wired to SOAR shrinks dwell time more than any single filter tweak.</li>
+<li><strong>The highest-fidelity post-compromise signal is malicious inbox-rule creation</strong> (auto-delete of payment/invoice replies) — alert on it directly.</li>
+<li><strong>Hardening auth pushes attackers to the endpoint, recovery flow, and help desk</strong> — invest in token binding, device compliance, and strong recovery identity proofing.</li>
+<li><strong>For an active BEC wire, report to the bank and FBI IC3 within ~72 hours</strong> — recovery odds collapse after that.</li>
+<li>Defense-in-depth wins: authentication + gateway/ICES + passkeys + process controls + training/reporting + detection + fast takedown, in that priority order.</li>
+</ul>
+<hr />
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>FBI IC3 — Internet Crime Report (annual) and BEC public service announcements (I-... alerts): https://www.ic3.gov</li>
+<li>NIST SP 800-177 Rev. 1 — Trustworthy Email</li>
+<li>RFC 7208 (SPF), RFC 6376 (DKIM), RFC 7489 (DMARC), RFC 8617 (ARC)</li>
+<li>MITRE ATT&amp;CK — T1566 Phishing (and sub-techniques .001/.002/.003), T1534 Internal Spearphishing, T1621 MFA Request Generation, T1114 Email Collection, T1528 Steal Application Access Token, T1539 Steal Web Session Cookie</li>
+<li>CISA — Guidance on phishing-resistant MFA and defending against MFA fatigue / AiTM</li>
+<li>FIDO Alliance — FIDO2/WebAuthn specifications; W3C WebAuthn Level 2/3</li>
+<li>Microsoft Security — reporting on large-scale AiTM phishing and post-compromise BEC</li>
+<li>Verizon DBIR (annual) — social-engineering and BEC breach statistics</li>
+<li>Cross-references in this repo: <code>web/Email-Security/Email-Authentication/README.md</code>, <code>auth_authz/Authentication/WebAuthn-Passkeys/README.md</code>, <code>auth_authz/Authentication/MFA/README.md</code>, <code>network/Layer7/SMTP/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

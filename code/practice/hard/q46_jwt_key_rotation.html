@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q46_jwt_key_rotation.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q46_jwt_key_rotation.py</h1>
+  <p class="file-path">Source: code\practice\hard\q46_jwt_key_rotation.py</p>
+  <p class="line-count">530 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q46 [Hard] — JWT Key Rotation Validator
+=============================================================================
+
+PROBLEM
+-------
+Validate JWTs using a JWKS (JSON Web Key Set) with:
+  1. Key ID (kid) lookup from the JWKS.
+  2. In-memory JWKS cache with configurable TTL.
+  3. Algorithm enforcement (reject &quot;none&quot;, restrict to RS256/ES256).
+  4. Claim validation: exp, nbf, iss, aud.
+  5. Graceful key-not-found handling (don&#x27;t crash; try cache refresh once).
+  6. Stub JWKS fetching (no actual HTTP; simulated for testing).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Which algorithms?
+   → RS256 and ES256 only; reject &quot;none&quot;, HS256 with public key, and others.
+2. What claims must be validated?
+   → exp (required), nbf (if present), iss (if configured), aud (if configured).
+3. JWKS refresh?
+   → Cache with TTL; on kid-not-found, refresh once before failing.
+4. External HTTP calls?
+   → Abstract behind a JwksFetcher interface; stub in tests.
+5. Actual crypto?
+   → Use cryptography library if available; otherwise stub validation for
+     stdlib-only mode and note production requires it.
+
+=============================================================================
+APPROACH 1 — NAIVE (no kid check, accepts &quot;none&quot; algorithm)
+=============================================================================
+  Decode JWT with no signature verification or algorithm enforcement.
+  Vulnerable to: algorithm confusion, unsigned tokens, expired tokens.
+
+=============================================================================
+APPROACH 2 — JWKS-BACKED VALIDATOR WITH CACHE AND ALGORITHM ENFORCEMENT
+=============================================================================
+  1. Decode header without verification → extract kid + alg.
+  2. Enforce algorithm allowlist.
+  3. Lookup key from cache; refresh if needed.
+  4. Verify signature (using cryptography lib; stubbed here).
+  5. Validate exp, nbf, iss, aud.
+  6. Return structured result.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Set
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+ALLOWED_ALGORITHMS: Set[str] = {&quot;RS256&quot;, &quot;ES256&quot;}
+JWKS_CACHE_TTL_S   = 3600      # 1 hour
+MAX_CLOCK_SKEW_S   = 30        # allow 30s clock skew on exp/nbf
+TOKEN_MAX_AGE_S    = 86400     # reject tokens older than 24h even if not expired
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class JwksKey:
+    kid: str
+    alg: str
+    kty: str           # &quot;RSA&quot; or &quot;EC&quot;
+    use: str           # &quot;sig&quot;
+    # Raw key material (simplified; real JWKS has n, e, x, y etc.)
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class JwtClaims:
+    sub: Optional[str] = None
+    iss: Optional[str] = None
+    aud: Optional[Any] = None    # str or list
+    exp: Optional[int] = None
+    nbf: Optional[int] = None
+    iat: Optional[int] = None
+    jti: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class JwtValidationResult:
+    valid: bool
+    claims: Optional[JwtClaims] = None
+    kid: Optional[str] = None
+    alg: Optional[str] = None
+    failure_reason: str = &quot;&quot;
+
+
+class JwtValidationError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# JWT utility (stdlib-only; no external library)
+# ---------------------------------------------------------------------------
+
+def _b64url_decode(s: str) -&gt; bytes:
+    &quot;&quot;&quot;Decode base64url without padding.&quot;&quot;&quot;
+    s += &quot;=&quot; * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s)
+
+
+def _decode_part(s: str) -&gt; dict:
+    return json.loads(_b64url_decode(s))
+
+
+def _decode_header_no_verify(token: str) -&gt; Dict[str, Any]:
+    &quot;&quot;&quot;Decode JWT header without signature verification.&quot;&quot;&quot;
+    parts = token.split(&quot;.&quot;)
+    if len(parts) != 3:
+        raise JwtValidationError(&quot;Invalid JWT format: expected 3 parts&quot;)
+    return _decode_part(parts[0])
+
+
+def _decode_payload_no_verify(token: str) -&gt; Dict[str, Any]:
+    parts = token.split(&quot;.&quot;)
+    return _decode_part(parts[1])
+
+
+# ---------------------------------------------------------------------------
+# JWKS Fetcher interface + stub
+# ---------------------------------------------------------------------------
+
+class JwksFetcher:
+    &quot;&quot;&quot;Abstract interface for fetching JWKS.&quot;&quot;&quot;
+
+    def fetch(self, jwks_uri: str) -&gt; List[JwksKey]:
+        raise NotImplementedError
+
+
+class StubJwksFetcher(JwksFetcher):
+    &quot;&quot;&quot;Returns a pre-configured list of keys; used in tests.&quot;&quot;&quot;
+
+    def __init__(self, keys: List[JwksKey], fail: bool = False):
+        self._keys = keys
+        self._fail = fail
+
+    def fetch(self, jwks_uri: str) -&gt; List[JwksKey]:
+        if self._fail:
+            raise RuntimeError(&quot;JWKS fetch failed&quot;)
+        return list(self._keys)
+
+
+# ---------------------------------------------------------------------------
+# JWKS Cache
+# ---------------------------------------------------------------------------
+
+class JwksCache:
+    def __init__(self, fetcher: JwksFetcher, ttl_s: float = JWKS_CACHE_TTL_S):
+        self._fetcher  = fetcher
+        self._ttl_s    = ttl_s
+        self._keys: Dict[str, JwksKey] = {}
+        self._fetched_at: float = 0.0
+
+    def get_key(self, jwks_uri: str, kid: str) -&gt; Optional[JwksKey]:
+        if self._is_stale():
+            self._refresh(jwks_uri)
+        key = self._keys.get(kid)
+        if key is None and not self._is_fresh_enough():
+            # Try refresh once
+            self._refresh(jwks_uri)
+            key = self._keys.get(kid)
+        return key
+
+    def _is_stale(self) -&gt; bool:
+        return (time.monotonic() - self._fetched_at) &gt; self._ttl_s
+
+    def _is_fresh_enough(self) -&gt; bool:
+        return (time.monotonic() - self._fetched_at) &lt; 10.0
+
+    def _refresh(self, jwks_uri: str) -&gt; None:
+        try:
+            keys = self._fetcher.fetch(jwks_uri)
+            self._keys = {k.kid: k for k in keys}
+            self._fetched_at = time.monotonic()
+        except Exception:
+            pass  # Keep stale cache on error
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (no verification)
+# ---------------------------------------------------------------------------
+
+class NaiveJwtValidator:
+    &quot;&quot;&quot;
+    Decodes JWT with no verification — vulnerable to all JWT attacks.
+    NEVER USE IN PRODUCTION.
+    &quot;&quot;&quot;
+
+    def validate(self, token: str) -&gt; Dict[str, Any]:
+        parts = token.split(&quot;.&quot;)
+        if len(parts) != 3:
+            return {}
+        return json.loads(_b64url_decode(parts[1]))
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Secure JWT validator
+# ---------------------------------------------------------------------------
+
+class JwtValidator:
+    &quot;&quot;&quot;
+    Validates JWT using JWKS with:
+      - Algorithm enforcement
+      - kid lookup + cache with refresh
+      - Claim validation (exp, nbf, iss, aud)
+      - Signature verification (stubbed; real impl uses cryptography library)
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        jwks_uri: str,
+        cache: JwksCache,
+        allowed_algorithms: Optional[Set[str]] = None,
+        expected_issuer: Optional[str] = None,
+        expected_audience: Optional[str] = None,
+        verify_signature: Optional[Callable[[str, JwksKey], bool]] = None,
+        max_clock_skew_s: int = MAX_CLOCK_SKEW_S,
+    ):
+        self._jwks_uri     = jwks_uri
+        self._cache        = cache
+        self._allowed_algs = allowed_algorithms or ALLOWED_ALGORITHMS
+        self._issuer       = expected_issuer
+        self._audience     = expected_audience
+        # Signature verifier: injected for testability;
+        # production: use cryptography lib
+        self._verify_sig   = verify_signature or self._stub_verify
+        self._skew         = max_clock_skew_s
+
+    def validate(self, token: str) -&gt; JwtValidationResult:
+        try:
+            return self._validate_internal(token)
+        except JwtValidationError as e:
+            return JwtValidationResult(valid=False, failure_reason=str(e))
+        except Exception as e:
+            return JwtValidationResult(valid=False, failure_reason=f&quot;internal: {e}&quot;)
+
+    def _validate_internal(self, token: str) -&gt; JwtValidationResult:
+        # 1. Parse structure
+        parts = token.split(&quot;.&quot;)
+        if len(parts) != 3:
+            raise JwtValidationError(&quot;invalid_jwt_format&quot;)
+
+        # 2. Decode header
+        try:
+            header = _decode_part(parts[0])
+        except Exception:
+            raise JwtValidationError(&quot;header_decode_error&quot;)
+
+        alg = header.get(&quot;alg&quot;, &quot;&quot;)
+        kid = header.get(&quot;kid&quot;, &quot;&quot;)
+
+        # 3. Algorithm enforcement
+        if not alg:
+            raise JwtValidationError(&quot;missing_algorithm&quot;)
+        if alg.lower() == &quot;none&quot;:
+            raise JwtValidationError(&quot;algorithm_none_rejected&quot;)
+        if alg not in self._allowed_algs:
+            raise JwtValidationError(f&quot;algorithm_not_allowed: {alg}&quot;)
+        if not kid:
+            raise JwtValidationError(&quot;missing_kid&quot;)
+
+        # 4. Key lookup
+        key = self._cache.get_key(self._jwks_uri, kid)
+        if key is None:
+            raise JwtValidationError(f&quot;unknown_kid: {kid}&quot;)
+
+        # 5. Algorithm consistency: JWKS key alg must match header alg
+        if key.alg and key.alg != alg:
+            raise JwtValidationError(
+                f&quot;algorithm_mismatch: header={alg}, jwks={key.alg}&quot;
+            )
+
+        # 6. Signature verification
+        if not self._verify_sig(token, key):
+            raise JwtValidationError(&quot;signature_invalid&quot;)
+
+        # 7. Decode payload
+        try:
+            payload = _decode_part(parts[1])
+        except Exception:
+            raise JwtValidationError(&quot;payload_decode_error&quot;)
+
+        # 8. Claim validation
+        now = int(time.time())
+
+        exp = payload.get(&quot;exp&quot;)
+        if exp is None:
+            raise JwtValidationError(&quot;missing_exp_claim&quot;)
+        if not isinstance(exp, int):
+            raise JwtValidationError(&quot;invalid_exp_type&quot;)
+        if now &gt; exp + self._skew:
+            raise JwtValidationError(f&quot;token_expired: exp={exp}, now={now}&quot;)
+
+        nbf = payload.get(&quot;nbf&quot;)
+        if nbf is not None:
+            if not isinstance(nbf, int):
+                raise JwtValidationError(&quot;invalid_nbf_type&quot;)
+            if now &lt; nbf - self._skew:
+                raise JwtValidationError(f&quot;token_not_yet_valid: nbf={nbf}&quot;)
+
+        iat = payload.get(&quot;iat&quot;)
+        if iat is not None and isinstance(iat, int):
+            if now - iat &gt; TOKEN_MAX_AGE_S:
+                raise JwtValidationError(f&quot;token_too_old: iat={iat}&quot;)
+
+        iss = payload.get(&quot;iss&quot;)
+        if self._issuer and iss != self._issuer:
+            raise JwtValidationError(f&quot;issuer_mismatch: got={iss!r}&quot;)
+
+        aud = payload.get(&quot;aud&quot;)
+        if self._audience:
+            aud_list = aud if isinstance(aud, list) else [aud]
+            if self._audience not in aud_list:
+                raise JwtValidationError(f&quot;audience_mismatch: got={aud!r}&quot;)
+
+        claims = JwtClaims(
+            sub=payload.get(&quot;sub&quot;),
+            iss=iss,
+            aud=aud,
+            exp=exp,
+            nbf=nbf,
+            iat=iat,
+            jti=payload.get(&quot;jti&quot;),
+            extra={k: v for k, v in payload.items()
+                   if k not in (&quot;sub&quot;, &quot;iss&quot;, &quot;aud&quot;, &quot;exp&quot;, &quot;nbf&quot;, &quot;iat&quot;, &quot;jti&quot;)},
+        )
+        return JwtValidationResult(valid=True, claims=claims, kid=kid, alg=alg)
+
+    @staticmethod
+    def _stub_verify(token: str, key: JwksKey) -&gt; bool:
+        &quot;&quot;&quot;
+        Stub: in production use cryptography.hazmat.primitives.asymmetric
+        to verify the RS256 or ES256 signature.
+        Here we trust a special test marker in key.raw[&quot;_stub_valid&quot;].
+        &quot;&quot;&quot;
+        return key.raw.get(&quot;_stub_valid&quot;, True)
+
+
+# ---------------------------------------------------------------------------
+# JWT builder for tests (minimal; no real signing)
+# ---------------------------------------------------------------------------
+
+def _b64url_encode(data: bytes) -&gt; str:
+    return base64.urlsafe_b64encode(data).rstrip(b&quot;=&quot;).decode()
+
+
+def _build_test_token(
+    kid: str,
+    alg: str = &quot;RS256&quot;,
+    exp_offset: int = 3600,
+    extra_claims: Optional[Dict[str, Any]] = None,
+    iss: str = &quot;https://auth.example.com&quot;,
+    aud: str = &quot;api.example.com&quot;,
+) -&gt; str:
+    &quot;&quot;&quot;Build a minimal JWT for testing (signature is placeholder).&quot;&quot;&quot;
+    now = int(time.time())
+    header  = {&quot;alg&quot;: alg, &quot;kid&quot;: kid, &quot;typ&quot;: &quot;JWT&quot;}
+    payload = {
+        &quot;sub&quot;: &quot;user123&quot;, &quot;iss&quot;: iss, &quot;aud&quot;: aud,
+        &quot;exp&quot;: now + exp_offset, &quot;nbf&quot;: now - 5, &quot;iat&quot;: now,
+        &quot;jti&quot;: &quot;test-jti-001&quot;,
+    }
+    if extra_claims:
+        payload.update(extra_claims)
+    h = _b64url_encode(json.dumps(header).encode())
+    p = _b64url_encode(json.dumps(payload).encode())
+    # Fake signature (stub verifier will accept it)
+    s = _b64url_encode(b&quot;fake_signature_placeholder&quot;)
+    return f&quot;{h}.{p}.{s}&quot;
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_validator(
+    kid: str = &quot;key-001&quot;,
+    alg: str = &quot;RS256&quot;,
+    stub_valid: bool = True,
+    issuer: str = &quot;https://auth.example.com&quot;,
+    audience: str = &quot;api.example.com&quot;,
+) -&gt; JwtValidator:
+    key = JwksKey(kid=kid, alg=alg, kty=&quot;RSA&quot;, use=&quot;sig&quot;,
+                  raw={&quot;_stub_valid&quot;: stub_valid})
+    fetcher = StubJwksFetcher([key])
+    cache   = JwksCache(fetcher, ttl_s=3600)
+    return JwtValidator(
+        jwks_uri=&quot;https://auth.example.com/.well-known/jwks.json&quot;,
+        cache=cache,
+        expected_issuer=issuer,
+        expected_audience=audience,
+    )
+
+
+def test_valid_token():
+    v     = _make_validator()
+    token = _build_test_token(&quot;key-001&quot;)
+    r     = v.validate(token)
+    assert r.valid, r.failure_reason
+    assert r.claims.sub == &quot;user123&quot;
+    print(f&quot;Valid token: passed&quot;)
+
+
+def test_algorithm_none_rejected():
+    v     = _make_validator()
+    token = _build_test_token(&quot;key-001&quot;, alg=&quot;none&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;none&quot; in r.failure_reason
+    print(f&quot;Algorithm none rejected: passed ({r.failure_reason})&quot;)
+
+
+def test_algorithm_hs256_rejected():
+    v     = _make_validator()
+    token = _build_test_token(&quot;key-001&quot;, alg=&quot;HS256&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;not_allowed&quot; in r.failure_reason
+    print(f&quot;HS256 rejected: passed&quot;)
+
+
+def test_expired_token():
+    v     = _make_validator()
+    token = _build_test_token(&quot;key-001&quot;, exp_offset=-3600)   # expired 1h ago
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;expired&quot; in r.failure_reason
+    print(f&quot;Expired token rejected: passed ({r.failure_reason})&quot;)
+
+
+def test_unknown_kid():
+    v     = _make_validator(kid=&quot;key-001&quot;)
+    token = _build_test_token(&quot;unknown-kid&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;unknown_kid&quot; in r.failure_reason
+    print(f&quot;Unknown kid rejected: passed&quot;)
+
+
+def test_issuer_mismatch():
+    v     = _make_validator(issuer=&quot;https://auth.example.com&quot;)
+    token = _build_test_token(&quot;key-001&quot;, iss=&quot;https://evil.attacker.com&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;issuer&quot; in r.failure_reason
+    print(f&quot;Issuer mismatch rejected: passed&quot;)
+
+
+def test_audience_mismatch():
+    v     = _make_validator(audience=&quot;api.example.com&quot;)
+    token = _build_test_token(&quot;key-001&quot;, aud=&quot;other.api.com&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;audience&quot; in r.failure_reason
+    print(f&quot;Audience mismatch rejected: passed&quot;)
+
+
+def test_signature_invalid():
+    v     = _make_validator(stub_valid=False)
+    token = _build_test_token(&quot;key-001&quot;)
+    r     = v.validate(token)
+    assert not r.valid
+    assert &quot;signature&quot; in r.failure_reason
+    print(f&quot;Invalid signature rejected: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+JWT ATTACK VECTORS
+--------------------
+1. ALGORITHM CONFUSION (CVE-2015-9235 and variants):
+   Attacker changes header &quot;alg&quot;:&quot;RS256&quot; → &quot;alg&quot;:&quot;HS256&quot;.
+   Server using the public RSA key as an HMAC secret will verify correctly.
+   Fix: enforce allowed algorithm list server-side; ignore client header alg.
+
+2. &quot;ALG&quot;:&quot;NONE&quot; BYPASS:
+   JWT spec (early) allowed &quot;none&quot; to skip signing.
+   Many libraries accepted unsigned tokens.
+   Fix: reject &quot;none&quot; before any other processing.
+
+3. KID INJECTION:
+   &quot;kid&quot;:&quot;../../dev/null&quot; or &quot;kid&quot;:&quot;; DROP TABLE keys;&quot;
+   If kid is used in a file path or SQL query without sanitisation.
+   Fix: lookup kid in a safe in-memory map; never use in filesystem paths.
+
+4. EXP MANIPULATION:
+   Attacker removes or sets exp = year 9999.
+   Fix: require exp; enforce TOKEN_MAX_AGE_S even if exp is far in future.
+
+5. JWKS SPOOFING (kid-matching attack):
+   Attacker embeds their own public key in the JWT header as a &quot;jku&quot; URL.
+   Fix: never follow jku/x5u URLs from the token header; use pinned JWKS URI.
+
+KEY ROTATION HANDLING
+---------------------
+  JWKS supports multiple keys simultaneously (each with a unique kid).
+  Rotate: add new key to JWKS, update signing service, wait TTL,
+  remove old key. Clients transparently pick up the new kid.
+  Our cache refreshes on kid-not-found to handle rotation latency.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_token()
+    test_algorithm_none_rejected()
+    test_algorithm_hs256_rejected()
+    test_expired_token()
+    test_unknown_kid()
+    test_issuer_mismatch()
+    test_audience_mismatch()
+    test_signature_invalid()
+</code></pre>
+</body>
+</html>

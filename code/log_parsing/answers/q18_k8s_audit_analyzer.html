@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q18_k8s_audit_analyzer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q18_k8s_audit_analyzer.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q18_k8s_audit_analyzer.py</p>
+  <p class="line-count">278 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q18. Kubernetes Audit Log Analyzer
+=====================================
+Detect container exec, secret reads, RBAC escalation, hostNetwork/PID
+pod specs, and anonymous API server access from K8s audit logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Alert on exec into pods.
+  Problem: kubectl exec is used by legitimate devs. Without filtering
+  for production namespaces, time of day, or user context, the alert rate
+  overwhelms. Misses the silent ways to get root: create a hostPID pod.
+
+BETTER: Alert on exec + secret read in production namespace.
+  Problem: Misses RBAC escalation (creating ClusterRoleBindings),
+  hostNetwork/PID pod creation (node escape), and anonymous API access.
+
+GOOGLE-LEVEL (this file):
+  - exec/attach: flag by user + namespace (prod vs dev) + time.
+  - Secret access: read/list secrets, cross-namespace.
+  - RBAC escalation: create/update ClusterRoleBinding or RoleBinding
+    that grants cluster-admin or wildcard verbs.
+  - hostNetwork/hostPID/hostIPC pods: node-level escape vectors.
+  - Anonymous access: user == &quot;system:anonymous&quot;.
+
+Complexity: O(N) over all audit events.
+=============================================================================
+&quot;&quot;&quot;
+
+import json
+import sys
+import re
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (K8s audit log, one JSON event per line)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = r&quot;&quot;&quot;
+{&quot;timestamp&quot;:&quot;2024-03-12T08:00:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;alice&quot;,&quot;groups&quot;:[&quot;system:masters&quot;]},&quot;verb&quot;:&quot;create&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;pods&quot;,&quot;namespace&quot;:&quot;production&quot;},&quot;requestObject&quot;:{&quot;spec&quot;:{&quot;hostNetwork&quot;:true,&quot;hostPID&quot;:true,&quot;containers&quot;:[{&quot;name&quot;:&quot;debug&quot;,&quot;image&quot;:&quot;ubuntu&quot;}]}},&quot;responseStatus&quot;:{&quot;code&quot;:201}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:01:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;alice&quot;},&quot;verb&quot;:&quot;create&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;clusterrolebindings&quot;,&quot;namespace&quot;:&quot;&quot;},&quot;requestObject&quot;:{&quot;subjects&quot;:[{&quot;kind&quot;:&quot;User&quot;,&quot;name&quot;:&quot;eve&quot;}],&quot;roleRef&quot;:{&quot;kind&quot;:&quot;ClusterRole&quot;,&quot;name&quot;:&quot;cluster-admin&quot;}},&quot;responseStatus&quot;:{&quot;code&quot;:201}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:02:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;bob&quot;},&quot;verb&quot;:&quot;get&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;secrets&quot;,&quot;namespace&quot;:&quot;production&quot;,&quot;name&quot;:&quot;db-credentials&quot;},&quot;responseStatus&quot;:{&quot;code&quot;:200}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:02:30Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;bob&quot;},&quot;verb&quot;:&quot;list&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;secrets&quot;,&quot;namespace&quot;:&quot;kube-system&quot;},&quot;responseStatus&quot;:{&quot;code&quot;:200}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:03:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;carol&quot;},&quot;verb&quot;:&quot;create&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;pods/exec&quot;,&quot;namespace&quot;:&quot;production&quot;,&quot;name&quot;:&quot;web-app-xyz&quot;},&quot;requestObject&quot;:{&quot;command&quot;:[&quot;/bin/bash&quot;]},&quot;responseStatus&quot;:{&quot;code&quot;:101}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:04:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;system:anonymous&quot;},&quot;verb&quot;:&quot;list&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;pods&quot;,&quot;namespace&quot;:&quot;default&quot;},&quot;responseStatus&quot;:{&quot;code&quot;:200}}
+{&quot;timestamp&quot;:&quot;2024-03-12T08:05:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;system:anonymous&quot;},&quot;verb&quot;:&quot;get&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;secrets&quot;,&quot;namespace&quot;:&quot;default&quot;,&quot;name&quot;:&quot;admin-token&quot;},&quot;responseStatus&quot;:{&quot;code&quot;:403}}
+{&quot;timestamp&quot;:&quot;2024-03-12T09:00:00Z&quot;,&quot;user&quot;:{&quot;username&quot;:&quot;dave&quot;},&quot;verb&quot;:&quot;get&quot;,&quot;objectRef&quot;:{&quot;resource&quot;:&quot;configmaps&quot;,&quot;namespace&quot;:&quot;development&quot;,&quot;name&quot;:&quot;app-config&quot;},&quot;responseStatus&quot;:{&quot;code&quot;:200}}
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+PRIVILEGED_NAMESPACES = {&quot;production&quot;, &quot;kube-system&quot;, &quot;kube-public&quot;, &quot;default&quot;}
+HIGH_PRIVILEGE_ROLES  = {&quot;cluster-admin&quot;, &quot;admin&quot;, &quot;edit&quot;}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_event(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def get_username(event: dict) -&gt; str:
+    return event.get(&quot;user&quot;, {}).get(&quot;username&quot;, &quot;unknown&quot;)
+
+
+def get_ts(event: dict) -&gt; float:
+    try:
+        return datetime.strptime(event[&quot;timestamp&quot;], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except (KeyError, ValueError):
+        return 0.0
+
+
+def get_obj(event: dict) -&gt; dict:
+    return event.get(&quot;objectRef&quot;, {})
+
+
+def get_status(event: dict) -&gt; int:
+    return event.get(&quot;responseStatus&quot;, {}).get(&quot;code&quot;, 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_exec_attach(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        obj  = get_obj(e)
+        resource = obj.get(&quot;resource&quot;, &quot;&quot;)
+        if resource not in (&quot;pods/exec&quot;, &quot;pods/attach&quot;):
+            continue
+        ns   = obj.get(&quot;namespace&quot;, &quot;&quot;)
+        user = get_username(e)
+        verb = e.get(&quot;verb&quot;, &quot;&quot;)
+        alerts.append({
+            &quot;type&quot;:      &quot;POD_EXEC_ATTACH&quot;,
+            &quot;user&quot;:      user,
+            &quot;namespace&quot;: ns,
+            &quot;pod&quot;:       obj.get(&quot;name&quot;, &quot;?&quot;),
+            &quot;verb&quot;:      verb,
+            &quot;sensitive&quot;: ns in PRIVILEGED_NAMESPACES,
+            &quot;ts&quot;:        get_ts(e),
+        })
+    return alerts
+
+
+def detect_secret_access(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        obj = get_obj(e)
+        if obj.get(&quot;resource&quot;) != &quot;secrets&quot;:
+            continue
+        ns   = obj.get(&quot;namespace&quot;, &quot;&quot;)
+        user = get_username(e)
+        verb = e.get(&quot;verb&quot;, &quot;&quot;)
+        if verb in (&quot;get&quot;, &quot;list&quot;, &quot;watch&quot;):
+            alerts.append({
+                &quot;type&quot;:      &quot;SECRET_READ&quot;,
+                &quot;user&quot;:      user,
+                &quot;namespace&quot;: ns,
+                &quot;secret&quot;:    obj.get(&quot;name&quot;, &quot;(all)&quot;),
+                &quot;verb&quot;:      verb,
+                &quot;status&quot;:    get_status(e),
+                &quot;ts&quot;:        get_ts(e),
+            })
+    return alerts
+
+
+def detect_rbac_escalation(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        obj      = get_obj(e)
+        resource = obj.get(&quot;resource&quot;, &quot;&quot;)
+        verb     = e.get(&quot;verb&quot;, &quot;&quot;)
+        if resource not in (&quot;clusterrolebindings&quot;, &quot;rolebindings&quot;) or verb not in (&quot;create&quot;, &quot;update&quot;, &quot;patch&quot;):
+            continue
+
+        req_obj  = e.get(&quot;requestObject&quot;, {})
+        role_ref = req_obj.get(&quot;roleRef&quot;, {})
+        role_name = role_ref.get(&quot;name&quot;, &quot;&quot;)
+        subjects  = req_obj.get(&quot;subjects&quot;, [])
+
+        if role_name in HIGH_PRIVILEGE_ROLES or role_name == &quot;*&quot;:
+            alerts.append({
+                &quot;type&quot;:     &quot;RBAC_ESCALATION&quot;,
+                &quot;actor&quot;:    get_username(e),
+                &quot;resource&quot;: resource,
+                &quot;role&quot;:     role_name,
+                &quot;subjects&quot;: [s.get(&quot;name&quot;) for s in subjects],
+                &quot;ts&quot;:       get_ts(e),
+            })
+    return alerts
+
+
+def detect_host_namespace_pods(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        obj  = get_obj(e)
+        verb = e.get(&quot;verb&quot;, &quot;&quot;)
+        if obj.get(&quot;resource&quot;) != &quot;pods&quot; or verb not in (&quot;create&quot;, &quot;update&quot;):
+            continue
+
+        spec = e.get(&quot;requestObject&quot;, {}).get(&quot;spec&quot;, {})
+        flags = []
+        if spec.get(&quot;hostNetwork&quot;):
+            flags.append(&quot;hostNetwork&quot;)
+        if spec.get(&quot;hostPID&quot;):
+            flags.append(&quot;hostPID&quot;)
+        if spec.get(&quot;hostIPC&quot;):
+            flags.append(&quot;hostIPC&quot;)
+
+        # Check privileged containers
+        for container in spec.get(&quot;containers&quot;, []):
+            sc = container.get(&quot;securityContext&quot;, {})
+            if sc.get(&quot;privileged&quot;):
+                flags.append(f&quot;privileged_container:{container.get(&#x27;name&#x27;,&#x27;?&#x27;)}&quot;)
+
+        if flags:
+            alerts.append({
+                &quot;type&quot;:      &quot;HOST_NAMESPACE_POD&quot;,
+                &quot;user&quot;:      get_username(e),
+                &quot;namespace&quot;: obj.get(&quot;namespace&quot;, &quot;&quot;),
+                &quot;flags&quot;:     flags,
+                &quot;ts&quot;:        get_ts(e),
+            })
+    return alerts
+
+
+def detect_anonymous_access(events: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:      &quot;ANONYMOUS_API_ACCESS&quot;,
+            &quot;verb&quot;:      e.get(&quot;verb&quot;),
+            &quot;resource&quot;:  get_obj(e).get(&quot;resource&quot;),
+            &quot;namespace&quot;: get_obj(e).get(&quot;namespace&quot;, &quot;&quot;),
+            &quot;status&quot;:    get_status(e),
+            &quot;ts&quot;:        get_ts(e),
+        }
+        for e in events
+        if get_username(e) == &quot;system:anonymous&quot;
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(execs, secrets, rbac, host_ns, anon) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;KUBERNETES AUDIT LOG — THREAT DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[POD_EXEC_ATTACH] {len(execs)} event(s)&quot;)
+    for a in execs:
+        tag = &quot; *** PRIVILEGED NAMESPACE ***&quot; if a[&quot;sensitive&quot;] else &quot;&quot;
+        print(f&quot;  user={a[&#x27;user&#x27;]}  pod={a[&#x27;pod&#x27;]}  ns={a[&#x27;namespace&#x27;]}{tag}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[SECRET_READ] {len(secrets)} event(s)&quot;)
+    for a in secrets:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  ns={a[&#x27;namespace&#x27;]}  secret={a[&#x27;secret&#x27;]}  &quot;
+              f&quot;verb={a[&#x27;verb&#x27;]}  status={a[&#x27;status&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[RBAC_ESCALATION] {len(rbac)} event(s)&quot;)
+    for a in rbac:
+        print(f&quot;  [CRITICAL] actor={a[&#x27;actor&#x27;]}  resource={a[&#x27;resource&#x27;]}  &quot;
+              f&quot;role={a[&#x27;role&#x27;]}  subjects={a[&#x27;subjects&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[HOST_NAMESPACE_POD] {len(host_ns)} event(s)&quot;)
+    for a in host_ns:
+        print(f&quot;  [CRITICAL] user={a[&#x27;user&#x27;]}  ns={a[&#x27;namespace&#x27;]}  &quot;
+              f&quot;flags={a[&#x27;flags&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[ANONYMOUS_API_ACCESS] {len(anon)} event(s)&quot;)
+    for a in anon:
+        print(f&quot;  verb={a[&#x27;verb&#x27;]}  resource={a[&#x27;resource&#x27;]}  ns={a[&#x27;namespace&#x27;]}  &quot;
+              f&quot;status={a[&#x27;status&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    events = [e for e in (parse_event(l) for l in raw_lines) if e is not None]
+    print(f&quot;Parsed {len(events)} Kubernetes audit events.\n&quot;)
+    print_report(
+        detect_exec_attach(events),
+        detect_secret_access(events),
+        detect_rbac_escalation(events),
+        detect_host_namespace_pods(events),
+        detect_anonymous_access(events),
+    )
+</code></pre>
+</body>
+</html>

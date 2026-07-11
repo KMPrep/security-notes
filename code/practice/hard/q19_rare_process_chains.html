@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q19_rare_process_chains.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q19_rare_process_chains.py</h1>
+  <p class="file-path">Source: code\practice\hard\q19_rare_process_chains.py</p>
+  <p class="line-count">444 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q19 [Hard] — Rare Parent-Child Process Chain Detection
+=============================================================================
+
+PROBLEM
+-------
+Attackers abuse legitimate binaries by spawning them from unusual parents.
+Classic examples:
+  - Word.exe → cmd.exe → powershell.exe (macro execution)
+  - nginx → /bin/sh (web shell)
+  - sshd → python (interactive shell from web server)
+  - cron → wget (download-and-execute)
+  - explorer.exe → wscript.exe → powershell.exe (phishing chain)
+
+Given a stream of process-start events, detect parent-child relationships
+that have not been seen before (or are below a frequency threshold) and
+that match known-suspicious patterns.
+
+Approach requires:
+  a) Counting historical (parent, child) pair frequencies.
+  b) Flagging pairs below a rarity threshold.
+  c) Applying high-confidence pattern rules (unconditionally suspicious).
+  d) Multi-hop chain detection (depth-first ancestor traversal).
+
+Input event fields: pid, ppid, exe, parent_exe, cmdline, host, ts, user
+
+CLARIFYING QUESTIONS
+--------------------
+1. Do we have access to a training corpus (normal process pairs)?
+   → Yes; feed historical events first; then flag new pairs below threshold.
+2. Are exe paths normalised (lowercase, no drive letter noise)?
+   → Normalise to basename in the detector.
+3. What chain depth to check?
+   → Configurable; default 3 hops (grandparent → parent → child).
+4. Should we track per-host or globally?
+   → Global model is fine; per-host reduces FP for specialised servers.
+5. Rarity threshold: absolute count or frequency?
+   → Count; pairs seen &lt; N times overall are flagged as rare.
+
+=============================================================================
+APPROACH 1 — NAIVE (hardcoded rule table)
+=============================================================================
+  Dict of {parent_exe: Set[suspicious_children]} patterns.
+  O(1) per event.  Does not learn; cannot detect novel pairs.
+
+=============================================================================
+APPROACH 2 — FREQUENCY-BASED RARITY MODEL (RECOMMENDED)
+=============================================================================
+  - defaultdict(int) of (parent_basename, child_basename) → count
+  - Pairs below `rarity_threshold` are flagged
+  - Chain tracking: store pid→exe, pid→ppid for lineage walk
+  - Hard rules overlay (unconditionally suspicious, e.g. doc → shell)
+  O(1) per event; O(D) memory per host for pid→ppid map.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import os
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Hard-rule suspicious pairs (parent_base → set of child_bases)
+# ---------------------------------------------------------------------------
+
+# These combos are ALWAYS suspicious regardless of frequency
+_SUSPICIOUS_CHAINS: Dict[str, FrozenSet[str]] = {
+    &quot;winword.exe&quot;:     frozenset({&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;, &quot;cscript.exe&quot;, &quot;mshta.exe&quot;, &quot;regsvr32.exe&quot;}),
+    &quot;excel.exe&quot;:       frozenset({&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;, &quot;cscript.exe&quot;}),
+    &quot;outlook.exe&quot;:     frozenset({&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;}),
+    &quot;nginx&quot;:           frozenset({&quot;sh&quot;, &quot;bash&quot;, &quot;dash&quot;, &quot;python&quot;, &quot;python3&quot;, &quot;perl&quot;, &quot;ruby&quot;}),
+    &quot;apache2&quot;:         frozenset({&quot;sh&quot;, &quot;bash&quot;, &quot;python&quot;, &quot;perl&quot;}),
+    &quot;httpd&quot;:           frozenset({&quot;sh&quot;, &quot;bash&quot;, &quot;python&quot;, &quot;perl&quot;}),
+    &quot;tomcat&quot;:          frozenset({&quot;sh&quot;, &quot;bash&quot;, &quot;python&quot;, &quot;perl&quot;, &quot;java&quot;}),
+    &quot;sshd&quot;:            frozenset({&quot;python&quot;, &quot;python3&quot;, &quot;perl&quot;, &quot;ruby&quot;, &quot;nc&quot;, &quot;ncat&quot;, &quot;nmap&quot;}),
+    &quot;cron&quot;:            frozenset({&quot;wget&quot;, &quot;curl&quot;, &quot;nc&quot;, &quot;ncat&quot;, &quot;python&quot;, &quot;bash&quot;}),
+    &quot;explorer.exe&quot;:    frozenset({&quot;wscript.exe&quot;, &quot;cscript.exe&quot;, &quot;mshta.exe&quot;}),
+    &quot;lsass.exe&quot;:       frozenset({&quot;cmd.exe&quot;, &quot;powershell.exe&quot;}),  # credential dumping artefact
+    &quot;services.exe&quot;:    frozenset({&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;net.exe&quot;}),
+}
+
+# Parents that are themselves unusual launchers
+_NEVER_SHOULD_EXEC_SHELL: FrozenSet[str] = frozenset({
+    &quot;mysqld&quot;, &quot;postgres&quot;, &quot;redis-server&quot;, &quot;mongod&quot;,
+    &quot;java&quot;,  # should not exec raw shells
+})
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProcessEvent:
+    pid: int
+    ppid: int
+    exe: str
+    parent_exe: str
+    cmdline: str
+    host: str
+    ts: float
+    user: str
+
+
+@dataclass
+class ChainAlert:
+    alert_type: str
+    severity: str
+    host: str
+    pid: int
+    exe: str
+    parent_exe: str
+    ts: float
+    detail: str
+    chain: List[str] = field(default_factory=list)  # ancestor chain for context
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_event(raw: dict) -&gt; Optional[ProcessEvent]:
+    ts = _parse_ts(raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return ProcessEvent(
+        pid=int(raw.get(&quot;pid&quot;, 0)),
+        ppid=int(raw.get(&quot;ppid&quot;, 0)),
+        exe=raw.get(&quot;exe&quot;, &quot;&quot;),
+        parent_exe=raw.get(&quot;parent_exe&quot;, &quot;&quot;),
+        cmdline=raw.get(&quot;cmdline&quot;, &quot;&quot;),
+        host=raw.get(&quot;host&quot;, &quot;localhost&quot;),
+        ts=ts,
+        user=raw.get(&quot;user&quot;, &quot;&quot;),
+    )
+
+
+def _base(exe: str) -&gt; str:
+    return os.path.basename(exe).lower()
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive hard-rule detector
+# ---------------------------------------------------------------------------
+
+class NaiveProcessChainDetector:
+    &quot;&quot;&quot;
+    Checks parent→child against a static suspicious table.
+    O(1) per event.
+    &quot;&quot;&quot;
+
+    def __init__(self, allowlist: Optional[Set[Tuple[str, str]]] = None) -&gt; None:
+        self.allowlist = allowlist or set()
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[ChainAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        p_base = _base(evt.parent_exe)
+        c_base = _base(evt.exe)
+        if (p_base, c_base) in self.allowlist:
+            return []
+
+        alerts = []
+        if p_base in _SUSPICIOUS_CHAINS and c_base in _SUSPICIOUS_CHAINS[p_base]:
+            alerts.append(ChainAlert(
+                alert_type=&quot;suspicious_parent_child&quot;,
+                severity=&quot;high&quot;,
+                host=evt.host,
+                pid=evt.pid, exe=evt.exe, parent_exe=evt.parent_exe,
+                ts=evt.ts,
+                detail=f&quot;Suspicious: {p_base!r} spawned {c_base!r}&quot;,
+            ))
+        if p_base in _NEVER_SHOULD_EXEC_SHELL and c_base in {&quot;sh&quot;, &quot;bash&quot;, &quot;dash&quot;, &quot;zsh&quot;,
+                                                               &quot;cmd.exe&quot;, &quot;powershell.exe&quot;}:
+            alerts.append(ChainAlert(
+                alert_type=&quot;db_server_spawned_shell&quot;,
+                severity=&quot;critical&quot;,
+                host=evt.host,
+                pid=evt.pid, exe=evt.exe, parent_exe=evt.parent_exe,
+                ts=evt.ts,
+                detail=f&quot;DB/service {p_base!r} spawned shell {c_base!r}&quot;,
+            ))
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Frequency-based rarity model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ProcNode:
+    exe: str
+    ppid: int
+    ts: float
+
+
+class ProcessChainDetector:
+    &quot;&quot;&quot;
+    Full stateful detector.
+    - Learns (parent, child) pair frequencies.
+    - Flags rare pairs below rarity_threshold.
+    - Performs multi-hop chain walk.
+    - Overlays hard rules.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        rarity_threshold: int = 5,
+        max_chain_depth: int = 3,
+        allowlist: Optional[Set[Tuple[str, str]]] = None,
+        pid_ttl_s: float = 3600.0,
+    ) -&gt; None:
+        self.rarity_threshold = rarity_threshold
+        self.max_chain_depth = max_chain_depth
+        self.allowlist = allowlist or set()
+        self.pid_ttl = pid_ttl_s
+        # (parent_base, child_base) → count
+        self._pair_freq: Dict[Tuple[str, str], int] = defaultdict(int)
+        # host → (pid → _ProcNode)
+        self._proc_table: Dict[str, Dict[int, _ProcNode]] = defaultdict(dict)
+        self._naive = NaiveProcessChainDetector(allowlist=allowlist)
+        self.malformed = 0
+
+    # -----------------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------------
+
+    def _get_chain(self, host: str, ppid: int, depth: int) -&gt; List[str]:
+        &quot;&quot;&quot;Walk ancestor tree up to `depth` hops; return list of exe basenames.&quot;&quot;&quot;
+        chain = []
+        current_ppid = ppid
+        seen_pids: Set[int] = set()
+        for _ in range(depth):
+            if current_ppid in seen_pids or current_ppid == 0:
+                break
+            seen_pids.add(current_ppid)
+            node = self._proc_table[host].get(current_ppid)
+            if node is None:
+                break
+            chain.append(_base(node.exe))
+            current_ppid = node.ppid
+        return chain
+
+    def _evict_stale_pids(self, host: str, now: float) -&gt; None:
+        &quot;&quot;&quot;Remove PID entries older than pid_ttl (approximate; evict on access).&quot;&quot;&quot;
+        table = self._proc_table[host]
+        stale = [pid for pid, node in table.items()
+                 if now - node.ts &gt; self.pid_ttl]
+        for pid in stale:
+            del table[pid]
+
+    # -----------------------------------------------------------------------
+
+    def feed_baseline(self, raw: dict) -&gt; None:
+        &quot;&quot;&quot;Ingest historical events to build frequency model (no alerting).&quot;&quot;&quot;
+        evt = _parse_event(raw)
+        if evt is None:
+            return
+        p_base = _base(evt.parent_exe)
+        c_base = _base(evt.exe)
+        self._pair_freq[(p_base, c_base)] += 1
+        self._proc_table[evt.host][evt.pid] = _ProcNode(evt.exe, evt.ppid, evt.ts)
+
+    def process(self, raw: dict) -&gt; List[ChainAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        p_base = _base(evt.parent_exe)
+        c_base = _base(evt.exe)
+
+        # Store in process table for lineage
+        self._proc_table[evt.host][evt.pid] = _ProcNode(evt.exe, evt.ppid, evt.ts)
+
+        # Evict stale PIDs periodically (cheap: only when a new event arrives)
+        if evt.pid % 50 == 0:
+            self._evict_stale_pids(evt.host, evt.ts)
+
+        alerts: List[ChainAlert] = []
+
+        # Allowlist check
+        if (p_base, c_base) not in self.allowlist:
+            # Hard rule check first
+            alerts.extend(self._naive.process(raw))
+
+            # Frequency-based rarity
+            pair = (p_base, c_base)
+            count = self._pair_freq.get(pair, 0)
+            self._pair_freq[pair] = count + 1
+
+            if count &lt; self.rarity_threshold and p_base and c_base:
+                ancestor_chain = self._get_chain(evt.host, evt.ppid, self.max_chain_depth)
+                alerts.append(ChainAlert(
+                    alert_type=&quot;rare_parent_child&quot;,
+                    severity=&quot;medium&quot;,
+                    host=evt.host,
+                    pid=evt.pid, exe=evt.exe, parent_exe=evt.parent_exe,
+                    ts=evt.ts,
+                    detail=(f&quot;Rare pair: {p_base!r} → {c_base!r} &quot;
+                            f&quot;(seen {count} times; threshold {self.rarity_threshold})&quot;),
+                    chain=ancestor_chain,
+                ))
+
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _ev(exe, parent_exe, pid=100, ppid=50, host=&quot;host1&quot;, ts=1000.0, user=&quot;root&quot;) -&gt; dict:
+    return {&quot;pid&quot;: pid, &quot;ppid&quot;: ppid, &quot;exe&quot;: exe, &quot;parent_exe&quot;: parent_exe,
+            &quot;cmdline&quot;: f&quot;{exe} -x&quot;, &quot;host&quot;: host, &quot;ts&quot;: ts, &quot;user&quot;: user}
+
+
+def test_hard_rule_office_macro():
+    det = NaiveProcessChainDetector()
+    alerts = det.process(_ev(&quot;/c/Program Files/winword.exe&quot;, &quot;/windows/system32/cmd.exe&quot;))
+    # Note: exe is the child, parent_exe is the parent
+    # Actually need child=cmd, parent=winword
+    det2 = NaiveProcessChainDetector()
+    alerts2 = det2.process(_ev(
+        &quot;/windows/system32/cmd.exe&quot;,
+        &quot;/c/Program Files/Microsoft Office/winword.exe&quot;
+    ))
+    assert any(a.alert_type == &quot;suspicious_parent_child&quot; for a in alerts2), \
+        f&quot;Expected alert; got {[a.alert_type for a in alerts2]}&quot;
+    print(&quot;Office macro hard rule: passed&quot;)
+
+
+def test_db_shell_spawn():
+    det = NaiveProcessChainDetector()
+    alerts = det.process(_ev(&quot;/bin/bash&quot;, &quot;/usr/sbin/mysqld&quot;))
+    assert any(a.alert_type == &quot;db_server_spawned_shell&quot; for a in alerts)
+    print(&quot;DB shell spawn: passed&quot;)
+
+
+def test_webserver_shell():
+    det = ProcessChainDetector(rarity_threshold=5)
+    alerts = det.process(_ev(&quot;/bin/sh&quot;, &quot;/usr/sbin/nginx&quot;))
+    assert any(a.alert_type == &quot;suspicious_parent_child&quot; for a in alerts)
+    print(&quot;Webserver shell: passed&quot;)
+
+
+def test_rare_pair_flagged():
+    det = ProcessChainDetector(rarity_threshold=3)
+    # Feed 2 baseline events
+    for i in range(2):
+        det.feed_baseline(_ev(&quot;/usr/bin/python3&quot;, &quot;/usr/bin/cron&quot;,
+                               pid=100 + i, ts=float(900 + i)))
+    # Third event should be flagged as rare (count was 2, below threshold 3)
+    alerts = det.process(_ev(&quot;/usr/bin/python3&quot;, &quot;/usr/bin/cron&quot;, pid=200, ts=1000.0))
+    # rare_parent_child fires when count &lt; threshold (0, 1, 2 → rare; 3+ → not)
+    # After 2 baseline feeds, count=2 &lt; 3, so should still flag
+    assert any(a.alert_type == &quot;rare_parent_child&quot; for a in alerts), \
+        f&quot;Expected rare_parent_child; got {[a.alert_type for a in alerts]}&quot;
+    print(&quot;Rare pair flagged: passed&quot;)
+
+
+def test_common_pair_not_flagged():
+    det = ProcessChainDetector(rarity_threshold=3)
+    # Feed 5 baseline events (above threshold)
+    for i in range(5):
+        det.feed_baseline(_ev(&quot;/bin/ls&quot;, &quot;/bin/bash&quot;, pid=100 + i, ts=float(900 + i)))
+    # 6th event - pair has count=5 → not rare
+    alerts = det.process(_ev(&quot;/bin/ls&quot;, &quot;/bin/bash&quot;, pid=200, ts=1000.0))
+    rare = [a for a in alerts if a.alert_type == &quot;rare_parent_child&quot;]
+    assert len(rare) == 0
+    print(&quot;Common pair not flagged: passed&quot;)
+
+
+def test_chain_walk():
+    det = ProcessChainDetector(rarity_threshold=100, max_chain_depth=3)
+    # Build chain: pid1(bash) → pid2(python) → pid3(nc)
+    det.feed_baseline(_ev(&quot;/bin/bash&quot;, &quot;/usr/sbin/sshd&quot;, pid=1, ppid=0, ts=900.0))
+    det.feed_baseline(_ev(&quot;/usr/bin/python3&quot;, &quot;/bin/bash&quot;, pid=2, ppid=1, ts=901.0))
+    alerts = det.process(_ev(&quot;/bin/nc&quot;, &quot;/usr/bin/python3&quot;, pid=3, ppid=2, ts=1000.0))
+    # Find the rare_parent_child alert and check chain
+    chain_alerts = [a for a in alerts if a.alert_type == &quot;rare_parent_child&quot;]
+    assert chain_alerts, f&quot;Expected rare_parent_child; got {[a.alert_type for a in alerts]}&quot;
+    assert &quot;python3&quot; in chain_alerts[0].chain or &quot;bash&quot; in chain_alerts[0].chain
+    print(&quot;Chain walk: passed&quot;)
+
+
+def test_malformed():
+    det = ProcessChainDetector()
+    r = det.process({&quot;pid&quot;: 1})  # missing ts
+    assert r == []
+    assert det.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Living-off-the-land attacks (LotL) use legitimate binaries (cmd, powershell,
+  wscript, cscript, mshta, regsvr32) to avoid signature-based AV.
+  The key signal is the parent process: a web server should never spawn bash.
+
+COMMON ATTACK CHAINS
+  Macro execution:    winword → wscript → powershell → (download C2 agent)
+  Web shell:          nginx/apache → /bin/sh  → curl → malware
+  Cron download:      cron → wget → bash script
+  LOLBins Windows:    msiexec → cmd → regsvr32 (register malicious COM DLL)
+  Container escape:   containerd-shim → nsenter → chroot
+
+HARDENING / COMPLEMENTARY DEFENCES
+  - Process execution whitelisting (AppLocker / SRP / SELinux domain transitions)
+  - EDR with parent-child baseline (CrowdStrike, Defender for Endpoint)
+  - Seccomp / sandbox: block exec syscall from web server worker processes
+  - Immutable container image: container rootfs mounted read-only
+
+FALSE POSITIVES
+  - Admin scripts that legitimately run shells from cron or services
+  - Development environments (IDE spawning arbitrary build tools)
+  - Mitigation: per-host allowlists; environment tags (dev vs prod)
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_hard_rule_office_macro()
+    test_db_shell_spawn()
+    test_webserver_shell()
+    test_rare_pair_flagged()
+    test_common_pair_not_flagged()
+    test_chain_walk()
+    test_malformed()
+</code></pre>
+</body>
+</html>

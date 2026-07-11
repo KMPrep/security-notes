@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 47 — Kubernetes Cluster Security Hardening</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario47-kubernetes-hardening.md</p>
+<h1 id="scenario-47-kubernetes-cluster-security-hardening">Scenario 47 — Kubernetes Cluster Security Hardening</h1>
+<blockquote>
+<p><strong>Scenario:</strong> A production Kubernetes cluster runs 200 microservices across dev, staging, and prod namespaces on the same cluster. Pod-to-pod communication is unrestricted.</p>
+<p><strong>Candidate questions:</strong></p>
+<ul>
+<li>What is the threat model for a compromised pod in this shared-namespace architecture?</li>
+<li>How do you enforce workload identity and service-to-service authentication (mTLS)?</li>
+<li>What controls prevent privilege escalation from a container to the host node?</li>
+<li>How do you detect lateral movement within the cluster (unusual pod-to-pod calls)?</li>
+<li>What residual risk remains for third-party Helm charts with unknown provenance?</li>
+</ul>
+</blockquote>
+<hr />
+<h2 id="1-assets-what-are-we-protecting">1. ASSETS — What are we protecting?</h2>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Sensitivity</th>
+<th>Why It Matters</th>
+<th>What Could Go Wrong If Compromised</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kubernetes API server</td>
+<td>Critical</td>
+<td>Central control plane for all cluster operations</td>
+<td>Full cluster takeover, workload manipulation, secret exfiltration</td>
+</tr>
+<tr>
+<td>Kubernetes Secrets (etcd)</td>
+<td>Critical</td>
+<td>Holds TLS certs, DB credentials, API keys, service tokens</td>
+<td>Mass credential theft from a single etcd access</td>
+</tr>
+<tr>
+<td>Service account tokens mounted in pods</td>
+<td>Critical</td>
+<td>Primary identity for pod-to-API-server communication</td>
+<td>Token theft enables API server privilege escalation</td>
+</tr>
+<tr>
+<td>Node (kubelet) with host filesystem access</td>
+<td>Critical</td>
+<td>Compromise of node allows access to all pods on that node</td>
+<td>Container escape grants attacker host-level access</td>
+</tr>
+<tr>
+<td>etcd datastore</td>
+<td>Critical</td>
+<td>Stores all cluster state including secrets in base64</td>
+<td>Direct etcd access bypasses all API server authorization</td>
+</tr>
+<tr>
+<td>Production namespace workloads and data</td>
+<td>Critical</td>
+<td>Customer-facing services and PII data in transit</td>
+<td>Cross-namespace lateral movement reaches prod from compromised dev pod</td>
+</tr>
+<tr>
+<td>Container images in private registry</td>
+<td>High</td>
+<td>Supply chain for all deployed workloads</td>
+<td>Malicious image deployed at scale if registry is compromised</td>
+</tr>
+<tr>
+<td>Helm chart release values and secrets</td>
+<td>High</td>
+<td>Often contain credentials and configuration</td>
+<td>Leaked release values expose database passwords and API keys</td>
+</tr>
+<tr>
+<td>Network policies and RBAC configuration</td>
+<td>High</td>
+<td>Define the security posture of the entire cluster</td>
+<td>Misconfiguration creates open lateral movement paths</td>
+</tr>
+<tr>
+<td>Third-party Helm chart dependencies</td>
+<td>High</td>
+<td>Unknown provenance code running with workload permissions</td>
+<td>Malicious third-party chart exfiltrates secrets or pivots laterally</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-threat-actors-who-attacks-and-how">2. THREAT ACTORS — Who attacks and how?</h2>
+<table>
+<thead>
+<tr>
+<th>Actor</th>
+<th>Motivation</th>
+<th>Likely TTPs</th>
+<th>MITRE ATT&amp;CK</th>
+<th>Capability</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attacker with RCE in application container</td>
+<td>Lateral movement and data exfiltration</td>
+<td>Container escape, service account token theft, API server probing</td>
+<td>T1610, T1528, T1552</td>
+<td>Medium to High</td>
+<td>External</td>
+</tr>
+<tr>
+<td>Malicious or compromised Helm chart maintainer</td>
+<td>Supply chain backdoor in production workloads</td>
+<td>Embed reverse shell or credential harvester in chart template</td>
+<td>T1195, T1059</td>
+<td>Medium</td>
+<td>External supply chain</td>
+</tr>
+<tr>
+<td>Insider developer with prod namespace access</td>
+<td>Data theft or sabotage</td>
+<td>Exec into prod pod, kubectl port-forward to internal service</td>
+<td>T1059, T1078</td>
+<td>Medium</td>
+<td>Insider</td>
+</tr>
+<tr>
+<td>Nation-state targeting production services</td>
+<td>Long-term persistence and espionage</td>
+<td>Compromise CI/CD to inject malicious image, deploy to cluster</td>
+<td>T1195, T1610</td>
+<td>Very High</td>
+<td>APT</td>
+</tr>
+<tr>
+<td>Cryptominer deploying workloads via exposed API server</td>
+<td>Resource abuse</td>
+<td>Exploit exposed or unauthenticated API server endpoint</td>
+<td>T1610, T1496</td>
+<td>Low</td>
+<td>External opportunistic</td>
+</tr>
+<tr>
+<td>Attacker exploiting privileged container</td>
+<td>Host node takeover</td>
+<td>Mount host filesystem, escape to node, pivot to all pods</td>
+<td>T1611, T1610</td>
+<td>Medium</td>
+<td>External</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-trust-boundaries-where-does-trust-change">3. TRUST BOUNDARIES — Where does trust change?</h2>
+<h3 id="31-high-level-trust-boundary-diagram">3.1 High-level trust boundary diagram</h3>
+<pre class="mermaid">
+flowchart LR
+    Internet[External Traffic] --> Ingress[Ingress Controller]
+    Ingress --> ProdNS[Production Namespace]
+    Ingress --> StagingNS[Staging Namespace]
+    DevNS[Dev Namespace] --> KubeAPI[Kubernetes API Server]
+    ProdNS --> KubeAPI
+    StagingNS --> KubeAPI
+    KubeAPI --> etcd[etcd Datastore]
+    KubeAPI --> Kubelet[Node Kubelet]
+    Kubelet --> HostOS[Host Node OS]
+    ProdNS -->|Unrestricted today| StagingNS
+    StagingNS -->|Unrestricted today| DevNS
+</pre>
+<h3 id="32-workload-identity-and-mtls-service-mesh-flow">3.2 Workload identity and mTLS service mesh flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant PodA as ServiceA-Pod
+    participant Sidecar as IstioSidecar
+    participant SPIFFE as SPIFFEIssuer
+    participant PodB as ServiceB-Pod
+    participant SidecarB as IstioSidecarB
+
+    PodA->>SPIFFE: Request SVID for workload identity
+    SPIFFE-->>PodA: X.509 SVID with SPIFFE URI
+    PodA->>Sidecar: Outgoing request to ServiceB
+    Sidecar->>SidecarB: mTLS handshake with SVID
+    SidecarB->>SidecarB: Validate SVID against trust domain
+    SidecarB-->>PodA: Authenticated response
+    SidecarB->>PodB: Forward request with verified caller identity
+</pre>
+<h3 id="33-compromised-pod-lateral-movement-path">3.3 Compromised pod lateral movement path</h3>
+<pre class="mermaid">
+flowchart TD
+    RCE[Attacker achieves RCE in dev namespace pod] --> TokenRead[Read service account token from /var/run/secrets]
+    TokenRead --> APIProbe[Probe Kubernetes API server with token]
+    APIProbe --> SecretRead[kubectl get secrets in prod namespace]
+    SecretRead --> DBCreds[Extract prod database credentials]
+    DBCreds --> DataExfil[Connect directly to prod database from pod network]
+</pre>
+<h3 id="34-highest-risk-boundary-crossing">3.4 Highest-risk boundary crossing</h3>
+<p>The highest-risk boundary crossing is between the dev or staging namespace and the production namespace when pod-to-pod communication is unrestricted and no NetworkPolicy objects exist. A compromised dev namespace pod can directly reach production services on their cluster-internal IP addresses and ports. Combined with service account tokens that have over-broad RBAC grants, an attacker with RCE in a low-privileged dev workload can pivot to read Kubernetes secrets in the production namespace and reach production databases via the flat pod network — all without leaving the cluster or triggering perimeter defenses.</p>
+<hr />
+<h2 id="4-attack-surface-entry-points-and-attack-vectors">4. ATTACK SURFACE — Entry points and attack vectors</h2>
+<table>
+<thead>
+<tr>
+<th>Attack Vector</th>
+<th>Entry Point</th>
+<th>Threat</th>
+<th>STRIDE Category</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unrestricted pod-to-pod network communication across namespaces</td>
+<td>Cluster network</td>
+<td>Lateral movement from dev/staging to production workloads</td>
+<td>Elevation of Privilege</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Service account token with over-broad RBAC mounted in every pod</td>
+<td>Pod filesystem</td>
+<td>Token theft enables API server access from compromised pod</td>
+<td>Elevation of Privilege</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Privileged container with host filesystem mount</td>
+<td>Container runtime</td>
+<td>Container escape to host node and all pods on that node</td>
+<td>Elevation of Privilege</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>etcd access without TLS or with leaked etcd client cert</td>
+<td>etcd port 2379</td>
+<td>Direct read of all secrets without API server authorization</td>
+<td>Information Disclosure</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Kubernetes API server exposed without network restriction</td>
+<td>API server endpoint</td>
+<td>Unauthenticated or misconfigured RBAC cluster access</td>
+<td>Elevation of Privilege</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Malicious third-party Helm chart with embedded backdoor</td>
+<td>Helm deployment pipeline</td>
+<td>Persistent backdoor in production workload</td>
+<td>Tampering</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Container image with embedded malware from compromised registry</td>
+<td>Image pull</td>
+<td>Malicious workload deployed at scale</td>
+<td>Tampering</td>
+<td>High</td>
+</tr>
+<tr>
+<td>kubectl exec into production pod by developer</td>
+<td>Developer tooling</td>
+<td>Insider access to production runtime environment</td>
+<td>Information Disclosure</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Insecure default ServiceAccount with cluster-admin binding</td>
+<td>RBAC configuration</td>
+<td>Any pod can perform cluster-admin operations</td>
+<td>Elevation of Privilege</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Secrets stored as environment variables visible in pod spec</td>
+<td>Pod configuration</td>
+<td>Secrets exposed in pod description and cluster events</td>
+<td>Information Disclosure</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Node metadata API access from pod (IMDS on cloud)</td>
+<td>Cloud metadata service</td>
+<td>Cloud IAM credential theft enabling cloud-level escalation</td>
+<td>Elevation of Privilege</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h3 id="41-attack-path-diagram">4.1 Attack path diagram</h3>
+<pre class="mermaid">
+flowchart TD
+    RCE[RCE in dev namespace container] --> Token[Read mounted service account token]
+    Token --> API[Call Kubernetes API server]
+    API --> SecretList[List secrets in prod namespace]
+    SecretList --> DBPass[Extract database password]
+    DBPass --> Network[Direct TCP to prod-db on pod network]
+    Network --> Exfil[Dump production database]
+</pre>
+<hr />
+<h2 id="5-controls-defense-in-depth">5. CONTROLS — Defense-in-depth</h2>
+<h3 id="51-preventive-controls">5.1 Preventive Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Gaps / Limitations</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NetworkPolicy objects denying all cross-namespace traffic by default</td>
+<td>Network layer</td>
+<td>Kubernetes NetworkPolicy with default-deny ingress and egress per namespace</td>
+<td>Requires CNI that enforces NetworkPolicy (Calico, Cilium); not enforced by default CNI</td>
+</tr>
+<tr>
+<td>Separate clusters for dev, staging, and prod</td>
+<td>Architecture</td>
+<td>Blast radius fully contained per environment</td>
+<td>Higher operational overhead; shared tooling may still bridge environments</td>
+</tr>
+<tr>
+<td>Workload identity via SPIFFE/SPIRE with Istio mTLS</td>
+<td>Service mesh</td>
+<td>Each pod gets a cryptographic identity; unauthenticated calls rejected</td>
+<td>Service mesh adds latency and complexity; sidecar injection must be enforced</td>
+</tr>
+<tr>
+<td>Minimal RBAC — no cluster-admin, namespace-scoped roles only</td>
+<td>RBAC</td>
+<td>Limit service account grants to only required verbs on required resources</td>
+<td>Over-permissive RBAC is common; requires ongoing hygiene</td>
+</tr>
+<tr>
+<td>Disable automountServiceAccountToken unless required</td>
+<td>Pod spec</td>
+<td>Pods without API server access needs carry no exploitable token</td>
+<td>Developers may re-enable for convenience</td>
+</tr>
+<tr>
+<td>Pod Security Admission (PSA) enforcing restricted or baseline profile</td>
+<td>Admission controller</td>
+<td>Reject pods requesting privileged mode, hostPath, or hostNetwork</td>
+<td>Does not prevent all container escapes; requires policy configuration</td>
+</tr>
+<tr>
+<td>OPA/Gatekeeper policies blocking privileged containers</td>
+<td>Admission control</td>
+<td>Policy-as-code prevents privileged pod deployment</td>
+<td>Policy gaps can be introduced; requires testing</td>
+</tr>
+<tr>
+<td>Secrets stored in Vault or external secrets manager, not etcd</td>
+<td>Secret management</td>
+<td>Secrets never stored in etcd; only short-lived references in pods</td>
+<td>Requires Vault integration; adds complexity</td>
+</tr>
+<tr>
+<td>etcd encryption at rest with KMS provider key</td>
+<td>etcd</td>
+<td>Secrets in etcd encrypted with external KMS key</td>
+<td>Protects against etcd disk access; not against authorized API server access</td>
+</tr>
+<tr>
+<td>Image signing and verification with Cosign and Kyverno policy</td>
+<td>Supply chain</td>
+<td>Reject images without valid signature from approved registry</td>
+<td>Signing infrastructure must be maintained; key management adds overhead</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="52-detective-controls">5.2 Detective Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Signal / Log Source</th>
+<th>What It Detects</th>
+<th>Alert Threshold / Trigger</th>
+<th>MTTD Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kubernetes audit logs for API server</td>
+<td>Unusual API calls, secret reads, RBAC changes</td>
+<td>Service account reading secrets outside its namespace</td>
+<td>5 minutes</td>
+</tr>
+<tr>
+<td>Cilium or Falco network flow monitoring</td>
+<td>Pod-to-pod calls outside expected service graph</td>
+<td>First-seen connection between namespace pairs</td>
+<td>5 minutes</td>
+</tr>
+<tr>
+<td>Falco runtime rules</td>
+<td>Container escape signals, unexpected process execution</td>
+<td>Process other than declared entrypoint running in container</td>
+<td>2 minutes</td>
+</tr>
+<tr>
+<td>Kubernetes audit logs for exec and port-forward</td>
+<td>Developer accessing production pods interactively</td>
+<td>kubectl exec or port-forward to prod namespace pod</td>
+<td>1 minute</td>
+</tr>
+<tr>
+<td>Service mesh (Istio) telemetry</td>
+<td>Unexpected service-to-service call patterns</td>
+<td>Call from service with no declared dependency on callee</td>
+<td>5 minutes</td>
+</tr>
+<tr>
+<td>Image admission audit</td>
+<td>Image pulled from unapproved registry or without signature</td>
+<td>Any unsigned image admitted to prod namespace</td>
+<td>Real-time</td>
+</tr>
+<tr>
+<td>etcd audit log</td>
+<td>Direct etcd queries bypassing API server</td>
+<td>Any client connection to etcd port outside API server CIDR</td>
+<td>5 minutes</td>
+</tr>
+<tr>
+<td>Node resource anomaly (CPU, network egress)</td>
+<td>Cryptominer or data exfiltration workload</td>
+<td>Node CPU &gt;90 percent sustained or egress &gt;10x baseline</td>
+<td>10 minutes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="53-corrective-controls">5.3 Corrective Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Response Action</th>
+<th>Automated or Manual</th>
+<th>Recovery Time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compromised pod confirmed</td>
+<td>Cordon node, delete pod, rotate all secrets it could have accessed</td>
+<td>Automated cordon plus Manual secret rotation</td>
+<td>&lt;15 minutes</td>
+</tr>
+<tr>
+<td>Container escape to host node detected</td>
+<td>Isolate node from cluster (kubectl cordon drain), preserve forensic image</td>
+<td>Manual</td>
+<td>&lt;30 minutes</td>
+</tr>
+<tr>
+<td>Malicious Helm chart detected post-deployment</td>
+<td>Delete Helm release, rotate credentials from that release, quarantine chart</td>
+<td>Manual</td>
+<td>&lt;1 hour</td>
+</tr>
+<tr>
+<td>Over-broad service account token abuse confirmed</td>
+<td>Delete service account, revoke token, review RBAC grants</td>
+<td>Automated token revocation plus Manual</td>
+<td>&lt;10 minutes</td>
+</tr>
+<tr>
+<td>Unauthenticated API server access detected</td>
+<td>Restrict API server network access via firewall rule, review auth config</td>
+<td>Manual</td>
+<td>&lt;30 minutes</td>
+</tr>
+<tr>
+<td>Image without valid signature admitted</td>
+<td>Delete workload, block image SHA in admission policy, investigate registry</td>
+<td>Automated block plus Manual</td>
+<td>&lt;15 minutes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-monitoring-detection-strategy">6. MONITORING &amp; DETECTION STRATEGY</h2>
+<h3 id="61-top-log-sources">6.1 Top log sources</h3>
+<table>
+<thead>
+<tr>
+<th>Log Source</th>
+<th>Event IDs / Fields</th>
+<th>Why Critical for This Scenario</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kubernetes API server audit log</td>
+<td>verb, resource, namespace, user, userAgent, responseCode</td>
+<td>Detect service account token abuse, secret reads, RBAC changes</td>
+</tr>
+<tr>
+<td>Falco runtime security events</td>
+<td>rule, container.name, proc.name, namespace, pod.name</td>
+<td>Detect container escape, unexpected process execution, sensitive file access</td>
+</tr>
+<tr>
+<td>Istio or Cilium network flow logs</td>
+<td>src.workload, dst.workload, src.namespace, dst.namespace, bytes</td>
+<td>Detect lateral movement across namespace boundaries</td>
+</tr>
+<tr>
+<td>Node OS syslog and auditd</td>
+<td>syscall, pid, user, command, file</td>
+<td>Detect container escape to host — unexpected processes or file access</td>
+</tr>
+<tr>
+<td>Image admission controller logs</td>
+<td>image, registry, signatureVerified, admissionDecision</td>
+<td>Detect unsigned or unapproved image deployments</td>
+</tr>
+<tr>
+<td>etcd access logs</td>
+<td>clientIP, operation, key, responseCode</td>
+<td>Detect direct etcd access bypassing API server authorization</td>
+</tr>
+<tr>
+<td>Cloud metadata service access log (IMDS)</td>
+<td>podIP, action, credentialRequested</td>
+<td>Detect pods attempting to harvest node cloud IAM credentials</td>
+</tr>
+<tr>
+<td>Helm release audit</td>
+<td>releaseName, chart, chartVersion, values hash, deployer</td>
+<td>Detect unauthorized chart deployment or version rollback</td>
+</tr>
+</tbody>
+</table>
+<h3 id="62-detection-rules">6.2 Detection rules</h3>
+<table>
+<thead>
+<tr>
+<th>Rule Name</th>
+<th>Logic / Condition</th>
+<th>False Positive Risk</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CrossNamespaceSecretRead</td>
+<td>API audit: ServiceAccount in namespace X reads secret in namespace Y</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>ContainerEscapeSignal</td>
+<td>Falco: process exec outside container PID namespace or host mount access</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>FirstSeenCrossNamespaceFlow</td>
+<td>Network flow: new connection between namespace pair with no prior history</td>
+<td>Medium</td>
+<td>High</td>
+</tr>
+<tr>
+<td>KubectlExecProd</td>
+<td>API audit: exec or port-forward verb on pod in prod namespace</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>PrivilegedPodAdmitted</td>
+<td>Admission: pod spec has securityContext.privileged=true in prod namespace</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>EtcdDirectAccess</td>
+<td>etcd client connection from IP outside API server subnet</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>IMDSAccessFromPod</td>
+<td>Outbound request to 169.254.169.254 from pod IP</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>UnsignedImageAdmitted</td>
+<td>Admission: image pulled without valid Cosign signature</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>ClusterRoleBindingCreated</td>
+<td>API audit: ClusterRoleBinding created by non-platform-admin user</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>MassSecretListByServiceAccount</td>
+<td>API audit: single service account lists &gt;20 distinct secrets in 5 minutes</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+</tbody>
+</table>
+<h3 id="63-monitoring-architecture-diagram">6.3 Monitoring architecture diagram</h3>
+<pre class="mermaid">
+flowchart LR
+    AuditLog[K8s API Server Audit Log] --> Collector[Log Collector FluentBit]
+    Falco[Falco Runtime Events] --> Collector
+    NetFlow[Cilium or Istio Network Flows] --> Collector
+    NodeSyslog[Node OS Auditd] --> Collector
+    Collector --> SIEM[SIEM Correlation]
+    SIEM --> SOAR[SOAR Playbooks]
+    SOAR --> Actions[Cordon Node Delete Pod Rotate Secrets Block Image]
+    SIEM --> SOC[SOC Investigation Queue]
+</pre>
+<h3 id="64-kpis-and-baselining">6.4 KPIs and baselining</h3>
+<table>
+<thead>
+<tr>
+<th>KPI</th>
+<th>Baseline Method</th>
+<th>Alert Threshold</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mean time to detect cross-namespace lateral movement</td>
+<td>Red team exercise</td>
+<td>&gt;5 minutes</td>
+<td>Platform Security</td>
+</tr>
+<tr>
+<td>Percentage of prod pods with automountServiceAccountToken disabled</td>
+<td>Weekly audit</td>
+<td>&lt;100 percent of non-API-server pods</td>
+<td>Cluster Security</td>
+</tr>
+<tr>
+<td>Privileged pod count in prod namespace</td>
+<td>Continuous policy scan</td>
+<td>&gt;0</td>
+<td>Cluster Security</td>
+</tr>
+<tr>
+<td>Image signing coverage</td>
+<td>Weekly registry audit</td>
+<td>&lt;100 percent of prod images signed</td>
+<td>DevSecOps</td>
+</tr>
+<tr>
+<td>NetworkPolicy coverage per prod namespace</td>
+<td>Continuous CSPM</td>
+<td>&lt;100 percent namespace coverage</td>
+<td>Platform Security</td>
+</tr>
+<tr>
+<td>RBAC hygiene score</td>
+<td>Quarterly RBAC audit</td>
+<td>Any cluster-admin binding to non-platform role</td>
+<td>Identity Team</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-residual-risk">7. RESIDUAL RISK</h2>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Why Not Mitigated</th>
+<th>Owner</th>
+<th>Acceptance Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Third-party Helm chart with unknown malicious code</td>
+<td>Medium</td>
+<td>High</td>
+<td>Cannot fully audit all chart code and dependencies</td>
+<td>DevSecOps</td>
+<td>Accepted with chart provenance policy and mandatory internal mirror</td>
+</tr>
+<tr>
+<td>Zero-day container runtime escape (runc, containerd)</td>
+<td>Low</td>
+<td>Critical</td>
+<td>Kernel vulnerabilities cannot be fully prevented at application layer</td>
+<td>Platform Security</td>
+<td>Accepted with gVisor or Kata Containers for highest-risk workloads</td>
+</tr>
+<tr>
+<td>Developer with legitimate kubectl access to prod for incident response</td>
+<td>Medium</td>
+<td>High</td>
+<td>Operational necessity; cannot restrict all prod access</td>
+<td>Platform Security</td>
+<td>Accepted with just-in-time access controls and full audit logging</td>
+</tr>
+<tr>
+<td>Service mesh sidecar injection bypass for non-annotated pods</td>
+<td>Low</td>
+<td>High</td>
+<td>Requires strict namespace labeling discipline; gaps possible</td>
+<td>Service Mesh Team</td>
+<td>Accepted with automated compliance scan for unlabeled pods</td>
+</tr>
+<tr>
+<td>etcd encryption key compromise through KMS provider breach</td>
+<td>Low</td>
+<td>Critical</td>
+<td>KMS provider is a trust anchor; cannot eliminate this dependency</td>
+<td>Infrastructure Security</td>
+<td>Accepted with KMS provider audit and geographic redundancy</td>
+</tr>
+<tr>
+<td>Compromised node cloud IAM role granting lateral movement to cloud control plane</td>
+<td>Low</td>
+<td>Critical</td>
+<td>IMDS access from pods is hard to block without breaking node bootstrapping</td>
+<td>Cloud Security</td>
+<td>Accepted with node metadata service restrictions and workload identity federation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-google-scale-considerations">8. GOOGLE-SCALE CONSIDERATIONS</h2>
+<h3 id="81-automation-and-policy-as-code">8.1 Automation and policy-as-code</h3>
+<p>At Google scale, every Kubernetes security control must be defined as OPA/Gatekeeper policy enforced at admission time — no manual security reviews before deployment. NetworkPolicy, Pod Security Admission, image signing verification, RBAC least-privilege, and service account token disablement must all be enforced by admission webhooks with deny-by-default posture. Policy violations must fail CI/CD pipelines, not just trigger alerts in production.</p>
+<h3 id="82-fleet-wide-impact-analysis">8.2 Fleet-wide impact analysis</h3>
+<p>A container escape vulnerability in a shared runtime version affects every node in the cluster simultaneously. At Google scale with thousands of nodes and hundreds of microservices, a single exploited runtime escape in a dev namespace pod can cascade to all production workloads on that node within seconds. Blast radius reduction requires physical cluster separation between dev and prod, node isolation for sensitive workloads using dedicated node pools, and runtime sandboxing (gVisor) for untrusted workloads.</p>
+<h3 id="83-eliminating-human-bottlenecks">8.3 Eliminating human bottlenecks</h3>
+<p>Manual RBAC reviews, ad hoc NetworkPolicy configuration, and per-release Helm chart audits cannot scale across 200 microservices updated multiple times per day. Automate RBAC least-privilege enforcement via automated role generation from workload manifests, enforce NetworkPolicy via service mesh declarative config generated from the service dependency graph, and block unapproved Helm charts via internal chart mirroring and signing requirements enforced at the cluster level.</p>
+<h3 id="84-controls-that-break-at-scale">8.4 Controls that break at scale</h3>
+<p>Pod-by-pod security context review, manual secret rotation after each suspected compromise, and human review of every cluster role binding fail above a few dozen workloads. Replace with policy-as-code that prevents misconfiguration at source, automated secret rotation triggered by security events, and continuous RBAC drift detection with automated alerting for deviation from approved baseline.</p>
+<hr />
+<h2 id="answer-summary-90-second-version">ANSWER SUMMARY — 90-second version</h2>
+<blockquote>
+<p>Use this to open your answer before going deep on any section.</p>
+</blockquote>
+<p>For a Kubernetes cluster with 200 microservices sharing a flat pod network across dev, staging, and prod namespaces, the core threat is cross-namespace lateral movement — a compromised dev pod can reach production services directly and steal Kubernetes secrets via an over-privileged service account token.</p>
+<p>The architectural fix is immediate: the prod, staging, and dev workloads should run in separate clusters in a real production environment. Within a single cluster, the critical controls are NetworkPolicy with default-deny across namespaces, disable automountServiceAccountToken on all pods that don't need API server access, Pod Security Admission enforcing restricted profile, and OPA/Gatekeeper admission policies blocking privileged containers.</p>
+<p>For service-to-service identity, deploy Istio with SPIFFE-based workload identity and enforce mTLS everywhere in the prod namespace so unauthenticated lateral movement calls are rejected.</p>
+<p>Detection relies on Kubernetes API audit logs for cross-namespace secret reads, Falco runtime rules for container escape signals, and Cilium network flow monitoring for first-seen cross-namespace connections.</p>
+<p>Residual risk I'd accept: unknown Helm chart vulnerabilities and zero-day container runtime escapes — mitigated with gVisor for sensitive workloads and chart provenance enforcement.</p>
+<hr />
+<h2 id="likely-follow-up-questions-ideal-answers">LIKELY FOLLOW-UP QUESTIONS &amp; IDEAL ANSWERS</h2>
+<h3 id="follow-up-1-what-is-the-threat-model-for-a-compromised-pod-in-this-shared-namespace-architecture">Follow-up 1: What is the threat model for a compromised pod in this shared-namespace architecture?</h3>
+<p>A compromised pod is an authenticated principal inside the cluster network with a mounted service account token. Without NetworkPolicy, it can reach any other pod on its CIDR range. Without RBAC restrictions, its service account token may have cluster-wide read on secrets. The attack chain is: RCE → read service account token → query API server → list secrets in prod namespace → extract database credentials → connect directly to production database. The blast radius of one compromised dev pod equals full production data access in this architecture.</p>
+<h3 id="follow-up-2-how-do-you-enforce-workload-identity-and-service-to-service-authentication">Follow-up 2: How do you enforce workload identity and service-to-service authentication?</h3>
+<p>Deploy Istio or Linkerd with SPIFFE/SPIRE issuing X.509 SVIDs to each pod based on its Kubernetes service account. Configure PeerAuthentication policy to enforce STRICT mTLS mode in the prod namespace — any call without a valid SVID is rejected at the sidecar layer before reaching the application. This means even a pod with network access cannot impersonate a legitimate service without a valid cluster-issued identity certificate.</p>
+<h3 id="follow-up-3-what-controls-prevent-privilege-escalation-from-a-container-to-the-host-node">Follow-up 3: What controls prevent privilege escalation from a container to the host node?</h3>
+<p>Pod Security Admission enforcing the restricted profile blocks hostPath mounts, hostPID, hostNetwork, and privileged security contexts. OPA/Gatekeeper policies add a second enforcement layer. For highest-sensitivity workloads, replace the runc runtime with gVisor (runsc) which provides a user-space kernel boundary between the container and the host OS, so even a kernel exploit in the container does not escape to the host.</p>
+<h3 id="follow-up-4-how-do-you-detect-lateral-movement-within-the-cluster">Follow-up 4: How do you detect lateral movement within the cluster?</h3>
+<p>Three signal sources: Kubernetes API audit logs detect cross-namespace secret reads and unusual verb patterns from service accounts. Cilium Hubble or Istio telemetry detect first-seen pod-to-pod connections between namespaces that have no declared service dependency. Falco runtime rules detect unexpected process execution inside containers — a shell spawning inside a Go application container is a strong escape signal. Correlate all three in the SIEM.</p>
+<h3 id="follow-up-5-what-residual-risk-remains-for-third-party-helm-charts">Follow-up 5: What residual risk remains for third-party Helm charts?</h3>
+<p>Helm charts are templated Kubernetes manifests that may request privileged security contexts, create ClusterRoleBindings, or include arbitrary container images. The residual risk is that malicious code in a chart runs in the cluster with the permissions of the deploying namespace. Mitigation: mirror all third-party charts in an internal registry, pin chart versions with SHA verification, require mandatory security review for new charts, and enforce admission policies that would reject any misconfigured workload even from a trusted chart source.</p>
+<hr />
+<h2 id="common-mistakes-to-avoid">COMMON MISTAKES TO AVOID</h2>
+<ul>
+<li>Treating namespace isolation as a security boundary without NetworkPolicy enforcement — namespaces are organizational, not security, boundaries by default.</li>
+<li>Not disabling automountServiceAccountToken on pods that have no legitimate API server access need.</li>
+<li>Assuming PodSecurityPolicy (deprecated) or Pod Security Admission alone prevents container escapes without runtime sandboxing.</li>
+<li>Not separating dev, staging, and prod into separate clusters and relying solely on RBAC for isolation.</li>
+<li>Storing secrets directly in Kubernetes Secrets (etcd) without external secret management and KMS encryption.</li>
+<li>Treating service mesh mTLS as optional or only for inter-service calls, while ignoring pod-to-database and pod-to-external-service paths.</li>
+<li>Not having Kubernetes API server audit logging enabled — this is the single most important forensic evidence source.</li>
+<li>Allowing cluster-admin ClusterRoleBindings for developer convenience in any environment that shares network or identity with production.</li>
+</ul>
+<hr />
+<p><em>Generated: 2026-05-31 | Source: threat-modeling-prompt.md | Scenario 47 of 50</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

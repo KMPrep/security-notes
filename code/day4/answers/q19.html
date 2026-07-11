@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q19.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q19.py</h1>
+  <p class="file-path">Source: code\day4\answers\q19.py</p>
+  <p class="line-count">267 lines</p>
+  <pre><code class="language-python"># Q19 - Sort and Deduplicate IP Blocklist
+# Given a messy list of IP strings (with duplicates, unsorted), produce a
+# sorted, deduplicated blocklist. Discuss complexity and scaling strategies.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Clarify
+#   &quot;Are all entries guaranteed to be valid IPs? IPv4 only or IPv6 too?
+#    What&#x27;s the expected scale — memory-resident or disk-based sort needed?&quot;
+#
+# STEP 2 — Naive approach
+#   &quot;Load everything into memory. Use a set to dedup, convert to list, sort.
+#    O(n) for set build + O(u log u) for sort where u = unique IPs.
+#    Simple and correct for small-to-medium lists.&quot;
+#
+# STEP 3 — Natural sort (IP-semantic ordering)
+#   &quot;Sorting IPs lexicographically gives wrong order:
+#    &#x27;10.0.0.2&#x27; &lt; &#x27;9.0.0.1&#x27; lexicographically (wrong!)
+#    Correct: sort by numeric tuple (10, 0, 0, 2) &lt; (10, 0, 0, 3).
+#    Use key=ip_sort_key.&quot;
+#
+# STEP 4 — Large-scale (10M entries)
+#   &quot;10M IPv4 strings × ~15 bytes each ≈ 150MB — fits in RAM on a modern server.
+#    But for 10B entries or streaming:
+#    - External sort (sort chunks that fit in RAM, merge sorted chunks)
+#    - Bloom filter for approximate dedup before exact dedup
+#    - Radix sort on the 32-bit integer representation of IPv4: O(n)&quot;
+#
+# STEP 5 — Edge cases
+#   - Empty list                   → []
+#   - All duplicates               → single entry list
+#   - Malformed IPs                → validate and skip/reject
+#   - IPv6 addresses               → need different key function
+#
+# Complexity:
+#   Basic: O(n + u log u) time, O(n) space
+#   Radix (IPv4 only): O(n) time, O(n) space
+# ─────────────────────────────────────────────────────────────────────────────
+
+import socket
+
+
+# ── APPROACH 1: Naive — set dedup + lexicographic sort ───────────────────────
+
+def blocklist_naive(ips: list) -&gt; list:
+    &quot;&quot;&quot;
+    Dedup with set, sort lexicographically (INCORRECT order for IPs).
+    Mention this first to show the pitfall.
+
+    Time:  O(n + u log u)  u = unique IPs
+    Space: O(n)
+    &quot;&quot;&quot;
+    if not isinstance(ips, list):
+        raise TypeError(f&quot;Expected list, got {type(ips).__name__}&quot;)
+    return sorted(set(ips))     # lexicographic sort — wrong for IPs
+
+
+# ── APPROACH 2: Correct IP-aware sort with validation ────────────────────────
+
+def _ip_sort_key(ip: str):
+    &quot;&quot;&quot;
+    Convert IPv4 string to a tuple of 4 integers for correct numeric sort.
+    E.g., &#x27;10.0.0.2&#x27; → (10, 0, 0, 2).
+    Returns a sentinel tuple for invalid IPs so they sort to the end.
+    &quot;&quot;&quot;
+    parts = ip.split(&quot;.&quot;)
+    if len(parts) != 4:
+        return (256, 256, 256, 256)     # invalid → sort to end
+    try:
+        octets = tuple(int(p) for p in parts)
+        if any(o &lt; 0 or o &gt; 255 for o in octets):
+            return (256, 256, 256, 256)
+        return octets
+    except ValueError:
+        return (256, 256, 256, 256)
+
+
+def _is_valid_ipv4(ip: str) -&gt; bool:
+    &quot;&quot;&quot;Validate an IPv4 address string.&quot;&quot;&quot;
+    if not isinstance(ip, str):
+        return False
+    parts = ip.split(&quot;.&quot;)
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 &lt;= int(p) &lt;= 255 and str(int(p)) == p for p in parts)
+    except ValueError:
+        return False
+
+
+def blocklist_sorted(ips: list, skip_invalid: bool = True) -&gt; list:
+    &quot;&quot;&quot;
+    Dedup, validate, and sort numerically by IP value.
+
+    Time:  O(n + u log u)   u = unique valid IPs
+    Space: O(n)
+    &quot;&quot;&quot;
+    if not isinstance(ips, list):
+        raise TypeError(f&quot;Expected list, got {type(ips).__name__}&quot;)
+    if not ips:
+        return []
+
+    seen  = set()
+    valid = []
+
+    for ip in ips:
+        if not isinstance(ip, str):
+            if not skip_invalid:
+                raise TypeError(f&quot;IP must be a string, got {type(ip).__name__}&quot;)
+            continue
+        ip = ip.strip()
+        if ip in seen:
+            continue
+        if not _is_valid_ipv4(ip):
+            if not skip_invalid:
+                raise ValueError(f&quot;Invalid IPv4 address: {ip!r}&quot;)
+            continue
+        seen.add(ip)
+        valid.append(ip)
+
+    valid.sort(key=_ip_sort_key)
+    return valid
+
+
+# ── APPROACH 3: Radix sort on 32-bit integer representation (O(n)) ───────────
+
+def _ip_to_int(ip: str) -&gt; int:
+    &quot;&quot;&quot;Convert IPv4 string to 32-bit integer.&quot;&quot;&quot;
+    parts = ip.split(&quot;.&quot;)
+    n = 0
+    for p in parts:
+        n = (n &lt;&lt; 8) | int(p)
+    return n
+
+
+def _int_to_ip(n: int) -&gt; str:
+    &quot;&quot;&quot;Convert 32-bit integer back to IPv4 string.&quot;&quot;&quot;
+    return &quot;.&quot;.join([
+        str((n &gt;&gt; 24) &amp; 0xFF),
+        str((n &gt;&gt; 16) &amp; 0xFF),
+        str((n &gt;&gt; 8)  &amp; 0xFF),
+        str(n         &amp; 0xFF),
+    ])
+
+
+def blocklist_radix(ips: list) -&gt; list:
+    &quot;&quot;&quot;
+    Convert IPs to 32-bit integers, deduplicate via set, radix sort,
+    convert back. For IPv4, the numeric space is [0, 2^32-1].
+
+    Radix sort on 32-bit ints: O(n) time (4 passes of counting sort on 1 byte).
+    Total: O(n) time, O(n) space.
+
+    Note: Python&#x27;s built-in sort with integer key is effectively O(n log n).
+    True radix sort is shown conceptually for discussion.
+    &quot;&quot;&quot;
+    if not isinstance(ips, list):
+        raise TypeError(f&quot;Expected list, got {type(ips).__name__}&quot;)
+    if not ips:
+        return []
+
+    # Dedup and convert to ints
+    unique_ints = set()
+    for ip in ips:
+        ip = ip.strip()
+        if _is_valid_ipv4(ip):
+            unique_ints.add(_ip_to_int(ip))
+
+    # Sort integers (uses Python&#x27;s Timsort — O(u log u))
+    # True radix sort would be O(u) but more code; discuss conceptually
+    sorted_ints = sorted(unique_ints)
+
+    return [_int_to_ip(n) for n in sorted_ints]
+
+
+# ── MANUAL — no set(), no sorted(), no sort() ────────────────────────────────
+
+def blocklist_manual(ips: list) -&gt; list:
+    &quot;&quot;&quot;
+    Manual dedup (dict) + manual insertion sort on numeric IP tuples.
+
+    Time:  O(n + u²) — insertion sort is O(u²); acceptable for demonstration
+    Space: O(n)
+    &quot;&quot;&quot;
+    if ips is None:
+        raise ValueError(&quot;ips cannot be None&quot;)
+    if len(ips) == 0:
+        return []
+
+    # Manual dedup using dict
+    seen = {}
+    unique = []
+    for ip in ips:
+        if not isinstance(ip, str):
+            continue
+        ip = ip.strip()
+        if ip not in seen and _is_valid_ipv4(ip):
+            seen[ip] = True
+            unique.append(ip)
+
+    # Insertion sort by numeric key
+    for i in range(1, len(unique)):
+        key_ip  = unique[i]
+        key_val = _ip_sort_key(key_ip)
+        j = i - 1
+        while j &gt;= 0 and _ip_sort_key(unique[j]) &gt; key_val:
+            unique[j + 1] = unique[j]
+            j -= 1
+        unique[j + 1] = key_ip
+
+    return unique
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    messy = [
+        &quot;10.0.0.2&quot;,
+        &quot;9.255.255.255&quot;,    # lexicographically &quot;9...&quot; &gt; &quot;10...&quot; but numerically less
+        &quot;10.0.0.1&quot;,
+        &quot;192.168.1.1&quot;,
+        &quot;10.0.0.2&quot;,         # duplicate
+        &quot;172.16.0.0&quot;,
+        &quot;INVALID_IP&quot;,       # should be skipped
+        &quot;  10.0.0.3  &quot;,     # leading/trailing whitespace
+        &quot;256.0.0.1&quot;,        # out-of-range octet — invalid
+        &quot;10.0.0.1&quot;,         # duplicate
+    ]
+
+    expected = [
+        &quot;9.255.255.255&quot;,
+        &quot;10.0.0.1&quot;,
+        &quot;10.0.0.2&quot;,
+        &quot;10.0.0.3&quot;,
+        &quot;172.16.0.0&quot;,
+        &quot;192.168.1.1&quot;,
+    ]
+
+    result       = blocklist_sorted(messy)
+    result_radix = blocklist_radix(messy)
+    result_manual = blocklist_manual(messy)
+
+    assert result       == expected, f&quot;blocklist_sorted: {result}&quot;
+    assert result_radix == expected, f&quot;blocklist_radix:  {result_radix}&quot;
+    assert result_manual == expected, f&quot;blocklist_manual: {result_manual}&quot;
+
+    # Edge cases
+    assert blocklist_sorted([])              == []
+    assert blocklist_sorted([&quot;1.2.3.4&quot;])     == [&quot;1.2.3.4&quot;]
+    assert blocklist_sorted([&quot;1.2.3.4&quot;] * 5) == [&quot;1.2.3.4&quot;]
+
+    # Validate the naive approach shows lexicographic ordering (incorrect)
+    naive_result = blocklist_naive([&quot;10.0.0.1&quot;, &quot;9.255.255.255&quot;])
+    assert naive_result == [&quot;10.0.0.1&quot;, &quot;9.255.255.255&quot;]   # lexicographic: &quot;1&quot; &lt; &quot;9&quot;
+    assert naive_result != [&quot;9.255.255.255&quot;, &quot;10.0.0.1&quot;]   # numeric correct order
+
+    print(&quot;Q19 — All assertions passed.&quot;)
+    print(&quot;\nSorted deduplicated blocklist:&quot;)
+    for ip in result:
+        print(f&quot;  {ip}&quot;)
+    print()
+    print(&quot;Scaling notes (10M+ entries):&quot;)
+    print(&quot;  - 10M × 15 bytes ≈ 150MB — fits in RAM on most servers&quot;)
+    print(&quot;  - IPv4 radix sort on 32-bit int: O(n) time&quot;)
+    print(&quot;  - Disk: sort 64MB chunks, k-way merge (external merge sort)&quot;)
+    print(&quot;  - Approximate dedup: Bloom filter (then exact dedup on candidates)&quot;)
+</code></pre>
+</body>
+</html>

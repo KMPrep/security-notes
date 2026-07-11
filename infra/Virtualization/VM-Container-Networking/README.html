@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Network Connections from VMs and Containers</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: infra\Virtualization\VM-Container-Networking\README.md</p>
+<h1 id="network-connections-from-vms-and-containers">Network Connections from VMs and Containers</h1>
+<p><strong>Category:</strong> Infrastructure Security — Virtual Networking<br />
+<strong>Applies To:</strong> Docker networking, Kubernetes CNI, virtual switch (OVS/VPC), cloud VPC networking</p>
+<h2 id="overview">Overview</h2>
+<p>Understanding how network traffic flows from VMs and containers is essential for implementing correct network security controls. Virtual networking adds multiple abstraction layers between a container/VM and the physical network — each layer introduces potential attack surface, misconfigurations, and lateral movement opportunities. At Google scale, a compromised container must not be able to read traffic from another pod or reach services it has no business contacting. This is enforced through Kubernetes NetworkPolicy, VPC firewall rules, eBPF-based dataplane enforcement (Cilium), and GCP's VPC Flow Logs.</p>
+<h2 id="vm-networking-architecture">VM Networking Architecture</h2>
+<h3 id="how-a-vms-network-packet-reaches-the-physical-nic">How a VM's Network Packet Reaches the Physical NIC</h3>
+<pre class="mermaid">
+flowchart TD
+    A[VM App - sends packet] --> B[Guest Network Stack]
+    B --> C[Virtual NIC - emulated e1000 or virtio-net]
+    C --> D[Hypervisor Network Backend - TAP device]
+    D --> E[Virtual Switch - Linux bridge or OVS]
+    E --> F[Physical NIC - via bonding or directly]
+    F --> G[Physical Network]
+</pre>
+<p><strong>Two VM networking models:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Description</th>
+<th>Performance</th>
+<th>Security</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Software bridge (Linux bridge)</td>
+<td>VMs connected via kernel bridge; all traffic passes through hypervisor</td>
+<td>Moderate</td>
+<td>Bridge can be sniffed by root on host</td>
+</tr>
+<tr>
+<td>OVS (Open vSwitch)</td>
+<td>Programmable virtual switch with OpenFlow rules</td>
+<td>Good</td>
+<td>Flow rules enforce isolation</td>
+</tr>
+<tr>
+<td>SR-IOV (Single Root I/O Virtualization)</td>
+<td>VM gets direct access to virtual NIC function on physical NIC</td>
+<td>Near-native</td>
+<td>Bypasses hypervisor for data path</td>
+</tr>
+<tr>
+<td>DPDK</td>
+<td>Bypass kernel entirely for NIC access</td>
+<td>Very high</td>
+<td>Requires careful isolation</td>
+</tr>
+</tbody>
+</table>
+<h3 id="vlan-based-vm-isolation">VLAN-Based VM Isolation</h3>
+<p>Each VM or tenant is assigned a VLAN. The virtual switch tags outbound packets and enforces that VMs can only receive traffic on their VLAN.</p>
+<pre><code>VM A (VLAN 100) &lt;-&gt; vSwitch &lt;-&gt; VM B (VLAN 100)  → Can communicate
+VM A (VLAN 100) &lt;-&gt; vSwitch &lt;-&gt; VM C (VLAN 200)  → Blocked by VLAN tagging
+</code></pre>
+<hr />
+<h2 id="container-networking-architecture">Container Networking Architecture</h2>
+<h3 id="docker-networking-modes">Docker Networking Modes</h3>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>How It Works</th>
+<th>Security Implications</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>bridge (default)</td>
+<td>Container gets a veth pair; one end in container, one in <code>docker0</code> bridge</td>
+<td>All containers on same bridge can communicate; no isolation by default</td>
+</tr>
+<tr>
+<td>host</td>
+<td>Container shares host network namespace</td>
+<td>Container opens ports directly on host; no isolation; not recommended</td>
+</tr>
+<tr>
+<td>none</td>
+<td>No network interface; fully isolated</td>
+<td>Maximum network isolation</td>
+</tr>
+<tr>
+<td>overlay</td>
+<td>Multi-host networking; uses VXLAN tunnels between hosts</td>
+<td>Encrypt VXLAN with IPsec for multi-host scenarios</td>
+</tr>
+<tr>
+<td>macvlan</td>
+<td>Container gets a real MAC address on the physical network</td>
+<td>Bypasses docker0 bridge; appears as a physical host</td>
+</tr>
+</tbody>
+</table>
+<h3 id="docker-bridge-mode-packet-flow">Docker bridge mode — packet flow:</h3>
+<pre class="mermaid">
+flowchart TD
+    A[Container 1 - 172.17.0.2] --> B[veth0 in container]
+    B --> C[veth1 on host - docker0 bridge]
+    D[Container 2 - 172.17.0.3] --> E[veth2 in container]
+    E --> F[veth3 on host - docker0 bridge]
+    C --> G[docker0 bridge - 172.17.0.1]
+    F --> G
+    G --> H[host iptables/NAT rules]
+    H --> I[Physical NIC - eth0]
+    I --> J[External network]
+    style G fill:#ff6b6b,color:#fff
+</pre>
+<p>By default, all containers on the same docker0 bridge can reach each other. This is the "flat network" problem — no micro-segmentation by default.</p>
+<hr />
+<h2 id="kubernetes-networking">Kubernetes Networking</h2>
+<h3 id="the-kubernetes-networking-model-cni-contract">The Kubernetes Networking Model (CNI Contract)</h3>
+<p>Kubernetes requires:<br />
+1. Every pod gets its own unique IP address<br />
+2. All pods can communicate with all other pods without NAT (flat network by default)<br />
+3. All nodes can communicate with all pods<br />
+4. Pods see their own IP address as their IP (no NAT on pod-to-pod traffic)</p>
+<p>This "flat network" model means <strong>network segmentation must be explicitly applied</strong> via NetworkPolicy.</p>
+<h3 id="cni-plugins-and-their-security-models">CNI Plugins and Their Security Models</h3>
+<table>
+<thead>
+<tr>
+<th>CNI Plugin</th>
+<th>Dataplane</th>
+<th>NetworkPolicy</th>
+<th>Encryption</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Calico</td>
+<td>iptables or eBPF</td>
+<td>Full NetworkPolicy support</td>
+<td>WireGuard optional</td>
+<td>Most deployed; strong security</td>
+</tr>
+<tr>
+<td>Cilium</td>
+<td>eBPF</td>
+<td>Full + extended L7 policies</td>
+<td>WireGuard optional</td>
+<td>Best performance; eBPF-native; used by GKE Dataplane V2</td>
+</tr>
+<tr>
+<td>Flannel</td>
+<td>VXLAN / UDP</td>
+<td>No NetworkPolicy by default</td>
+<td>None</td>
+<td>Simple; not suitable for production security</td>
+</tr>
+<tr>
+<td>Weave Net</td>
+<td>VXLAN</td>
+<td>NetworkPolicy support</td>
+<td>Sleeve encryption</td>
+<td>Easier setup; moderate performance</td>
+</tr>
+<tr>
+<td>AWS VPC CNI</td>
+<td>AWS VPC routing</td>
+<td>AWS Security Groups for pods</td>
+<td>VPC-level</td>
+<td>Native AWS integration; SG-per-pod</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pod-to-pod-traffic-path-same-node">Pod-to-Pod Traffic Path (Same Node)</h3>
+<pre class="mermaid">
+flowchart LR
+    A[Pod A - eth0 - 10.0.0.4] --> B[veth pair]
+    B --> C[Linux bridge or eBPF hook]
+    C --> D[eBPF NetworkPolicy check]
+    D --> E{Allowed by NetworkPolicy?}
+    E -- Yes --> F[veth pair to Pod B]
+    F --> G[Pod B - eth0 - 10.0.0.5]
+    E -- No --> H[Drop packet]
+</pre>
+<h3 id="pod-to-pod-traffic-path-cross-node-with-vxlan">Pod-to-Pod Traffic Path (Cross-Node with VXLAN)</h3>
+<pre class="mermaid">
+flowchart LR
+    A[Pod A - Node 1] --> B[CNI eBPF hook]
+    B --> C[VXLAN encapsulation]
+    C --> D[Node 1 eth0]
+    D --> E[Physical network]
+    E --> F[Node 2 eth0]
+    F --> G[VXLAN decapsulation]
+    G --> H[CNI eBPF hook + NetworkPolicy]
+    H --> I[Pod B - Node 2]
+</pre>
+<h3 id="kubernetes-networkpolicy-the-security-baseline">Kubernetes NetworkPolicy — The Security Baseline</h3>
+<p>Without NetworkPolicy, all pod-to-pod traffic is allowed. With NetworkPolicy, you create explicit allow rules:</p>
+<pre><code class="language-yaml"># Default deny all ingress to a namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: production
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+  - Ingress
+
+---
+# Allow only frontend -&gt; backend traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+</code></pre>
+<hr />
+<h2 id="network-attack-scenarios">Network Attack Scenarios</h2>
+<h3 id="1-arp-spoofing-in-a-vmcontainer-environment">1. ARP Spoofing in a VM/Container Environment</h3>
+<p>On a shared Layer-2 virtual network, a malicious container can send gratuitous ARP packets claiming it has the IP of another container or gateway. Other containers update their ARP cache and route traffic through the attacker (ARP spoofing man-in-the-middle).</p>
+<p><strong>Prevention:</strong> Enable arp_ignore and arp_filter on hosts; use CNI plugins that prevent ARP spoofing (Cilium native routing mode eliminates L2 and ARP entirely).</p>
+<h3 id="2-container-to-metadata-service-via-host-network">2. Container to Metadata Service via Host Network</h3>
+<p>If a container is on the same network as the host (or has <code>hostNetwork: true</code>), it can reach the cloud metadata service (<code>169.254.254.169</code> on GCP, <code>169.254.169.254</code> on AWS):</p>
+<pre><code class="language-bash"># Inside a hostNetwork container on GCP
+curl -H &quot;Metadata-Flavor: Google&quot; http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+# Returns the node's GCP service account token
+</code></pre>
+<p><strong>Prevention:</strong> Block metadata IP in NetworkPolicy or with iptables on the host.</p>
+<h3 id="3-dns-spoofing-coredns-poisoning">3. DNS Spoofing / CoreDNS Poisoning</h3>
+<p>If an attacker compromises a pod and can reach CoreDNS, they may be able to inject DNS responses. Kubernetes uses CoreDNS for cluster-internal DNS. A compromised pod can poison another pod's DNS, redirecting service traffic to the attacker.</p>
+<p><strong>Prevention:</strong> NetworkPolicy restricting CoreDNS access; deploy Cilium L7 DNS policy to validate DNS responses.</p>
+<h3 id="4-lateral-movement-via-east-west-traffic">4. Lateral Movement via East-West Traffic</h3>
+<p>In a flat cluster network with no NetworkPolicy, a compromised pod in one namespace can reach any pod in any other namespace:</p>
+<pre><code class="language-bash"># Scan entire cluster from compromised pod (no NetworkPolicy)
+for i in $(seq 1 254); do curl -s http://10.0.${i}.0/; done
+# Can reach all pods across all namespaces
+</code></pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>ARP spoofing between containers</td>
+<td>L2 shared network, no MAC/ARP enforcement</td>
+<td>MITM all traffic on subnet</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Metadata service access from container</td>
+<td>Container on host network or VPC; no egress block</td>
+<td>Node service account token theft</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>East-west lateral movement</td>
+<td>No NetworkPolicy; flat cluster network</td>
+<td>Compromise spreads to all services</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>VXLAN traffic interception</td>
+<td>Unencrypted overlay network; attacker on node</td>
+<td>All inter-node pod traffic readable</td>
+<td>Low-Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>DNS spoofing to redirect service traffic</td>
+<td>No DNSSEC; CoreDNS accessible from pods</td>
+<td>Redirect inter-service calls to attacker</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Exposed NodePort services</td>
+<td>NodePort opens service on every node's external IP</td>
+<td>Service directly reachable from internet</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Container bridge escape via promiscuous mode</td>
+<td>Container with NET_ADMIN; sniff bridge traffic</td>
+<td>Capture credentials in transit</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Flat network / lateral movement</td>
+<td>Default-deny NetworkPolicy in all namespaces</td>
+<td>Kubernetes NetworkPolicy</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Metadata service access</td>
+<td>Block <code>169.254.169.254</code> and <code>metadata.google.internal</code> in NetworkPolicy egress rules</td>
+<td>CNI / host iptables</td>
+</tr>
+<tr>
+<td>3</td>
+<td>ARP spoofing</td>
+<td>Use Cilium in native routing mode (no L2); or enable ARP filtering on vSwitch</td>
+<td>CNI / host config</td>
+</tr>
+<tr>
+<td>4</td>
+<td>VXLAN interception</td>
+<td>Enable WireGuard encryption in Cilium or Calico for pod-to-pod traffic</td>
+<td>CNI config</td>
+</tr>
+<tr>
+<td>5</td>
+<td>NodePort exposure</td>
+<td>Use ClusterIP or private LoadBalancer; audit all NodePort services</td>
+<td>K8s service spec</td>
+</tr>
+<tr>
+<td>6</td>
+<td>hostNetwork pods</td>
+<td>Deny in PodSecurityAdmission unless required by system DaemonSets</td>
+<td>Admission control</td>
+</tr>
+<tr>
+<td>7</td>
+<td>DNS spoofing</td>
+<td>Deploy Cilium L7 DNS policy; lock CoreDNS access to pods via NetworkPolicy</td>
+<td>CNI + CoreDNS</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Promiscuous NIC access</td>
+<td>Drop <code>CAP_NET_RAW</code>; deny <code>NET_ADMIN</code> in pod security; monitor with Falco</td>
+<td>securityContext</td>
+</tr>
+</tbody>
+</table>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What is the Kubernetes networking model and why does it require explicit NetworkPolicy to achieve isolation?</li>
+<li>Walk through the packet path from a pod to an external IP in a Kubernetes cluster using the VXLAN CNI.</li>
+<li>What is ARP spoofing and how does an attacker exploit it in a container environment?</li>
+<li>How does a compromised container use the cloud metadata service to steal credentials, and how do you block it?</li>
+<li>Compare Calico vs Cilium for Kubernetes networking security. When would you choose Cilium?</li>
+<li>What happens when you set <code>hostNetwork: true</code> on a pod? What are the security implications?</li>
+<li>How would you implement strong network microsegmentation for 500 microservices across 10 Kubernetes namespaces?</li>
+<li>What is a CNI plugin and how does it enforce NetworkPolicy?</li>
+<li>How would you detect lateral movement between pods in a Kubernetes cluster using eBPF telemetry?</li>
+<li>Explain how WireGuard encryption in Cilium protects inter-node pod traffic and what it doesn't protect against.</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Default Kubernetes networking is a flat network — all pods can reach all pods without any policies applied.</li>
+<li>NetworkPolicy default-deny-all is the most critical security baseline for any production cluster.</li>
+<li>The cloud metadata service (<code>169.254.169.254</code>) must always be blocked from container egress.</li>
+<li>Cilium with eBPF provides the best combination of performance, security, and observability for production K8s networking.</li>
+<li>ARP spoofing is a real threat in container environments with L2 virtual networks; Cilium native routing eliminates it.</li>
+<li>Encrypt pod-to-pod traffic (WireGuard in CNI) for any sensitive workload — east-west traffic is often unencrypted by default.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

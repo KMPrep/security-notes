@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q49_sqli_static_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q49_sqli_static_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q49_sqli_static_detector.py</p>
+  <p class="line-count">432 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q49 [Hard] — SQL Injection Static Pattern Detector
+=============================================================================
+
+PROBLEM
+-------
+Build a static analyzer that detects SQL injection vulnerabilities:
+  1. String concatenation to build SQL queries.
+  2. %-style or .format() interpolation directly into SQL strings.
+  3. f-string SQL queries with variable interpolation.
+  4. Taint analysis: user-controlled variable flows into SQL string.
+  5. Flag parameterized queries as safe.
+
+Languages: Python, JavaScript (Node/MySQL), Java-like pseudo-code.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Languages to support?
+   → Python, JavaScript, Java; heuristic approach (no full AST).
+2. What sources are user-controlled?
+   → request.args/form/body/query, input(), sys.argv, headers.
+3. What are SQL sinks?
+   → cursor.execute, db.query, conn.execute, db.run, executeQuery.
+4. What suppresses findings?
+   → Parameterized queries (cursor.execute(sql, (param,))),
+     ORM calls (Model.objects.filter), prepared statements.
+5. Output?
+   → Structured findings with file, line, severity, pattern name.
+
+=============================================================================
+APPROACH 1 — NAIVE (grep for &quot;execute&quot;)
+=============================================================================
+  Flag every `execute(` line. High false positives; misses .format() patterns.
+
+=============================================================================
+APPROACH 2 — TAINT-AWARE PATTERN DETECTOR (OPTIMAL)
+=============================================================================
+  Pass 1: collect tainted variables (assigned from user input).
+  Pass 2: detect SQL string construction patterns.
+  Pass 3: detect SQL sinks; correlate with tainted strings.
+  Safe pattern suppressors: parameterized query detection.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SqliFinding:
+    file: str
+    line_number: int
+    severity: str          # &quot;high&quot; | &quot;medium&quot; | &quot;low&quot;
+    rule_name: str
+    evidence: str
+    line_preview: str
+
+    def __str__(self) -&gt; str:
+        return (
+            f&quot;[{self.severity.upper()}] {self.file}:{self.line_number} &quot;
+            f&quot;rule={self.rule_name!r}: {self.evidence[:60]}&quot;
+        )
+
+
+@dataclass
+class ScanResult:
+    filename: str
+    findings: List[SqliFinding] = field(default_factory=list)
+    lines_scanned: int = 0
+
+    @property
+    def has_findings(self) -&gt; bool:
+        return bool(self.findings)
+
+
+# ---------------------------------------------------------------------------
+# Pattern Definitions
+# ---------------------------------------------------------------------------
+
+# User-controlled source patterns
+_SOURCE_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;flask_args&quot;,   re.compile(r&quot;request\.(args|form|values|GET|POST|json)(\[|\.get\s*\()&quot;)),
+    (&quot;django_req&quot;,   re.compile(r&quot;request\.(GET|POST|data)\s*[\[.]&quot;)),
+    (&quot;input_func&quot;,   re.compile(r&quot;\binput\s*\(&quot;)),
+    (&quot;sys_argv&quot;,     re.compile(r&quot;\bsys\.argv\b&quot;)),
+    (&quot;req_query&quot;,    re.compile(r&quot;req\.(query|body|params)\s*[\[.]&quot;)),
+    (&quot;req_param&quot;,    re.compile(r&quot;request\.getParameter\s*\(&quot;)),
+    (&quot;env_user&quot;,     re.compile(r&quot;os\.environ\.get\s*\([&#x27;\&quot;]USER|os\.getenv\s*\([&#x27;\&quot;]USER&quot;)),
+]
+
+# SQL sinks
+_SQL_SINKS: List[Tuple[str, re.Pattern]] = [
+    (&quot;cursor_execute&quot;,  re.compile(r&quot;\bcursor\.execute\s*\(&quot;)),
+    (&quot;conn_execute&quot;,    re.compile(r&quot;\bconn\.execute\s*\(&quot;)),
+    (&quot;db_execute&quot;,      re.compile(r&quot;\bdb\.execute\s*\(&quot;)),
+    (&quot;db_query&quot;,        re.compile(r&quot;\bdb\.(query|run)\s*\(&quot;)),
+    (&quot;execute_query&quot;,   re.compile(r&quot;\bexecuteQuery\s*\(&quot;)),
+    (&quot;execute_update&quot;,  re.compile(r&quot;\bexecuteUpdate\s*\(&quot;)),
+    (&quot;raw_query&quot;,       re.compile(r&quot;\.raw\s*\(&quot;)),
+    (&quot;stmt_execute&quot;,    re.compile(r&quot;\bstmt\.execute\s*\(&quot;)),
+]
+
+# SQL string construction patterns (dangerous)
+_SQL_CONCAT_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;sql_fstring&quot;,     re.compile(r&#x27;\bf[&quot;\&#x27;].*\b(SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)\b.*\{&#x27;)),
+    (&quot;sql_format&quot;,      re.compile(r&#x27;[&quot;\&#x27;].*\b(SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)\b.*[&quot;\&#x27;].*\.format\s*\(&#x27;)),
+    (&quot;sql_percent&quot;,     re.compile(r&#x27;[&quot;\&#x27;].*\b(SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)\b.*%\s*(?:\w|[(\[])&#x27;)),
+    (&quot;sql_concat_plus&quot;, re.compile(r&#x27;[&quot;\&#x27;].*\b(SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)\b.*[&quot;\&#x27;].*\+&#x27;)),
+    (&quot;sql_concat_var&quot;,  re.compile(r&#x27;\+\s*\w+\s*\+.*(?:SELECT|INSERT|UPDATE|DELETE|WHERE)&#x27;)),
+]
+
+# Parameterized query suppressors
+_SAFE_PATTERNS: List[re.Pattern] = [
+    re.compile(r&quot;cursor\.execute\s*\(\s*\w+\s*,\s*[\[(]&quot;),   # cursor.execute(sql, (x,))
+    re.compile(r&quot;\.filter\s*\(&quot;),                              # ORM filter
+    re.compile(r&quot;\.objects\.\w+\s*\(&quot;),                       # Django ORM
+    re.compile(r&quot;prepare\s*\(&quot;),                               # prepared statement
+    re.compile(r&quot;sqlalchemy\b&quot;),                               # SQLAlchemy ORM
+    re.compile(r&quot;#\s*(nosec|noqa|safe)&quot;),                     # inline suppression
+    re.compile(r&quot;^\s*#&quot;),                                      # commented line
+]
+
+
+def _line_is_safe(line: str) -&gt; bool:
+    return any(p.search(line) for p in _SAFE_PATTERNS)
+
+
+def _source_on_line(line: str) -&gt; Optional[str]:
+    for name, pat in _SOURCE_PATTERNS:
+        if pat.search(line):
+            return name
+    return None
+
+
+def _sql_concat_on_line(line: str) -&gt; Optional[Tuple[str, str]]:
+    for name, pat in _SQL_CONCAT_PATTERNS:
+        m = pat.search(line)
+        if m:
+            return name, m.group(0)
+    return None
+
+
+def _sink_on_line(line: str) -&gt; Optional[Tuple[str, str]]:
+    for name, pat in _SQL_SINKS:
+        m = pat.search(line)
+        if m:
+            return name, m.group(0)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+def detect_naive(code: str) -&gt; List[str]:
+    results = []
+    for i, line in enumerate(code.splitlines(), 1):
+        if &quot;execute(&quot; in line:
+            results.append(f&quot;Line {i}: {line.strip()}&quot;)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Taint-aware detector
+# ---------------------------------------------------------------------------
+
+class SqlInjectionDetector:
+    &quot;&quot;&quot;
+    Multi-pass heuristic SQL injection detector.
+
+    Pass 1: taint variables assigned from user-controlled sources.
+    Pass 2: flag SQL string construction patterns (fstring, %, .format, +).
+    Pass 3: flag SQL sink calls containing tainted vars or dynamic SQL.
+    &quot;&quot;&quot;
+
+    def __init__(self, lookahead: int = 8):
+        self._lookahead = lookahead
+        self._tainted_sql_vars: Set[str] = set()
+
+    def detect(self, code: str, filename: str = &quot;&lt;code&gt;&quot;) -&gt; ScanResult:
+        self._tainted_sql_vars = set()
+        result = ScanResult(filename=filename)
+        lines  = code.splitlines()
+        result.lines_scanned = len(lines)
+
+        # ---- Pass 1: Collect tainted variable names ----
+        _VAR_FROM_SOURCE = re.compile(
+            r&quot;^\s*(\w+)\s*=\s*.*(?:request\.|req\.|input\(|sys\.argv|getParameter\s*\()&quot;,
+            re.IGNORECASE,
+        )
+        tainted: Set[str] = set()
+        for line in lines:
+            m = _VAR_FROM_SOURCE.match(line)
+            if m:
+                tainted.add(m.group(1))
+
+        # ---- Pass 2: Track SQL variables built from user input ----
+        _SQL_VAR_ASSIGN = re.compile(r&quot;^\s*(\w+)\s*=\s*.*(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)&quot;,
+                                     re.IGNORECASE)
+        sql_vars: Dict[str, int] = {}    # var_name → line_idx
+        for i, line in enumerate(lines):
+            m = _SQL_VAR_ASSIGN.match(line)
+            if m:
+                var = m.group(1)
+                sql_vars[var] = i
+                # If any tainted var appears in the assignment → tainted sql_var
+                for tv in tainted:
+                    if re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line):
+                        self._tainted_sql_vars.add(var)
+
+        # ---- Pass 3: Find sink calls ----
+        for line_idx, line in enumerate(lines, start=1):
+            if _line_is_safe(line):
+                continue
+
+            # Direct source in sink (highest severity)
+            src  = _source_on_line(line)
+            sink = _sink_on_line(line)
+            if src and sink:
+                result.findings.append(SqliFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;{src}_in_{sink[0]}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # SQL concat pattern on same line as sink
+            sql_pat = _sql_concat_on_line(line)
+            if sql_pat and sink:
+                result.findings.append(SqliFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;{sql_pat[0]}_in_{sink[0]}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Tainted SQL variable in sink
+            if sink:
+                for tsv in self._tainted_sql_vars:
+                    if re.search(r&#x27;\b&#x27; + re.escape(tsv) + r&#x27;\b&#x27;, line):
+                        result.findings.append(SqliFinding(
+                            file=filename,
+                            line_number=line_idx,
+                            severity=&quot;high&quot;,
+                            rule_name=f&quot;tainted_sql_var_{sink[0]}&quot;,
+                            evidence=f&quot;tainted_var={tsv}&quot;,
+                            line_preview=line.strip()[:100],
+                        ))
+                        break
+                else:
+                    # Sink with any sql variable (possibly tainted)
+                    for sv in sql_vars:
+                        if re.search(r&#x27;\b&#x27; + re.escape(sv) + r&#x27;\b&#x27;, line):
+                            result.findings.append(SqliFinding(
+                                file=filename,
+                                line_number=line_idx,
+                                severity=&quot;medium&quot;,
+                                rule_name=f&quot;sql_var_{sink[0]}&quot;,
+                                evidence=f&quot;sql_var={sv}&quot;,
+                                line_preview=line.strip()[:100],
+                            ))
+                            break
+
+            # SQL concat/fstring without a sink yet → flag as medium
+            elif sql_pat and (src or any(
+                re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line) for tv in tainted
+            )):
+                result.findings.append(SqliFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;medium&quot;,
+                    rule_name=f&quot;sql_construction_{sql_pat[0]}&quot;,
+                    evidence=sql_pat[1][:60],
+                    line_preview=line.strip()[:100],
+                ))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_fstring_injection():
+    code = &quot;&quot;&quot;
+from flask import request
+import sqlite3
+
+conn = sqlite3.connect(&quot;users.db&quot;)
+cursor = conn.cursor()
+
+username = request.args.get(&quot;username&quot;)
+query = f&quot;SELECT * FROM users WHERE name = &#x27;{username}&#x27;&quot;
+cursor.execute(query)
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;views.py&quot;)
+    print(f&quot;fstring findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert high
+    print(&quot;fstring SQLi: passed&quot;)
+
+
+def test_parameterized_suppressed():
+    code = &quot;&quot;&quot;
+import sqlite3
+conn = sqlite3.connect(&quot;db.sqlite&quot;)
+cursor = conn.cursor()
+username = &quot;alice&quot;
+cursor.execute(&quot;SELECT * FROM users WHERE name = ?&quot;, (username,))
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;safe.py&quot;)
+    assert not r.has_findings
+    print(&quot;Parameterized query not flagged: passed&quot;)
+
+
+def test_percent_interpolation():
+    code = &quot;&quot;&quot;
+from flask import request
+username = request.form[&quot;user&quot;]
+sql = &quot;SELECT * FROM accounts WHERE user=&#x27;%s&#x27;&quot; % username
+cursor.execute(sql)
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;login.py&quot;)
+    print(f&quot;% interpolation findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;% interpolation SQLi: passed&quot;)
+
+
+def test_string_concat():
+    code = &quot;&quot;&quot;
+from flask import request
+user_id = request.args[&quot;id&quot;]
+query = &quot;SELECT * FROM orders WHERE id=&quot; + user_id
+cursor.execute(query)
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;orders.py&quot;)
+    print(f&quot;String concat findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;String concat SQLi: passed&quot;)
+
+
+def test_js_sqli():
+    code = &quot;&quot;&quot;
+const userId = req.query.id;
+const sql = &quot;SELECT * FROM users WHERE id=&quot; + userId;
+db.query(sql, (err, rows) =&gt; {});
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;server.js&quot;)
+    print(f&quot;JS SQLi findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;JS SQLi: passed&quot;)
+
+
+def test_orm_safe():
+    code = &quot;&quot;&quot;
+from myapp.models import User
+from flask import request
+username = request.args.get(&quot;username&quot;)
+users = User.objects.filter(name=username)
+&quot;&quot;&quot;
+    d = SqlInjectionDetector()
+    r = d.detect(code, &quot;orm.py&quot;)
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert not high
+    print(&quot;ORM filter not flagged high: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+SQL INJECTION — OWASP #1 / CWE-89
+------------------------------------
+Root Cause: user input treated as SQL syntax instead of data.
+
+CLASSIC ATTACK
+--------------
+  query = &quot;SELECT * FROM users WHERE name=&#x27;&quot; + username + &quot;&#x27;&quot;
+  username = &quot;&#x27; OR &#x27;1&#x27;=&#x27;1&quot;
+  Result: SELECT * FROM users WHERE name=&#x27;&#x27; OR &#x27;1&#x27;=&#x27;1&#x27;
+  → Returns all rows.
+
+  username = &quot;&#x27;; DROP TABLE users;--&quot;
+  Result: SELECT * FROM users WHERE name=&#x27;&#x27;; DROP TABLE users;--
+  → Destroys the table.
+
+BLIND INJECTION
+---------------
+Boolean: ?id=1 AND 1=1 (true) vs ?id=1 AND 1=2 (false) → infer data.
+Time-based: ?id=1; WAITFOR DELAY &#x27;0:0:5&#x27;-- → confirm injection via delay.
+Out-of-band: DNS exfiltration via DNS lookup on injected host name.
+
+DEFENSES (in order of priority)
+---------------------------------
+1. Parameterized queries / prepared statements — gold standard.
+2. ORM with proper escaping (avoid raw() unless absolutely needed).
+3. Stored procedures (if not constructed dynamically inside them).
+4. Input validation (allowlist, not blocklist — bypass with Unicode, comments).
+5. Least privilege DB account (can&#x27;t DROP even if injected).
+6. WAF as defense-in-depth (not primary defense; bypassable).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_fstring_injection()
+    test_parameterized_suppressed()
+    test_percent_interpolation()
+    test_string_concat()
+    test_js_sqli()
+    test_orm_safe()
+</code></pre>
+</body>
+</html>

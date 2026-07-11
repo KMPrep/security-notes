@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q10_suppress_duplicate_alerts.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q10_suppress_duplicate_alerts.py</h1>
+  <p class="file-path">Source: code\practice\hard\q10_suppress_duplicate_alerts.py</p>
+  <p class="line-count">422 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q10 [Hard] — Suppress Duplicate Alerts with Escalation
+=============================================================================
+
+PROBLEM
+-------
+A detection rule fires repeatedly for the same condition (e.g. brute force
+continuing for 10 minutes).  Emitting an alert on every match floods analysts.
+
+Requirements:
+  1. Suppress duplicate alerts within a configurable suppression window.
+  2. Track the suppressed count so the severity can be escalated when the
+     same alert fires many times.
+  3. Emit a &quot;re-open&quot; alert if the same pattern fires after the window expires.
+  4. Emit a &quot;resolved&quot; notification when the pattern stops for resolve_after_seconds.
+  5. Different alert keys (rule_name + group_by fields) have independent windows.
+
+CLARIFYING QUESTIONS
+--------------------
+1. How is &quot;same alert&quot; defined?
+   → Same (rule_name, entity_key) pair  — where entity_key is a tuple of
+     the relevant field values (e.g. rule=brute_force, src=10.0.0.1).
+2. Suppression window: rolling or fixed?
+   → Fixed window from first alert; after expiry, next occurrence re-opens.
+3. What does &quot;escalation&quot; mean here?
+   → If suppress_count reaches escalation_threshold, bump severity one level.
+4. Should suppressed alerts be recorded for audit?
+   → Yes; maintain a suppressed_count and last_suppressed_ts.
+5. What is &quot;resolved&quot;?
+   → The condition has not fired for resolve_after_seconds.
+6. Memory bound?
+   → Evict state for keys that have been resolved.
+7. Thread safety?
+   → Single-threaded; note locking requirements for multi-thread.
+
+=============================================================================
+APPROACH 1 — NAIVE (dict of suppress windows, no escalation)
+=============================================================================
+Simple dict: key → expiry_timestamp.
+If current_ts &lt; expiry → suppress. Else → pass-through + reset expiry.
+  No suppressed_count, no escalation, no resolve notifications.
+  O(1) per alert.
+
+=============================================================================
+APPROACH 2 — FULL DEDUPLICATION ENGINE (RECOMMENDED)
+=============================================================================
+State per (rule, entity_key):
+  - status: &quot;open&quot; | &quot;suppressed&quot; | &quot;resolved&quot;
+  - window_start_ts
+  - window_end_ts   = window_start_ts + suppress_seconds
+  - suppress_count  (incremented for each duplicate within window)
+  - last_seen_ts
+  - severity        (current, may have been escalated)
+
+Transitions:
+  RESOLVED → OPEN on new match (re-open)
+  OPEN → SUPPRESSED after first alert in window is emitted
+  SUPPRESSED → SUPPRESSED + increment count (no alert, unless escalation triggers)
+  SUPPRESSED → check escalation threshold → emit escalated alert if crossed
+  Any → RESOLVED if now - last_seen_ts &gt; resolve_after_seconds
+
+  Time : O(1) per alert
+  Space: O(active keys)
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Severity ladder
+# ---------------------------------------------------------------------------
+SEVERITY_LADDER = [&quot;info&quot;, &quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;]
+
+def _escalate(current: str) -&gt; str:
+    idx = SEVERITY_LADDER.index(current.lower()) if current.lower() in SEVERITY_LADDER else 1
+    return SEVERITY_LADDER[min(idx + 1, len(SEVERITY_LADDER) - 1)]
+
+
+# ---------------------------------------------------------------------------
+# Alert and Notification Types
+# ---------------------------------------------------------------------------
+
+class AlertAction(Enum):
+    EMIT = &quot;emit&quot;              # New or re-opened alert; send to analyst
+    SUPPRESS = &quot;suppress&quot;      # Duplicate within window; drop silently
+    ESCALATE = &quot;escalate&quot;      # Threshold crossed; re-emit with higher severity
+    RESOLVE = &quot;resolve&quot;        # Pattern stopped; notify resolution
+    REOPEN = &quot;reopen&quot;          # Was resolved; same pattern fires again
+
+
+@dataclass
+class AlertDecision:
+    action: AlertAction
+    rule_name: str
+    entity_key: Tuple
+    severity: str
+    suppress_count: int = 0
+    original_ts: float = 0.0
+    current_ts: float = 0.0
+    message: str = &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (simple expiry window, no escalation)
+# ---------------------------------------------------------------------------
+
+class NaiveSuppressor:
+    &quot;&quot;&quot;
+    Simplest possible deduplication: suppress identical alerts within
+    suppress_seconds of each other.
+    No escalation, no resolve, no count tracking.
+    &quot;&quot;&quot;
+
+    def __init__(self, suppress_seconds: float = 300.0) -&gt; None:
+        self.suppress_seconds = suppress_seconds
+        # (rule_name, entity_key) → expiry_ts
+        self._windows: Dict[Tuple, float] = {}
+
+    def process(self, rule_name: str, entity_key: Tuple, ts: float,
+                severity: str) -&gt; AlertDecision:
+        key = (rule_name, entity_key)
+        expiry = self._windows.get(key, 0.0)
+
+        if ts &lt; expiry:
+            return AlertDecision(AlertAction.SUPPRESS, rule_name, entity_key,
+                                 severity, current_ts=ts)
+        # New or re-opened
+        self._windows[key] = ts + self.suppress_seconds
+        return AlertDecision(AlertAction.EMIT, rule_name, entity_key,
+                             severity, current_ts=ts)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full Deduplication Engine with Escalation (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _KeyState:
+    rule_name: str
+    entity_key: Tuple
+    status: str = &quot;resolved&quot;       # open | suppressed | resolved
+    original_severity: str = &quot;info&quot;
+    current_severity: str = &quot;info&quot;
+    window_start_ts: float = 0.0
+    window_end_ts: float = 0.0
+    last_seen_ts: float = 0.0
+    suppress_count: int = 0         # duplicates suppressed in current window
+    total_count: int = 0            # total times seen (all windows)
+    escalation_emitted: Set[int] = field(default_factory=set)  # escalation thresholds hit
+
+
+class AlertDeduplicator:
+    &quot;&quot;&quot;
+    Full deduplication + escalation + resolve engine.
+
+    suppress_seconds   : window length for deduplication
+    escalation_thresholds : list of suppress_counts that trigger escalation
+                             e.g. [5, 20, 100] → escalate at 5th, 20th, 100th dup
+    resolve_after_seconds : idle time before sending resolve notification
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        suppress_seconds: float = 300.0,
+        escalation_thresholds: List[int] = None,
+        resolve_after_seconds: float = 1800.0,
+    ) -&gt; None:
+        self.suppress_seconds = suppress_seconds
+        self.escalation_thresholds = sorted(escalation_thresholds or [10, 50, 200])
+        self.resolve_after = resolve_after_seconds
+        self._states: Dict[Tuple, _KeyState] = {}
+
+    def _get_state(self, rule_name: str, entity_key: Tuple, severity: str) -&gt; _KeyState:
+        k = (rule_name, entity_key)
+        if k not in self._states:
+            self._states[k] = _KeyState(
+                rule_name=rule_name, entity_key=entity_key,
+                original_severity=severity, current_severity=severity,
+            )
+        return self._states[k]
+
+    def process(self, rule_name: str, entity_key: Tuple, ts: float,
+                severity: str = &quot;medium&quot;) -&gt; AlertDecision:
+        &quot;&quot;&quot;
+        Process one alert firing.  Returns the AlertDecision (what to do).
+        &quot;&quot;&quot;
+        state = self._get_state(rule_name, entity_key, severity)
+        state.last_seen_ts = ts
+        state.total_count += 1
+
+        # --- Case 1: resolved / never seen → open new alert ---
+        if state.status == &quot;resolved&quot;:
+            action = AlertAction.EMIT if state.total_count == 1 else AlertAction.REOPEN
+            state.status = &quot;suppressed&quot;  # after first emit, further dups are suppressed
+            state.window_start_ts = ts
+            state.window_end_ts = ts + self.suppress_seconds
+            state.suppress_count = 0
+            state.escalation_emitted = set()
+            state.original_severity = severity
+            state.current_severity = severity
+            msg = &quot;New alert&quot; if action == AlertAction.EMIT else &quot;Alert re-opened after quiet period&quot;
+            return AlertDecision(action, rule_name, entity_key, severity,
+                                 current_ts=ts, message=msg)
+
+        # --- Case 2: within active window ---
+        if ts &lt;= state.window_end_ts:
+            state.suppress_count += 1
+
+            # Check escalation thresholds
+            for threshold in self.escalation_thresholds:
+                if (state.suppress_count &gt;= threshold
+                        and threshold not in state.escalation_emitted):
+                    state.escalation_emitted.add(threshold)
+                    state.current_severity = _escalate(state.current_severity)
+                    return AlertDecision(
+                        AlertAction.ESCALATE, rule_name, entity_key,
+                        state.current_severity,
+                        suppress_count=state.suppress_count,
+                        current_ts=ts,
+                        message=f&quot;Escalated after {state.suppress_count} duplicates&quot;,
+                    )
+
+            return AlertDecision(AlertAction.SUPPRESS, rule_name, entity_key,
+                                 state.current_severity,
+                                 suppress_count=state.suppress_count,
+                                 current_ts=ts)
+
+        # --- Case 3: window expired → start new window, emit (re-fire) ---
+        state.window_start_ts = ts
+        state.window_end_ts = ts + self.suppress_seconds
+        state.suppress_count = 0
+        state.escalation_emitted = set()
+        # Keep escalated severity if it was raised; could optionally reset here
+        return AlertDecision(AlertAction.EMIT, rule_name, entity_key,
+                             state.current_severity,
+                             current_ts=ts,
+                             message=&quot;Alert re-fired after window expiry&quot;)
+
+    def check_resolutions(self, now: float) -&gt; List[AlertDecision]:
+        &quot;&quot;&quot;
+        Call periodically (e.g. every minute) to emit resolve notifications
+        for keys that have been quiet for resolve_after_seconds.
+        &quot;&quot;&quot;
+        resolved = []
+        for key, state in self._states.items():
+            if (state.status != &quot;resolved&quot;
+                    and now - state.last_seen_ts &gt;= self.resolve_after):
+                state.status = &quot;resolved&quot;
+                resolved.append(AlertDecision(
+                    AlertAction.RESOLVE, state.rule_name, state.entity_key,
+                    state.current_severity,
+                    suppress_count=state.suppress_count,
+                    current_ts=now,
+                    message=f&quot;Resolved after {now - state.last_seen_ts:.0f}s quiet&quot;,
+                ))
+        return resolved
+
+    def stats(self) -&gt; Dict[Tuple, dict]:
+        return {
+            (s.rule_name, s.entity_key): {
+                &quot;status&quot;: s.status,
+                &quot;total_count&quot;: s.total_count,
+                &quot;suppress_count&quot;: s.suppress_count,
+                &quot;current_severity&quot;: s.current_severity,
+            }
+            for s in self._states.values()
+        }
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_naive_suppress():
+    sup = NaiveSuppressor(suppress_seconds=60)
+    d1 = sup.process(&quot;r1&quot;, (&quot;10.0.0.1&quot;,), 0.0, &quot;medium&quot;)
+    assert d1.action == AlertAction.EMIT
+
+    d2 = sup.process(&quot;r1&quot;, (&quot;10.0.0.1&quot;,), 30.0, &quot;medium&quot;)
+    assert d2.action == AlertAction.SUPPRESS
+
+    d3 = sup.process(&quot;r1&quot;, (&quot;10.0.0.1&quot;,), 70.0, &quot;medium&quot;)
+    assert d3.action == AlertAction.EMIT  # window expired
+    print(&quot;NaiveSuppressor: passed&quot;)
+
+
+def test_emit_on_first():
+    eng = AlertDeduplicator(suppress_seconds=300, escalation_thresholds=[5, 20])
+    d = eng.process(&quot;brute_force&quot;, (&quot;alice&quot;,), 0.0, &quot;medium&quot;)
+    assert d.action == AlertAction.EMIT
+    print(&quot;First alert emitted: passed&quot;)
+
+
+def test_suppress_duplicates():
+    eng = AlertDeduplicator(suppress_seconds=300, escalation_thresholds=[5, 20])
+    eng.process(&quot;r&quot;, (&quot;alice&quot;,), 0.0, &quot;medium&quot;)
+    for i in range(1, 4):
+        d = eng.process(&quot;r&quot;, (&quot;alice&quot;,), float(i * 10), &quot;medium&quot;)
+        assert d.action == AlertAction.SUPPRESS, f&quot;Expected SUPPRESS at i={i}: {d}&quot;
+    print(&quot;Suppress duplicates: passed&quot;)
+
+
+def test_escalation():
+    eng = AlertDeduplicator(suppress_seconds=3600, escalation_thresholds=[3, 10])
+    eng.process(&quot;r&quot;, (&quot;bob&quot;,), 0.0, &quot;low&quot;)
+    escalated = None
+    for i in range(1, 15):
+        d = eng.process(&quot;r&quot;, (&quot;bob&quot;,), float(i * 10), &quot;low&quot;)
+        if d.action == AlertAction.ESCALATE:
+            escalated = d
+            print(f&quot;  Escalated at count={d.suppress_count} new_sev={d.severity}&quot;)
+    assert escalated is not None, &quot;Expected at least one escalation&quot;
+    print(&quot;Escalation: passed&quot;)
+
+
+def test_window_expiry_refire():
+    eng = AlertDeduplicator(suppress_seconds=60)
+    eng.process(&quot;r&quot;, (&quot;host-1&quot;,), 0.0, &quot;high&quot;)
+    eng.process(&quot;r&quot;, (&quot;host-1&quot;,), 30.0, &quot;high&quot;)  # suppress
+
+    d = eng.process(&quot;r&quot;, (&quot;host-1&quot;,), 100.0, &quot;high&quot;)  # past window
+    assert d.action == AlertAction.EMIT, f&quot;Expected EMIT after window expiry: {d}&quot;
+    print(&quot;Window expiry refire: passed&quot;)
+
+
+def test_resolve_notification():
+    eng = AlertDeduplicator(suppress_seconds=60, resolve_after_seconds=120)
+    eng.process(&quot;r&quot;, (&quot;ip-x&quot;,), 0.0, &quot;high&quot;)
+    eng.process(&quot;r&quot;, (&quot;ip-x&quot;,), 30.0, &quot;high&quot;)
+
+    # Nothing resolved yet at t=100
+    resolved = eng.check_resolutions(100.0)
+    assert len(resolved) == 0
+
+    # At t=200, 200s idle → resolve
+    resolved = eng.check_resolutions(200.0)
+    assert len(resolved) == 1
+    assert resolved[0].action == AlertAction.RESOLVE
+    print(&quot;Resolve notification: passed&quot;)
+
+
+def test_reopen_after_resolve():
+    eng = AlertDeduplicator(suppress_seconds=60, resolve_after_seconds=120)
+    eng.process(&quot;r&quot;, (&quot;user-a&quot;,), 0.0, &quot;medium&quot;)
+    eng.check_resolutions(200.0)  # mark resolved
+
+    d = eng.process(&quot;r&quot;, (&quot;user-a&quot;,), 300.0, &quot;medium&quot;)  # fires again after resolve
+    assert d.action == AlertAction.REOPEN, f&quot;Expected REOPEN: {d}&quot;
+    print(&quot;Reopen after resolve: passed&quot;)
+
+
+def test_independent_keys():
+    &quot;&quot;&quot;Different entity keys should not interfere.&quot;&quot;&quot;
+    eng = AlertDeduplicator(suppress_seconds=3600)
+    d1 = eng.process(&quot;r&quot;, (&quot;10.0.0.1&quot;,), 0.0, &quot;low&quot;)
+    d2 = eng.process(&quot;r&quot;, (&quot;10.0.0.2&quot;,), 0.0, &quot;low&quot;)
+    assert d1.action == AlertAction.EMIT
+    assert d2.action == AlertAction.EMIT  # independent key
+    print(&quot;Independent keys: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Without suppression, a single persistent attacker (e.g. long-running brute
+  force) can generate thousands of identical alerts per hour, causing:
+  - Alert fatigue: analysts ignore all alerts
+  - PagerDuty flooding: on-call engineers wake up to 500 pages
+  - SOAR playbook loops: automated responses trigger repeatedly, wasting resources
+
+  Suppression with escalation gives the best of both worlds:
+  - Analyst sees ONE alert when the attack starts.
+  - After N duplicates (5, 20, 100), the alert is escalated to ensure it&#x27;s
+    not buried during high-volume attacks.
+  - When the attack stops, a RESOLVE notification confirms clean state.
+
+ESCALATION THRESHOLDS — DESIGN GUIDANCE
+  - threshold=5: brief burst (automated scan that ran for a few seconds)
+  - threshold=50: moderate persistence (minutes-long brute force)
+  - threshold=500: severe persistence (hours-long campaign)
+  Use these to route to different teams: medium → Tier 1, high → Tier 2, critical → Tier 3.
+
+FAILURE MODES
+  - Suppression window too long: a new attacker from a different vector is
+    suppressed because a previous window is still open for the same (rule, entity).
+    Mitigate: include more specific fields in entity_key (e.g. add src_ip).
+  - Suppression window too short: burst attackers fire many windows rapidly;
+    each window emits a new alert → partial flooding.
+    Mitigate: use exponential backoff for window length after repeated re-fires.
+  - Missing resolve: if the process crashes before check_resolutions runs,
+    resolve notifications are never sent.
+    Mitigate: persist state to durable store; recover on restart.
+
+PRODUCTION HARDENING
+  - Store _states in Redis with TTL = suppress_seconds + resolve_after_seconds.
+  - Run check_resolutions in a scheduled job (every 60s).
+  - Expose a /suppress-status API for SOC dashboards.
+  - Log every SUPPRESS action with suppress_count for post-incident auditing.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_suppress()
+    test_emit_on_first()
+    test_suppress_duplicates()
+    test_escalation()
+    test_window_expiry_refire()
+    test_resolve_notification()
+    test_reopen_after_resolve()
+    test_independent_keys()
+</code></pre>
+</body>
+</html>

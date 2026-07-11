@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q17_s3_access_auditor.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q17_s3_access_auditor.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q17_s3_access_auditor.py</p>
+  <p class="line-count">273 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q17. S3 Server Access Log Auditor
+===================================
+Detect bulk downloads, sensitive prefix access, cross-account requests,
+anonymous access, and 403 storms from S3 server access logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Parse the log, print rows with status != 200.
+  Problem: 403s are meaningful in aggregate (scanning) but individually
+  they&#x27;re normal. A bulk download of 1000 objects, all returning 200,
+  is far more dangerous and would be missed entirely.
+
+BETTER: Alert on any anonymous requester.
+  Problem: Misses cross-account access (authenticated, but by a foreign
+  account), bulk download, and sensitive-prefix patterns.
+
+GOOGLE-LEVEL (this file):
+  - Bulk download: &gt; threshold GetObject calls per requester per bucket window.
+  - Sensitive prefix: regex on key path (ssn, pci, credentials, etc.).
+  - Cross-account: requester account != bucket-owner account.
+  - Anonymous: requester == &quot;-&quot; or AuthType contains anonymous.
+  - 403 storm: sustained stream of 403s from one IP → permission-probing.
+
+Complexity: O(N) parse, O(U × B) for aggregation tables.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (S3 server access log format)
+# Columns: BucketOwner Bucket Time RemoteIP Requester RequestID Operation Key
+#          RequestURI Status ErrorCode BytesSent ObjectSize TotalTime
+#          TurnAroundTime Referrer UserAgent VersionId HostId SignatureVersion
+#          CipherSuite AuthType HostHeader TLSVersion
+# Simplified subset used here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:00:00 +0000] 1.2.3.4 arn:aws:iam::111111111111:user/alice REST.GET.OBJECT finance/q4-revenue.csv 200 - 45000 45000 200 100 - python-boto3 - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:00:01 +0000] 1.2.3.4 arn:aws:iam::111111111111:user/alice REST.GET.OBJECT finance/q3-revenue.csv 200 - 43000 43000 200 100 - python-boto3 - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:00:02 +0000] 1.2.3.4 arn:aws:iam::111111111111:user/alice REST.GET.OBJECT hr/salaries.csv 200 - 12000 12000 200 100 - python-boto3 - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:00:03 +0000] 1.2.3.4 arn:aws:iam::111111111111:user/alice REST.GET.OBJECT hr/ssn.csv 200 - 8000 8000 200 100 - python-boto3 - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:00:04 +0000] 1.2.3.4 arn:aws:iam::111111111111:user/alice REST.GET.OBJECT hr/employee-list.csv 200 - 9000 9000 200 100 - python-boto3 - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:01:00 +0000] 5.6.7.8 arn:aws:iam::999999999999:user/external REST.GET.OBJECT public/logo.png 200 - 5000 5000 100 50 - aws-sdk-go - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:02:00 +0000] 9.10.11.12 - REST.GET.OBJECT public/file.txt 200 - 1000 1000 100 50 - Mozilla - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:03:00 +0000] 13.14.15.16 arn:aws:iam::222222222222:user/bob REST.GET.OBJECT config/secrets.yaml 403 AccessDenied 0 0 10 0 - aws-cli - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:03:01 +0000] 13.14.15.16 arn:aws:iam::222222222222:user/bob REST.GET.OBJECT config/keys.json 403 AccessDenied 0 0 10 0 - aws-cli - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:03:02 +0000] 13.14.15.16 arn:aws:iam::222222222222:user/bob REST.GET.OBJECT config/tokens.txt 403 AccessDenied 0 0 10 0 - aws-cli - - TLSv1.2
+OWNER_ACCT corp-sensitive-data [12/Mar/2024:08:03:03 +0000] 13.14.15.16 arn:aws:iam::222222222222:user/bob REST.GET.OBJECT db/backup.sql 403 AccessDenied 0 0 10 0 - aws-cli - - TLSv1.2
+MALFORMED_LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+BULK_DOWNLOAD_THRESHOLD = 5   # GetObject calls per (requester, bucket) in one session
+FORBIDDEN_STORM_THRESHOLD = 3 # 403s from one IP within window
+
+SENSITIVE_KEY_RE = re.compile(
+    r&#x27;^(finance|hr|payroll|ssn|pci|credentials|secrets|keys|tokens|db|backup|config)&#x27;,
+    re.IGNORECASE,
+)
+
+OWNER_ACCOUNT = &quot;OWNER_ACCT&quot;  # bucket-owner account token in logs
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# S3 log is space-delimited; time field contains spaces but is bracketed [...]
+# Fields we care about: BucketOwner Bucket [Time] RemoteIP Requester
+#                       _ Operation Key Status ...
+LOG_RE = re.compile(
+    r&#x27;^(?P&lt;owner&gt;\S+)\s+&#x27;          # 1 BucketOwner
+    r&#x27;(?P&lt;bucket&gt;\S+)\s+&#x27;          # 2 Bucket
+    r&#x27;\[(?P&lt;time&gt;[^\]]+)\]\s+&#x27;     # 3 Time
+    r&#x27;(?P&lt;ip&gt;\S+)\s+&#x27;              # 4 RemoteIP
+    r&#x27;(?P&lt;requester&gt;\S+)\s+&#x27;       # 5 Requester (ARN or -)
+    r&#x27;\S+\s+&#x27;                      # 6 RequestID
+    r&#x27;(?P&lt;operation&gt;\S+)\s+&#x27;       # 7 Operation
+    r&#x27;(?P&lt;key&gt;\S+)\s+&#x27;             # 8 Key
+    r&#x27;&quot;.+?&quot;\s+&#x27;                    # 9 RequestURI (quoted)
+    r&#x27;(?P&lt;status&gt;\d+)&#x27;             # 10 HTTP Status
+)
+
+TIME_FMT = &quot;%d/%b/%Y:%H:%M:%S +0000&quot;
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    try:
+        ts = datetime.strptime(m.group(&quot;time&quot;), TIME_FMT).timestamp()
+    except ValueError:
+        return None
+    return {
+        &quot;ts&quot;:         ts,
+        &quot;owner&quot;:      m.group(&quot;owner&quot;),
+        &quot;bucket&quot;:     m.group(&quot;bucket&quot;),
+        &quot;ip&quot;:         m.group(&quot;ip&quot;),
+        &quot;requester&quot;:  m.group(&quot;requester&quot;),
+        &quot;operation&quot;:  m.group(&quot;operation&quot;),
+        &quot;key&quot;:        m.group(&quot;key&quot;),
+        &quot;status&quot;:     int(m.group(&quot;status&quot;)),
+    }
+
+
+def requester_account(requester: str) -&gt; str:
+    &quot;&quot;&quot;Extract AWS account ID from IAM ARN, or return &#x27;-&#x27; for anonymous.&quot;&quot;&quot;
+    if requester == &quot;-&quot;:
+        return &quot;-&quot;
+    m = re.search(r&#x27;::(\d{12}):&#x27;, requester)
+    return m.group(1) if m else requester
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_bulk_download(records: list[dict]) -&gt; list[dict]:
+    counts: dict[tuple, list] = defaultdict(list)
+    for r in records:
+        if r[&quot;operation&quot;] == &quot;REST.GET.OBJECT&quot; and r[&quot;status&quot;] == 200:
+            counts[(r[&quot;requester&quot;], r[&quot;bucket&quot;])].append(r[&quot;ts&quot;])
+    return [
+        {
+            &quot;type&quot;:      &quot;BULK_DOWNLOAD&quot;,
+            &quot;requester&quot;: req,
+            &quot;bucket&quot;:    bucket,
+            &quot;count&quot;:     len(tss),
+            &quot;ts&quot;:        min(tss),
+        }
+        for (req, bucket), tss in counts.items()
+        if len(tss) &gt;= BULK_DOWNLOAD_THRESHOLD
+    ]
+
+
+def detect_sensitive_prefix(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:      &quot;SENSITIVE_KEY_ACCESS&quot;,
+            &quot;requester&quot;: r[&quot;requester&quot;],
+            &quot;bucket&quot;:    r[&quot;bucket&quot;],
+            &quot;key&quot;:       r[&quot;key&quot;],
+            &quot;status&quot;:    r[&quot;status&quot;],
+            &quot;ts&quot;:        r[&quot;ts&quot;],
+        }
+        for r in records
+        if SENSITIVE_KEY_RE.match(r[&quot;key&quot;])
+    ]
+
+
+def detect_cross_account(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        acct = requester_account(r[&quot;requester&quot;])
+        # Non-anonymous and account differs from bucket owner token
+        if acct != &quot;-&quot; and r[&quot;owner&quot;] != acct:
+            alerts.append({
+                &quot;type&quot;:      &quot;CROSS_ACCOUNT_ACCESS&quot;,
+                &quot;requester&quot;: r[&quot;requester&quot;],
+                &quot;bucket&quot;:    r[&quot;bucket&quot;],
+                &quot;key&quot;:       r[&quot;key&quot;],
+                &quot;status&quot;:    r[&quot;status&quot;],
+                &quot;ts&quot;:        r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_anonymous(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:   &quot;ANONYMOUS_ACCESS&quot;,
+            &quot;ip&quot;:     r[&quot;ip&quot;],
+            &quot;bucket&quot;: r[&quot;bucket&quot;],
+            &quot;key&quot;:    r[&quot;key&quot;],
+            &quot;status&quot;: r[&quot;status&quot;],
+            &quot;ts&quot;:     r[&quot;ts&quot;],
+        }
+        for r in records
+        if r[&quot;requester&quot;] == &quot;-&quot;
+    ]
+
+
+def detect_403_storm(records: list[dict]) -&gt; list[dict]:
+    forbidden: dict[str, list] = defaultdict(list)
+    for r in records:
+        if r[&quot;status&quot;] == 403:
+            forbidden[r[&quot;ip&quot;]].append(r[&quot;ts&quot;])
+    return [
+        {
+            &quot;type&quot;:  &quot;403_STORM&quot;,
+            &quot;ip&quot;:    ip,
+            &quot;count&quot;: len(tss),
+            &quot;ts&quot;:    min(tss),
+        }
+        for ip, tss in forbidden.items()
+        if len(tss) &gt;= FORBIDDEN_STORM_THRESHOLD
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(bulk, sensitive, cross_acct, anon, storm) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;S3 SERVER ACCESS LOG AUDIT REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[BULK_DOWNLOAD] {len(bulk)} alert(s)&quot;)
+    for a in bulk:
+        print(f&quot;  requester={a[&#x27;requester&#x27;][:60]}  bucket={a[&#x27;bucket&#x27;]}  &quot;
+              f&quot;objects={a[&#x27;count&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[SENSITIVE_KEY_ACCESS] {len(sensitive)} event(s)&quot;)
+    for a in sensitive:
+        print(f&quot;  requester={a[&#x27;requester&#x27;][:60]}  key={a[&#x27;key&#x27;]}  &quot;
+              f&quot;status={a[&#x27;status&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[CROSS_ACCOUNT_ACCESS] {len(cross_acct)} event(s)&quot;)
+    for a in cross_acct:
+        print(f&quot;  requester={a[&#x27;requester&#x27;][:60]}  bucket={a[&#x27;bucket&#x27;]}  &quot;
+              f&quot;key={a[&#x27;key&#x27;]}  status={a[&#x27;status&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[ANONYMOUS_ACCESS] {len(anon)} event(s)&quot;)
+    for a in anon:
+        print(f&quot;  ip={a[&#x27;ip&#x27;]}  bucket={a[&#x27;bucket&#x27;]}  key={a[&#x27;key&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[403_STORM] {len(storm)} alert(s)&quot;)
+    for a in storm:
+        print(f&quot;  ip={a[&#x27;ip&#x27;]}  count={a[&#x27;count&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} S3 access log entries.\n&quot;)
+    print_report(
+        detect_bulk_download(records),
+        detect_sensitive_prefix(records),
+        detect_cross_account(records),
+        detect_anonymous(records),
+        detect_403_storm(records),
+    )
+</code></pre>
+</body>
+</html>

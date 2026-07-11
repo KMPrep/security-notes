@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q7_csv_event_report.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q7_csv_event_report.py</h1>
+  <p class="file-path">Source: code\day5\answers\q7_csv_event_report.py</p>
+  <p class="line-count">325 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q7. CSV Security Event Report
+================================
+Read a CSV of security events, group by severity, count (src_ip, dst_ip)
+pairs, output sorted report, write CRITICAL events to a new CSV.
+
+CSV columns:
+  event_id, timestamp, severity, source_ip, destination_ip, event_type, description
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Process a CSV of security events and produce a report.&quot;
+
+--- CANDIDATE FIRST RESPONSE (open file, split by comma naively) ---
+&quot;I&#x27;d read each line, split by comma, and index into the fields.&quot;
+
+Follow-up: &quot;What if a description field has a comma inside it (quoted field)?&quot;
+→ Naive split breaks. Use csv.reader or csv.DictReader.
+
+--- CANDIDATE SECOND RESPONSE (csv.DictReader, basic aggregation) ---
+Better. Follow-up: &quot;What if the CSV has a BOM or unusual encoding?&quot;
+→ Open with encoding=&#x27;utf-8-sig&#x27; to strip BOM.
+Follow-up: &quot;What if a row is missing a column?&quot;
+→ DictReader returns None/&#x27;&#x27;/restval; check for it.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+csv.DictReader with encoding, missing-field validation, clean aggregation,
+sorted report, filtered CSV output.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import sys
+import csv
+import io
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_CSV = &quot;&quot;&quot;\
+event_id,timestamp,severity,source_ip,destination_ip,event_type,description
+1,2024-01-15T10:00:00Z,CRITICAL,10.0.0.1,192.168.1.100,INTRUSION,&quot;SQL injection attempt&quot;
+2,2024-01-15T10:01:00Z,HIGH,10.0.0.2,192.168.1.101,SCAN,&quot;Port scan detected&quot;
+3,2024-01-15T10:02:00Z,CRITICAL,10.0.0.1,192.168.1.100,INTRUSION,&quot;XSS attempt in header&quot;
+4,2024-01-15T10:03:00Z,LOW,10.0.0.3,192.168.1.102,INFO,&quot;Normal login&quot;
+5,2024-01-15T10:04:00Z,MEDIUM,10.0.0.4,192.168.1.103,POLICY,&quot;Blocked by policy&quot;
+6,2024-01-15T10:05:00Z,CRITICAL,10.0.0.5,192.168.1.100,EXFIL,&quot;Large upload to external IP&quot;
+7,2024-01-15T10:06:00Z,HIGH,10.0.0.2,192.168.1.104,SCAN,&quot;Vulnerability scan&quot;
+8,2024-01-15T10:07:00Z,HIGH,10.0.0.1,192.168.1.105,BRUTEFORCE,&quot;SSH brute force&quot;
+9,2024-01-15T10:08:00Z,LOW,10.0.0.6,192.168.1.106,INFO,&quot;DNS lookup&quot;
+10,2024-01-15T10:09:00Z,CRITICAL,10.0.0.1,192.168.1.100,INTRUSION,&quot;Command injection&quot;
+11,2024-01-15T10:10:00Z,MEDIUM,10.0.0.7,192.168.1.107,POLICY,&quot;Rate limit exceeded&quot;
+12,2024-01-15T10:11:00Z,HIGH,10.0.0.2,192.168.1.101,SCAN,&quot;Service enumeration&quot;
+&quot;&quot;&quot;
+
+REQUIRED_COLUMNS = {
+    &quot;event_id&quot;, &quot;timestamp&quot;, &quot;severity&quot;,
+    &quot;source_ip&quot;, &quot;destination_ip&quot;, &quot;event_type&quot;, &quot;description&quot;
+}
+SEVERITY_ORDER = {&quot;CRITICAL&quot;: 0, &quot;HIGH&quot;: 1, &quot;MEDIUM&quot;: 2, &quot;LOW&quot;: 3, &quot;INFO&quot;: 4}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual CSV parsing using csv.reader not DictReader, manual dicts, no sorted key)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_insertion_sort_by_count(pairs):
+    &quot;&quot;&quot;Sort (key, count) pairs descending by count in-place.&quot;&quot;&quot;
+    for i in range(1, len(pairs)):
+        cur = pairs[i]
+        j = i - 1
+        while j &gt;= 0 and pairs[j][1] &lt; cur[1]:
+            pairs[j + 1] = pairs[j]
+            j -= 1
+        pairs[j + 1] = cur
+
+
+def analyze_without_builtins(csv_text: str):
+    &quot;&quot;&quot;
+    Uses csv.reader (lower-level than DictReader) + manual dict mapping.
+    No defaultdict, no sorted with key=, no Counter.
+    &quot;&quot;&quot;
+    reader = csv.reader(io.StringIO(csv_text))
+
+    # Read header row
+    try:
+        header = next(reader)
+    except StopIteration:
+        print(&quot;[ERROR] CSV is empty.&quot;, file=sys.stderr)
+        return {}, {}, [], 0
+
+    # Strip whitespace from header columns
+    header = [h.strip() for h in header]
+
+    # Build column index map manually
+    col_index = {}
+    for i, col in enumerate(header):
+        col_index[col] = i
+
+    # Validate required columns
+    for col in REQUIRED_COLUMNS:
+        if col not in col_index:
+            print(f&quot;[ERROR] Missing required column: {col}&quot;, file=sys.stderr)
+            return {}, {}, [], 0
+
+    severity_groups = {}   # severity -&gt; list of row dicts
+    pair_counts     = {}   # (src_ip, dst_ip) -&gt; count
+    critical_events = []
+    malformed       = 0
+
+    for row_num, row in enumerate(reader, start=2):
+        if len(row) &lt; len(header):
+            print(f&quot;[WARN] Row {row_num}: fewer columns than header, skipping.&quot;,
+                  file=sys.stderr)
+            malformed += 1
+            continue
+
+        # Build a dict from the row manually
+        record = {}
+        for col, idx in col_index.items():
+            record[col] = row[idx].strip() if idx &lt; len(row) else &quot;&quot;
+
+        severity = record.get(&quot;severity&quot;, &quot;&quot;).upper()
+        src_ip   = record.get(&quot;source_ip&quot;, &quot;&quot;)
+        dst_ip   = record.get(&quot;destination_ip&quot;, &quot;&quot;)
+
+        if not severity:
+            print(f&quot;[WARN] Row {row_num}: empty severity, skipping.&quot;,
+                  file=sys.stderr)
+            malformed += 1
+            continue
+
+        # Severity grouping (manual)
+        if severity not in severity_groups:
+            severity_groups[severity] = []
+        severity_groups[severity].append(record)
+
+        # (src, dst) pair counting (manual)
+        pair = (src_ip, dst_ip)
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
+        if severity == &quot;CRITICAL&quot;:
+            critical_events.append(record)
+
+    # Convert pair_counts to sorted list
+    pair_list = list(pair_counts.items())
+    _manual_insertion_sort_by_count(pair_list)
+
+    return severity_groups, pair_list, critical_events, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (csv.DictReader, defaultdict, sorted)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(csv_text: str):
+    reader = csv.DictReader(
+        io.StringIO(csv_text),
+        skipinitialspace=True
+    )
+
+    # Validate header
+    if reader.fieldnames is None:
+        print(&quot;[ERROR] CSV has no headers.&quot;, file=sys.stderr)
+        return {}, [], [], 0
+
+    missing = REQUIRED_COLUMNS - set(reader.fieldnames)
+    if missing:
+        print(f&quot;[ERROR] Missing columns: {missing}&quot;, file=sys.stderr)
+        return {}, [], [], 0
+
+    severity_groups = defaultdict(list)
+    pair_counts     = defaultdict(int)
+    critical_events = []
+    malformed       = 0
+
+    for row_num, row in enumerate(reader, start=2):
+        severity = (row.get(&quot;severity&quot;) or &quot;&quot;).strip().upper()
+        src_ip   = (row.get(&quot;source_ip&quot;) or &quot;&quot;).strip()
+        dst_ip   = (row.get(&quot;destination_ip&quot;) or &quot;&quot;).strip()
+
+        if not severity:
+            print(f&quot;[WARN] Row {row_num}: empty severity.&quot;, file=sys.stderr)
+            malformed += 1
+            continue
+
+        severity_groups[severity].append(dict(row))
+        pair_counts[(src_ip, dst_ip)] += 1
+
+        if severity == &quot;CRITICAL&quot;:
+            critical_events.append(dict(row))
+
+    pair_list = sorted(pair_counts.items(), key=lambda x: x[1], reverse=True)
+
+    return dict(severity_groups), pair_list, critical_events, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT PRINTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(severity_groups, pair_list, critical_events, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  CSV SECURITY EVENT REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Malformed / skipped rows: {malformed}\n&quot;)
+
+    print(&quot;Events by Severity:&quot;)
+    for sev in [&quot;CRITICAL&quot;, &quot;HIGH&quot;, &quot;MEDIUM&quot;, &quot;LOW&quot;, &quot;INFO&quot;]:
+        events = severity_groups.get(sev, [])
+        if events:
+            print(f&quot;  {sev:&lt;10} {len(events):&gt;4} events&quot;)
+
+    print(f&quot;\nTop (src_ip, dst_ip) Pairs by Event Count:&quot;)
+    for (src, dst), count in pair_list[:10]:   # top-10
+        print(f&quot;  {src:&lt;20} → {dst:&lt;20} : {count} events&quot;)
+
+    print(f&quot;\nCRITICAL Events ({len(critical_events)}):&quot;)
+    for ev in critical_events:
+        print(f&quot;  [{ev.get(&#x27;event_id&#x27;,&#x27;?&#x27;)}] {ev.get(&#x27;timestamp&#x27;,&#x27;&#x27;)}  &quot;
+              f&quot;{ev.get(&#x27;event_type&#x27;,&#x27;&#x27;)}  {ev.get(&#x27;source_ip&#x27;,&#x27;&#x27;)} → &quot;
+              f&quot;{ev.get(&#x27;destination_ip&#x27;,&#x27;&#x27;)}  \&quot;{ev.get(&#x27;description&#x27;,&#x27;&#x27;)}\&quot;&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV WRITER for CRITICAL events
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_critical_csv(critical_events, filepath: str):
+    &quot;&quot;&quot;Write CRITICAL events to a new CSV file.&quot;&quot;&quot;
+    if not critical_events:
+        print(&quot;[INFO] No CRITICAL events to write.&quot;)
+        return
+    try:
+        fieldnames = list(REQUIRED_COLUMNS)  # consistent column order
+        with open(filepath, &quot;w&quot;, newline=&quot;&quot;, encoding=&quot;utf-8&quot;) as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames,
+                                    extrasaction=&quot;ignore&quot;)
+            writer.writeheader()
+            for ev in critical_events:
+                writer.writerow(ev)
+        print(f&quot;[INFO] CRITICAL events written to: {filepath}&quot;)
+    except (PermissionError, OSError) as exc:
+        print(f&quot;[ERROR] Could not write {filepath}: {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_csv_text(filepath: str) -&gt; str:
+    &quot;&quot;&quot;Read entire CSV text. Returns empty string on error.&quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8-sig&quot;,
+                  errors=&quot;replace&quot;, newline=&quot;&quot;) as fh:
+            return fh.read()
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+        return &quot;&quot;
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+        return &quot;&quot;
+    except OSError as exc:
+        print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+        return &quot;&quot;
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        csv_text = read_csv_text(sys.argv[1])
+        if not csv_text:
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        csv_text = SAMPLE_CSV
+
+    sg_manual,  pl_manual,  crit_manual,  mal_manual  = analyze_without_builtins(csv_text)
+    sg_builtin, pl_builtin, crit_builtin, mal_builtin = analyze_with_builtins(csv_text)
+
+    print_report(sg_manual,  pl_manual,  crit_manual,  mal_manual,  label=&quot;(Manual)&quot;)
+    print_report(sg_builtin, pl_builtin, crit_builtin, mal_builtin, label=&quot;(Builtins)&quot;)
+
+    # Write critical events CSV (use builtin result — the cleaner one)
+    # write_critical_csv(crit_builtin, &quot;critical_events.csv&quot;)
+
+    # Sanity checks
+    assert len(crit_manual) == len(crit_builtin), &quot;CRITICAL count mismatch!&quot;
+    print(&quot;[OK] Both approaches agree on CRITICAL event count.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(R log R) dominated by sorting pair_counts (R = rows)
+# Space : O(R) for storing all rows (needed for CSV output)
+#         If only the report is needed, space is O(S + P) where
+#         S = unique severities, P = unique (src,dst) pairs.
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;The CSV has 10M rows. You can&#x27;t load it into memory.&quot;
+#     → Stream with csv.DictReader (already a generator). Keep only counters,
+#       not full row data. For CRITICAL output, write directly to output file
+#       as you stream rather than collecting in a list.
+# - &quot;What if severity values are inconsistent: &#x27;critical&#x27;, &#x27;CRIT&#x27;, &#x27;Critical&#x27;?&quot;
+#     → Normalize with .upper() and build an alias map:
+#       {&#x27;CRIT&#x27;: &#x27;CRITICAL&#x27;, &#x27;HIGH&#x27;: &#x27;HIGH&#x27;, &#x27;WARN&#x27;: &#x27;MEDIUM&#x27;, ...}
+# - &quot;How would you handle the CSV having different delimiters (TSV, semicolons)?&quot;
+#     → Use csv.Sniffer().sniff() to auto-detect the delimiter, or accept
+#       it as a command-line argument.
+# =============================================================================
+</code></pre>
+</body>
+</html>

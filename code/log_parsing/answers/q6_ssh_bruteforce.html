@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q6_ssh_bruteforce.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q6_ssh_bruteforce.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q6_ssh_bruteforce.py</p>
+  <p class="line-count">299 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q6. SSH/Auth Brute-Force Detector with IP Clustering
+======================================================
+Parse /var/log/auth.log to detect brute-force, credential stuffing,
+distributed attacks, and successful logins following failure bursts.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Count total failed logins per IP; flag if &gt; N.
+  Problem: Misses credential stuffing (many usernames from one IP), misses
+  distributed attacks (5 IPs each trying 2 passwords to avoid thresholds),
+  and misses post-burst success (the actual compromise event).
+
+BETTER: Per-IP counter with time window.
+  Problem: Still missing the distributed and post-burst success patterns.
+  Requires four separate independent detector passes.
+
+GOOGLE-LEVEL (this file):
+  - Four independent detectors, each with clear thresholds.
+  - Sliding window for rate-based detectors (not just total counts).
+  - Post-burst success: look backward from each success event to find
+    any failure burst for that user within the preceding N seconds.
+  - Streaming parse with regex so any auth.log format works.
+
+Complexity: O(N log N) sort; O(U) space for user/IP state.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+Mar 12 08:00:00 srv1 sshd[1001]: Failed password for root from 203.0.113.5 port 54321 ssh2
+Mar 12 08:00:01 srv1 sshd[1002]: Failed password for root from 203.0.113.5 port 54322 ssh2
+Mar 12 08:00:02 srv1 sshd[1003]: Failed password for root from 203.0.113.5 port 54323 ssh2
+Mar 12 08:00:03 srv1 sshd[1004]: Failed password for root from 203.0.113.5 port 54324 ssh2
+Mar 12 08:00:04 srv1 sshd[1005]: Failed password for root from 203.0.113.5 port 54325 ssh2
+Mar 12 08:00:05 srv1 sshd[1006]: Failed password for root from 203.0.113.5 port 54326 ssh2
+Mar 12 08:00:06 srv1 sshd[1007]: Failed password for root from 203.0.113.5 port 54327 ssh2
+Mar 12 08:00:07 srv1 sshd[1008]: Failed password for root from 203.0.113.5 port 54328 ssh2
+Mar 12 08:00:08 srv1 sshd[1009]: Failed password for root from 203.0.113.5 port 54329 ssh2
+Mar 12 08:00:09 srv1 sshd[1010]: Failed password for root from 203.0.113.5 port 54330 ssh2
+Mar 12 08:00:10 srv1 sshd[1011]: Failed password for root from 203.0.113.5 port 54331 ssh2
+Mar 12 08:00:11 srv1 sshd[1012]: Accepted password for root from 203.0.113.5 port 54332 ssh2
+Mar 12 08:01:00 srv1 sshd[2001]: Failed password for alice from 10.0.0.99 port 60001 ssh2
+Mar 12 08:01:01 srv1 sshd[2002]: Failed password for bob from 10.0.0.99 port 60002 ssh2
+Mar 12 08:01:02 srv1 sshd[2003]: Failed password for carol from 10.0.0.99 port 60003 ssh2
+Mar 12 08:01:03 srv1 sshd[2004]: Failed password for dave from 10.0.0.99 port 60004 ssh2
+Mar 12 08:01:04 srv1 sshd[2005]: Failed password for eve from 10.0.0.99 port 60005 ssh2
+Mar 12 08:01:05 srv1 sshd[2006]: Failed password for frank from 10.0.0.99 port 60006 ssh2
+Mar 12 08:01:06 srv1 sshd[2007]: Failed password for grace from 10.0.0.99 port 60007 ssh2
+Mar 12 08:01:07 srv1 sshd[2008]: Failed password for heidi from 10.0.0.99 port 60008 ssh2
+Mar 12 08:01:08 srv1 sshd[2009]: Failed password for ivan from 10.0.0.99 port 60009 ssh2
+Mar 12 08:01:09 srv1 sshd[2010]: Failed password for judy from 10.0.0.99 port 60010 ssh2
+Mar 12 08:01:10 srv1 sshd[2011]: Failed password for karen from 10.0.0.99 port 60011 ssh2
+Mar 12 08:01:11 srv1 sshd[2012]: Failed password for larry from 10.0.0.99 port 60012 ssh2
+Mar 12 08:01:12 srv1 sshd[2013]: Failed password for mike from 10.0.0.99 port 60013 ssh2
+Mar 12 08:01:13 srv1 sshd[2014]: Failed password for nancy from 10.0.0.99 port 60014 ssh2
+Mar 12 08:01:14 srv1 sshd[2015]: Failed password for oscar from 10.0.0.99 port 60015 ssh2
+Mar 12 08:01:15 srv1 sshd[2016]: Failed password for pat from 10.0.0.99 port 60016 ssh2
+Mar 12 08:01:16 srv1 sshd[2017]: Failed password for quinn from 10.0.0.99 port 60017 ssh2
+Mar 12 08:01:17 srv1 sshd[2018]: Failed password for rachel from 10.0.0.99 port 60018 ssh2
+Mar 12 08:01:18 srv1 sshd[2019]: Failed password for sam from 10.0.0.99 port 60019 ssh2
+Mar 12 08:01:19 srv1 sshd[2020]: Failed password for tom from 10.0.0.99 port 60020 ssh2
+Mar 12 08:02:00 srv1 sshd[3001]: Failed password for admin from 192.168.1.10 port 55000 ssh2
+Mar 12 08:02:01 srv1 sshd[3002]: Failed password for admin from 192.168.1.11 port 55001 ssh2
+Mar 12 08:02:02 srv1 sshd[3003]: Failed password for admin from 192.168.1.12 port 55002 ssh2
+Mar 12 08:02:03 srv1 sshd[3004]: Failed password for admin from 192.168.1.13 port 55003 ssh2
+Mar 12 08:02:04 srv1 sshd[3005]: Failed password for admin from 192.168.1.14 port 55004 ssh2
+Mar 12 08:02:05 srv1 sshd[3006]: Failed password for admin from 192.168.1.15 port 55005 ssh2
+Mar 12 08:04:00 srv1 sshd[4001]: Failed password for deploy from 172.16.0.50 port 56000 ssh2
+Mar 12 08:04:30 srv1 sshd[4002]: Failed password for deploy from 172.16.0.50 port 56001 ssh2
+Mar 12 08:05:00 srv1 sshd[4003]: Accepted password for deploy from 172.16.0.50 port 56002 ssh2
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+BRUTE_FORCE_THRESHOLD    = 10   # failed logins from same IP within window
+BRUTE_FORCE_WINDOW_SECS  = 60
+STUFFING_USERNAME_THRESH = 20   # distinct usernames tried from one IP
+DISTRIBUTED_IP_THRESHOLD = 5    # IPs all targeting same username within window
+DISTRIBUTED_WINDOW_SECS  = 300  # 5 minutes
+POST_BURST_WINDOW_SECS   = 300  # success within 5 min of a failure burst
+
+# Parse auth.log RFC 3164-style
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;month&gt;\w{3})\s+(?P&lt;day&gt;\d+)\s+(?P&lt;time&gt;\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;\S+\s+sshd\[\d+\]:\s+&#x27;
+    r&#x27;(?P&lt;result&gt;Failed|Accepted)\s+\S+\s+for\s+(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;from\s+(?P&lt;ip&gt;\S+)\s+port\s+(?P&lt;port&gt;\d+)&#x27;
+)
+
+MONTH_MAP = {&quot;Jan&quot;:1,&quot;Feb&quot;:2,&quot;Mar&quot;:3,&quot;Apr&quot;:4,&quot;May&quot;:5,&quot;Jun&quot;:6,
+             &quot;Jul&quot;:7,&quot;Aug&quot;:8,&quot;Sep&quot;:9,&quot;Oct&quot;:10,&quot;Nov&quot;:11,&quot;Dec&quot;:12}
+
+REFERENCE_YEAR = 2024  # no year in syslog RFC 3164
+
+
+def parse_ts(month: str, day: str, time_str: str) -&gt; float:
+    dt = datetime(REFERENCE_YEAR, MONTH_MAP[month], int(day),
+                  *map(int, time_str.split(&quot;:&quot;)))
+    return dt.timestamp()
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.search(line)
+    if not m:
+        return None
+    return {
+        &quot;ts&quot;:     parse_ts(m.group(&quot;month&quot;), m.group(&quot;day&quot;), m.group(&quot;time&quot;)),
+        &quot;result&quot;: m.group(&quot;result&quot;),
+        &quot;user&quot;:   m.group(&quot;user&quot;),
+        &quot;ip&quot;:     m.group(&quot;ip&quot;),
+        &quot;port&quot;:   int(m.group(&quot;port&quot;)),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 1: Brute-Force (same IP, many failures in window)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_brute_force(records: list[dict]) -&gt; list[dict]:
+    ip_fail_events: dict[str, list[float]] = defaultdict(list)
+    for r in records:
+        if r[&quot;result&quot;] == &quot;Failed&quot;:
+            ip_fail_events[r[&quot;ip&quot;]].append(r[&quot;ts&quot;])
+
+    alerts = []
+    for ip, timestamps in ip_fail_events.items():
+        timestamps.sort()
+        left = 0
+        for right in range(len(timestamps)):
+            while timestamps[right] - timestamps[left] &gt; BRUTE_FORCE_WINDOW_SECS:
+                left += 1
+            count = right - left + 1
+            if count &gt;= BRUTE_FORCE_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:   &quot;BRUTE_FORCE&quot;,
+                    &quot;ip&quot;:     ip,
+                    &quot;count&quot;:  count,
+                    &quot;window&quot;: (timestamps[left], timestamps[right]),
+                })
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 2: Credential Stuffing (one IP, many distinct usernames)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_credential_stuffing(records: list[dict]) -&gt; list[dict]:
+    ip_users: dict[str, set] = defaultdict(set)
+    for r in records:
+        if r[&quot;result&quot;] == &quot;Failed&quot;:
+            ip_users[r[&quot;ip&quot;]].add(r[&quot;user&quot;])
+
+    return [
+        {&quot;type&quot;: &quot;CREDENTIAL_STUFFING&quot;, &quot;ip&quot;: ip, &quot;distinct_users&quot;: len(users), &quot;users&quot;: sorted(users)}
+        for ip, users in ip_users.items()
+        if len(users) &gt; STUFFING_USERNAME_THRESH
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 3: Distributed Attack (many IPs, same username, same window)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_distributed(records: list[dict]) -&gt; list[dict]:
+    user_events: dict[str, list[tuple]] = defaultdict(list)  # user -&gt; [(ts, ip)]
+    for r in records:
+        if r[&quot;result&quot;] == &quot;Failed&quot;:
+            user_events[r[&quot;user&quot;]].append((r[&quot;ts&quot;], r[&quot;ip&quot;]))
+
+    alerts = []
+    for user, events in user_events.items():
+        events.sort()
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; DISTRIBUTED_WINDOW_SECS:
+                left += 1
+            ips = {events[i][1] for i in range(left, right + 1)}
+            if len(ips) &gt; DISTRIBUTED_IP_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:        &quot;DISTRIBUTED_ATTACK&quot;,
+                    &quot;target_user&quot;: user,
+                    &quot;distinct_ips&quot;: len(ips),
+                    &quot;window&quot;:      (events[left][0], events[right][0]),
+                    &quot;sample_ips&quot;:  sorted(ips)[:5],
+                })
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 4: Post-Burst Success
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_post_burst_success(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Successful login for a user preceded by a failure burst within POST_BURST_WINDOW_SECS.&quot;&quot;&quot;
+    user_failures: dict[str, list[float]] = defaultdict(list)
+    successes:     list[dict]             = []
+
+    for r in records:
+        if r[&quot;result&quot;] == &quot;Failed&quot;:
+            user_failures[r[&quot;user&quot;]].append(r[&quot;ts&quot;])
+        elif r[&quot;result&quot;] == &quot;Accepted&quot;:
+            successes.append(r)
+
+    alerts = []
+    for s in successes:
+        user      = s[&quot;user&quot;]
+        success_ts = s[&quot;ts&quot;]
+        fails = user_failures.get(user, [])
+        # Count failures within window before success
+        recent_fails = [t for t in fails if success_ts - POST_BURST_WINDOW_SECS &lt;= t &lt; success_ts]
+        if len(recent_fails) &gt;= 2:
+            alerts.append({
+                &quot;type&quot;:          &quot;POST_BURST_SUCCESS&quot;,
+                &quot;user&quot;:          user,
+                &quot;login_ip&quot;:      s[&quot;ip&quot;],
+                &quot;success_ts&quot;:    success_ts,
+                &quot;preceding_fails&quot;: len(recent_fails),
+                &quot;fail_window_s&quot;: round(success_ts - min(recent_fails), 1),
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(bf, cs, dist, pbs) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;SSH AUTH LOG — BRUTE-FORCE DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[BRUTE_FORCE] {len(bf)} alert(s)&quot;)
+    for a in bf:
+        print(f&quot;  ip={a[&#x27;ip&#x27;]}  failures={a[&#x27;count&#x27;]}  &quot;
+              f&quot;window={ts_fmt(a[&#x27;window&#x27;][0])} → {ts_fmt(a[&#x27;window&#x27;][1])}&quot;)
+
+    print(f&quot;\n[CREDENTIAL_STUFFING] {len(cs)} alert(s)&quot;)
+    for a in cs:
+        print(f&quot;  ip={a[&#x27;ip&#x27;]}  distinct_users={a[&#x27;distinct_users&#x27;]}&quot;)
+        print(f&quot;  first 5 users: {a[&#x27;users&#x27;][:5]}&quot;)
+
+    print(f&quot;\n[DISTRIBUTED_ATTACK] {len(dist)} alert(s)&quot;)
+    for a in dist:
+        print(f&quot;  target={a[&#x27;target_user&#x27;]}  ips={a[&#x27;distinct_ips&#x27;]}  &quot;
+              f&quot;window={ts_fmt(a[&#x27;window&#x27;][0])} → {ts_fmt(a[&#x27;window&#x27;][1])}&quot;)
+
+    print(f&quot;\n[POST_BURST_SUCCESS] {len(pbs)} alert(s)&quot;)
+    for a in pbs:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  login_ip={a[&#x27;login_ip&#x27;]}  &quot;
+              f&quot;success_at={ts_fmt(a[&#x27;success_ts&#x27;])}&quot;)
+        print(f&quot;  preceded by {a[&#x27;preceding_fails&#x27;]} failures in {a[&#x27;fail_window_s&#x27;]}s&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} auth events.\n&quot;)
+
+    print_report(
+        detect_brute_force(records),
+        detect_credential_stuffing(records),
+        detect_distributed(records),
+        detect_post_burst_success(records),
+    )
+</code></pre>
+</body>
+</html>

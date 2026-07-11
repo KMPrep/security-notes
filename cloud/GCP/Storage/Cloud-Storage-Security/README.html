@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Cloud Storage (GCS) Security</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Storage\Cloud-Storage-Security\README.md</p>
+<h1 id="gcp-cloud-storage-gcs-security">GCP Cloud Storage (GCS) Security</h1>
+<p><strong>Category:</strong> Cloud / GCP / Storage (Object Storage)<br />
+<strong>Defensive framing:</strong> study — how to reason about, harden, detect, and respond to object-storage exposure at scale.<br />
+<strong>Key Docs:</strong> <a href="https://cloud.google.com/storage/docs/security">Cloud Storage security</a>, <a href="https://cloud.google.com/storage/docs/uniform-bucket-level-access">Uniform bucket-level access</a>, <a href="https://cloud.google.com/storage/docs/public-access-prevention">Public access prevention</a>, <a href="https://cloud.google.com/vpc-service-controls/docs/overview">VPC Service Controls</a><br />
+<strong>Standards:</strong> NIST SP 800-53 (SC-8, SC-28, AC-3, AU-2), CIS GCP Foundations Benchmark v3.0 §5, MITRE ATT&amp;CK Cloud Matrix (T1530, T1567.002, T1619, T1580)</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Google Cloud Storage (GCS) is GCP's foundational object store: a globally-namespaced, strongly-consistent, exabyte-scale service that holds buckets containing objects addressed by key. It is the single most common source of cloud data-exposure incidents because it sits at the intersection of three failure-prone surfaces — identity (who can read/write), network reachability (can the public internet resolve <code>storage.googleapis.com</code> for this object), and encryption/retention (is the data protected at rest and tamper-resistant). Every large object-storage provider — S3, Azure Blob, GCS — has an identical structural weakness: the default anonymous identity (<code>allUsers</code> in GCP, "public" in S3/Azure) plus one permissive grant is enough to turn a private bucket into an internet-facing data feed. At scale, the security problem is not one bucket; it is the <em>policy floor</em> — proving that no bucket in any of ten thousand projects can ever become public, and proving it holds even when a developer with <code>roles/storage.admin</code> tries to override it.</p>
+<p>GCS security in 2024+ is dominated by four pivots: <strong>Uniform Bucket-Level Access (UBLA)</strong> replacing legacy fine-grained ACLs, the <strong>Public Access Prevention (PAP)</strong> org-policy constraint that structurally forbids public grants, <strong>VPC Service Controls (VPC-SC)</strong> that draw a network-identity perimeter around the data so stolen credentials cannot exfiltrate outward, and <strong>CMEK + Bucket Lock</strong> for cryptographic control and ransomware/tamper resistance. A senior engineer must be able to reason about how these compose, where each fails, and how to detect the gap between "configured" and "enforced org-wide."</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- <strong>Uniform bucket-level access (UBLA)</strong> disables per-object ACLs and makes IAM the <em>single</em> authorization model — always prefer it; fine-grained ACLs are the historical root cause of most accidental exposures because a public object ACL is invisible to bucket-level IAM review.<br />
+- <strong>Public Access Prevention</strong> is an org-policy constraint (<code>storage.publicAccessPrevention</code> = <code>enforced</code>) that structurally blocks any grant to <code>allUsers</code>/<code>allAuthenticatedUsers</code>, even by a project owner — set it at the org node, not per-bucket.<br />
+- Anonymous exposure in GCP = granting <code>roles/storage.objectViewer</code> (or legacy <code>READER</code> ACL) to the members <strong><code>allUsers</code></strong> or <strong><code>allAuthenticatedUsers</code></strong>; the latter is <em>not</em> "safe" — it means any Google account on earth.<br />
+- <strong>Signed URLs</strong> and <strong>signed policy documents</strong> are time-boxed, credential-derived capability tokens — a leaked signed URL is a bearer credential that bypasses IAM entirely until it expires; keep TTLs short and sign with a dedicated, low-privilege service account.<br />
+- <strong>Defense-in-depth for exfil</strong>: UBLA + PAP (identity floor) → VPC-SC perimeter (network floor) → CMEK (crypto control) → Object Versioning + Bucket Lock (recovery/immutability) → Data Access audit logs (detection).</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>GCS has a clean split between the <strong>control plane</strong> (bucket/object metadata, IAM policy, org policy — served by the JSON/XML API and the resource manager) and the <strong>data plane</strong> (the actual bytes, served from <code>storage.googleapis.com</code> and Google's edge). Authorization is evaluated on every request against the union of IAM bindings and, if fine-grained mode is active, per-object ACLs. Org Policy sits <em>above</em> IAM: a <code>DENY</code>-style constraint like Public Access Prevention cannot be overridden by any IAM role, which is why it is the correct place to enforce non-negotiable invariants.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bucket</td>
+<td>Globally-unique-named container; region/dual-region/multi-region located; holds objects and bucket-level config</td>
+</tr>
+<tr>
+<td>Object</td>
+<td>Immutable blob addressed by key (name); has metadata, generation number, and optional custom metadata</td>
+</tr>
+<tr>
+<td>IAM binding</td>
+<td><code>member</code> → <code>role</code> grant at org/folder/project/bucket scope; the modern, preferred auth model</td>
+</tr>
+<tr>
+<td>Fine-grained ACL</td>
+<td>Legacy per-object/per-bucket access list (<code>OWNER</code>/<code>READER</code>/<code>WRITER</code>); coexists with IAM unless UBLA is on</td>
+</tr>
+<tr>
+<td>Uniform bucket-level access (UBLA)</td>
+<td>Bucket setting that <strong>disables ACLs entirely</strong>; IAM becomes the sole authorization source</td>
+</tr>
+<tr>
+<td><code>allUsers</code></td>
+<td>Special IAM member = anyone on the internet, unauthenticated; a binding to it = public</td>
+</tr>
+<tr>
+<td><code>allAuthenticatedUsers</code></td>
+<td>Special IAM member = anyone with <em>any</em> Google account; effectively public, not internal</td>
+</tr>
+<tr>
+<td>Public Access Prevention (PAP)</td>
+<td>Bucket/org constraint that blocks binding <code>allUsers</code>/<code>allAuthenticatedUsers</code>; <code>inherited</code> or <code>enforced</code></td>
+</tr>
+<tr>
+<td>Org Policy constraint</td>
+<td>Guardrail evaluated above IAM (e.g. <code>storage.publicAccessPrevention</code>, <code>storage.uniformBucketLevelAccess</code>)</td>
+</tr>
+<tr>
+<td>Signed URL</td>
+<td>Time-limited URL cryptographically signed by a key/SA; grants the encoded operation without IAM</td>
+</tr>
+<tr>
+<td>Signed policy document</td>
+<td>Signed form-POST policy constraining browser uploads (key prefix, size, content-type, expiry)</td>
+</tr>
+<tr>
+<td>CMEK</td>
+<td>Customer-Managed Encryption Key in Cloud KMS used to wrap the object's data-encryption key</td>
+</tr>
+<tr>
+<td>CSEK</td>
+<td>Customer-Supplied Encryption Key — you provide raw key material per request; Google never stores it</td>
+</tr>
+<tr>
+<td>Object Versioning</td>
+<td>Retains noncurrent generations on overwrite/delete; enables recovery from tamper/ransomware</td>
+</tr>
+<tr>
+<td>Retention policy / Bucket Lock</td>
+<td>Minimum retention duration; <strong>Bucket Lock</strong> makes it immutable (WORM) even to project owners</td>
+</tr>
+<tr>
+<td>VPC Service Controls</td>
+<td>Identity-aware network perimeter; blocks API access to GCS from outside the perimeter</td>
+</tr>
+<tr>
+<td>Generation / metageneration</td>
+<td>Monotonic version identifiers used for optimistic concurrency and precondition guards</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Authorization decision logic.</strong> For a data-plane request, GCS resolves: (1) is there a valid signed URL/token? If so, honor the encoded grant. (2) Otherwise authenticate the caller (OAuth token / SA). (3) Evaluate Org Policy guardrails (PAP etc.) — these can hard-deny. (4) Evaluate IAM at the bucket and, if fine-grained mode is on, ACLs at the object. (5) If VPC-SC applies, verify the request origin is inside the perimeter or covered by an ingress/egress rule. Access is granted only if authorization passes and no guardrail denies. The critical mental model: <strong>UBLA collapses steps (4)'s two sub-checks into one</strong>, removing the invisible ACL surface; <strong>PAP and VPC-SC are deny-overrides</strong> that no IAM grant can beat.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete Configuration</h3>
+<p><strong>Enforce Uniform Bucket-Level Access (disable ACLs).</strong> ACLs are the classic footgun: a single public object ACL will not show up when you review bucket IAM, so exposure hides. Turn UBLA on everywhere.</p>
+<pre><code class="language-bash"># Enable UBLA on an existing bucket (gcloud storage is the modern CLI; gsutil still works)
+gcloud storage buckets update gs://acme-prod-pii \
+  --uniform-bucket-level-access
+
+# Verify it is on
+gcloud storage buckets describe gs://acme-prod-pii \
+  --format=&quot;value(uniform_bucket_level_access.enabled)&quot;     # -&gt; True
+
+# gsutil equivalents (older muscle memory, still valid)
+gsutil uniformbucketlevelaccess set on gs://acme-prod-pii
+gsutil uniformbucketlevelaccess get gs://acme-prod-pii
+</code></pre>
+<p><strong>Enforce UBLA org-wide via Org Policy</strong> so new buckets cannot be created with ACLs enabled:</p>
+<pre><code class="language-bash"># Require UBLA on every bucket in the org (boolean constraint)
+cat &gt; ubla-policy.yaml &lt;&lt;'EOF'
+name: organizations/123456789012/policies/storage.uniformBucketLevelAccess
+spec:
+  rules:
+  - enforce: true
+EOF
+gcloud org-policies set-policy ubla-policy.yaml
+</code></pre>
+<p><strong>Apply Public Access Prevention (the single most important anti-leak control).</strong> Set the org-policy constraint at the organization node so it is inherited by every project, folder, and bucket. Even a user with <code>roles/owner</code> cannot then grant <code>allUsers</code>.</p>
+<pre><code class="language-bash"># Org-wide enforced PAP — blocks allUsers / allAuthenticatedUsers everywhere
+cat &gt; pap-policy.yaml &lt;&lt;'EOF'
+name: organizations/123456789012/policies/storage.publicAccessPrevention
+spec:
+  rules:
+  - enforce: true
+EOF
+gcloud org-policies set-policy pap-policy.yaml
+
+# Per-bucket enforcement (belt-and-suspenders; the API field is publicAccessPrevention)
+gcloud storage buckets update gs://acme-prod-pii \
+  --public-access-prevention
+
+# Confirm — should print &quot;enforced&quot;
+gcloud storage buckets describe gs://acme-prod-pii \
+  --format=&quot;value(public_access_prevention)&quot;
+</code></pre>
+<p>With PAP <code>enforced</code>, this deliberate exposure attempt is rejected server-side:</p>
+<pre><code class="language-bash"># This FAILS with PAP enforced: &quot;One or more users named in the policy do not
+# belong to a permitted customer, ... public access prevention is enforced.&quot;
+gcloud storage buckets add-iam-policy-binding gs://acme-prod-pii \
+  --member=&quot;allUsers&quot; \
+  --role=&quot;roles/storage.objectViewer&quot;
+</code></pre>
+<p><strong>Least-privilege bucket IAM.</strong> Grant object-scoped roles to specific service accounts, never broad <code>storage.admin</code> to humans. Use conditions to constrain by object prefix where supported.</p>
+<pre><code class="language-bash"># App SA gets read-only on this bucket only
+gcloud storage buckets add-iam-policy-binding gs://acme-prod-pii \
+  --member=&quot;serviceAccount:ingest-svc@acme-prod.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/storage.objectViewer&quot;
+
+# Separate writer identity; note objectViewer != objectAdmin (no delete)
+gcloud storage buckets add-iam-policy-binding gs://acme-prod-pii \
+  --member=&quot;serviceAccount:writer-svc@acme-prod.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/storage.objectCreator&quot;
+</code></pre>
+<p><strong>CMEK — bind the bucket to a Cloud KMS key</strong> so key access (and thus data access) is independently controlled and audited, and revocation is possible.</p>
+<pre><code class="language-bash"># 1. Create a key ring + key
+gcloud kms keyrings create acme-gcs --location us
+gcloud kms keys create pii-cmek --location us --keyring acme-gcs --purpose encryption
+
+# 2. Grant the GCS service agent permission to use the key
+GCS_SA=$(gcloud storage service-agent --project=acme-prod)
+gcloud kms keys add-iam-policy-binding pii-cmek \
+  --location us --keyring acme-gcs \
+  --member=&quot;serviceAccount:${GCS_SA}&quot; \
+  --role=&quot;roles/cloudkms.cryptoKeyEncrypterDecrypter&quot;
+
+# 3. Set the bucket default CMEK
+gcloud storage buckets update gs://acme-prod-pii \
+  --default-encryption-key=projects/acme-prod/locations/us/keyRings/acme-gcs/cryptoKeys/pii-cmek
+</code></pre>
+<p><strong>Object Versioning + Retention + Bucket Lock (ransomware / tamper resistance).</strong> Versioning keeps noncurrent generations so an attacker's overwrite/delete is recoverable; a retention policy sets a minimum age before deletion; <strong>Bucket Lock</strong> makes that retention <em>irreversible</em> — WORM even against <code>roles/owner</code>.</p>
+<pre><code class="language-bash"># Keep every prior version on overwrite/delete
+gcloud storage buckets update gs://acme-audit-logs --versioning
+
+# Require objects be retained &gt;= 2555 days (7y) before deletion is allowed
+gcloud storage buckets update gs://acme-audit-logs \
+  --retention-period=2555d
+
+# LOCK it — irreversible; retention can now only be *extended*, never removed
+gcloud storage buckets update gs://acme-audit-logs --lock-retention-period
+</code></pre>
+<p><strong>Signed URL — time-boxed capability token.</strong> Sign with a dedicated low-privilege SA. Keep the TTL as short as the workflow tolerates. A leaked signed URL is a bearer token that bypasses IAM until expiry.</p>
+<pre><code class="language-bash"># 15-minute read URL, signed by a scoped SA (impersonation avoids downloading keys)
+gcloud storage sign-url gs://acme-prod-pii/reports/q3.pdf \
+  --duration=15m \
+  --impersonate-service-account=url-signer@acme-prod.iam.gserviceaccount.com \
+  --http-verb=GET
+</code></pre>
+<p><strong>Enforce Data Access audit logging for GCS</strong> (it is NOT on by default — ADMIN_READ/DATA_READ/DATA_WRITE must be explicitly enabled):</p>
+<pre><code class="language-yaml"># In the project/org IAM policy auditConfigs — logs object reads AND writes
+auditConfigs:
+- service: storage.googleapis.com
+  auditLogConfigs:
+  - logType: ADMIN_READ
+  - logType: DATA_READ
+  - logType: DATA_WRITE
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — GCS authorization decision path</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Request to storage.googleapis.com] --> B{Signed URL or token present}
+    B -->|Yes and unexpired| C[Honor encoded grant]
+    B -->|No| D[Authenticate caller]
+    D --> E{Org Policy guardrail}
+    E -->|PAP blocks public| F[403 Denied]
+    E -->|Allowed| G{UBLA enabled}
+    G -->|Yes| H[Evaluate bucket IAM only]
+    G -->|No| I[Evaluate bucket IAM and object ACL]
+    H --> J{VPC-SC perimeter}
+    I --> J
+    J -->|Outside perimeter| F
+    J -->|Inside or ingress rule| K{Authorized}
+    K -->|Yes| L[Serve object]
+    K -->|No| F
+</pre>
+<p><strong>Diagram B — Signed URL generation and redemption</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant App as Backend App
+    participant SA as Signer Service Account
+    participant User as End User Browser
+    participant GCS as Cloud Storage
+    App->>SA: Request signature for GET object TTL 15m
+    SA-->>App: Signed URL with expiry and signature
+    App-->>User: Return signed URL
+    User->>GCS: GET signed URL
+    GCS->>GCS: Verify signature and expiry
+    GCS-->>User: Object bytes if valid
+    Note over User,GCS: IAM is bypassed the URL itself is the capability
+</pre>
+<p><strong>Diagram C — Defense-in-depth layers around a bucket</strong></p>
+<pre class="mermaid">
+flowchart LR
+    A[Identity floor UBLA and PAP] --> B[Least privilege bucket IAM]
+    B --> C[Network floor VPC Service Controls]
+    C --> D[Crypto control CMEK in Cloud KMS]
+    D --> E[Recovery versioning and Bucket Lock]
+    E --> F[Detection Data Access audit logs]
+    F --> G[Response revoke key and rotate SA]
+</pre>
+<p><strong>Diagram D — VPC Service Controls perimeter for exfil prevention</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Compromised SA credential] --> B{Request origin}
+    B -->|From inside perimeter VM| C[Allowed by egress rule]
+    B -->|From attacker network| D[VPC-SC denies API call]
+    D --> E[No data leaves even with valid token]
+    C --> F{Egress rule allows destination}
+    F -->|No| E
+    F -->|Yes| G[Controlled transfer only]
+</pre>
+<p><strong>Diagram E — Ransomware recovery via versioning and Bucket Lock</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Live
+    Live --> Overwritten: Attacker PUT new bytes
+    Overwritten --> NoncurrentRetained: Versioning keeps old generation
+    NoncurrentRetained --> Restored: Copy old generation back
+    Restored --> Live
+    Live --> DeleteAttempt: Attacker DELETE
+    DeleteAttempt --> BlockedByLock: Bucket Lock retention active
+    BlockedByLock --> Live
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root Cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Netlify / Newsweek / broad "open bucket" scans across S3+GCS+Azure</td>
+<td>2017–2021</td>
+<td>Public object storage discovered by scanners</td>
+<td>Provider-agnostic: anonymous read of object storage is the #1 cloud leak</td>
+</tr>
+<tr>
+<td>Ford / mobile app data via misconfigured GCS bucket (various researcher reports)</td>
+<td>2020–2021</td>
+<td><code>allUsers</code> reader on app-asset bucket</td>
+<td>Even non-obvious buckets leak once indexed by scanners like GrayhatWarfare</td>
+</tr>
+<tr>
+<td>Truffle Security / GCP metadata + bucket enumeration research</td>
+<td>2021+</td>
+<td>Enumerable bucket names + weak IAM</td>
+<td>Predictable bucket names enable enumeration; obscurity is not a control</td>
+</tr>
+<tr>
+<td>Toyota (T-Connect) cloud storage exposure</td>
+<td>2022</td>
+<td>Access key/config committed publicly, then bucket access</td>
+<td>Credential-in-repo → object-store exfil is a common chain (T1552.001 → T1530)</td>
+</tr>
+<tr>
+<td>CVE-2020-8933 (Google Cloud SDK / gcloud on-host privesc)</td>
+<td>2020</td>
+<td>Insecure temp file handling in <code>gcloud</code> component</td>
+<td>Client tooling on shared hosts is part of the storage attack surface</td>
+</tr>
+<tr>
+<td>Capital One (AWS S3, cross-provider analog)</td>
+<td>2019</td>
+<td>SSRF → over-privileged role → 100M records from S3</td>
+<td>The pattern (SSRF→creds→bucket read) maps 1:1 onto GCS metadata + GCS</td>
+</tr>
+<tr>
+<td>GhostWriter / GrayhatWarfare index growth (ongoing)</td>
+<td>2018–present</td>
+<td>Continuous internet-wide scanning of buckets</td>
+<td>Assume any public bucket is found within hours, not months</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — Anonymous read via legacy ACL (the classic).</strong> A team enables a static-asset bucket for a marketing microsite and, following a stale tutorial, runs <code>gsutil acl ch -u AllUsers:R gs://acme-microsite-assets</code>. Because the bucket used fine-grained ACLs (UBLA off), this grants anonymous read at the object level — invisible to anyone reviewing <em>bucket IAM</em> in the console. A scanner indexes the predictable bucket name within a day and mirrors the contents, which turn out to include an unrelated <code>backups/</code> prefix a script had synced there. <strong>Control that stops it:</strong> UBLA (no object ACLs to set) plus PAP <code>enforced</code> at the org node (the <code>AllUsers:R</code> grant is rejected server-side). Detection would have come from a Data Access <code>DATA_READ</code> log spike from unauthenticated principals.</p>
+<p><strong>Case study 2 — SSRF → metadata → bucket exfil.</strong> An internet-facing GCE workload has a metadata-server SSRF. The attacker retrieves the VM's default service-account OAuth token from <code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code> (MITRE T1552.005), which happens to carry <code>roles/storage.admin</code> at the project. They enumerate buckets and begin bulk <code>GET</code>/<code>storage.objects.list</code> to an external host (T1530 → T1567.002). <strong>Controls that stop it:</strong> (a) least-privilege SA — the VM should have had <code>objectViewer</code> on one bucket, not project <code>storage.admin</code>; (b) <strong>VPC Service Controls</strong> — even with a valid token, egress of object bytes to a network outside the perimeter is denied; (c) org-policy blocking default-SA broad scopes. Detection: sudden high-volume <code>storage.objects.get</code> from a VM SA to novel object prefixes.</p>
+<p><strong>Case study 3 — Signed URL over-share.</strong> A backend mints signed download URLs with a <strong>7-day</strong> TTL and posts them in a customer support ticketing tool. A support integration syncs ticket bodies to a third-party analytics SaaS. The URLs — bearer capabilities that bypass IAM — are now replayable by anyone who reads that analytics store, for a week. <strong>Controls that stop it:</strong> short TTL (minutes), signing with a dedicated low-privilege SA scoped to a single object, and treating signed URLs as secrets (never logged, never synced). Because signed-URL redemptions can appear as unauthenticated <code>DATA_READ</code>, correlation on the object key surfaces the abuse.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Anonymous public read via <code>allUsers</code> IAM/ACL</td>
+<td>T1530 Data from Cloud Storage</td>
+<td>Public grant on bucket/object; PAP not enforced</td>
+<td>Full data breach of bucket contents</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>allAuthenticatedUsers</code> grant mistaken as "internal"</td>
+<td>T1530</td>
+<td>Misunderstanding the member semantics</td>
+<td>Any Google account can read; de facto public</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Legacy fine-grained ACL hides object-level public grant</td>
+<td>T1530 / Misconfiguration</td>
+<td>UBLA disabled; ACL not visible in IAM review</td>
+<td>Silent exposure undetected by bucket audits</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-privileged SA (<code>storage.admin</code> project-wide)</td>
+<td>T1078.004 Valid Cloud Accounts</td>
+<td>Broad role instead of object-scoped</td>
+<td>One creds → read/delete all buckets</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Stolen VM SA token via metadata SSRF</td>
+<td>T1552.005 Cloud Instance Metadata</td>
+<td>SSRF + default SA over-scoped</td>
+<td>Exfil of all reachable objects</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Signed URL leak / over-long TTL</td>
+<td>T1567.002 Exfil to Cloud Storage / bearer token</td>
+<td>Long TTL, URL logged or shared</td>
+<td>IAM-bypassing access until expiry</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Signed policy document too permissive (upload)</td>
+<td>Misconfiguration</td>
+<td>No key-prefix/size/content-type constraints</td>
+<td>Attacker uploads arbitrary content</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Data exfiltration to external bucket (no perimeter)</td>
+<td>T1567.002</td>
+<td>No VPC-SC; egress unrestricted</td>
+<td>Bulk copy of sensitive data outward</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Ransomware overwrite/delete of objects</td>
+<td>T1485 Data Destruction / T1486</td>
+<td>Writer/admin creds; no versioning</td>
+<td>Irrecoverable loss or extortion</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>No CMEK; key control fully with Google-managed</td>
+<td>SC-28 gap</td>
+<td>Default encryption only</td>
+<td>No independent revocation / crypto-shred</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>CMEK key deleted / access revoked → data unreadable</td>
+<td>Availability / self-DoS</td>
+<td>KMS key lifecycle mishandled</td>
+<td>Objects become undecryptable</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Bucket enumeration via predictable names</td>
+<td>T1580 Cloud Infra Discovery</td>
+<td>Guessable bucket naming scheme</td>
+<td>Recon → targeted exposure attempts</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Cross-project/cross-org data sharing misgrant</td>
+<td>T1078.004</td>
+<td>IAM binding to external principal</td>
+<td>Data leaves trust boundary</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Missing Data Access logs → no forensics</td>
+<td>Detection Gap / AU-2</td>
+<td>DATA_READ/WRITE not enabled</td>
+<td>Breach invisible; no timeline</td>
+<td>High</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Retention policy without Bucket Lock</td>
+<td>Tamper / compliance gap</td>
+<td>Retention removable by owner</td>
+<td>Insider/attacker deletes evidence</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Public via load balancer / CDN backend bucket</td>
+<td>Misconfiguration</td>
+<td>Backend bucket exposed w/o auth</td>
+<td>Unintended internet reachability</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>17</td>
+<td>HMAC key (interop/S3-compat) leaked</td>
+<td>T1552 Unsecured Credentials</td>
+<td>Long-lived HMAC key in code</td>
+<td>Static-cred access to buckets</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Object ACL <code>WRITER</code> allows content injection</td>
+<td>Integrity</td>
+<td>Fine-grained write ACL</td>
+<td>Defacement / supply-chain poisoning</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Logs/backups synced into a public bucket</td>
+<td>T1530</td>
+<td>Wrong destination bucket</td>
+<td>Secondary sensitive-data exposure</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Version history readable exposes deleted secrets</td>
+<td>Information Disclosure</td>
+<td>Versioning + broad read</td>
+<td>"Deleted" secrets still retrievable</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Control</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Anonymous public read</td>
+<td>Public Access Prevention <code>enforced</code></td>
+<td>Org Policy at org node + per-bucket</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>allAuthenticatedUsers</code> confusion</td>
+<td>PAP blocks both members; policy lint in CI</td>
+<td>Org Policy + IaC review</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Hidden object ACL exposure</td>
+<td>Uniform Bucket-Level Access on all buckets</td>
+<td>Bucket setting + org constraint</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-privileged SA</td>
+<td>Object-scoped roles; IAM Recommender</td>
+<td>Bucket IAM + IAM analytics</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Metadata SSRF token theft</td>
+<td>Least-priv default SA + VPC-SC + metadata v2/headers</td>
+<td>VM config + perimeter</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Signed URL leak / TTL</td>
+<td>Short TTL, dedicated signer SA, never log URL</td>
+<td>App layer + IAM</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Permissive signed policy</td>
+<td>Constrain key prefix, size, content-type, expiry</td>
+<td>App layer</td>
+</tr>
+<tr>
+<td>8</td>
+<td>External exfil</td>
+<td>VPC Service Controls perimeter + egress rules</td>
+<td>Network-identity perimeter</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Ransomware overwrite/delete</td>
+<td>Object Versioning + retention + Bucket Lock</td>
+<td>Bucket config (WORM)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>No CMEK</td>
+<td>CMEK via Cloud KMS + key IAM</td>
+<td>Bucket default encryption</td>
+</tr>
+<tr>
+<td>11</td>
+<td>CMEK availability loss</td>
+<td>KMS key rotation policy, no premature destroy, dual-region KMS</td>
+<td>KMS lifecycle</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Bucket enumeration</td>
+<td>Non-guessable names + PAP so found buckets stay private</td>
+<td>Naming + Org Policy</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Cross-boundary misgrant</td>
+<td>Domain-restricted sharing org policy</td>
+<td>Org Policy <code>iam.allowedPolicyMemberDomains</code></td>
+</tr>
+<tr>
+<td>14</td>
+<td>No forensics</td>
+<td>Enable Data Access ADMIN/DATA_READ/DATA_WRITE logs</td>
+<td>Audit config org-wide</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Removable retention</td>
+<td>Bucket Lock (irreversible WORM)</td>
+<td>Bucket config</td>
+</tr>
+<tr>
+<td>16</td>
+<td>LB backend-bucket exposure</td>
+<td>Require IAP/auth on backend; PAP still applies</td>
+<td>LB + bucket config</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Leaked HMAC key</td>
+<td>Prefer OAuth/SA; disable interop; rotate/scan for HMAC</td>
+<td>Project settings + secret scanning</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Write ACL injection</td>
+<td>UBLA removes ACLs; scoped <code>objectCreator</code> only</td>
+<td>Bucket IAM</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Sync to wrong bucket</td>
+<td>Destination allowlist + PAP so mistakes stay private</td>
+<td>Pipeline + Org Policy</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Version history disclosure</td>
+<td>Scope read tightly; lifecycle-delete old versions</td>
+<td>IAM + lifecycle rules</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Public Access Prevention (org-policy <code>enforced</code>).</strong> PAP is a boolean org-policy constraint evaluated <em>above</em> IAM. When set to <code>enforced</code> at the organization node, the GCS control plane rejects any attempt to add <code>allUsers</code> or <code>allAuthenticatedUsers</code> to a bucket or object policy — including by a project <code>roles/owner</code> — and removes public reachability from buckets that had it. Implementation is one policy at the org node (see §2.2) plus per-bucket <code>--public-access-prevention</code> for defense-in-depth. <strong>Why it is the single highest-leverage control:</strong> it converts "don't make buckets public" from a <em>practice</em> into an <em>invariant</em> that survives new projects, new engineers, copy-pasted tutorials, and Terraform drift. <strong>Trade-offs/limits:</strong> it breaks legitimately public buckets (static websites, public datasets) — those must live in a separate folder with PAP <code>inherited</code>/not-enforced and their own controls; PAP does not stop authenticated over-sharing (a broad grant to an internal-but-wrong group), so pair it with domain-restricted sharing and IAM review.</p>
+<p><strong>2. Uniform Bucket-Level Access (UBLA).</strong> UBLA disables per-object and per-bucket ACLs so IAM is the sole authorization model. Technically, once enabled the storage API refuses ACL operations and only evaluates IAM bindings. <strong>Why it matters:</strong> fine-grained ACLs are the stealthiest exposure vector — a single public <em>object</em> ACL never appears in a bucket-IAM review, so audits pass while data leaks. UBLA eliminates that entire class. Implementation: bucket setting plus the <code>storage.uniformBucketLevelAccess</code> org constraint so new buckets are born uniform. <strong>Trade-offs/limits:</strong> some legacy workflows depend on per-object ACLs (e.g. mixed-visibility objects in one bucket, or old integrations); the fix is architectural — split by sensitivity into separate buckets, each with bucket-level IAM. There is a 90-day window to revert after enabling, after which it is permanent — plan migrations.</p>
+<p><strong>3. VPC Service Controls perimeter.</strong> VPC-SC draws an identity-aware network perimeter around GCS (and other APIs) for a set of projects. Even with a <em>valid</em> stolen credential, an API call to read/list objects from outside the perimeter is denied, and egress of object data to destinations outside the perimeter is blocked unless an explicit egress rule allows it. <strong>Why it matters:</strong> it is the control that defeats the credential-theft-then-exfil chain (Capital One-style) that IAM alone cannot, because IAM says "this token may read" while VPC-SC says "but not to <em>there</em> / not from <em>here</em>." Implementation: define an access policy, a service perimeter listing projects and <code>storage.googleapis.com</code>, and ingress/egress rules for legitimate cross-perimeter flows. <strong>Trade-offs/limits:</strong> operationally heavy — breaks CI/CD, third-party SaaS integrations, and cross-project analytics until ingress/egress rules and access levels are modeled; start in <em>dry-run</em> mode and read the violation logs before enforcing.</p>
+<p><strong>4. CMEK + Cloud KMS.</strong> With CMEK, each object's data-encryption key is wrapped by a key you own in Cloud KMS; GCS must call KMS (as its service agent) to encrypt/decrypt. <strong>Why it matters:</strong> you gain independent authorization and audit over decryption (KMS access is separately logged and IAM-controlled), key rotation on your schedule, and <strong>crypto-shredding</strong> — disabling/destroying the key renders objects unrecoverable, a fast containment lever after compromise. Implementation: create key ring/key, grant the GCS service agent <code>cryptoKeyEncrypterDecrypter</code>, set the bucket default key (see §2.2). <strong>Trade-offs/limits:</strong> availability risk — if the key is disabled/destroyed or its region is unavailable, all dependent objects become unreadable (this is a self-DoS if mishandled); use rotation not deletion, keep keys in a resilient location, and separate duties so no single admin can both exfiltrate and destroy keys.</p>
+<p><strong>5. Object Versioning + Retention + Bucket Lock.</strong> Versioning retains a noncurrent generation on every overwrite/delete; a retention policy sets a minimum object age before deletion; <strong>Bucket Lock</strong> makes that retention irreversible (WORM), enforced even against <code>roles/owner</code>. <strong>Why it matters:</strong> this is the ransomware and evidence-tamper defense — an attacker who overwrites objects only creates noncurrent versions you can restore, and one who tries to delete audit logs is blocked by the locked retention. Implementation: <code>--versioning</code>, <code>--retention-period</code>, then <code>--lock-retention-period</code> (see §2.2). <strong>Trade-offs/limits:</strong> cost (you store every version — pair with lifecycle rules to age out old <em>noncurrent</em> versions), and Bucket Lock is genuinely irreversible so pick the retention duration carefully; versioning also means "deleted" secrets persist as old generations, so tighten read scope on versioned buckets.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>Cloud Audit Logs — Admin Activity</strong> (always on): <code>storage.setIamPermissions</code>, <code>storage.buckets.update</code>, <code>storage.buckets.create</code>, ACL changes — catches <em>config drift toward public</em>.</li>
+<li><strong>Cloud Audit Logs — Data Access</strong> (must be explicitly enabled): <code>storage.objects.get</code> (DATA_READ), <code>storage.objects.create</code>/<code>delete</code> (DATA_WRITE), <code>storage.objects.list</code> — catches <em>exfil and destruction</em>. Key fields: <code>protoPayload.authenticationInfo.principalEmail</code>, <code>protoPayload.requestMetadata.callerIp</code>, <code>resource.labels.bucket_name</code>, <code>protoPayload.resourceName</code>, <code>protoPayload.methodName</code>.</li>
+<li><strong>VPC Service Controls violation logs</strong>: <code>protoPayload.metadata.violationReason</code>, <code>securityPolicyInfo</code> — perimeter denials indicate credential misuse from outside.</li>
+<li><strong>KMS logs</strong>: <code>cloudkms.googleapis.com</code> decrypt calls tie object access to key usage.</li>
+<li><strong>Org Policy audit</strong>: changes to <code>storage.publicAccessPrevention</code> / <code>storage.uniformBucketLevelAccess</code>.</li>
+<li><strong>Asset inventory / SCC</strong>: Security Command Center's "Public bucket" and "Bucket policy only disabled" findings.</li>
+</ul>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>SQL (BigQuery log sink) — buckets that became publicly readable:</strong></p>
+<pre><code class="language-sql">-- Detect IAM setPolicy events granting allUsers/allAuthenticatedUsers on GCS
+SELECT
+  timestamp,
+  protopayload_auditlog.authenticationInfo.principalEmail AS actor,
+  resource.labels.bucket_name AS bucket,
+  binding
+FROM `acme-logs.cloudaudit_googleapis_com_activity`,
+  UNNEST(protopayload_auditlog.servicedata_v1_iam.policyDelta.bindingDeltas) AS binding
+WHERE protopayload_auditlog.methodName = 'storage.setIamPermissions'
+  AND binding.action = 'ADD'
+  AND binding.member IN ('allUsers', 'allAuthenticatedUsers')
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+ORDER BY timestamp DESC;
+</code></pre>
+<p><strong>SQL — bulk read exfil from a single principal (possible token theft):</strong></p>
+<pre><code class="language-sql">-- Spike of object GETs by one principal to many distinct objects in a window
+SELECT
+  protopayload_auditlog.authenticationInfo.principalEmail AS actor,
+  protopayload_auditlog.requestMetadata.callerIp AS src_ip,
+  resource.labels.bucket_name AS bucket,
+  COUNT(*) AS gets,
+  COUNT(DISTINCT protopayload_auditlog.resourceName) AS distinct_objects
+FROM `acme-logs.cloudaudit_googleapis_com_data_access`
+WHERE protopayload_auditlog.methodName = 'storage.objects.get'
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+GROUP BY actor, src_ip, bucket
+HAVING distinct_objects &gt; 1000
+ORDER BY gets DESC;
+</code></pre>
+<p><strong>Sigma — public-grant configuration change (portable to SIEMs ingesting GCP audit logs):</strong></p>
+<pre><code class="language-yaml">title: GCS Bucket Made Public
+id: 4b2c9a10-gcs-public-0001
+status: stable
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  selection:
+    data.protoPayload.methodName: 'storage.setIamPermissions'
+    data.protoPayload.serviceData.policyDelta.bindingDeltas.action: 'ADD'
+    data.protoPayload.serviceData.policyDelta.bindingDeltas.member:
+      - 'allUsers'
+      - 'allAuthenticatedUsers'
+  condition: selection
+level: high
+tags:
+  - attack.exfiltration
+  - attack.t1530
+</code></pre>
+<p><strong>gcloud one-liner — inventory of currently-public buckets (hunt / audit):</strong></p>
+<pre><code class="language-bash">for b in $(gcloud storage buckets list --format=&quot;value(name)&quot;); do
+  if gcloud storage buckets get-iam-policy gs://$b --format=json \
+      | grep -qE '&quot;allUsers&quot;|&quot;allAuthenticatedUsers&quot;'; then
+    echo &quot;PUBLIC: gs://$b&quot;
+  fi
+done
+</code></pre>
+<h3 id="response-playbook-containment-eradication-recovery">Response playbook (containment → eradication → recovery)</h3>
+<ol>
+<li><strong>Confirm exposure &amp; scope.</strong> From the setIamPermissions log, identify the bucket, the actor who added the public binding, and the time window. Pull Data Access <code>DATA_READ</code> for that bucket to enumerate which objects were fetched and by which <code>callerIp</code>.</li>
+<li><strong>Contain — remove public access immediately.</strong> <code>gcloud storage buckets remove-iam-policy-binding gs://&lt;bucket&gt; --member=allUsers --role=roles/storage.objectViewer</code> (and <code>allAuthenticatedUsers</code>), then set <code>--public-access-prevention</code> on the bucket. If exposure is broad, enforce PAP at the org node to stop lateral repeats.</li>
+<li><strong>Contain credentials (if token theft suspected).</strong> Disable/rotate the implicated service account keys, revoke active OAuth tokens, and — if data was CMEK-encrypted — consider disabling the KMS key version to crypto-shred access while you investigate (weigh availability impact).</li>
+<li><strong>Eradicate the root cause.</strong> Enable UBLA on the bucket; add the missing Org Policies (PAP, UBLA, domain-restricted sharing); tighten the offending SA to object-scoped roles; fix the SSRF/leaked-HMAC/long-TTL signed URL that enabled it.</li>
+<li><strong>Assess data impact.</strong> Cross-reference fetched object keys against data-classification tags to determine what PII/secret content left; rotate any credentials/secrets that were in exposed objects.</li>
+<li><strong>Recover integrity/availability.</strong> If objects were overwritten/deleted, restore from noncurrent versions (<code>gcloud storage cp gs://bucket/obj#&lt;generation&gt; gs://bucket/obj</code>) or from the locked-retention copy. Re-enable the KMS key once contained.</li>
+<li><strong>Detect-forward &amp; harden.</strong> Deploy the setIamPermissions and bulk-read detections above; add SCC "Public bucket" finding alerts; put PAP/UBLA into the org's IaC baseline so the fix is enforced, not manual. Run a post-incident review focused on why the guardrail was absent.</li>
+</ol>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What exactly makes a GCS bucket "public," and what are the two special members involved?</strong><br />
+A bucket is public when its IAM policy (or, in fine-grained mode, an object/bucket ACL) grants a read role to one of two special members: <code>allUsers</code> (anyone on the internet, unauthenticated) or <code>allAuthenticatedUsers</code> (anyone with any Google account). Both are effectively public — <code>allAuthenticatedUsers</code> is a common trap because engineers assume it means "my org's users," when it actually means any Google account worldwide. The fix is Public Access Prevention, which blocks binding either member.<br />
+<em>Signal: knows the precise member semantics, not just "there's a public toggle."</em></p>
+<p><strong>Q2. What is Uniform Bucket-Level Access and why is it strongly preferred over fine-grained ACLs?</strong><br />
+UBLA disables per-object/per-bucket ACLs so IAM is the sole authorization model. It is preferred because ACLs are the stealthiest exposure path: a public <em>object</em> ACL never shows up in a bucket-IAM review, so audits pass while data leaks. UBLA collapses authorization to one place you can reason about, review, and enforce with Org Policy. Fine-grained ACLs exist mainly for legacy interop and mixed-visibility patterns better solved by splitting buckets.<br />
+<em>Signal: understands the invisibility-of-ACLs problem, the real reason UBLA matters.</em></p>
+<p><strong>Q3. How do signed URLs work and what is their core security risk?</strong><br />
+A signed URL encodes an operation (e.g. GET this object), an expiry, and a cryptographic signature produced by a key/service account. GCS validates the signature and expiry and serves the request <em>without evaluating IAM for the caller</em> — the URL itself is the capability. The core risk is that a leaked signed URL is a bearer token: anyone who obtains it can perform the encoded action until it expires. Mitigate with short TTLs, a dedicated low-privilege signer SA, single-object scope, and never logging/sharing the URL.<br />
+<em>Signal: grasps "bearer capability that bypasses IAM," not just "temporary link."</em></p>
+<p><strong>Q4. What does CMEK give you that Google-default encryption does not?</strong><br />
+GCS always encrypts at rest; CMEK changes <em>who controls the key</em>. With a Customer-Managed Encryption Key in Cloud KMS, you get independent IAM control and audit over decryption, key rotation on your schedule, and crypto-shredding — disabling/destroying the key makes objects unrecoverable, a fast containment lever. The trade-off is availability risk: mishandling the key (destroy, revoke, region outage) makes your own data unreadable.<br />
+<em>Signal: distinguishes "encrypted" from "you control the key," and knows the availability downside.</em></p>
+<p><strong>Q5. How would you make a bucket resistant to ransomware/tamper?</strong><br />
+Enable Object Versioning so overwrites/deletes only create recoverable noncurrent generations; set a retention policy for a minimum object age; then apply Bucket Lock to make that retention irreversible (WORM) even against a project owner. Pair with lifecycle rules to age out old noncurrent versions for cost, and tight IAM so few identities can write. This means an attacker's destructive actions are recoverable and audit logs cannot be deleted.<br />
+<em>Signal: knows versioning ≠ immutability; Bucket Lock is the WORM guarantee.</em></p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design an org-wide guarantee that no bucket in 10,000 projects can ever become public. What are the pieces and the failure modes?</strong><br />
+Set <code>storage.publicAccessPrevention</code> = <code>enforced</code> and <code>storage.uniformBucketLevelAccess</code> = <code>enforce</code> as Org Policy at the organization node so every current and future project inherits them — this makes "no public buckets" an invariant above IAM that even project owners cannot override. Layer domain-restricted sharing (<code>iam.allowedPolicyMemberDomains</code>) to stop authenticated over-sharing to external accounts. Back it with detection (setIamPermissions alerting, SCC public-bucket findings) as a safety net. Failure modes: legitimately-public buckets (static sites, public datasets) need a carved-out folder with PAP not enforced — a common exception path that must itself be tightly governed; org-policy exceptions/overrides at folder level can silently create gaps, so audit the policy hierarchy; and PAP does not stop over-broad <em>internal</em> grants, hence the domain restriction and IAM review still matter.<br />
+<em>Signal: reaches for Org Policy as an invariant, not per-bucket toggles, and names the exception governance problem.</em></p>
+<p><strong>Q7. A workload needs public downloads for some assets and strictly-private storage for user PII in the same platform. How do you architect it?</strong><br />
+Split by sensitivity into separate buckets in separate folders with different policy postures: a <code>public-assets</code> bucket in a folder where PAP is not enforced but with tight write IAM, CDN in front, and no PII ever written there; and a <code>user-pii</code> bucket in a folder with PAP enforced, UBLA on, CMEK, VPC-SC perimeter, versioning + Bucket Lock, and Data Access logging. For time-limited user access to private objects, mint short-TTL signed URLs from a dedicated signer SA rather than making anything public. Enforce the separation with Org Policy at the folder level and CI checks so no pipeline can write PII into the public bucket, and use data-classification tags to detect misroutes. The key trade-off is operational: two postures cost more to run but eliminate the "one bucket, mixed visibility" footgun that ACLs invite.<br />
+<em>Signal: separates by bucket/folder posture instead of trying to mix visibility in one bucket.</em></p>
+<p><strong>Q8. When would you deploy VPC Service Controls around GCS, and what breaks?</strong><br />
+Deploy VPC-SC when the threat you care about is credential theft leading to exfiltration — the case IAM alone cannot stop, because IAM authorizes the token while VPC-SC constrains <em>where</em> the API call may originate and <em>where</em> data may egress. It is essential for regulated/PII data at scale. What breaks: CI/CD runners, third-party SaaS integrations, cross-project analytics, and developer laptops all sit outside the perimeter and get denied until you model access levels and ingress/egress rules for each legitimate flow. The right rollout is dry-run mode first, read the violation logs to enumerate real dependencies, add narrowly-scoped rules, then enforce — a big-bang enforce will cause an outage.<br />
+<em>Signal: knows VPC-SC defeats the exfil chain IAM cannot, and respects the operational cost/dry-run discipline.</em></p>
+<p><strong>Q9. How do you decide between short-lived signed URLs, IAM-based access, and IAP for serving objects to users?</strong><br />
+Use IAM-based access when the consumer is a service/SA you control — it is auditable, revocable, and needs no bearer tokens. Use signed URLs for unauthenticated or third-party end users who need time-boxed access to specific objects (e.g. a customer downloading their export) — accept that it is a bearer capability and keep TTLs minimal. Use Identity-Aware Proxy in front of a backend bucket when you want per-request identity, group-based authorization, and context-aware access (device, location) for a web-served asset without minting URLs. The trade-off axis is: IAM = strongest audit but requires the consumer to have an identity; signed URLs = frictionless but bearer-token risk; IAP = identity + context but adds a proxy and only fits HTTP-served flows.<br />
+<em>Signal: matches mechanism to consumer identity model and articulates the audit-vs-friction trade-off.</em></p>
+<p><strong>Q10. How would you roll out CMEK to an existing fleet of buckets without an availability incident?</strong><br />
+CMEK only applies to newly-written objects, so set the bucket default key and then rewrite existing objects (copy in place) to bring them under CMEK, staged per bucket. Before flipping anything, ensure the GCS service agent has <code>cryptoKeyEncrypterDecrypter</code> on the key, put keys in a resilient location matching the bucket's, and set a rotation schedule (rotate, never destroy, live keys). Separate duties so no single identity can both read objects and destroy the key, and add KMS-decrypt monitoring. The dominant risk is availability: a disabled/destroyed key or a region mismatch renders objects unreadable, so treat key lifecycle as a change-controlled, staged operation with rollback (re-enable key) rather than a bulk flip.<br />
+<em>Signal: knows CMEK is write-forward, and centers key-availability/duty-separation risk.</em></p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. Walk through the full SSRF-to-exfil chain against GCS and every control that breaks a link.</strong><br />
+An internet-facing workload has an SSRF; the attacker hits the metadata server (<code>metadata.google.internal</code>) to steal the VM's default-SA OAuth token (T1552.005), then uses it to list and bulk-GET objects (T1530) and stream them to an external host (T1567.002). Break the chain at each link: fix the SSRF and require the <code>Metadata-Flavor</code> header / disable legacy metadata endpoints to make token theft harder; give the VM a minimal SA with object-scoped read on one bucket instead of project <code>storage.admin</code> so a stolen token is low-value; enforce VPC Service Controls so even a valid token cannot read from outside the perimeter or egress data outward; enable Data Access logs to detect the bulk-read spike from a novel IP; and use CMEK so you can crypto-shred if needed. The most robust single control is VPC-SC because it neutralizes the token's value regardless of how it was stolen.<br />
+<em>Signal: end-to-end kill-chain thinking with a named "strongest link-breaker."</em></p>
+<p><strong>Q12. Compare UBLA-migration risk and the irreversibility windows for UBLA and Bucket Lock. How do you sequence them safely?</strong><br />
+Enabling UBLA is reversible for 90 days, after which it becomes permanent; enabling it can break workflows that rely on per-object ACLs, so you inventory ACL usage (audit logs / <code>storage.objects</code> ACL reads) and migrate mixed-visibility buckets by splitting before flipping, validating within the 90-day window. Bucket Lock is <em>immediately and permanently</em> irreversible — once locked, retention can only be extended, never removed or shortened — so it must come after you are certain of the retention duration and have modeled cost of storing all versions. Sequence: first UBLA (reversible safety net), validate access still works, then set retention and only lock it once the compliance requirement and duration are signed off. Never lock a bucket you are still experimenting with, and keep a separate un-locked staging bucket for validation.<br />
+<em>Signal: precise on the two different irreversibility semantics and safe ordering.</em></p>
+<p><strong>Q13. How do signed policy documents differ from signed URLs, and what's the abuse if you get them wrong?</strong><br />
+A signed URL authorizes a single, fully-specified operation (usually a GET/PUT to one object); a signed policy document authorizes a browser form-POST <em>upload</em> and constrains it with conditions — allowed key prefix, content-length range, content-type, and an expiry. The abuse when done wrong: if the policy omits a key-prefix constraint, an attacker can upload to arbitrary object names (overwrite other users' objects or plant malicious content in a served path); without a content-length cap they can exhaust storage or upload huge payloads; without content-type limits they can smuggle executable/HTML content into a bucket fronted by a website. The correct posture is tight conditions (exact prefix per user, size ceiling, content-type allowlist, minutes-long expiry) and a low-privilege signer, treating the signed policy as a scoped capability just like a signed URL.<br />
+<em>Signal: knows the upload-side capability and its specific misconfig abuses.</em></p>
+<p><strong>Q14. Design detection for "insider slowly exfiltrating via signed URLs" — which is deliberately stealthy against normal alerts.</strong><br />
+Signed-URL redemptions can appear as unauthenticated Data Access <code>DATA_READ</code>, so per-principal read-volume alerts miss them. Detect on the <em>generation</em> side and the <em>redemption</em> side together: alert when a single service account (the signer) mints an anomalous number of signed URLs, or mints them for objects/prefixes outside its historical pattern (Admin Activity / app logs); and correlate redemptions by object key and <code>callerIp</code> diversity — many distinct external IPs fetching many distinct objects signed by one SA in a short window is the signal. Baseline per-SA signing rates and per-bucket external-IP fan-out, and flag deviations. Also constrain the blast radius so detection has teeth: dedicated signer SA per use-case, short TTLs (so a stolen batch expires), and object-scoped signing so mass-minting is visible as scope-widening. The hard part is that a patient insider staying under thresholds requires behavioral baselining, not static rules.<br />
+<em>Signal: recognizes signed URLs evade principal-based read alerts and pivots to signing-side + fan-out behavioral detection.</em></p>
+<p><strong>Q15. GCS, S3, and Azure Blob all suffer public-bucket leaks. Argue which provider's <em>default</em> controls best prevent it in 2024+ and what a provider-agnostic policy floor looks like.</strong><br />
+All three converged on similar controls: GCS has Public Access Prevention + UBLA as Org Policy; AWS has S3 Block Public Access (now on by default for new buckets since 2023) + object-ownership "bucket owner enforced" that disables ACLs; Azure has "allow blob anonymous access = disabled" at the storage-account level + no-ACL model by default. AWS arguably has the strongest <em>default</em> today because Block Public Access is enabled by default account-wide and BPA overrides any policy/ACL, whereas GCS PAP and Azure's account setting are strong but must be deliberately enforced org-wide (GCS ships PAP as <code>inherited</code>/unset by default). The provider-agnostic floor is identical in shape: (1) disable ACLs so IAM/RBAC is the single model; (2) a top-of-hierarchy guardrail that structurally forbids anonymous grants and cannot be overridden by resource owners; (3) an identity-aware egress perimeter (VPC-SC / S3 access points + VPC endpoints + SCPs / Azure private endpoints + firewall) so stolen credentials cannot exfiltrate; (4) customer-managed keys for crypto control; (5) versioning/object-lock for tamper resistance; and (6) mandatory data-access logging. The lesson from a decade of leaks across all three is that the control that works is a non-overridable <em>invariant at the org root</em>, not per-bucket hygiene.<br />
+<em>Signal: cross-provider fluency plus the meta-point that org-root invariants beat per-resource practice.</em></p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP (Cloud Storage)</th>
+<th>AWS (S3)</th>
+<th>Azure (Blob Storage)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Container</td>
+<td>Bucket</td>
+<td>Bucket</td>
+<td>Container (in Storage Account)</td>
+</tr>
+<tr>
+<td>Disable ACLs / single auth model</td>
+<td>Uniform Bucket-Level Access</td>
+<td>Object Ownership = Bucket owner enforced</td>
+<td>ACLs only in ADLS Gen2; RBAC default</td>
+</tr>
+<tr>
+<td>Block public access</td>
+<td>Public Access Prevention (Org Policy)</td>
+<td>S3 Block Public Access (default on, 2023+)</td>
+<td>Storage account "allow blob anonymous access = disabled"</td>
+</tr>
+<tr>
+<td>Anonymous member</td>
+<td><code>allUsers</code> / <code>allAuthenticatedUsers</code></td>
+<td><code>"Principal": "*"</code> / public ACL</td>
+<td>Anonymous / public container access level</td>
+</tr>
+<tr>
+<td>Resource-scoped policy</td>
+<td>Bucket IAM bindings</td>
+<td>Bucket policy</td>
+<td>Azure RBAC role assignments / SAS</td>
+</tr>
+<tr>
+<td>Time-boxed capability token</td>
+<td>Signed URL</td>
+<td>Presigned URL</td>
+<td>Shared Access Signature (SAS)</td>
+</tr>
+<tr>
+<td>Constrained upload token</td>
+<td>Signed policy document</td>
+<td>POST policy</td>
+<td>SAS with permissions/prefix constraints</td>
+</tr>
+<tr>
+<td>Customer-managed keys</td>
+<td>CMEK (Cloud KMS)</td>
+<td>SSE-KMS</td>
+<td>Customer-managed keys (Key Vault)</td>
+</tr>
+<tr>
+<td>Customer-supplied keys</td>
+<td>CSEK</td>
+<td>SSE-C</td>
+<td>Customer-provided key (per-request)</td>
+</tr>
+<tr>
+<td>Immutability / WORM</td>
+<td>Retention policy + Bucket Lock</td>
+<td>Object Lock (governance/compliance)</td>
+<td>Immutable blob storage (time-based/legal hold)</td>
+</tr>
+<tr>
+<td>Versioning</td>
+<td>Object Versioning</td>
+<td>S3 Versioning</td>
+<td>Blob versioning + snapshots</td>
+</tr>
+<tr>
+<td>Network-identity perimeter</td>
+<td>VPC Service Controls</td>
+<td>VPC endpoints + endpoint policies + SCPs</td>
+<td>Private Endpoints + storage firewall</td>
+</tr>
+<tr>
+<td>Data-access audit</td>
+<td>Cloud Audit Logs (Data Access)</td>
+<td>CloudTrail S3 data events</td>
+<td>Azure Monitor / Storage Analytics logs</td>
+</tr>
+<tr>
+<td>Org-wide guardrail</td>
+<td>Organization Policy constraints</td>
+<td>SCPs (Service Control Policies)</td>
+<td>Azure Policy</td>
+</tr>
+<tr>
+<td>Public-bucket finding</td>
+<td>SCC "Public bucket"</td>
+<td>Macie / Config / Access Analyzer</td>
+<td>Defender for Cloud / Storage recommendations</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Public Access Prevention enforced at the org node is the single highest-leverage control</strong> — it turns "no public buckets" into an invariant above IAM that survives new projects and human error.</li>
+<li><strong>Always enable Uniform Bucket-Level Access.</strong> Fine-grained ACLs hide object-level public grants from bucket-IAM review; UBLA removes that entire invisible exposure class.</li>
+<li><strong><code>allAuthenticatedUsers</code> is not "internal"</strong> — it means any Google account on earth; treat it as public and block it with PAP.</li>
+<li><strong>Signed URLs and signed policy documents are bearer capabilities that bypass IAM.</strong> Short TTLs, a dedicated low-privilege signer SA, tight object/prefix scope, and never logging them.</li>
+<li><strong>VPC Service Controls is the control that defeats the credential-theft-then-exfil chain</strong> IAM alone cannot; roll it out in dry-run first because it breaks CI/CD and SaaS integrations.</li>
+<li><strong>CMEK gives you key control, audit, rotation, and crypto-shredding</strong> — but mishandling the key is a self-inflicted availability outage; rotate, never prematurely destroy.</li>
+<li><strong>Versioning is recovery; Bucket Lock is immutability.</strong> Together they give ransomware resistance and tamper-proof audit logs — and Bucket Lock is irreversible, so choose retention carefully.</li>
+<li><strong>Data Access audit logs are OFF by default</strong> — without ADMIN_READ/DATA_READ/DATA_WRITE you have no exfil forensics; enable them org-wide.</li>
+<li><strong>Least-privilege service accounts</strong> (object-scoped roles, not project <code>storage.admin</code>) shrink the blast radius of any stolen token.</li>
+<li><strong>The cross-provider lesson from a decade of leaks:</strong> a non-overridable guardrail at the org root beats per-bucket hygiene every time; the same shape (disable ACLs → block-public invariant → egress perimeter → CMK → WORM → logging) applies to S3 and Azure Blob.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/security">Cloud Storage security overview</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/uniform-bucket-level-access">Uniform bucket-level access</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/public-access-prevention">Public access prevention</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/access-control">Making data public / access control</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/access-control/signed-urls">Signed URLs</a> and <a href="https://cloud.google.com/storage/docs/authentication/signatures">Signed policy documents</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/encryption/customer-managed-keys">Customer-managed encryption keys (CMEK)</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/object-versioning">Object Versioning</a> and <a href="https://cloud.google.com/storage/docs/bucket-lock">Bucket Lock / retention</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/vpc-service-controls/docs/overview">VPC Service Controls overview</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints">Organization Policy constraints</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/storage/docs/audit-logging">Cloud Audit Logs for Cloud Storage</a></li>
+<li>CIS — <a href="https://www.cisecurity.org/benchmark/google_cloud_computing_platform">Google Cloud Platform Foundations Benchmark v3.0</a> (Section 5, Storage)</li>
+<li>MITRE ATT&amp;CK — <a href="https://attack.mitre.org/techniques/T1530/">T1530 Data from Cloud Storage</a>, <a href="https://attack.mitre.org/techniques/T1567/002/">T1567.002 Exfiltration to Cloud Storage</a>, <a href="https://attack.mitre.org/techniques/T1552/005/">T1552.005 Cloud Instance Metadata API</a></li>
+<li>NIST — SP 800-53 Rev.5 (SC-8, SC-28, AC-3, AU-2), SP 800-209 (Security Guidelines for Storage Infrastructure)</li>
+<li>AWS — <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html">S3 Block Public Access</a>; Azure — <a href="https://learn.microsoft.com/azure/storage/blobs/anonymous-read-access-prevent">Prevent anonymous public read access to blobs</a></li>
+<li>Research/tooling — GrayhatWarfare (public bucket index), Truffle Security GCP research, Google Cloud Security Command Center findings reference</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

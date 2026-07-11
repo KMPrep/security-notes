@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Cloud KMS — Key Management, Envelope Encryption, and Key Custody Models</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Security\Cloud-KMS\README.md</p>
+<h1 id="gcp-cloud-kms-key-management-envelope-encryption-and-key-custody-models">GCP Cloud KMS — Key Management, Envelope Encryption, and Key Custody Models</h1>
+<p><strong>Cloud:</strong> Google Cloud Platform — Security / Cryptography<br />
+<strong>Services:</strong> Cloud KMS, Cloud HSM, Cloud External Key Manager (EKM), Autokey<br />
+<strong>Related standards &amp; refs:</strong> NIST SP 800-57 (Key Management), NIST SP 800-38F (key wrapping), FIPS 140-2 Level 3 (Cloud HSM), NIST SP 800-131A (algorithm transitions), MITRE ATT&amp;CK T1486 (Data Encrypted for Impact), T1552.001 (Credentials in Files), T1078.004 (Cloud Accounts)</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Cloud KMS is Google Cloud's managed cryptographic key service: it creates, stores, uses, rotates, and destroys cryptographic keys, and it exposes cryptographic operations (encrypt, decrypt, sign, verify, MAC, key-wrap) as API calls without ever exporting the raw key material to the caller. Its central architectural idea is that key material is a <em>managed, access-controlled, audited resource</em> that lives inside a hardware or software boundary, and that data is protected by <strong>envelope encryption</strong> — bulk data is encrypted locally with a fast symmetric data encryption key (DEK), and only the small DEK is sent to KMS to be wrapped by a key encryption key (KEK) that never leaves the service. This matters at scale because almost every managed GCP service (Cloud Storage, BigQuery, Persistent Disk, Cloud SQL, Pub/Sub, Secret Manager) delegates its encryption to KMS, so KMS is the single control point where an organization decides <em>who can decrypt what, when, and prove it happened</em>. Getting KMS right means data-at-rest encryption, regulatory key-custody requirements (BYOK/HYOK), and crypto-shredding all become policy rather than bespoke code. Getting it wrong means either a silent loss of confidentiality (over-broad <code>cryptoKeyEncrypterDecrypter</code> grants) or a self-inflicted denial of service (a destroyed key that shreds petabytes).</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- KMS never gives you the key; it gives you <em>operations on</em> the key. Data plane calls are <code>Encrypt</code>/<code>Decrypt</code>/<code>AsymmetricSign</code> against a resource path, gated by IAM and logged in Cloud Audit Logs Data Access logs.<br />
+- The hierarchy is <strong>project → location → key ring → crypto key → crypto key version</strong>. IAM is enforced at key-ring or key level; key <em>versions</em> are the rotating unit that actually holds material.<br />
+- <strong>Envelope encryption</strong>: encrypt data with a local DEK, wrap the DEK with a KEK in KMS, store the wrapped DEK next to the ciphertext. Only unwrapping the DEK requires KMS, so throughput isn't bottlenecked on KMS.<br />
+- Custody spectrum: <strong>Google-managed (default)</strong> → <strong>CMEK</strong> (you own the KEK in KMS) → <strong>CSEK</strong> (you supply raw key bytes per request, few services) → <strong>EKM / HYOK</strong> (key material lives <em>outside</em> Google in a third-party HSM). Protection levels are <code>SOFTWARE</code>, <code>HSM</code> (FIPS 140-2 L3), <code>EXTERNAL</code>, <code>EXTERNAL_VPC</code>.<br />
+- Destruction is a two-step, reversible-for-a-window operation: <code>DESTROY_SCHEDULED</code> state for 24h–120d before material is irrecoverably gone. This window is both a safety net and a crypto-shred lever.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>Cloud KMS is organized as a strict resource hierarchy. A <strong>key ring</strong> is a grouping/namespacing container bound to a single <strong>location</strong> (region like <code>us-east1</code>, dual-region like <code>nam4</code>, multi-region like <code>us</code>, or <code>global</code>). Inside a key ring live <strong>crypto keys</strong>; inside each crypto key live one or more <strong>crypto key versions</strong>. The key version is the object that actually holds (or references) cryptographic material; the crypto key is a logical pointer with a <strong>primary version</strong> that new symmetric encrypt operations use by default. Rotation is nothing more than <em>creating a new version and repointing the primary</em> — old versions stay enabled so existing ciphertext (which embeds the version that wrapped it) can still be decrypted.</p>
+<p>Key rings and key versions are <strong>immutable and non-deletable by design</strong> in an important sense: you cannot delete a key ring, and you cannot delete a crypto key — you can only disable/destroy <em>versions</em>. This is deliberate, because deleting a key ring would orphan the audit history and could be weaponized. Locations are also immutable per key ring; a <code>global</code> key can be used from anywhere, while a regional key constrains where cryptographic operations can be served (relevant for data-residency).</p>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Purpose</th>
+<th>Mutable?</th>
+<th>IAM attach point</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Project</td>
+<td>Billing + top-level IAM boundary</td>
+<td>—</td>
+<td>Yes</td>
+<td>KMS keys are frequently isolated in a dedicated "keys project"</td>
+</tr>
+<tr>
+<td>Location</td>
+<td>Geographic/residency scope for a key ring</td>
+<td>No (fixed at create)</td>
+<td>No</td>
+<td><code>global</code>, region, dual-region, multi-region</td>
+</tr>
+<tr>
+<td>Key ring</td>
+<td>Namespacing container for keys</td>
+<td>No (cannot delete)</td>
+<td>Yes (common)</td>
+<td>Grant here to cover all keys inside</td>
+</tr>
+<tr>
+<td>Crypto key</td>
+<td>Logical key with purpose + rotation policy</td>
+<td>Partially (labels, rotation, primary)</td>
+<td>Yes (fine-grained)</td>
+<td>Purpose is fixed at create</td>
+</tr>
+<tr>
+<td>Crypto key version</td>
+<td>Actual key material / HSM handle</td>
+<td>State transitions only</td>
+<td>No (inherits)</td>
+<td>The rotating, destroyable unit</td>
+</tr>
+<tr>
+<td>Import job</td>
+<td>Wrapping target for BYOK import</td>
+<td>No</td>
+<td>Yes</td>
+<td>Holds a public wrapping key for CKM import</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key <em>purpose</em></strong> is fixed at creation and determines which operations are legal: <code>ENCRYPT_DECRYPT</code> (symmetric AES-256-GCM), <code>ASYMMETRIC_SIGN</code> (RSA 2048/3072/4096 PSS or PKCS#1, or EC P-256/P-384), <code>ASYMMETRIC_DECRYPT</code> (RSA-OAEP), and <code>MAC</code> (HMAC-SHA256). <strong>Symmetric keys</strong> are the workhorse: fast, used for envelope encryption and CMEK, and <em>never exportable</em> — you can only call <code>Encrypt</code>/<code>Decrypt</code>. <strong>Asymmetric keys</strong> expose a <strong>public key you can retrieve</strong> (<code>GetPublicKey</code>) and use offline for verify/encrypt, while the private half stays in KMS for <code>AsymmetricSign</code>/<code>AsymmetricDecrypt</code> — this is what powers code signing, JWT signing, and X.509 CA operations (Certificate Authority Service builds on this).</p>
+<p><strong>Protection level</strong> is orthogonal to purpose and pins <em>where</em> the material lives and what boundary protects it:</p>
+<table>
+<thead>
+<tr>
+<th>Protection level</th>
+<th>Where key material lives</th>
+<th>Assurance</th>
+<th>Latency/throughput</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SOFTWARE</code></td>
+<td>Google-operated software crypto boundary</td>
+<td>FIPS 140-2 L1</td>
+<td>Lowest latency, highest QPS</td>
+<td>Default CMEK, high-volume envelope KEKs</td>
+</tr>
+<tr>
+<td><code>HSM</code> (Cloud HSM)</td>
+<td>Google-operated FIPS 140-2 <strong>Level 3</strong> HSM cluster</td>
+<td>Hardware-backed, tamper-resistant</td>
+<td>Slightly higher latency, quota-limited</td>
+<td>Regulated data, key never in software memory</td>
+</tr>
+<tr>
+<td><code>EXTERNAL</code> (EKM over internet)</td>
+<td>Third-party HSM/KMS <em>outside</em> Google</td>
+<td>You hold the material (HYOK)</td>
+<td>Network round-trip to partner; availability tied to partner</td>
+<td>Data residency / key-custody mandates</td>
+</tr>
+<tr>
+<td><code>EXTERNAL_VPC</code> (EKM over VPC)</td>
+<td>Third-party HSM reachable via private VPC</td>
+<td>HYOK, no public egress</td>
+<td>VPC path, better latency/isolation</td>
+<td>HYOK without internet exposure</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Custody models</strong> (a separate axis again — this is the most-confused part):<br />
+- <strong>Google-managed encryption keys (GMEK)</strong> — the default. Google creates and rotates KEKs automatically; you never see them and there is no key ring in <em>your</em> project. Zero config, zero control, no separate audit surface for the key.<br />
+- <strong>CMEK (Customer-Managed Encryption Keys)</strong> — <em>you</em> create a KMS key (SOFTWARE/HSM/EXTERNAL) and point a service at it. The service's per-object DEKs are wrapped by <em>your</em> KEK. You control rotation, disable, destroy, and IAM — meaning you can <em>revoke a whole service's ability to read its own data</em> by disabling the key.<br />
+- <strong>CSEK (Customer-Supplied Encryption Keys)</strong> — you pass <strong>raw 256-bit key bytes</strong> (base64) on <em>every request</em>; Google uses them in memory to wrap the DEK and then discards them. Supported by a <em>narrow</em> set (Cloud Storage, Compute Engine disks/images). No KMS involved, no rotation service — you are the key server, and if you lose the bytes the data is gone.<br />
+- <strong>EKM / HYOK</strong> — CMEK where the KEK is <code>EXTERNAL</code>; the actual bits live in a partner HSM (Fortanix, Thales, Virtru, Futurex). Google calls out to unwrap. Pull the key at the partner and Google can no longer decrypt — the strongest "hold your own key" posture.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Create a key ring and a rotating symmetric key.</strong> Note rotation cadence and the algorithm.</p>
+<pre><code class="language-bash"># Key rings are location-bound and permanent — pick location deliberately (residency).
+gcloud kms keyrings create app-secrets \
+  --location=us-east1 \
+  --project=acme-security-keys
+
+# Symmetric ENCRYPT_DECRYPT key, HSM-backed, auto-rotate every 90 days,
+# first rotation scheduled 90 days out.
+gcloud kms keys create billing-cmek \
+  --location=us-east1 \
+  --keyring=app-secrets \
+  --purpose=encryption \
+  --protection-level=hsm \
+  --default-algorithm=google-symmetric-encryption \
+  --rotation-period=90d \
+  --next-rotation-time=&quot;$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)&quot; \
+  --project=acme-security-keys
+</code></pre>
+<p><strong>Direct encrypt/decrypt (for small blobs — DEKs, secrets &lt; 64 KiB).</strong> The plaintext limit is 64 KiB precisely because KMS is meant to wrap DEKs, not bulk data.</p>
+<pre><code class="language-bash"># Encrypt a small secret. Output is base64 ciphertext bound to the key version used.
+gcloud kms encrypt \
+  --location=us-east1 --keyring=app-secrets --key=billing-cmek \
+  --plaintext-file=./stripe-api-key.txt \
+  --ciphertext-file=./stripe-api-key.enc \
+  --additional-authenticated-data-file=./aad.bin   # AAD binds ciphertext to context
+
+# Decrypt — caller needs cloudkms.cryptoKeyVersions.useToDecrypt
+gcloud kms decrypt \
+  --location=us-east1 --keyring=app-secrets --key=billing-cmek \
+  --ciphertext-file=./stripe-api-key.enc \
+  --plaintext-file=./decrypted.txt \
+  --additional-authenticated-data-file=./aad.bin
+</code></pre>
+<p>The <strong>Additional Authenticated Data (AAD)</strong> is a critical, under-used control: it's not encrypted but it <em>is</em> authenticated, so decryption fails unless the exact same AAD is supplied. Bind AAD to context (e.g. <code>tenant_id=42|table=cards</code>) to prevent a stolen ciphertext from being decrypted in the wrong context — a cheap defense against ciphertext-swapping.</p>
+<p><strong>Least-privilege IAM — grant use, not admin.</strong> The single most important role split in KMS:</p>
+<pre><code class="language-bash"># App service account may ONLY encrypt/decrypt with this ONE key — not admin it.
+gcloud kms keys add-iam-policy-binding billing-cmek \
+  --location=us-east1 --keyring=app-secrets \
+  --member=&quot;serviceAccount:billing-app@acme-prod.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/cloudkms.cryptoKeyEncrypterDecrypter&quot; \
+  --project=acme-security-keys
+
+# Even tighter: decrypt-only (asymmetric consumers, or read-only services)
+#   roles/cloudkms.cryptoKeyDecrypter
+# Admins who manage keys but must NOT be able to decrypt data:
+#   roles/cloudkms.admin   (create/rotate/destroy, but NO crypto ops)
+</code></pre>
+<p>That last line is the crux of <strong>separation of duties</strong>: <code>roles/cloudkms.admin</code> can rotate and destroy keys but <em>cannot</em> call <code>Decrypt</code>; <code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> can decrypt but cannot destroy. Never grant <code>roles/owner</code> on the keys project to app teams, and never grant <code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> at the <em>project</em> or <em>key-ring</em> level when a <em>single key</em> will do.</p>
+<p><strong>CMEK on a Cloud Storage bucket</strong> — the canonical CMEK example. The storage service agent (a Google-managed SA unique to your project) must be able to use your key, or every write fails.</p>
+<pre><code class="language-bash"># 1. Find/enable the Cloud Storage service agent and grant it use of the key.
+SA=&quot;$(gsutil kms serviceaccount -p acme-prod)&quot;   # service-&lt;PROJECT_NUMBER&gt;@gs-project-accounts.iam.gserviceaccount.com
+gcloud kms keys add-iam-policy-binding billing-cmek \
+  --location=us-east1 --keyring=app-secrets \
+  --member=&quot;serviceAccount:${SA}&quot; \
+  --role=&quot;roles/cloudkms.cryptoKeyEncrypterDecrypter&quot; \
+  --project=acme-security-keys
+
+# 2. Set the default CMEK on the bucket (must be same location as bucket).
+gcloud storage buckets update gs://acme-billing-exports \
+  --default-encryption-key=projects/acme-security-keys/locations/us-east1/keyRings/app-secrets/cryptoKeys/billing-cmek
+
+# 3. Verify it stuck.
+gcloud storage buckets describe gs://acme-billing-exports \
+  --format=&quot;value(default_kms_key)&quot;
+</code></pre>
+<p><strong>Enforce CMEK org-wide</strong> so nobody can create a resource with default Google-managed keys. This is the control that turns CMEK from optional to mandatory:</p>
+<pre><code class="language-bash"># Deny resource creation unless CMEK is used, org-wide.
+gcloud resource-manager org-policies enable-enforce \
+  constraints/gcp.restrictNonCmekServices --organization=123456789012
+
+# Restrict WHICH keys/projects may be used as CMEK (block foreign keys).
+gcloud resource-manager org-policies set-policy cmek-projects-policy.yaml \
+  --organization=123456789012
+# cmek-projects-policy.yaml pins constraints/gcp.restrictCmekCryptoKeyProjects
+# to under:projects/acme-security-keys so only the blessed keys project qualifies.
+</code></pre>
+<p><strong>Rotation — automatic vs manual.</strong> Automatic rotation only makes sense for <strong>symmetric</strong> keys (old versions transparently decrypt old ciphertext). Asymmetric keys can't auto-rotate because verifiers hold the old public key.</p>
+<pre><code class="language-bash"># Set/confirm automatic rotation.
+gcloud kms keys update billing-cmek \
+  --location=us-east1 --keyring=app-secrets \
+  --rotation-period=90d --next-rotation-time=&quot;2026-10-01T00:00:00Z&quot;
+
+# Manual rotation — create a new version and make it primary NOW (incident response).
+gcloud kms keys versions create \
+  --location=us-east1 --keyring=app-secrets --key=billing-cmek --primary
+</code></pre>
+<p><strong>Destruction — the two-step, reversible-for-a-window flow:</strong></p>
+<pre><code class="language-bash"># Schedule destruction. Version enters DESTROY_SCHEDULED for the key ring's
+# destroy-scheduled duration (default 24h; configurable 24h–120d at key creation).
+gcloud kms keys versions destroy 3 \
+  --location=us-east1 --keyring=app-secrets --key=billing-cmek
+
+# CHANGED YOUR MIND within the window? Restore it.
+gcloud kms keys versions restore 3 \
+  --location=us-east1 --keyring=app-secrets --key=billing-cmek
+</code></pre>
+<p>Set a long <code>--destroy-scheduled-duration</code> (e.g. <code>--destroy-scheduled-duration=30d</code> at key creation) so an accidental or malicious destroy is recoverable, but short enough that crypto-shredding still meets your data-deletion SLA.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Resource hierarchy.</strong></p>
+<pre class="mermaid">
+flowchart TD
+  P[Project acme-security-keys] --> L[Location us-east1]
+  L --> KR[Key ring app-secrets]
+  KR --> CK1[Crypto key billing-cmek ENCRYPT_DECRYPT]
+  KR --> CK2[Crypto key jwt-signer ASYMMETRIC_SIGN]
+  CK1 --> V1[Version 1 disabled]
+  CK1 --> V2[Version 2 enabled]
+  CK1 --> V3[Version 3 primary]
+  CK2 --> PV[Version 1 primary with public key]
+</pre>
+<p><strong>Diagram B — Envelope encryption write path.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+  participant App as Application
+  participant Lib as Crypto library
+  participant KMS as Cloud KMS KEK
+  participant Store as Object store
+  App->>Lib: encrypt plaintext object
+  Lib->>Lib: generate random DEK AES 256
+  Lib->>Lib: encrypt object with DEK locally
+  Lib->>KMS: wrap DEK with KEK
+  KMS-->>Lib: return wrapped DEK
+  Lib->>Store: store ciphertext plus wrapped DEK
+  Lib->>Lib: discard plaintext DEK from memory
+</pre>
+<p><strong>Diagram C — Decrypt / read path.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+  participant App as Application
+  participant Store as Object store
+  participant KMS as Cloud KMS KEK
+  App->>Store: fetch ciphertext and wrapped DEK
+  Store-->>App: ciphertext plus wrapped DEK
+  App->>KMS: unwrap DEK with KEK
+  KMS->>KMS: check IAM and log Data Access
+  KMS-->>App: plaintext DEK
+  App->>App: decrypt object with DEK then wipe DEK
+</pre>
+<p><strong>Diagram D — Key version lifecycle state machine.</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> PendingGeneration
+  PendingGeneration --> Enabled
+  Enabled --> Disabled
+  Disabled --> Enabled
+  Disabled --> DestroyScheduled
+  Enabled --> DestroyScheduled
+  DestroyScheduled --> Disabled
+  DestroyScheduled --> Destroyed
+  Destroyed --> [*]
+</pre>
+<p><strong>Diagram E — Custody / control spectrum.</strong></p>
+<pre class="mermaid">
+flowchart LR
+  A[Google managed default] --> B[CMEK you own KEK in KMS]
+  B --> C[CMEK with Cloud HSM FIPS 140 2 L3]
+  C --> D[EKM external key manager HYOK]
+  B --> E[CSEK you supply raw key bytes]
+  D --> F[Key access justifications approve each unwrap]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name / ID</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Code Spaces destruction</td>
+<td>2014</td>
+<td>Attacker got console creds, deleted data + backups</td>
+<td>Custody-holder can destroy availability; needs separation of duties + immutable backups</td>
+</tr>
+<tr>
+<td>Tesla Kubernetes crypto-mining</td>
+<td>2018</td>
+<td>Exposed console → cloud creds harvested</td>
+<td>IAM sprawl lets attackers reach key operations laterally</td>
+</tr>
+<tr>
+<td>Capital One / SSRF</td>
+<td>2019</td>
+<td>SSRF → instance metadata creds → S3 (AWS KMS-encrypted) read</td>
+<td>KMS-at-rest does <strong>not</strong> stop an authorized identity from decrypting; IAM is the real boundary</td>
+</tr>
+<tr>
+<td>CVE-2020-8897 (AWS Encryption SDK)</td>
+<td>2020</td>
+<td>Missing key-commitment in AES-GCM allowed a single ciphertext to decrypt to two plaintexts</td>
+<td>AEAD without key commitment is exploitable; use committing modes / bind context</td>
+</tr>
+<tr>
+<td>Microsoft SAS/Storsimple key leak lineage</td>
+<td>2021-22</td>
+<td>Over-shared keys/SAS tokens across tenants</td>
+<td>Broad key/secret sharing collapses tenant isolation</td>
+</tr>
+<tr>
+<td>Microsoft Storm-0558 token forgery</td>
+<td>2023</td>
+<td>Stolen MSA <em>signing key</em> + validation flaw forged tokens for any tenant</td>
+<td>A single signing (asymmetric) key is a skeleton key; HSM custody + rotation + scope checks are non-negotiable</td>
+</tr>
+<tr>
+<td>Retool / cloud key exposure patterns</td>
+<td>2023</td>
+<td>Session/creds phishing reaching admin planes</td>
+<td>MFA + admin/data-plane separation for key admin roles</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — Capital One (2019) and "encryption at rest is not access control."</strong> The attacker exploited a misconfigured WAF (SSRF) to reach the instance metadata endpoint, stole the role credentials, and used them to list and read ~100M records from S3. Those objects were encrypted at rest with KMS. The encryption did <em>nothing</em> to stop the breach because the compromised role was <em>authorized</em> to decrypt — KMS transparently unwrapped the DEKs for it. The GCP-native lesson: CMEK/GMEK protects against <em>stolen media / offline theft</em>, not against a compromised principal with <code>cryptoKeyDecrypter</code>. The control that would have helped is <strong>least-privilege on the key</strong> (the role should not have had blanket decrypt across the whole dataset) plus <strong>VPC Service Controls</strong> to keep the metadata-derived credential from reaching the storage/KMS API from outside the perimeter, plus <strong>Key Access Justifications</strong> so an anomalous programmatic decrypt at scale could be denied or flagged.</p>
+<p><strong>Case study 2 — Storm-0558 (2023) and the skeleton signing key.</strong> Microsoft disclosed that threat actor Storm-0558 obtained a consumer (MSA) signing key and, combining it with a token-validation flaw, forged authentication tokens to access Exchange Online across many organizations. This is the asymmetric-key nightmare: a <em>single</em> private signing key, if extracted and long-lived, becomes a master forgery tool. The KMS-relevant takeaways map directly onto how you'd design a signing key on GCP: keep the private key in <strong>Cloud HSM (never exportable, FIPS 140-2 L3)</strong> so it <em>cannot</em> be extracted even by insiders; <strong>rotate signing keys</strong> on a schedule and support fast revocation; <strong>scope</strong> the key so it can only sign for its intended audience; and <strong>log every <code>AsymmetricSign</code></strong> call as a Data Access event so mass or off-hours signing is detectable.</p>
+<p><strong>Case study 3 — Code Spaces (2014) and key/credential-driven DoS.</strong> An attacker gained control-plane access and, when the company resisted an extortion demand, deleted production data <em>and</em> the backups, ending the business. Translate to KMS: a principal with <code>roles/cloudkms.admin</code> (or <code>owner</code>) can schedule every key version for destruction. If the destroy-scheduled window is short and no restore happens, everything wrapped by those keys becomes permanently unreadable — crypto-shredding turned into a weapon. The controls: <strong>separate key-admin from data-plane</strong>, <strong>long destroy-scheduled durations</strong>, <strong>org-policy locks</strong>, and <strong>audit alerts on any <code>DestroyCryptoKeyVersion</code></strong>.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Over-broad <code>cryptoKeyEncrypterDecrypter</code> at project/org level</td>
+<td>T1078.004 Cloud Accounts</td>
+<td>IAM granted too high in hierarchy</td>
+<td>Any compromised SA can decrypt all data</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Key-admin also holds decrypt (no SoD)</td>
+<td>Privilege / SoD gap</td>
+<td><code>roles/owner</code> on keys project</td>
+<td>One identity can destroy <em>and</em> read</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Malicious/accidental <code>DestroyCryptoKeyVersion</code></td>
+<td>T1485/T1486 Data Destruction</td>
+<td>No org-policy lock, short destroy window</td>
+<td>Permanent data loss (crypto-DoS)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>4</td>
+<td>CMEK never enforced; resources use Google-managed keys</td>
+<td>Misconfiguration</td>
+<td>No <code>restrictNonCmekServices</code> org policy</td>
+<td>No key-custody control, no revoke lever</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Missing / disabled key rotation</td>
+<td>Cryptoperiod violation</td>
+<td>No rotation policy set</td>
+<td>Long-lived key increases blast radius</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Auto-rotation on an <em>asymmetric</em> signing key</td>
+<td>Design error</td>
+<td>Wrong mental model</td>
+<td>Verifiers break; outage or silent failure</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Ciphertext-swapping (no AAD binding)</td>
+<td>T1565 Data Manipulation</td>
+<td>AAD not used</td>
+<td>Ciphertext decrypts in wrong context</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cross-project/foreign KMS key used as CMEK</td>
+<td>Trust boundary violation</td>
+<td>No <code>restrictCmekCryptoKeyProjects</code></td>
+<td>Third party can revoke/read your data</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>CSEK key bytes lost or committed to git</td>
+<td>T1552.001 Credentials in Files</td>
+<td>DIY key custody, no vault</td>
+<td>Irrecoverable data / key theft</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Service agent lost <code>EncrypterDecrypter</code> on key</td>
+<td>Availability misconfig</td>
+<td>IAM removed / key disabled</td>
+<td>Service can't read its own data (self-DoS)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>EKM partner outage / key pulled</td>
+<td>Availability / HYOK risk</td>
+<td>External dependency</td>
+<td>All EKM-wrapped data unreadable</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Data Access audit logging disabled for KMS</td>
+<td>Detection gap</td>
+<td>Default DATA_READ off</td>
+<td>Key use is invisible; no forensics</td>
+<td>High</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Weak algorithm / short RSA key selected</td>
+<td>Crypto weakness</td>
+<td>RSA-2048 for long-lived signing</td>
+<td>Future compromise, non-compliance</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>14</td>
+<td>KMS quota exhaustion (envelope on bulk data)</td>
+<td>DoS / design error</td>
+<td>Encrypting &gt;64KiB direct, no DEK caching</td>
+<td>Throttling, latency, outage</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Exfiltration of <em>wrapped</em> DEKs + later key access</td>
+<td>T1530 Data from Cloud Storage</td>
+<td>Attacker persists ciphertext, gets decrypt later</td>
+<td>Delayed decryption if key not rotated/revoked</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Import job wrapping key mishandled (BYOK)</td>
+<td>Key exposure</td>
+<td>Weak import wrapping</td>
+<td>Imported key material exposed</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Global key used where residency requires regional</td>
+<td>Compliance violation</td>
+<td>Wrong location at create</td>
+<td>Data-residency breach, fines</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Disabled (not destroyed) key silently re-enabled</td>
+<td>Persistence / abuse</td>
+<td>Attacker re-enables version</td>
+<td>Regained decrypt without new grant</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Logging pipeline reads via broad SA that also decrypts</td>
+<td>Lateral / over-scope</td>
+<td>Shared SA across duties</td>
+<td>Log compromise → data decrypt</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>No alerting on <code>SetIamPolicy</code> for keys</td>
+<td>Detection gap</td>
+<td>Monitoring not wired</td>
+<td>Silent grant of decrypt to attacker SA</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Over-broad decrypt</td>
+<td>Grant <code>cryptoKeyEncrypterDecrypter</code> at the <em>single key</em>, per-service SA</td>
+<td>KMS IAM, per key</td>
+</tr>
+<tr>
+<td>2</td>
+<td>No SoD</td>
+<td>Split <code>roles/cloudkms.admin</code> (no crypto) from <code>cryptoKeyDecrypter</code>; deny <code>owner</code> on keys project</td>
+<td>Org / project IAM</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Destroy DoS</td>
+<td>Long <code>destroy-scheduled-duration</code>, org-policy lock, restore runbook, alert on destroy</td>
+<td>KMS + org policy + monitoring</td>
+</tr>
+<tr>
+<td>4</td>
+<td>CMEK not enforced</td>
+<td><code>constraints/gcp.restrictNonCmekServices</code></td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No rotation</td>
+<td><code>--rotation-period</code> on all symmetric keys; SCC/config-validator check</td>
+<td>KMS key config</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Auto-rotate asymmetric</td>
+<td>Manual rotation + dual-publish public keys for verifiers</td>
+<td>Process / key config</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Ciphertext swap</td>
+<td>Mandatory AAD bound to tenant/context</td>
+<td>Application crypto</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Foreign CMEK key</td>
+<td><code>constraints/gcp.restrictCmekCryptoKeyProjects</code></td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>9</td>
+<td>CSEK loss/leak</td>
+<td>Prefer CMEK; if CSEK, store bytes in Secret Manager/HSM, never in code</td>
+<td>Design / secret store</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Self-DoS</td>
+<td>Alert on key <code>Disable</code>/IAM removal; pre-flight IAM checks in CI</td>
+<td>Monitoring / CI</td>
+</tr>
+<tr>
+<td>11</td>
+<td>EKM outage</td>
+<td>Multi-region EKM, availability SLA, break-glass GMEK fallback plan</td>
+<td>Architecture</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Logging off</td>
+<td>Enable Data Access <code>DATA_READ</code>/<code>DATA_WRITE</code> audit logs for KMS org-wide</td>
+<td>Audit log config</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Weak algo</td>
+<td>Enforce approved algorithms; RSA-3072+/EC P-384 for long-lived; HSM</td>
+<td>Key config / policy</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Quota/DoS</td>
+<td>Envelope encryption + DEK caching; request quota increases</td>
+<td>Application design</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Wrapped-DEK exfil</td>
+<td>Rotate keys, disable old versions, VPC-SC to block API exfil</td>
+<td>KMS + VPC-SC</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Import mishandled</td>
+<td>Use KMS import job public wrapping key; short-lived import jobs</td>
+<td>KMS import flow</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Residency</td>
+<td>Regional key rings; <code>resourceLocations</code> org policy</td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Re-enable abuse</td>
+<td>Alert on <code>UpdateCryptoKeyVersion</code> to ENABLED; destroy not disable</td>
+<td>Monitoring / process</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Shared SA</td>
+<td>One SA per duty; dedicated logging SA with no decrypt</td>
+<td>IAM design</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Silent IAM grant</td>
+<td>Alert on KMS <code>SetIamPolicy</code>; VPC-SC perimeter; Access Approval</td>
+<td>Monitoring / VPC-SC</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Least-privilege key IAM (<code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> at the key, per-SA).</strong> KMS IAM is evaluated <em>additively</em> down the hierarchy: a grant at the org, project, or key-ring level flows to every key beneath it. The single highest-leverage mistake is granting decrypt at a level above the individual key, which silently authorizes decryption of <em>unrelated</em> data. The technical control is to bind the <em>predefined</em> role <code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> — or the tighter <code>cryptoKeyDecrypter</code>/<code>cryptoKeyEncrypter</code> — directly on the specific <code>cryptoKey</code> resource, to a <em>dedicated</em> service account used by exactly one workload. Combine with <strong>IAM Conditions</strong> to add request-context constraints. Trade-off: fine-grained per-key IAM multiplies the number of bindings and can become unmanageable; mitigate with Terraform-managed bindings and periodic IAM Recommender review. Limit: IAM does not protect against a <em>legitimately authorized</em> but compromised principal (see Capital One) — that's what VPC-SC and Key Access Justifications are for.</p>
+<p><strong>2. CMEK enforcement + key-project pinning (org policy).</strong> Two org-policy constraints turn CMEK from best-effort into a guarantee. <code>constraints/gcp.restrictNonCmekServices</code> (list of service names) <em>fails resource creation</em> for listed services unless a CMEK key is specified — no more accidental Google-managed buckets. <code>constraints/gcp.restrictCmekCryptoKeyProjects</code> restricts <em>which</em> projects' keys are even accepted as CMEK, blocking an attacker (or a careless team) from pointing your production data at a key in a project they control (which would let them silently revoke or read). Implementation is a YAML policy at the org node. Trade-off: strict enforcement can break Terraform runs and new-service onboarding; roll out with <code>dryRunSpec</code> first and per-folder exceptions. Limit: it governs the <em>KEK ownership</em>, not day-to-day decrypt authorization.</p>
+<p><strong>3. Separation of duties between key admin and data plane.</strong> The predefined roles are deliberately split so that no single role both manages and uses keys. <code>roles/cloudkms.admin</code> can create, rotate, set IAM, and schedule destruction — but has <strong>no</strong> <code>Encrypt</code>/<code>Decrypt</code> permission. <code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> can perform crypto operations but cannot destroy or re-IAM the key. You enforce this by putting keys in a dedicated <strong>keys project</strong> whose <code>owner</code>/<code>editor</code> is held only by a small platform team, granting workloads only the crypto-op role on specific keys, and never granting basic <code>roles/editor</code> (which historically leaked KMS permissions). Trade-off: the key-admin team becomes a bottleneck for rotation/creation; solve with automation (Terraform) rather than broadening grants. Limit: an org-admin or a compromised platform SA still transcends this — layer Access Approval and audit alerting on top.</p>
+<p><strong>4. Rotation with a defined cryptoperiod.</strong> NIST SP 800-57 recommends bounded cryptoperiods so that any single key protects a limited quantity of data and time, capping blast radius from a future key compromise. For <strong>symmetric CMEK/envelope KEKs</strong>, automatic rotation (<code>--rotation-period=90d</code>) is transparent: a new primary version wraps new DEKs while old versions keep decrypting old ciphertext. Rotation does <em>not</em> re-encrypt existing data — that's a separate re-wrap job if you want to fully retire a version. For <strong>asymmetric</strong> keys, rotation must be <em>manual and choreographed</em>: publish the new public key to verifiers, cut over signing, then retire the old version, because auto-rotation would break every holder of the old public key. Trade-off: frequent rotation increases the number of live versions and audit noise; balance cadence against operational overhead (90 days is a common sweet spot). Limit: rotation alone doesn't help if you never disable/destroy compromised old versions.</p>
+<p><strong>5. Full Data Access audit logging + alerting.</strong> KMS <code>Encrypt</code>/<code>Decrypt</code>/<code>AsymmetricSign</code> are <strong>Data Access</strong> operations, and Data Access logging is <strong>off by default</strong> (only Admin Activity is always on). Without enabling it, key <em>use</em> is invisible — you can see who <em>created</em> a key but not who <em>decrypted</em> your customer PII. Enable <code>DATA_READ</code> and <code>DATA_WRITE</code> for the KMS API in the org's IAM audit config, sink logs to a BigQuery/Chronicle dataset in a separate logging project, and build alerts (below) on anomalous volume, off-hours use, new SAs, IAM changes, and destroy events. Trade-off: Data Access logs for high-QPS envelope workloads can be voluminous and costly — scope logging to sensitive keys, sample, or rely on DEK caching to cut call volume. Limit: logs are detective, not preventive; pair with VPC-SC and Key Access Justifications for prevention.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<p><strong>What to log / telemetry sources.</strong> Enable <strong>Cloud Audit Logs → Data Access</strong> for <code>cloudkms.googleapis.com</code> (both <code>DATA_READ</code> and <code>DATA_WRITE</code>); Admin Activity logs are always on and capture create/update/setIamPolicy/destroy. Key fields to alert on in <code>protoPayload</code>:<br />
+- <code>methodName</code> — <code>Decrypt</code>, <code>Encrypt</code>, <code>AsymmetricSign</code>, <code>DestroyCryptoKeyVersion</code>, <code>UpdateCryptoKeyVersion</code>, <code>SetIamPolicy</code>, <code>CreateCryptoKey</code>.<br />
+- <code>resourceName</code> — the full key/version path (which key was used).<br />
+- <code>authenticationInfo.principalEmail</code> — who did it (watch for new/unexpected SAs).<br />
+- <code>requestMetadata.callerIp</code> / <code>callerSuppliedUserAgent</code> — source (watch for outside-perimeter IPs).<br />
+- <code>authorizationInfo.granted</code> — denied attempts are strong signal.<br />
+- <strong>Key Access Justifications</strong> <code>keyAccessJustification</code> reason codes (when EKM/KAJ enabled) — flag <code>CUSTOMER_INITIATED_ACCESS</code> anomalies or unexpected justification types.</p>
+<p><strong>Sample detection 1 — BigQuery/SQL: spike in Decrypt calls by a principal (mass-decrypt / exfil).</strong></p>
+<pre><code class="language-sql">SELECT
+  protopayload_auditlog.authenticationInfo.principalEmail AS principal,
+  protopayload_auditlog.resourceName AS key_resource,
+  COUNT(*) AS decrypt_calls,
+  MIN(timestamp) AS first_seen,
+  MAX(timestamp) AS last_seen
+FROM `acme-logs.audit.cloudaudit_googleapis_com_data_access`
+WHERE protopayload_auditlog.serviceName = 'cloudkms.googleapis.com'
+  AND protopayload_auditlog.methodName LIKE '%Decrypt'
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+GROUP BY principal, key_resource
+HAVING decrypt_calls &gt; 1000        -- tune to per-principal baseline
+ORDER BY decrypt_calls DESC;
+</code></pre>
+<p><strong>Sample detection 2 — Sigma: key destruction or IAM change on a KMS key.</strong></p>
+<pre><code class="language-yaml">title: GCP KMS Key Destruction or IAM Grant
+id: 6b1e9a2c-kms-destroy-iam
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  selection_destroy:
+    protoPayload.serviceName: cloudkms.googleapis.com
+    protoPayload.methodName:
+      - google.cloud.kms.v1.KeyManagementService.DestroyCryptoKeyVersion
+      - google.cloud.kms.v1.KeyManagementService.UpdateCryptoKeyVersion
+  selection_iam:
+    protoPayload.serviceName: cloudkms.googleapis.com
+    protoPayload.methodName: google.cloud.kms.v1.KeyManagementService.SetIamPolicy
+  condition: selection_destroy or selection_iam
+level: high
+falsepositives:
+  - Planned rotation retirement or Terraform-managed IAM changes
+</code></pre>
+<p><strong>Sample detection 3 — KQL-style: denied KMS operation (probing / missing grant).</strong></p>
+<pre><code class="language-kusto">GCPAuditLogs
+| where ServiceName == &quot;cloudkms.googleapis.com&quot;
+| where AuthorizationInfo has &quot;granted\&quot;:false&quot;
+| summarize DeniedCount = count() by PrincipalEmail, MethodName, ResourceName, bin(TimeGenerated, 15m)
+| where DeniedCount &gt; 5
+</code></pre>
+<p><strong>Response playbook (containment → eradication → recovery):</strong><br />
+1. <strong>Confirm &amp; scope.</strong> Pull the offending <code>principalEmail</code>, <code>resourceName</code>, <code>callerIp</code> from audit logs; determine which key/versions and how many decrypt/sign calls occurred and over what window.<br />
+2. <strong>Contain — cut the identity, not the key first.</strong> Remove the compromised SA's KMS IAM binding (<code>gcloud kms keys remove-iam-policy-binding …</code>), disable the SA key, and revoke active tokens. Cutting the <em>identity</em> stops abuse without breaking legitimate consumers of the key.<br />
+3. <strong>Contain the key if needed.</strong> If the <em>key itself</em> is suspected compromised (e.g. EKM material or a signing key), <strong>disable the affected versions</strong> (<code>versions disable</code>) — reversible — before considering destruction. For signing keys, revoke the public key with verifiers and rotate immediately.<br />
+4. <strong>Eradicate.</strong> Rotate the key (new primary version), remove any attacker-added IAM bindings across the ring, and re-verify org policies (<code>restrictNonCmekServices</code>, key-project pinning) weren't relaxed. Hunt for persistence: re-enabled versions, new import jobs, altered rotation schedules.<br />
+5. <strong>Assess data exposure.</strong> Correlate <code>Decrypt</code> calls to the objects/DEKs they unwrapped; treat any data whose DEK was unwrapped by the attacker as potentially exfiltrated. Wrapped-DEK theft + later key access is the delayed-decryption risk — rotating and disabling old versions closes it.<br />
+6. <strong>Recover.</strong> Re-wrap/re-encrypt affected data under a fresh key version if required, restore any accidentally destroyed versions within the destroy-scheduled window (<code>versions restore</code>), and confirm services regained access. Validate CMEK is still enforced.<br />
+7. <strong>Post-incident.</strong> Tighten to per-key least privilege, shorten which principals hold decrypt, verify Data Access logging coverage, and add/adjust the detections above. Enable <strong>Key Access Justifications</strong> and <strong>Access Approval</strong> if not already, so future decrypts require an approved justification.</p>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<p><strong>Tier 1 — Fundamentals</strong></p>
+<p><strong>Q1. Explain envelope encryption and why KMS uses it instead of encrypting data directly.</strong><br />
+Envelope encryption encrypts bulk data locally with a randomly generated symmetric <strong>data encryption key (DEK)</strong>, then encrypts (wraps) only that small DEK with a <strong>key encryption key (KEK)</strong> held in KMS; the wrapped DEK is stored alongside the ciphertext. KMS itself limits direct payloads to 64 KiB precisely because it's designed to wrap DEKs, not bulk data. This decouples throughput from KMS: you encrypt gigabytes locally at line speed and make only one small KMS call per object (or fewer, with DEK caching). It also enables cheap re-keying — rotating the KEK re-wraps DEKs without re-encrypting data — and lets a single KMS call revoke access to everything wrapped under a key.<br />
+<em>Why asked / signal:</em> This is the foundational KMS concept; a senior must explain the DEK/KEK split and the performance/blast-radius rationale without hesitation.</p>
+<p><strong>Q2. Walk through the Cloud KMS resource hierarchy.</strong><br />
+Top to bottom: <strong>project → location → key ring → crypto key → crypto key version</strong>. The key ring is a location-bound namespacing container that cannot be deleted; the crypto key is a logical key with a fixed <em>purpose</em> and a <em>primary version</em>; the crypto key version holds the actual material and is the unit that rotates and can be destroyed. IAM is typically attached at the key-ring or individual-key level and inherits downward, so granting at the ring covers all keys inside it. Location is fixed at key-ring creation and drives data residency (<code>global</code>, regional, dual/multi-region).<br />
+<em>Why asked / signal:</em> Tests whether the candidate knows <em>where IAM binds</em> and <em>what actually rotates</em> — prerequisites for reasoning about least privilege.</p>
+<p><strong>Q3. Compare Google-managed keys, CMEK, and CSEK.</strong><br />
+Google-managed (GMEK) is the zero-config default — Google creates and rotates the KEK, you have no key ring and no separate control. <strong>CMEK</strong> means you create and own the KEK inside KMS (SOFTWARE/HSM/EXTERNAL) and point a service at it, gaining control over rotation, IAM, disable, and destroy — including the power to revoke a service's ability to read its own data. <strong>CSEK</strong> means you pass raw 256-bit key bytes on every request for a narrow set of services (Cloud Storage, Compute disks); Google uses them in memory and discards them, so <em>you</em> are the key server and losing the bytes loses the data. The spectrum trades convenience for control.<br />
+<em>Why asked / signal:</em> These are constantly conflated; the answer shows the candidate understands the custody/control tradeoff, not just terminology.</p>
+<p><strong>Q4. What are the KMS protection levels and when would you pick each?</strong><br />
+<code>SOFTWARE</code> (FIPS 140-2 L1, Google software boundary) is the low-latency, high-QPS default for envelope KEKs. <code>HSM</code> (Cloud HSM, FIPS 140-2 <strong>Level 3</strong>) keeps material in tamper-resistant hardware, never in software memory — pick it for regulated data or signing keys that must be non-extractable. <code>EXTERNAL</code>/<code>EXTERNAL_VPC</code> (EKM) keeps the actual key material in a <em>third-party</em> HSM outside Google (HYOK), for strict key-custody/residency mandates, at the cost of an external dependency and latency. Choose the weakest level that meets your compliance and threat model, because stronger levels cost latency, quota, and (for EKM) availability risk.<br />
+<em>Why asked / signal:</em> Tests that the candidate maps a compliance/threat requirement to a concrete protection level rather than defaulting to "always HSM."</p>
+<p><strong>Q5. What IAM roles govern KMS and why does the split matter?</strong><br />
+<code>roles/cloudkms.cryptoKeyEncrypterDecrypter</code> allows encrypt+decrypt (with <code>cryptoKeyEncrypter</code>/<code>cryptoKeyDecrypter</code> as one-directional variants); <code>roles/cloudkms.admin</code> allows create/rotate/setIamPolicy/destroy but <strong>no</strong> crypto operations; <code>roles/cloudkms.viewer</code> is read-only metadata. The split enforces separation of duties: a key administrator can manage lifecycle without ever reading plaintext, and a workload can decrypt without being able to destroy or re-IAM the key. You should grant the crypto-op role on the <em>specific key</em> to a <em>dedicated per-workload SA</em>, and never grant <code>roles/owner</code>/<code>editor</code> on the keys project to app teams.<br />
+<em>Why asked / signal:</em> Least-privilege and SoD are the day-to-day core of key management; the exact role names signal hands-on experience.</p>
+<p><strong>Tier 2 — System design / trade-offs</strong></p>
+<p><strong>Q6. Design CMEK for a multi-tenant SaaS storing regulated customer data across regions. How do you enforce it org-wide?</strong><br />
+I'd stand up a dedicated <strong>keys project</strong> with tight <code>owner</code> held only by a platform team, and create <strong>regional</strong> key rings matching each data region for residency (never <code>global</code> for regulated data). Each tenant (or tenant tier) gets its own CMEK key so I can revoke or crypto-shred per tenant, HSM-protected for regulated classes. I'd grant each service's Google service agent <code>cryptoKeyEncrypterDecrypter</code> on only its key. To make it non-optional org-wide, I'd enforce <code>constraints/gcp.restrictNonCmekServices</code> (fail resource creation without CMEK) and <code>constraints/gcp.restrictCmekCryptoKeyProjects</code> (only the blessed keys project qualifies), plus a <code>resourceLocations</code> policy for residency. Rotation is automatic at 90 days on symmetric keys; Data Access logging is on and sinked to a separate logging project. Trade-offs: per-tenant keys multiply IAM bindings and rotation ops (solved with Terraform), and org-policy enforcement can break onboarding, so I roll out with dry-run first.<br />
+<em>Why asked / signal:</em> Tests end-to-end design: residency, per-tenant blast radius, enforcement mechanism, and operational reality.</p>
+<p><strong>Q7. Envelope encryption at 100k objects/sec — how do you avoid making KMS a bottleneck?</strong><br />
+Never call KMS per byte or for bulk data; call it only to wrap/unwrap DEKs. The key optimization is <strong>DEK caching / key reuse with a bounded lifetime</strong>: generate a DEK, use it to encrypt many objects for a short window (bounded by object count and time to cap exposure), and wrap it once — this collapses KMS QPS by orders of magnitude. Cache <em>decrypted</em> DEKs briefly in memory (e.g. via Tink's KMS envelope AEAD with a cache) so repeated reads of the same object group don't re-hit KMS. Choose <code>SOFTWARE</code> protection for the KEK (higher QPS than HSM), request quota increases, and shard across keys/regions if needed. Trade-off: longer DEK reuse windows reduce KMS load but widen the blast radius if a DEK leaks, so I tune the cache TTL/usage cap against the data sensitivity.<br />
+<em>Why asked / signal:</em> Tests understanding that KMS is a control plane for keys, not a bulk crypto engine — and the caching-vs-blast-radius tradeoff.</p>
+<p><strong>Q8. When would you choose EKM/HYOK over Cloud HSM, and what new risks does it introduce?</strong><br />
+I'd choose EKM (External Key Manager) when a regulatory or contractual mandate requires that key material physically reside <em>outside</em> the cloud provider and that we can render data unreadable to the provider by pulling the key — true "hold your own key." Cloud HSM keeps material in Google-operated hardware; EKM keeps it in a partner HSM (Fortanix, Thales, etc.) that Google calls out to for every unwrap. The new risks are <strong>availability</strong> (every decrypt now depends on the external partner and network path — an EKM outage means data is unreadable), <strong>latency</strong> (extra round-trip; mitigate with <code>EXTERNAL_VPC</code>), and <strong>operational complexity/two control planes</strong>. I'd pair it with <strong>Key Access Justifications</strong> so each unwrap carries an auditable reason the partner can approve or deny, and design a break-glass posture and multi-region EKM for resilience.<br />
+<em>Why asked / signal:</em> Tests grasp of the strongest custody model and honest reasoning about the availability tax it imposes.</p>
+<p><strong>Q9. A team wants to "delete customer data instantly for GDPR." How do you use KMS for crypto-shredding, and what are the pitfalls?</strong><br />
+Crypto-shredding means the data stays encrypted at rest and you achieve "deletion" by destroying the key that can decrypt it — instant, verifiable un-readability without rewriting storage. The design: give each subject/tenant its own CMEK key (or a per-subject DEK wrapped by a tenant KEK), and on an erasure request schedule that key/version for destruction. Pitfalls: (1) <strong>granularity</strong> — if one key covers many subjects, you can't shred one without shredding all, so keying strategy must match your deletion unit; (2) <strong>the destroy-scheduled window</strong> means data isn't <em>immediately</em> gone (24h–120d), which you must reconcile with your SLA and prove in your DPA; (3) <strong>backups and replicas</strong> wrapped by the same key are also shredded (usually intended) — but copies encrypted under <em>other</em> keys are not; (4) it's a <strong>DoS weapon</strong> if misused, so destruction must be gated by SoD, org policy, and alerting. I'd document that crypto-shred = destroy key + confirm no other key can decrypt.<br />
+<em>Why asked / signal:</em> Tests whether the candidate can turn a compliance requirement into a concrete keying strategy and name the sharp edges (granularity, window, backups).</p>
+<p><strong>Q10. How do you rotate keys without breaking anything, for both symmetric and asymmetric keys?</strong><br />
+For <strong>symmetric</strong> keys, rotation is transparent: create a new version and make it primary; new data wraps under the new version while old versions stay enabled to decrypt existing ciphertext (which embeds the version that wrapped it). No data re-encryption is required unless you want to <em>retire</em> an old version, which needs a separate re-wrap job before disabling it. Automatic rotation (<code>--rotation-period=90d</code>) is safe here. For <strong>asymmetric</strong> keys, rotation must be manual and choreographed because verifiers/holders have the <em>old public key</em>: publish the new public key to all verifiers, cut over signing to the new version, allow a dual-trust overlap, then disable the old version. Auto-rotating an asymmetric key would silently break every verifier. In both cases, disable-then-destroy compromised old versions rather than leaving them enabled.<br />
+<em>Why asked / signal:</em> The symmetric/asymmetric rotation asymmetry is a classic trap; a correct answer shows real operational depth.</p>
+<p><strong>Tier 3 — Expert / deep dive</strong></p>
+<p><strong>Q11. Your KMS-encrypted data was breached even though everything was CMEK-encrypted. How is that possible, and what would have prevented it?</strong><br />
+CMEK protects against <em>offline/media theft</em> and gives you a revocation lever, but it does <strong>not</strong> stop a <em>legitimately authorized principal</em> from decrypting — KMS transparently unwraps DEKs for any identity holding <code>cryptoKeyDecrypter</code>. This is exactly Capital One (2019): an SSRF stole a role's credentials, and that role was authorized to decrypt, so encryption at rest was irrelevant. Prevention is defense-in-depth beyond encryption: (1) <strong>least-privilege per-key IAM</strong> so a compromised SA can decrypt only its own narrow dataset; (2) <strong>VPC Service Controls</strong> so credentials exfiltrated to outside the perimeter can't call the KMS/Storage API at all; (3) <strong>Key Access Justifications + Access Approval</strong> so anomalous programmatic decrypt-at-scale requires an approved justification and can be denied; (4) <strong>Data Access audit logging with anomaly alerting</strong> to catch the mass-decrypt in progress. The point: encryption is a control over <em>key custody</em>, not over <em>authorized access</em>.<br />
+<em>Why asked / signal:</em> Separates candidates who think "encrypted = safe" from those who understand encryption's actual threat model and layer IAM/VPC-SC/KAJ on top.</p>
+<p><strong>Q12. Explain AES-GCM key commitment and why AAD matters in a KMS-backed scheme.</strong><br />
+AES-GCM is an AEAD mode providing confidentiality and integrity, but standard GCM is <strong>not key-committing</strong>: a single ciphertext can be crafted to decrypt successfully under two <em>different</em> keys to two <em>different</em> plaintexts (the basis of CVE-2020-8897 in the AWS Encryption SDK and the broader "invisible salamanders" class). In multi-key or multi-tenant KMS designs this can be abused, so committing AEAD constructions or explicit key-commitment are the fix. Separately, <strong>AAD (additional authenticated data)</strong> is data that is authenticated but not encrypted — decryption fails unless the exact AAD is supplied. Binding AAD to context (<code>tenant_id</code>, <code>object_id</code>, <code>purpose</code>) prevents <strong>ciphertext-swapping</strong>: a stolen ciphertext can't be decrypted in a different tenant/context because the AAD won't match. So AAD is a cheap, powerful integrity-of-context control that every KMS-backed encrypt call should use.<br />
+<em>Why asked / signal:</em> Deep cryptographic literacy — knowing that AEAD has sharp edges (commitment) and that AAD is a design tool, not decoration.</p>
+<p><strong>Q13. Design detection for KMS key abuse. What do you log and what are your top alerts?</strong><br />
+First, enable <strong>Data Access audit logs</strong> (<code>DATA_READ</code>/<code>DATA_WRITE</code>) for <code>cloudkms.googleapis.com</code> org-wide — they're off by default, so <code>Decrypt</code>/<code>AsymmetricSign</code> are otherwise invisible; Admin Activity logs (always on) cover create/destroy/setIamPolicy. Sink to a dedicated logging project (BigQuery/Chronicle). Top alerts: (1) <strong><code>SetIamPolicy</code> on any key</strong> — silent grant of decrypt to an attacker SA is the stealthiest persistence; (2) <strong><code>DestroyCryptoKeyVersion</code></strong> — potential crypto-DoS; (3) <strong>decrypt volume anomaly per principal</strong> vs baseline — mass exfil; (4) <strong>new/unexpected <code>principalEmail</code> calling Decrypt</strong>, or calls from <strong>outside the VPC-SC perimeter / unusual <code>callerIp</code></strong>; (5) <strong><code>UpdateCryptoKeyVersion</code> to ENABLED</strong> on a previously disabled version — re-enable abuse; (6) <strong>denied ops (<code>authorizationInfo.granted=false</code>) spikes</strong> — probing. I'd also monitor Key Access Justification reason codes when EKM/KAJ is on. Pair detective controls with preventive ones (VPC-SC, KAJ) because logs alone don't stop the decrypt.<br />
+<em>Why asked / signal:</em> Detection engineering depth — knowing the default-off gotcha, the exact methodNames, and which events map to which attacker objective.</p>
+<p><strong>Q14. Compare BYOK import into Cloud KMS vs EKM. When is each appropriate?</strong><br />
+<strong>BYOK (key import)</strong> brings <em>your</em> key material <em>into</em> Google's KMS: you create an <strong>import job</strong> that publishes a public wrapping key, you wrap your key locally per NIST SP 800-38F, upload it, and thereafter it lives and operates <em>inside</em> Google's HSM/software boundary like any other KMS key. Use it when policy says "we must generate keys ourselves / prove provenance" but you're fine with the material residing in Google after import. <strong>EKM/HYOK</strong> never imports the material — it stays permanently in a third-party HSM and Google calls out for each operation. Use EKM when the mandate is that Google must <em>never</em> possess the material and you must be able to revoke access by pulling the key externally. Trade-offs: BYOK gives you Google-native performance and availability but Google now holds the (imported) material; EKM preserves external custody at the cost of availability dependence and latency. Import wrapping must be handled carefully — a weak wrapping step exposes the key at import time.<br />
+<em>Why asked / signal:</em> Distinguishes "custody of generation" (BYOK) from "custody of storage" (HYOK) — a nuance many miss.</p>
+<p><strong>Q15. An org-admin's account is compromised and starts scheduling key destruction across the estate. Walk through detection, containment, and why your architecture limits the damage.</strong><br />
+Detection fires on <code>DestroyCryptoKeyVersion</code> (Admin Activity log, always on) and on any <code>SetIamPolicy</code>/org-policy change — a burst of destroys by one principal is a high-severity alert. Containment: immediately revoke the compromised admin's sessions/keys and remove its roles, then <strong>restore every affected version within the destroy-scheduled window</strong> (<code>gcloud kms keys versions restore</code>) — this is exactly why I configure a long <code>--destroy-scheduled-duration</code> (e.g. 30 days) at key creation: destruction is reversible for a generous window, converting a would-be catastrophe into a recoverable event. Architectural limits on damage: (1) org-policy locks and SoD mean the app teams' SAs can't destroy at all; (2) key-admin and data-plane are separated so the blast radius of any one role is bounded; (3) <strong>Access Approval / KAJ</strong> can require external approval for sensitive operations; (4) keys live in a dedicated project with a very small owner set and mandatory MFA/hardware keys. Post-incident: rotate, re-verify org policies weren't relaxed, and hunt for persistence (re-enabled versions, new bindings). The design philosophy is that no single identity — even org-admin — should be able to cause <em>irreversible</em> loss in one action.<br />
+<em>Why asked / signal:</em> Tests incident response under a worst-case insider/admin-compromise scenario and whether the candidate designed reversibility and SoD <em>in advance</em> rather than reacting.</p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Managed key service</td>
+<td>Cloud KMS</td>
+<td>AWS KMS</td>
+<td>Key Vault / Managed HSM</td>
+</tr>
+<tr>
+<td>Key container</td>
+<td>Key ring (location-bound)</td>
+<td>(KMS keys are flat; alias namespacing)</td>
+<td>Vault</td>
+</tr>
+<tr>
+<td>Rotating unit</td>
+<td>Crypto key version</td>
+<td>Key material / rotation</td>
+<td>Key version</td>
+</tr>
+<tr>
+<td>Default managed keys</td>
+<td>Google-managed (GMEK)</td>
+<td>AWS-managed keys (<code>aws/service</code>)</td>
+<td>Microsoft-managed keys</td>
+</tr>
+<tr>
+<td>Customer-managed</td>
+<td>CMEK</td>
+<td>Customer managed key (CMK)</td>
+<td>Customer-managed key</td>
+</tr>
+<tr>
+<td>Envelope DEK/KEK</td>
+<td>Native + Tink</td>
+<td>GenerateDataKey (DEK)</td>
+<td>Wrapped keys / SDK</td>
+</tr>
+<tr>
+<td>HSM protection</td>
+<td>Cloud HSM (FIPS 140-2 L3)</td>
+<td>CloudHSM / KMS custom key store</td>
+<td>Managed HSM (FIPS 140-2 L3)</td>
+</tr>
+<tr>
+<td>Supply raw bytes per request</td>
+<td>CSEK (GCS, Compute)</td>
+<td>SSE-C (S3)</td>
+<td>Client-side / no direct equiv</td>
+</tr>
+<tr>
+<td>BYOK (import)</td>
+<td>KMS import job</td>
+<td>Import key material</td>
+<td>BYOK (import)</td>
+</tr>
+<tr>
+<td>HYOK / external key</td>
+<td>External Key Manager (EKM)</td>
+<td>External Key Store (XKS)</td>
+<td>Managed HSM / BYOK+</td>
+</tr>
+<tr>
+<td>Least-priv crypto role</td>
+<td><code>cryptoKeyEncrypterDecrypter</code></td>
+<td><code>kms:Encrypt</code>/<code>Decrypt</code> in key policy</td>
+<td>Key Vault Crypto User</td>
+</tr>
+<tr>
+<td>Access policy model</td>
+<td>IAM (+ Conditions)</td>
+<td>Key policy + IAM + grants</td>
+<td>RBAC + access policies</td>
+</tr>
+<tr>
+<td>Key-use audit</td>
+<td>Cloud Audit Logs (Data Access)</td>
+<td>CloudTrail (data events)</td>
+<td>Azure Monitor / diagnostic logs</td>
+</tr>
+<tr>
+<td>Justified access</td>
+<td>Key Access Justifications</td>
+<td>(none native)</td>
+<td>(none native)</td>
+</tr>
+<tr>
+<td>Auto rotation</td>
+<td><code>--rotation-period</code> (symmetric)</td>
+<td>Annual auto-rotation for CMK</td>
+<td>Auto-rotation policy</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>KMS gives you operations on keys, never the keys.</strong> Every use is an IAM-gated, audited API call; the security boundary is <em>who can call Decrypt</em>, enforced by IAM + VPC-SC + KAJ — not the ciphertext itself.</li>
+<li><strong>Envelope encryption (DEK wrapped by KEK)</strong> is the whole game: it decouples bulk-crypto throughput from KMS, enables cheap rekeying, and makes one call revoke access to everything under a key. Cache DEKs to survive high QPS.</li>
+<li><strong>Custody is a spectrum:</strong> GMEK (default) → CMEK (you own the KEK) → CSEK (you supply raw bytes) → EKM/HYOK (material outside Google). Each step trades convenience for control and, for EKM, availability.</li>
+<li><strong>Least privilege lives at the individual key.</strong> Bind <code>cryptoKeyEncrypterDecrypter</code> to one dedicated SA on one key; never at project/ring level; separate <code>roles/cloudkms.admin</code> (no decrypt) from data-plane roles.</li>
+<li><strong>Enforce CMEK with org policy</strong> (<code>restrictNonCmekServices</code> + <code>restrictCmekCryptoKeyProjects</code>) or it's merely aspirational — and pin keys to a blessed keys project.</li>
+<li><strong>Rotation differs by key type:</strong> symmetric auto-rotates transparently; asymmetric must be manually choreographed because verifiers hold the old public key.</li>
+<li><strong>Destruction is reversible for a window</strong> (<code>DESTROY_SCHEDULED</code>, 24h–120d). Set it long enough to survive accidents/attacks, short enough to meet crypto-shred SLAs, and alert on every destroy.</li>
+<li><strong>Crypto-shredding is real but sharp:</strong> it only works at the <em>granularity of your keys</em>, respects the destroy window, and shreds all copies under that key — and it's a DoS weapon if IAM/SoD are weak.</li>
+<li><strong>Data Access audit logs are OFF by default</strong> — enable them for KMS or key <em>use</em> is invisible. Alert on <code>SetIamPolicy</code>, <code>Destroy</code>, decrypt-volume anomalies, and denied ops.</li>
+<li><strong>Encryption is not access control</strong> (Capital One): a compromised authorized principal decrypts freely. Layer IAM, VPC-SC, Key Access Justifications, and detection on top.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — Cloud KMS documentation: object hierarchy, key purposes, protection levels, rotation, destruction. https://cloud.google.com/kms/docs</li>
+<li>Google Cloud — Envelope encryption. https://cloud.google.com/kms/docs/envelope-encryption</li>
+<li>Google Cloud — CMEK overview and CMEK-integrated services. https://cloud.google.com/kms/docs/cmek</li>
+<li>Google Cloud — Customer-supplied encryption keys (CSEK). https://cloud.google.com/storage/docs/encryption/customer-supplied-keys</li>
+<li>Google Cloud — Cloud HSM and Cloud External Key Manager (EKM). https://cloud.google.com/kms/docs/hsm ; https://cloud.google.com/kms/docs/ekm</li>
+<li>Google Cloud — Key Access Justifications. https://cloud.google.com/assured-workloads/key-access-justifications/docs</li>
+<li>Google Cloud — Cloud KMS IAM roles and permissions. https://cloud.google.com/kms/docs/reference/permissions-and-roles</li>
+<li>Google Cloud — Organization policy constraints (<code>restrictNonCmekServices</code>, <code>restrictCmekCryptoKeyProjects</code>). https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints</li>
+<li>NIST SP 800-57 Part 1 Rev. 5 — Recommendation for Key Management (cryptoperiods, key hierarchy).</li>
+<li>NIST SP 800-38F — Methods for Key Wrapping.</li>
+<li>NIST SP 800-131A Rev. 2 — Transitioning the Use of Cryptographic Algorithms and Key Lengths.</li>
+<li>CVE-2020-8897 — AWS Encryption SDK key-commitment / AES-GCM issue; "Invisible Salamanders" (Dodis et al.) research on non-committing AEAD.</li>
+<li>MITRE ATT&amp;CK — T1486 Data Encrypted for Impact, T1485 Data Destruction, T1552.001 Credentials in Files, T1530 Data from Cloud Storage, T1078.004 Cloud Accounts.</li>
+<li>CISA / public post-incident analyses — Capital One (2019), Storm-0558 (2023, CSRB report), Code Spaces (2014).</li>
+<li>Google Tink library — application-layer envelope encryption with KMS-backed KEKs. https://github.com/google/tink</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

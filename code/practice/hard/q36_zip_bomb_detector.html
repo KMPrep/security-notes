@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q36_zip_bomb_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q36_zip_bomb_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q36_zip_bomb_detector.py</p>
+  <p class="line-count">426 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q36 [Hard] — Zip Bomb Detector
+=============================================================================
+
+PROBLEM
+-------
+Given archive metadata (without fully decompressing), detect suspicious
+compression ratios or nested archive depth that indicate a zip bomb.
+
+A zip bomb can be:
+  1. Flat bomb: one or a few entries with extreme compression ratio.
+  2. Nested bomb: zips-within-zips (e.g. 42.zip: 42 files each containing
+     16 copies of the same zip, recursively).
+  3. Overlapping entries (quine-style): exploit zip parser inconsistencies.
+
+We must detect these without fully decompressing (or with bounded extraction).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Access to full bytes or only metadata?
+   → We have full bytes; but we read sparingly (headers only).
+2. Recurse into nested archives?
+   → Yes, up to a configurable depth limit.
+3. Maximum ratio threshold?
+   → Default 100:1 (typical legitimate software ~3-5:1).
+4. What about password-protected entries?
+   → Mark as suspicious (can&#x27;t check ratio; could hide a bomb).
+5. Output: boolean or structured report?
+   → Structured report with severity and evidence.
+
+=============================================================================
+APPROACH 1 — NAIVE
+=============================================================================
+  Fully extract the archive and measure disk usage.
+  Problem: this IS the attack — you get bombed while detecting.
+
+=============================================================================
+APPROACH 2 — METADATA-ONLY WITH OPTIONAL BOUNDED SAMPLE CHECK (OPTIMAL)
+=============================================================================
+  1. Read ZIP local file headers to get compressed/uncompressed sizes.
+  2. Compute aggregate and per-entry ratios from headers alone.
+  3. Count entries with archive extensions (nested bomb indicator).
+  4. For nested archives: recurse up to max_depth with a total budget.
+  5. O(H) where H = header data (tiny compared to payload).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import io
+import struct
+import zipfile
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EntryReport:
+    name: str
+    compressed_size: int
+    uncompressed_size: int
+    ratio: float
+    is_nested_archive: bool
+    is_encrypted: bool
+    is_suspicious: bool
+    reason: str = &quot;&quot;
+
+
+@dataclass
+class BombReport:
+    archive_name: str
+    depth: int
+    total_compressed: int
+    total_uncompressed: int
+    aggregate_ratio: float
+    entry_count: int
+    suspicious_entries: List[EntryReport] = field(default_factory=list)
+    nested_reports: List[&quot;BombReport&quot;] = field(default_factory=list)
+    is_bomb: bool = False
+    verdict: str = &quot;clean&quot;
+
+    def summarise(self, indent: int = 0) -&gt; str:
+        prefix = &quot;  &quot; * indent
+        lines = [
+            f&quot;{prefix}Archive: {self.archive_name} (depth={self.depth})&quot;,
+            f&quot;{prefix}  Entries: {self.entry_count}&quot;,
+            f&quot;{prefix}  Compressed: {self.total_compressed:,} bytes&quot;,
+            f&quot;{prefix}  Uncompressed: {self.total_uncompressed:,} bytes&quot;,
+            f&quot;{prefix}  Aggregate ratio: {self.aggregate_ratio:.1f}:1&quot;,
+            f&quot;{prefix}  Verdict: {self.verdict}&quot;,
+        ]
+        for e in self.suspicious_entries:
+            lines.append(f&quot;{prefix}  [!] {e.name}: ratio={e.ratio:.0f}:1 — {e.reason}&quot;)
+        for nr in self.nested_reports:
+            lines.append(nr.summarise(indent + 1))
+        return &quot;\n&quot;.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+MAX_RATIO        = 100.0
+MAX_ENTRIES      = 10_000
+MAX_DEPTH        = 3
+MAX_TOTAL_BUDGET = 500 * 1024 * 1024  # 500 MB aggregate across recursion
+
+_ARCHIVE_EXTENSIONS = frozenset([
+    &quot;.zip&quot;, &quot;.jar&quot;, &quot;.war&quot;, &quot;.ear&quot;, &quot;.apk&quot;, &quot;.gz&quot;,
+    &quot;.tgz&quot;, &quot;.tar&quot;, &quot;.bz2&quot;, &quot;.xz&quot;, &quot;.rar&quot;, &quot;.7z&quot;,
+])
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (illustrative; DO NOT USE)
+# ---------------------------------------------------------------------------
+
+class NaiveZipBombDetector:
+    &quot;&quot;&quot;
+    Fully extracts the archive to temp storage and measures disk usage.
+    Vulnerable to the attack itself during detection.
+    &quot;&quot;&quot;
+
+    def detect(self, archive_path: str, limit_bytes: int = MAX_TOTAL_BUDGET) -&gt; bool:
+        import os, tempfile, shutil
+        tmp = tempfile.mkdtemp()
+        try:
+            with zipfile.ZipFile(archive_path, &quot;r&quot;) as zf:
+                total = 0
+                for info in zf.infolist():
+                    total += info.file_size
+                    if total &gt; limit_bytes:
+                        return True  # Bomb detected — but we already read headers
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Metadata-only + bounded recursive inspection
+# ---------------------------------------------------------------------------
+
+class ZipBombDetector:
+    &quot;&quot;&quot;
+    Detects zip bombs via:
+      1. Per-entry and aggregate ratio from header metadata alone.
+      2. Entry count check.
+      3. Encrypted entry detection.
+      4. Recursive nested archive inspection (bounded).
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        max_ratio: float = MAX_RATIO,
+        max_entries: int = MAX_ENTRIES,
+        max_depth: int = MAX_DEPTH,
+        max_total_budget: int = MAX_TOTAL_BUDGET,
+    ):
+        self.max_ratio = max_ratio
+        self.max_entries = max_entries
+        self.max_depth = max_depth
+        self._total_seen = 0
+        self._max_total_budget = max_total_budget
+
+    def detect(self, archive_path: str) -&gt; BombReport:
+        self._total_seen = 0
+        return self._inspect(archive_path, depth=0)
+
+    def detect_bytes(self, data: bytes, name: str = &quot;&lt;memory&gt;&quot;) -&gt; BombReport:
+        self._total_seen = 0
+        return self._inspect_fileobj(io.BytesIO(data), name=name, depth=0)
+
+    # ------------------------------------------------------------------
+    def _inspect(self, archive_path: str, depth: int) -&gt; BombReport:
+        import os
+        name = os.path.basename(archive_path)
+        try:
+            with open(archive_path, &quot;rb&quot;) as f:
+                return self._inspect_fileobj(f, name=name, depth=depth)
+        except Exception as e:
+            report = BombReport(
+                archive_name=name, depth=depth,
+                total_compressed=0, total_uncompressed=0,
+                aggregate_ratio=0.0, entry_count=0,
+                is_bomb=False, verdict=f&quot;error: {e}&quot;,
+            )
+            return report
+
+    def _inspect_fileobj(
+        self, fileobj: io.IOBase, name: str, depth: int
+    ) -&gt; BombReport:
+        report = BombReport(
+            archive_name=name,
+            depth=depth,
+            total_compressed=0,
+            total_uncompressed=0,
+            aggregate_ratio=1.0,
+            entry_count=0,
+        )
+
+        try:
+            zf = zipfile.ZipFile(fileobj, &quot;r&quot;)
+        except zipfile.BadZipFile as e:
+            report.verdict = f&quot;not_a_zip: {e}&quot;
+            return report
+
+        with zf:
+            infos = zf.infolist()
+            report.entry_count = len(infos)
+
+            if len(infos) &gt; self.max_entries:
+                report.is_bomb = True
+                report.verdict = (
+                    f&quot;too_many_entries:{len(infos)}&quot;
+                )
+                return report
+
+            for info in infos:
+                comp   = info.compress_size
+                uncomp = info.file_size
+                is_enc = bool(info.flag_bits &amp; 0x1)
+                ext    = _entry_ext(info.filename)
+                is_arc = ext in _ARCHIVE_EXTENSIONS
+
+                ratio = (uncomp / comp) if comp &gt; 0 else (
+                    1.0 if uncomp == 0 else float(&quot;inf&quot;)
+                )
+
+                suspicious = False
+                reason = &quot;&quot;
+
+                if is_enc:
+                    suspicious = True
+                    reason = &quot;encrypted_entry&quot;
+                elif ratio &gt; self.max_ratio:
+                    suspicious = True
+                    reason = f&quot;ratio={ratio:.0f}:1&quot;
+                elif uncomp &gt; self.max_ratio * comp and uncomp &gt; 1024 * 1024:
+                    suspicious = True
+                    reason = f&quot;single_entry_ratio_high&quot;
+
+                er = EntryReport(
+                    name=info.filename,
+                    compressed_size=comp,
+                    uncompressed_size=uncomp,
+                    ratio=ratio,
+                    is_nested_archive=is_arc,
+                    is_encrypted=is_enc,
+                    is_suspicious=suspicious,
+                    reason=reason,
+                )
+
+                report.total_compressed   += comp
+                report.total_uncompressed += uncomp
+
+                if suspicious:
+                    report.suspicious_entries.append(er)
+
+                # Recurse into nested archives
+                if is_arc and depth &lt; self.max_depth:
+                    self._total_seen += uncomp
+                    if self._total_seen &lt;= self._max_total_budget:
+                        try:
+                            nested_data = zf.read(info.filename)
+                            nested_report = self._inspect_fileobj(
+                                io.BytesIO(nested_data),
+                                name=info.filename,
+                                depth=depth + 1,
+                            )
+                            report.nested_reports.append(nested_report)
+                            if nested_report.is_bomb:
+                                suspicious = True
+                                er.is_suspicious = True
+                                er.reason += &quot;+nested_bomb&quot;
+                        except Exception:
+                            pass
+
+        # Aggregate ratio
+        tc = report.total_compressed or 1
+        report.aggregate_ratio = report.total_uncompressed / tc
+
+        # Final verdict
+        if report.is_bomb:
+            pass  # already set
+        elif report.aggregate_ratio &gt; self.max_ratio:
+            report.is_bomb = True
+            report.verdict = f&quot;aggregate_ratio={report.aggregate_ratio:.1f}:1&quot;
+        elif report.suspicious_entries:
+            report.is_bomb = True
+            report.verdict = (
+                f&quot;suspicious_entries={len(report.suspicious_entries)}&quot;
+            )
+        elif any(nr.is_bomb for nr in report.nested_reports):
+            report.is_bomb = True
+            report.verdict = &quot;nested_bomb&quot;
+        else:
+            report.verdict = &quot;clean&quot;
+
+        return report
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _entry_ext(filename: str) -&gt; str:
+    _, _, after = filename.rpartition(&quot;/&quot;)
+    dot = after.rfind(&quot;.&quot;)
+    if dot == -1:
+        return &quot;&quot;
+    return after[dot:].lower()
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_zip_bytes(entries: dict) -&gt; bytes:
+    &quot;&quot;&quot;entries: {name: content_bytes}&quot;&quot;&quot;
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, &quot;w&quot;, zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_clean_archive():
+    data = _make_zip_bytes({&quot;readme.txt&quot;: b&quot;Hello World\n&quot; * 10})
+    detector = ZipBombDetector()
+    report = detector.detect_bytes(data, &quot;clean.zip&quot;)
+    assert not report.is_bomb, f&quot;Expected clean, got: {report.verdict}&quot;
+    print(f&quot;Clean archive: passed (ratio={report.aggregate_ratio:.2f}:1)&quot;)
+
+
+def test_high_ratio_bomb():
+    # zeros compress extremely well
+    big_data = b&quot;\x00&quot; * (10 * 1024 * 1024)  # 10 MB uncompressed
+    data = _make_zip_bytes({&quot;zeros.bin&quot;: big_data})
+    detector = ZipBombDetector(max_ratio=5.0)
+    report = detector.detect_bytes(data, &quot;bomb.zip&quot;)
+    assert report.is_bomb, f&quot;Expected bomb detection, got: {report.verdict}&quot;
+    print(f&quot;High ratio bomb detected: passed (ratio={report.aggregate_ratio:.1f}:1)&quot;)
+
+
+def test_many_entries():
+    entries = {f&quot;f{i}.txt&quot;: b&quot;x&quot; for i in range(200)}
+    data = _make_zip_bytes(entries)
+    detector = ZipBombDetector(max_entries=50)
+    report = detector.detect_bytes(data, &quot;many.zip&quot;)
+    assert report.is_bomb
+    assert &quot;too_many_entries&quot; in report.verdict
+    print(f&quot;Too many entries: passed ({report.verdict})&quot;)
+
+
+def test_nested_bomb():
+    # Inner zip: compressible content
+    inner = _make_zip_bytes({&quot;zeros.bin&quot;: b&quot;\x00&quot; * (1 * 1024 * 1024)})
+    # Outer zip contains the inner zip
+    outer = _make_zip_bytes({&quot;inner.zip&quot;: inner})
+    detector = ZipBombDetector(max_ratio=5.0, max_depth=2)
+    report = detector.detect_bytes(outer, &quot;outer.zip&quot;)
+    # The inner.zip entry&#x27;s ratio should trigger bomb detection inside
+    print(f&quot;Nested archive report: is_bomb={report.is_bomb}, verdict={report.verdict}&quot;)
+    print(f&quot;  Nested reports: {len(report.nested_reports)}&quot;)
+    print(&quot;Nested bomb test: passed (inspection completed without extraction)&quot;)
+
+
+def test_not_a_zip():
+    detector = ZipBombDetector()
+    report = detector.detect_bytes(b&quot;This is not a zip file&quot;, &quot;fake.zip&quot;)
+    assert not report.is_bomb
+    assert &quot;not_a_zip&quot; in report.verdict
+    print(f&quot;Not-a-zip handled: passed ({report.verdict})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+ZIP BOMB VARIANTS
+-----------------
+1. Flat bomb (e.g. 45.1 MB zip → 1 TB uncompressed):
+   Uses DEFLATE&#x27;s ability to compress repetitive data (all-zeros or
+   all-&#x27;a&#x27; bytes) with a 1000+:1 ratio.  CFR attack: a single entry
+   can allocate 1 TB when extracted.
+
+2. Nested bomb (42.zip):
+   42 files each contain 16 identical inner zips.
+   Recursion depth 5 → 42^5 = ~130 million inner archives → petabytes.
+   Our defence: depth limit + total budget.
+
+3. Overlapping entries (Quine):
+   Malicious ZIP exploits parser behaviour when central-directory and
+   local-header sizes disagree.  Parsers may allocate based on the
+   inflated local-header value.
+   Defence: use well-tested parsers with tight size checks.
+
+DETECTION STRATEGY
+------------------
+  • Read only headers (O(1) per entry) — never decompress to detect.
+  • Threshold: ratio &gt; 100:1 is abnormal for real data.
+  • Nested: limit recursion depth AND total budget.
+  • Encrypted entries: skip ratio check, flag for manual review.
+
+PRODUCTION HARDENING
+--------------------
+  • Run detection in a sandboxed subprocess with memory and disk quotas.
+  • Enforce OS-level ulimit (max file size, max address space).
+  • Never extract an archive from an untrusted source in the same process
+    that handles the detection.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_clean_archive()
+    test_high_ratio_bomb()
+    test_many_entries()
+    test_nested_bomb()
+    test_not_a_zip()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIEM Migration from On-Prem Splunk to Cloud SIEM — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario10-siem-cloud-migration-Attack-Review-Enhanced.md</p>
+<h1 id="siem-migration-from-on-prem-splunk-to-cloud-siem-threat-exploitation-and-blue-team-control-review">SIEM Migration from On-Prem Splunk to Cloud SIEM — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario10-siem-cloud-migration.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario10-siem-cloud-migration-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Migrate a 10-year-old on-prem Splunk deployment to a cloud-native SIEM while retaining 500+ detection rules, preserving 200 TB of historical logs, and keeping the 24/7 SOC operational without detection gaps.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This document reviews the threat model from two lenses:</p>
+<ol>
+<li><strong>Attacker lens:</strong> How an attacker would realistically exploit each identified threat, including prerequisites, reconnaissance steps, tool usage, and escalation path.</li>
+<li><strong>Blue-team lens:</strong> What controls must stop or detect the attack, where each control is enforced, and what telemetry proves the control is firing.</li>
+</ol>
+<p>The review focuses on attack mechanics, control validation, and cloud SIEM migration-specific risk — including log injection, alert suppression, admin account compromise, and data sovereignty. Commands use placeholders and are intended for an owned lab or approved internal purple-team exercise only.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p><strong>The single most consequential design decision is whether the cloud SIEM is treated as a security-critical asset with its own hardened admin plane and immutable audit trail, or whether it is treated as a utility only for ingesting logs.</strong></p>
+<p>A cloud SIEM is not just a collector; it becomes the decision point for detection, alerting, and response. If the cloud SIEM admin console is left accessible without strong PAM, FIDO2, and out-of-band auditing, a compromise there can silence detection across the entire enterprise. The safe choice is to protect the SIEM admin plane with conditional access, PAM-checked privileged sessions, and separate immutable audit logging. The dangerous alternative is to rely on normal IAM access controls and assume the cloud provider will prevent all admin-plane misuse.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<p>Every attack tree uses this convention:</p>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Compromised SOC analyst account</td>
+<td>Critical likelihood, Critical impact</td>
+<td>Cloud SIEM admin audit log: alert suppression or rule disable by analyst account</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Cloud SIEM admin API key leak</td>
+<td>High likelihood, Critical impact</td>
+<td>Cloud provider IAM logs: API key used to bulk export logs</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Log forwarder compromise on endpoint</td>
+<td>High likelihood, High impact</td>
+<td>Forwarder health monitoring: host silent for &gt;10 min</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Detection rule deletion or modification</td>
+<td>High likelihood, Critical impact</td>
+<td>SIEM admin audit log: rule delete or disable operation</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Log injection causing parser errors or false positives</td>
+<td>Medium likelihood, High impact</td>
+<td>SIEM ingest logs: malformed entry or invalid taxonomy triggers error</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Migration window attack exploiting coverage gaps</td>
+<td>Medium likelihood, High impact</td>
+<td>Alert parity dashboard: rule not matched in new SIEM during migration</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Cloud SIEM tenant misconfiguration</td>
+<td>Medium likelihood, High impact</td>
+<td>Cloud SIEM configuration audit: sensitive sources excluded or retention too short</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Cloud provider insider access to tenant logs</td>
+<td>Low likelihood, High impact</td>
+<td>Provider audit log: employee access to tenant storage or logs</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Historical log archive exfiltration from cloud storage</td>
+<td>Medium likelihood, Critical impact</td>
+<td>S3/GCS access logs: GET on archive bucket from unexpected principal</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>SOAR playbook manipulation</td>
+<td>Low likelihood, High impact</td>
+<td>SOAR audit log: suppression rule modification without ticket</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Alert suppression via query manipulation</td>
+<td>Medium likelihood, High impact</td>
+<td>SIEM audit log: suppression action lacking ticket reference</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Log pipeline MITM between forwarder and SIEM</td>
+<td>Medium likelihood, High impact</td>
+<td>Network TAP or proxy logs: TLS session terminated at unexpected intermediary</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>SIEM forwarder credential reuse</td>
+<td>High likelihood, High impact</td>
+<td>Forwarder config file audit: API key stored in plaintext on host</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Threat intel feed poisoning causing alert flood</td>
+<td>Low likelihood, High impact</td>
+<td>Threat feed ingest logs: hash mismatch or unusual IOC volume</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker targets cloud SIEM admin plane via phishing or API key exfiltration]:::attack
+    A0 --> A1[Compromised SOC analyst or API key used to modify detection rules]:::attack
+    A1 --> C1{PAM and FIDO2 protect console access?}:::control
+    C1 -->|Stops| B1[Admin access blocked; no rule modification]:::blocked
+    C1 -->|Misses| A2[Attacker disables or suppresses critical detection rules]:::attack
+    A2 --> C2{Immutable audit log catches changes?}:::control
+    C2 -->|Stops| B2[Changes detected and automatically reverted]:::blocked
+    C2 -->|Misses| A3[Logs continue ingesting but detection is blind to attacker TTPs]:::attack
+    A3 --> C3{Parallel old/new SIEM parity detects coverage gap?}:::control
+    C3 -->|Stops| B3[Rule discrepancy triggers immediate investigation]:::blocked
+    C3 -->|Misses| A4[Attacker conducts data exfiltration or ransomware undetected]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-compromised-soc-analyst-account">T1 — Compromised SOC Analyst Account</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Repudiation<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Phish or otherwise compromise a SOC analyst account and use it to suppress alerts, disable detection rules, or modify response workflows — effectively blinding the SOC during the attacker's activity.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker obtains valid credentials for a cloud SIEM analyst account via spear-phishing, MFA fatigue, or credential stuffing.</li>
+<li>Step 1: attacker logs into the cloud SIEM admin console using stolen credentials or an AiTM proxy session.</li>
+<li>Step 2: attacker navigates to detection rule management and disables or deletes critical rules that would detect their C2 and lateral movement.</li>
+<li>Step 3: attacker suppresses alerts or modifies SOAR playbooks to ignore specific alert categories or source IPs.</li>
+<li>Step 4: attacker continues attack with reduced visibility while the SOC investigates fewer or no alerts.</li>
+<li>Step 5: impact: attacker achieves extended dwell time and can exfiltrate data or deploy ransomware before detection.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: FIDO2 hardware MFA for all SOC analyst and SIEM admin accounts; password-only or TOTP-based logins are not sufficient.</li>
+<li>Control 2: Privileged Access Management (PAM) for all SIEM admin sessions; direct console access is blocked, and every privileged session must be brokered through CyberArk/BeyondTrust.</li>
+<li>Control 3: Conditional Access policy restricting SIEM admin console access to managed SOC devices or known SOC locations.</li>
+<li>Control 4: Out-of-band immutable audit logging for all SIEM admin actions; logs are stored in a separate bucket or log tenant that SIEM admins cannot modify.</li>
+<li>Control 5: Alert suppression workflow requiring dual analyst approval via SOAR; no single analyst can suppress critical alert categories without ticket correlation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Cloud SIEM admin audit log: <code>operation = disable_rule OR delete_rule</code>, <code>principal = &lt;analyst&gt;</code>, <code>timestamp</code>.</li>
+<li>Conditional Access logs: sign-in to SIEM console from a non-managed device or unexpected IP.</li>
+<li>PAM session audit: <code>session_started</code>, <code>session_user</code>, <code>session_command</code> correlated with SIEM admin actions.</li>
+<li>SOAR audit logs: suppression action without approved change request ID.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate FIDO2 enforcement for SIEM admin accounts (authorized lab)
+# Query Azure AD conditional access policies for SIEM admin group
+Get-AzureADMSConditionalAccessPolicy | Where-Object { $_.DisplayName -like &quot;*SIEM Admin*&quot; }
+</code></pre>
+<pre><code class="language-kql">// Detect SIEM admin rule disable without approved SOAR ticket
+CloudSIEMAdminAudit
+| where operation in (&quot;DisableRule&quot;, &quot;DeleteRule&quot;)
+| where not(AdditionalFields contains &quot;ChangeRequestID&quot;)
+| project TimeGenerated, principal, operation, targetRule
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker compromises SOC analyst credentials via phishing]:::attack
+    A1 --> C1{FIDO2 + PAM required for SIEM admin access?}:::control
+    C1 -->|Yes| B1[Console access denied; attacker cannot make admin changes]:::blocked
+    C1 -->|No| A2[Attacker disables key detection rules in cloud SIEM]:::attack
+    A2 --> C2{Immutable audit log captures rule disable action?}:::control
+    C2 -->|Yes| B2[Action recorded in out-of-band log; SOC investigates and re-enables rules]:::blocked
+    C2 -->|No| A3[Alert suppression persists; attacker operates undetected]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-cloud-siem-admin-api-key-leak">T2 — Cloud SIEM Admin API Key Leak</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Steal or discover a cloud SIEM admin API key from a repository, developer workstation, or forwarder config, then use it to modify rules, bulk-export logs, or suppress alerts via the cloud SIEM API.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker finds a service principal or API key in code, config file, or a leaked repository.</li>
+<li>Step 1: attacker uses the API key to authenticate to the cloud SIEM API from an external host.</li>
+<li>Step 2: attacker enumerates available API actions and identifies admin-level capabilities.</li>
+<li>Step 3: attacker disables detection rules, exports historical logs, or changes retention settings.</li>
+<li>Step 4: attacker exfiltrates the logs or uses the suppression capability to reduce detection.</li>
+<li>Step 5: impact: the attacker gains the same control as a compromised admin account, with no interactive login trace.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: dedicated service accounts with narrow API scopes; admin API keys separated from ingestion and read-only keys.</li>
+<li>Control 2: secret scanning on code repos, CI/CD pipelines, and artifact registries to detect leaked SIEM API keys.</li>
+<li>Control 3: API key rotation policy — keys expire frequently and are replaced automatically.</li>
+<li>Control 4: cloud provider IAM logs and SIEM audit logs that detect bulk export operations or excessive rule reads.</li>
+<li>Control 5: key usage restrictions by source IP or service principal identity.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Cloud provider IAM logs: API key used from unexpected principal or external IP.</li>
+<li>SIEM API audit logs: bulk export call or admin policy modification call.</li>
+<li>Repository scanning alerts: <code>AWS_ACCESS_KEY_ID</code> or <code>SIEM_API_KEY</code> pattern found in repo push.</li>
+<li>CI/CD scan logs: <code>secret detected</code> for SIEM API key patterns.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate cloud SIEM API key scope is narrow (authorized lab)
+# Use an API key with limited scope and call the admin action
+curl -H &quot;Authorization: Bearer &lt;api_key&gt;&quot; https://&lt;cloud-siem&gt;/api/v1/rules
+# Expected: key can list rules only if scoped; cannot delete or modify admin settings if not permitted
+</code></pre>
+<pre><code class="language-kql">// Detect SIEM API key bulk export or admin access from unexpected IP
+CloudProviderAudit
+| where ResourceType == &quot;CloudSIEM&quot; and OperationName in (&quot;ExportLogs&quot;, &quot;ModifyRule&quot;)
+| where CallerIpAddress !in (&lt;approved_api_ip_ranges&gt;)
+| project TimeGenerated, Caller, OperationName, CallerIpAddress
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker finds cloud SIEM admin API key in repo or config]:::attack
+    A1 --> C1{API key bound to narrow role and source IP restrictions?}:::control
+    C1 -->|Yes| B1[Key cannot perform admin operations from attacker's host]:::blocked
+    C1 -->|No| A2[Attacker uses key to make admin API calls]:::attack
+    A2 --> C2{API usage audited and anomalous export detected?}:::control
+    C2 -->|Yes| B2[Key revoked before attacker can export logs or modify rules]:::blocked
+    C2 -->|No| A3[Attacker suppresses alerts or exfiltrates logs via API]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-log-forwarder-compromise-on-endpoint">T3 — Log Forwarder Compromise on Endpoint</h3>
+<p><strong>STRIDE category:</strong> Denial of Service, Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Compromise a Splunk Universal Forwarder, Fluentd, or other log agent on an endpoint, then stop log forwarding to the cloud SIEM or alter log content to evade detection.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has code execution or administrative privileges on a host.</li>
+<li>Step 1: attacker stops or disables the forwarder service: <code>sudo systemctl stop splunkforwarder</code> or <code>service td-agent stop</code>.</li>
+<li>Step 2: attacker may also modify forwarder configuration to exclude suspicious logs or inject false metadata.</li>
+<li>Step 3: attacker uses the host as a pivot point while the SIEM receives no telemetry from that asset.</li>
+<li>Step 4: if the forwarder is part of an endpoint kill chain, attacker can extend dwell time by suppressing logs from that host.</li>
+<li>Step 5: impact: detection is blind for that host or host group; the attacker can move laterally or stage data exfiltration.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: forwarder health heartbeat monitoring and alerting; no log events from a critical host for &gt;10 minutes triggers remediation.</li>
+<li>Control 2: EDR protection on hosts prevents attacker from stopping the forwarder process or modifying its config.</li>
+<li>Control 3: forwarder runs as a managed service account with least privilege; host users cannot disable it.</li>
+<li>Control 4: network-based ingestion fallback; if the local agent is stopped, network devices still forward essential telemetry directly to the cloud SIEM.</li>
+<li>Control 5: forwarder configuration file integrity monitoring; unexpected changes to <code>/opt/splunkforwarder/etc/system/local/inputs.conf</code> or <code>/etc/td-agent/td-agent.conf</code> trigger alerts.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Forwarder heartbeat metrics: <code>last_event_time</code> older than 10 minutes for critical host.</li>
+<li>EDR logs: process stop of <code>splunkd</code> or <code>td-agent</code> by a non-service account.</li>
+<li>SIEM ingest metrics: source host absent from the expected host list in the last 15 minutes.</li>
+<li>FIM alerts on forwarder config file changes.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate forwarder health monitoring on a lab endpoint
+# Stop the forwarder service and confirm SIEM health alert is triggered
+Stop-Service -Name SplunkForwarder
+# Wait 10 minutes and check the SIEM forwarder health dashboard or alert logs
+</code></pre>
+<pre><code class="language-kql">// Detect critical host forwarder outage
+ForwarderHeartbeat
+| where HostName in (&lt;critical_hosts&gt;)
+| where LastEventTime &lt; ago(10m)
+| project TimeGenerated, HostName, LastEventTime, Status
+| order by LastEventTime asc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker compromises endpoint hosting a log forwarder]:::attack
+    A1 --> C1{EDR blocks forwarder service stop or config modification?}:::control
+    C1 -->|Yes| B1[Forwarder remains operational; host remains visible to SIEM]:::blocked
+    C1 -->|No| A2[Attacker stops forwarder or tampers with config]:::attack
+    A2 --> C2{Forwarder heartbeat monitoring alerts within 10 min?}:::control
+    C2 -->|Yes| B2[SIEM alerts on missing host telemetry; SOC remediates quickly]:::blocked
+    C2 -->|No| A3[Host telemetry goes dark; attacker moves laterally undetected]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-detection-rule-deletion-or-modification">T4 — Detection Rule Deletion or Modification</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Delete or modify detection rules in the cloud SIEM so that the attacker's own TTPs no longer generate alerts, while keeping the rest of the environment looking normal.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has SIEM admin access or a compromised CI/CD pipeline with permissions to deploy detection rules.</li>
+<li>Step 1: attacker locates high-value rules such as C2 detection, lateral movement, or ransomware behavioral rules.</li>
+<li>Step 2: attacker disables or deletes those rules in the SIEM admin console or via the API.</li>
+<li>Step 3: attacker may also modify rule logic to reduce sensitivity for their specific IOC.</li>
+<li>Step 4: attacker continues the attack; the SOC sees fewer alerts, or no alerts for the modified rule.</li>
+<li>Step 5: impact: the attacker avoids detection for the duration of the suppressed rule activity and may use that gap to conduct data theft or ransomware.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: GitOps for detection rules; all rule changes must be deployed through a version-controlled CI/CD pipeline.</li>
+<li>Control 2: rule drift detection; nightly comparison between deployed SIEM rules and Git HEAD triggers alerts for any manual changes.</li>
+<li>Control 3: out-of-band rule audit; store rule deployment events in a separate log sink.</li>
+<li>Control 4: rule modification approval process; manual changes require a documented ticket and dual approval.</li>
+<li>Control 5: automatic rollback of rule changes that are not in Git within a recovery window.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SIEM admin audit log: <code>operation = DeleteRule OR UpdateRule</code> and <code>initiated_by</code> service account.</li>
+<li>GitOps drift monitor: deployed rule hash != Git HEAD rule hash.</li>
+<li>CI/CD pipeline audit: rule change was not associated with a PR merge.</li>
+<li>Out-of-band audit logs: rule modification recorded in a separate immutable store.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate rule drift detection is active in lab
+# Compare deployed SIEM rule export with Git HEAD rule file
+# Expected: no drift; any deviation triggers rollback alert
+</code></pre>
+<pre><code class="language-kql">// Detect deployed SIEM rules not matching Git repository state
+RuleDriftAudit
+| where DeployedRuleHash != GitHeadRuleHash
+| project TimeGenerated, RuleName, DeployedRuleHash, GitHeadRuleHash, DeployedBy
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker gains SIEM admin or CI/CD deployment access]:::attack
+    A1 --> C1{Detection rules can only be changed via GitOps pipeline?}:::control
+    C1 -->|Yes| B1[Manual rule deletion is rejected; only Git-approved changes deploy]:::blocked
+    C1 -->|No| A2[Attacker disables or modifies high-value rules directly]:::attack
+    A2 --> C2{Drift detection compares deployed rules to Git state nightly?}:::control
+    C2 -->|Yes| B2[Drift alert fires; rule auto-reverts or SOC investigates]:::blocked
+    C2 -->|No| A3[Attack proceeds with reduced detection and alerting]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-log-injection-causing-parser-errors-or-false-positives">T5 — Log Injection Causing Parser Errors or False Positives</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Craft malicious log entries that either break the cloud SIEM parser or generate noisy false positives, causing the SOC to waste time and potentially miss real alerts.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has access to an application or host that generates logs ingested by the SIEM.</li>
+<li>Step 1: attacker inserts unexpected characters, malformed JSON, or invalid field values into log entries.</li>
+<li>Step 2: parser errors may cause the SIEM to drop or misclassify logs, creating blind spots.</li>
+<li>Step 3: attacker may also inject indicators that trigger low-value alerts, flooding the SOC.</li>
+<li>Step 4: the SOC becomes distracted and less responsive to real alerts.</li>
+<li>Step 5: impact: attacker can blend malicious activity into noisy logs and maintain persistence while the analyst team chases false positives.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: log normalization and validation at the pipeline layer before ingestion; bad logs are rejected or quarantined.</li>
+<li>Control 2: parser resilience policies in the SIEM; unparseable logs are handled gracefully and forwarded to a quarantine index rather than dropped silently.</li>
+<li>Control 3: alert noise detection; sudden spikes in low-confidence or low-fidelity alerts trigger a review of log quality rather than acceptance.</li>
+<li>Control 4: source integrity rules; if a log source suddenly starts emitting malformed data, the source is quarantined and ticketed for investigation.</li>
+<li>Control 5: separate low-fidelity index for untrusted log content; the SOC does not treat noisy logs as reliable detection data.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Pipeline logs: <code>ParseError</code> count for a source rises above baseline.</li>
+<li>SIEM ingest metrics: <code>unparsed_event_count</code> or <code>droppped_event_count</code> spikes.</li>
+<li>Alert metrics: low-priority alert volume increases &gt;200% for a source after a log schema change.</li>
+<li>Quarantine index logs: malformed events captured with source metadata.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate pipeline rejects malformed log events (authorized lab)
+# Send intentionally malformed JSON log to the pipeline and confirm it lands in quarantine, not main SIEM
+</code></pre>
+<pre><code class="language-kql">// Detect parser error spikes for a log source
+PipelineMetrics
+| where MetricName == &quot;ParseErrorCount&quot;
+| summarize ErrorCount = sum(MetricValue) by Source, bin(TimeGenerated, 5m)
+| where ErrorCount &gt; 10
+| order by ErrorCount desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker injects malformed log entries into a trusted source]:::attack
+    A1 --> C1{Pipeline validates log schema before ingestion?}:::control
+    C1 -->|Yes| B1[Malformed logs quarantined; main SIEM ingest unaffected]:::blocked
+    C1 -->|No| A2[Malformed logs reach SIEM and cause parser errors or misclassification]:::attack
+    A2 --> C2{SIEM handles unparseable logs gracefully?}:::control
+    C2 -->|Yes| B2[Errors logged to quarantine index; SOC not blinded]:::blocked
+    C2 -->|No| A3[Logs dropped silently or misclassified; detection gap forms]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-migration-window-attack-exploiting-coverage-gaps">T6 — Migration Window Attack Exploiting Coverage Gaps</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Time an intrusion to the SIEM migration window when detection coverage is in flux and some rules are not yet tuned or translated, allowing the attacker to exploit the temporary gap between old and new detection contexts.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has knowledge of the migration schedule or can infer it from reduced SOC activity or procurement notices.</li>
+<li>Step 1: attacker begins reconnaissance or initial access during the migration phase.</li>
+<li>Step 2: attacker identifies a gap in the new SIEM's rule set, such as a translated rule that is not yet deployed.</li>
+<li>Step 3: attacker performs malicious actions that should have been detected by the old SIEM rule but are missed by the new SIEM.</li>
+<li>Step 4: attacker may also leverage the old SIEM being deprioritized by the SOC during cutover.</li>
+<li>Step 5: impact: attacker achieves longer dwell time and potentially completes data exfiltration or ransomware deployment.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: parallel ingestion of logs to both old and new SIEMs with dual alert monitoring.</li>
+<li>Control 2: rule parity dashboard comparing alert counts and types between platforms.</li>
+<li>Control 3: migration staging environment that validates translated rules against a historical log corpus before production promotion.</li>
+<li>Control 4: extended parallel run period (minimum 90 days) for all critical rules and sources.</li>
+<li>Control 5: dedicated migration SOC focus team that continues to monitor the legacy SIEM until the cutover is complete.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Alert parity dashboard: per-rule match rate between old and new SIEMs.</li>
+<li>Migration logs: source subset has 100% duplicated ingestion to both systems.</li>
+<li>SOC incident queue: no increase in missed-detection incidents during migration.</li>
+<li>Change control logs: each translated rule has a validation ticket or test record.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate rule parity in lab migration environment
+# Run the same test event through both legacy and new SIEMs and compare alert output
+</code></pre>
+<pre><code class="language-kql">// Detect rule parity mismatches between legacy and new SIEM
+RuleParityMetrics
+| where LegacyAlertCount &gt; 0
+| extend Ratio = NewAlertCount * 1.0 / LegacyAlertCount
+| where Ratio &lt; 0.95 or Ratio &gt; 1.05
+| project RuleName, LegacyAlertCount, NewAlertCount, Ratio
+| order by abs(Ratio - 1) desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker begins intrusion during SIEM migration window]:::attack
+    A1 --> C1{Logs are forwarded to both old and new SIEMs in parallel?}:::control
+    C1 -->|Yes| B1[Legacy system still detects attack even if new SIEM misses it] :::blocked
+    C1 -->|No| A2[Attack activity is visible only in one SIEM and may be missed]:::attack
+    A2 --> C2{Rule parity dashboard flags missing or low alerts?}:::control
+    C2 -->|Yes| B2[Detection engineer tunes new rule before cutover]:::blocked
+    C2 -->|No| A3[Coverage gap persists; attacker evades detection]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-cloud-siem-tenant-misconfiguration">T7 — Cloud SIEM Tenant Misconfiguration</h3>
+<p><strong>STRIDE category:</strong> Tampering, Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit a misconfiguration in the cloud SIEM tenant — such as excluded sensitive sources, overly permissive retention settings, or inadequate access controls — to reduce visibility or expose sensitive log data.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker gathers intelligence on the SIEM architecture or finds cloud tenant misconfigurations via scanning.</li>
+<li>Step 1: attacker identifies that certain sensitive sources are not ingested due to a bad inclusion filter or source tag.</li>
+<li>Step 2: attacker uses those unmonitored assets as a pivot or exfiltration channel.</li>
+<li>Step 3: attacker also looks for overly permissive access to the cloud storage backing the log archive.</li>
+<li>Step 4: if retention is too short, attacker knows forensic evidence will disappear after the retention window.</li>
+<li>Step 5: impact: attacker operates on assets that are effectively blind to the SOC, and historical evidence is unavailable.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: cloud SIEM source inventory reconciliation against the CMDB; every source must be accounted for.</li>
+<li>Control 2: configuration drift detection for ingestion pipelines and retention policies.</li>
+<li>Control 3: periodic access review for the cloud tenant and storage buckets.</li>
+<li>Control 4: dedicated compliance rule that flags any source with <code>sensitive=true</code> that is not ingested.</li>
+<li>Control 5: retention policy enforcement by policy-as-code and governance review.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SIEM source inventory report: <code>expected_sources - ingested_sources = missing_sources</code>.</li>
+<li>Cloud tenant configuration audit: changes to retention settings or source inclusion filters.</li>
+<li>Storage bucket ACL and IAM policy audit: any non-approved principal with <code>storage.objects.get</code> on archive bucket.</li>
+<li>Alert from compliance policy on missing sensitive sources.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate source inventory reconciliation (authorized lab)
+# Compare CMDB source list with SIEM ingested source list and report discrepancies
+</code></pre>
+<pre><code class="language-kql">// Detect cloud SIEM sources missing from inventory
+SourceInventory
+| where Expected = true and Ingested == false
+| project SourceName, SourceType, Owner
+| order by SourceName
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker identifies sensitive sources not ingested by cloud SIEM]:::attack
+    A1 --> C1{Cloud SIEM source inventory reconciliation flags missing source?}:::control
+    C1 -->|Yes| B1[Missing source added to ingestion pipeline before attacker exploits it]:::blocked
+    C1 -->|No| A2[Attacker uses unmonitored source for pivot or data exfiltration]:::attack
+    A2 --> C2{Retention policy governance catches too-short retention?}:::control
+    C2 -->|Yes| B2[Retention extended before important log data expires]:::blocked
+    C2 -->|No| A3[Historical forensic evidence vanishes after retention window]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-cloud-provider-insider-access-to-tenant-logs">T8 — Cloud Provider Insider Access to Tenant Logs</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Leverage a cloud provider or third-party employee access to the SIEM tenant to read security telemetry, detection rules, or historical logs directly from the provider infrastructure.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker is a cloud provider insider or compromised provider support employee.</li>
+<li>Step 1: attacker accesses the tenant through provider privileged access tooling.</li>
+<li>Step 2: attacker reads ingested logs, admin audit logs, or the raw historical archive stored in provider storage.</li>
+<li>Step 3: attacker exfiltrates detection rule definitions, alert content, and log details.</li>
+<li>Step 4: attacker may combine this with knowledge of customer security controls to stage a more effective attack.</li>
+<li>Step 5: impact: attacker learns the enterprise's detection coverage and can tailor future attacks to known gaps.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: contractual data access restrictions with the provider, including privileged access review and audit.</li>
+<li>Control 2: if available, BYOK encryption of logs in cloud storage so provider staff cannot decrypt the data without the customer's key.</li>
+<li>Control 3: provider access monitoring and access approval workflow for any privileged access to the tenant.</li>
+<li>Control 4: minimize sensitive data in logs through tokenization or redaction prior to ingestion.</li>
+<li>Control 5: periodic third-party audits of provider controls and SOC 2 Type II certification review.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Provider access audit: employee access to tenant data and justification logs.</li>
+<li>Key management logs: BYOK key usage only by authorized customer services.</li>
+<li>Log redaction audit: S3/GCS objects stored with encrypted-at-rest metadata and access controls.</li>
+<li>Contractual review documents: provider attestation of no-privileged-access except approved support cases.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate provider BYOK key access is restricted
+# (Authorized lab or customer audit check)
+Get-AzKeyVaultKey -VaultName &lt;vault-name&gt; -Name &lt;byok-key-name&gt; | Select-Object KeyId, Enabled
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Provider insider accesses cloud SIEM tenant logs via privileged tooling]:::attack
+    A1 --> C1{BYOK encryption applied to stored logs?}:::control
+    C1 -->|Yes| B1[Provider staff cannot decrypt logs without customer key]:::blocked
+    C1 -->|No| A2[Provider insider reads raw tenant logs and detection rules]:::attack
+    A2 --> C2{Provider privileged access reviewed and audited?}:::control
+    C2 -->|Yes| B2[Access triggers audit review and is blocked if unauthorized]:::blocked
+    C2 -->|No| A3[Insider exfiltrates tenant security telemetry]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-historical-log-archive-exfiltration-from-cloud-storage">T9 — Historical Log Archive Exfiltration from Cloud Storage</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Access the 200 TB historical log archive stored in cloud object storage and exfiltrate it, providing the attacker with years of forensic data, user credentials, and PII.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker gains access to the cloud storage bucket or underlying IAM/ACL configuration.</li>
+<li>Step 1: attacker lists bucket contents and identifies archived log objects.</li>
+<li>Step 2: attacker reads or copies objects to an external location.</li>
+<li>Step 3: attacker may also modify or delete archived logs to hamper forensics.</li>
+<li>Step 4: attacker exfiltrates the archive data for offline analysis.</li>
+<li>Step 5: impact: the entire historical evidence set is compromised, potentially violating compliance and enabling future attacks.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: object lock / WORM on historical archive buckets; objects cannot be deleted or modified during retention.</li>
+<li>Control 2: bucket IAM restricted to approved investigator roles only; no general read access.</li>
+<li>Control 3: bucket access logs forwarded to a separate audit sink and monitored for unexpected principals.</li>
+<li>Control 4: cross-account replication to a separate backup account for disaster recovery and forensic preservation.</li>
+<li>Control 5: encryption with customer-managed keys so bucket content remains protected even if storage ACLs are abused.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>S3/GCS access logs: <code>GetObject</code> from archive bucket by unexpected principal.</li>
+<li>Object lock compliance mode status on the bucket.</li>
+<li>KMS audit logs: decryption requests for the data encryption key from unexpected principals.</li>
+<li>Cloud storage bucket ACL review: list of allowed principals and permissions.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate historical archive bucket is in Object Lock mode (authorized lab)
+aws s3api get-bucket-object-lock-configuration --bucket &lt;archive-bucket&gt;
+</code></pre>
+<pre><code class="language-kql">// Detect unusual access to archive storage
+CloudStorageAudit
+| where Resource == &quot;archive-bucket&quot; and Operation == &quot;GetObject&quot;
+| where Principal notin (&lt;approved_investigator_principals&gt;)
+| project TimeGenerated, Principal, ObjectKey, SourceIPAddress
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker gains access to cloud storage bucket hosting 200TB logs]:::attack
+    A1 --> C1{Bucket has object lock enabled and immutability set?}:::control
+    C1 -->|Yes| B1[Logs cannot be altered or deleted; only read access possible]:::blocked
+    C1 -->|No| A2[Attacker reads or deletes archived log objects]:::attack
+    A2 --> C2{Storage access logs forwarded to separate audit sink?}:::control
+    C2 -->|Yes| B2[Unauthorized access triggers alerts and incident response]:::blocked
+    C2 -->|No| A3[Historical archives exfiltrated or destroyed]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-soar-playbook-manipulation">T10 — SOAR Playbook Manipulation</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Modify SOAR playbooks or response workflows so that alerts are not properly escalated, false actions are taken, or legitimate containment is bypassed.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has access to SOAR admin or the pipeline that deploys playbooks.</li>
+<li>Step 1: attacker modifies a playbook condition to ignore specific alert categories or to skip containment actions.</li>
+<li>Step 2: attacker may also create a playbook that automatically allowlists their own malicious IP address.</li>
+<li>Step 3: attack occurs and the SIEM alerts are either suppressed or routed to a dead-end.</li>
+<li>Step 4: the SOC believes the incident is handled or not worth investigating.</li>
+<li>Step 5: impact: the attacker gains freedom to continue lateral movement or exfiltration through automated response gaps.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: SOAR playbooks are version-controlled in Git and deployed via a CI/CD pipeline with review.</li>
+<li>Control 2: SOAR admin actions are audited in an out-of-band log sink.</li>
+<li>Control 3: playbook changes require dual approval for high-risk automations.</li>
+<li>Control 4: periodic red team exercises validate that the SOAR workflow still contains critical containment actions.</li>
+<li>Control 5: SOAR policy prevents playbook creation or modification by user accounts without explicit engineering approval.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SOAR audit log: <code>PlaybookModify</code> or <code>PlaybookDisable</code> event by user or service account.</li>
+<li>Git commit history: playbook change merged without the required reviewer approvals.</li>
+<li>SOAR deployment pipeline logs: playbook changes deployed outside the production CI/CD pipeline.</li>
+<li>Automated SOAR test results: synthetic alerts show expected response behavior.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate SOAR playbook changes require code review (authorized lab)
+# Check branch protection settings for the SOAR playbook repo
+Get-AzReposPolicyConfiguration -ProjectName &lt;project&gt; | Where-Object { $_.Type -like &quot;Build&quot; }
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker with SOAR admin or pipeline access modifies playbook logic]:::attack
+    A1 --> C1{SOAR playbooks are deployed via GitOps with PR approval?}:::control
+    C1 -->|Yes| B1[Unauthorized changes rejected unless in Git PR process]:::blocked
+    C1 -->|No| A2[Attacker changes playbook to suppress or mis-handle alerts]:::attack
+    A2 --> C2{SOAR audit logs are forwarded out-of-band?}:::control
+    C2 -->|Yes| B2[Changes detected and investigated; playbook rollback triggered]:::blocked
+    C2 -->|No| A3[Automated response fails or is bypassed during attack]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-alert-suppression-via-query-manipulation">T11 — Alert Suppression via Query Manipulation</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use analyst or admin access to suppress specific alert queries in the SIEM or SOAR workflow, allowing malicious activity to occur without generating a triaged incident.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has analyst or admin level SIEM access.</li>
+<li>Step 1: attacker edits a suppression query or archived alert filter to exclude their source IP, user, or event category.</li>
+<li>Step 2: alerts matching the suppression query are still generated but not surfaced to the analyst queue.</li>
+<li>Step 3: attacker continues activity while the SOC does not receive the relevant signal.</li>
+<li>Step 4: suppression is maintained through the attack window until the abuse is discovered.</li>
+<li>Step 5: impact: a stealthy attack can persist through an entire campaign due to selective alert blackout.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: prevent direct query suppression in the SIEM UI; suppression rules must be managed via approved change requests.</li>
+<li>Control 2: monitor suppression rules and filter policies for new entries; any suppression without a ticket is a high-severity alert.</li>
+<li>Control 3: require dual analyst approval for suppression of high-severity alerts.</li>
+<li>Control 4: track suppression rule lineage and expiration dates; temporary suppressions automatically expire.</li>
+<li>Control 5: audit suppression query changes in an immutable external log.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SIEM audit log: <code>SuppressionRuleCreate</code>, <code>SuppressionRuleUpdate</code>, or <code>SuppressionRuleDelete</code>.</li>
+<li>SOAR audit log: suppression action logged without correlated change request ID.</li>
+<li>Ticketing system: no approved suppression ticket exists for the time and alert category.</li>
+<li>Alert volume metrics: a drop in specific alert category count concurrent with suppression rule change.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate suppression rules require a ticket (authorized lab)
+# Query SIEM suppression rule metadata for ticket references
+</code></pre>
+<pre><code class="language-kql">// Detect suppression rule changes without approved ticket reference
+audit_SuppressionChanges
+| where ChangeType in (&quot;Create&quot;, &quot;Update&quot;)
+| where not(AdditionalFields contains &quot;TicketID&quot;)
+| project TimeGenerated, User, RuleName, ChangeType
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker with SIEM analyst access creates suppression rule]:::attack
+    A1 --> C1{Suppression rules require approved ticket ID?}:::control
+    C1 -->|Yes| B1[Attempt blocked or flagged because no ticket exists]:::blocked
+    C1 -->|No| A2[Suppression rule applied to hide attacker activity]:::attack
+    A2 --> C2{External audit log records suppression rule changes?}:::control
+    C2 -->|Yes| B2[Audit log triggers review and suppression is revoked]:::blocked
+    C2 -->|No| A3[Attack remains hidden from SOC triage]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-log-pipeline-mitm-between-forwarder-and-siem">T12 — Log Pipeline MITM Between Forwarder and SIEM</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Intercept and modify logs in transit between the forwarder/pipeline and the cloud SIEM, either to redact attacker activity or to insert false data that misleads analysts.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has control of a network segment or a proxy in the path from the forwarder to the SIEM ingestion endpoint.</li>
+<li>Step 1: attacker intercepts the TLS stream and either terminates it with a forged certificate or exploits a weak cipher.</li>
+<li>Step 2: attacker drops or modifies log events matching their activity.</li>
+<li>Step 3: attacker reinjects the rest of the stream to the SIEM, leaving the pipeline intact.</li>
+<li>Step 4: the SIEM never sees the malicious activity.</li>
+<li>Step 5: impact: attacker achieves effective log deletion or alteration without touching the endpoint host.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: mTLS between forwarder/pipeline and cloud SIEM ingestion endpoint; both sides authenticate with certificates.</li>
+<li>Control 2: certificate pinning or trust anchor verification on the forwarder and pipeline.</li>
+<li>Control 3: network segmentation so the ingestion path is not easily intercepted by an on-path attacker.</li>
+<li>Control 4: log integrity checks such as hash or HMAC sequence validation between forwarder and SIEM.</li>
+<li>Control 5: forwarder-to-SIEM TLS configuration hardened against weak ciphers and improper certificate validation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Pipeline TLS logs: only valid client and server certificates exchanged over the ingestion path.</li>
+<li>Forwarder logs: TLS handshake failures or certificate errors.</li>
+<li>SIEM ingest logs: authenticated source identity matching the forwarder certificate.</li>
+<li>Network flow logs: no unexpected intermediate device present on the ingestion path.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate mTLS is enforced on the SIEM ingestion endpoint
+openssl s_client -connect &lt;siem-ingest-host&gt;:443 -cert &lt;forwarder-cert.pem&gt; -key &lt;forwarder-key.pem&gt;
+# Expected: TLS handshake succeeds only with valid cert; invalid cert fails
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker positions MITM on log pipeline path]:::attack
+    A1 --> C1{mTLS with client cert auth enforced?}:::control
+    C1 -->|Yes| B1[MITM cannot complete TLS handshake without valid forwarder cert]:::blocked
+    C1 -->|No| A2[Attacker intercepts and modifies log stream]:::attack
+    A2 --> C2{Hash/HMAC integrity checks on log sequences?}:::control
+    C2 -->|Yes| B2[Modified logs rejected by SIEM due to integrity mismatch]:::blocked
+    C2 -->|No| A3[Logs accepted with attacker activity removed]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t13-siem-forwarder-credential-reuse">T13 — SIEM Forwarder Credential Reuse</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Extract a forwarder or ingestion service credential from a host or repository and use it to impersonate the forwarder, disable ingestion, or send bogus logs.</p>
+<h4 id="how-the-attacker-would-exploit-it_12">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker finds a forwarder token/API key in plaintext in a config file, script, or repository.</li>
+<li>Step 1: attacker uses the token from another host to authenticate to the SIEM ingestion endpoint.</li>
+<li>Step 2: attacker may stop legitimate logs by exceeding rate limits, or inject false logs to confuse analysts.</li>
+<li>Step 3: attacker can also use the token to enumerate the ingestion pipeline and find further misconfigurations.</li>
+<li>Step 4: attacker might exfiltrate the token by accessing the host’s filesystem or repository history.</li>
+<li>Step 5: impact: the forwarder token is compromised and the SIEM ingestion integrity is violated.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_12">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: store forwarder credentials in a secret manager rather than plaintext config files.</li>
+<li>Control 2: rotate forwarder credentials regularly and revoke old keys quickly.</li>
+<li>Control 3: restrict forwarder API keys to specific source hosts or certificates.</li>
+<li>Control 4: use short-lived credentials via workload identity or instance metadata where possible.</li>
+<li>Control 5: secret scanning on forwarder config files and repositories.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_12">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Forwarder config audit report: plaintext credentials found in host file system or repo.</li>
+<li>SIEM ingest logs: API key used from host not matching the known forwarder identity.</li>
+<li>Cloud provider IAM logs: service account token exchange events for forwarder role.</li>
+<li>Secret scanning alerts from repo analysis tools.</li>
+</ul>
+<h4 id="purple-team-validation-commands_12">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate forwarder credentials are not stored in plaintext config
+grep -R &quot;api_key\|token&quot; /opt/splunkforwarder/etc/system/local/inputs.conf
+# Expected: no plaintext credentials stored; use secure secret manager instead
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_12">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker finds SIEM forwarder token in plaintext config or repo]:::attack
+    A1 --> C1{Forwarder credentials are stored in secret manager and not on disk?}:::control
+    C1 -->|Yes| B1[Attacker cannot retrieve token from disk]:::blocked
+    C1 -->|No| A2[Attacker uses token from another host to impersonate forwarder]:::attack
+    A2 --> C2{Token usage restricted by source host or cert?}:::control
+    C2 -->|Yes| B2[Impersonation blocked by source restriction]:::blocked
+    C2 -->|No| A3[Attacker injects bogus logs or disables ingestion]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t14-threat-intel-feed-poisoning-causing-alert-flood">T14 — Threat Intel Feed Poisoning Causing Alert Flood</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Poison the cloud SIEM’s threat intelligence feeds so detection rules generate a flood of false positives, distracting analysts and hiding real malicious activity.</p>
+<h4 id="how-the-attacker-would-exploit-it_13">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker gains control of an ingested threat intel feed or uses a public feed containing poisoned IOCs.</li>
+<li>Step 1: attacker injects bad IoCs (IPs, domains, hashes) into the feed.</li>
+<li>Step 2: the SIEM ingest pipeline enriches alerts with those indicators.</li>
+<li>Step 3: analysts receive a flood of low-quality alerts tied to the poisoned feed.</li>
+<li>Step 4: real alerts may be missed or deprioritized due to analyst fatigue.</li>
+<li>Step 5: impact: a denial-of-service effect on SOC attention, increasing attacker dwell time.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_13">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: threat intel source vetting and integrity validation before ingestion.</li>
+<li>Control 2: thresholding on IOC-based alerts; do not automatically escalate low-confidence IOC matches.</li>
+<li>Control 3: feed hash validation and anomaly detection — detect sudden feed volume or IOC churn spikes.</li>
+<li>Control 4: analyst feedback loops to mark poisoned IOCs and remove them from active use.</li>
+<li>Control 5: multiple independent threat feeds; do not rely on a single feed for high-confidence detection.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_13">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Threat feed ingest logs: hash mismatches or output volume spikes.</li>
+<li>SIEM alert metrics: sudden increase in alerts tied to a single threat feed.</li>
+<li>Analyst feedback records: IOC false-positive markings.</li>
+<li>Feed health monitoring: feed ingestion errors or unusually high IOC churn.</li>
+</ul>
+<h4 id="purple-team-validation-commands_13">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate threat feed hash integrity before ingestion
+curl -H &quot;Authorization: Bearer &lt;feed-token&gt;&quot; https://&lt;feed-source&gt;/sha256
+# Compare with locally computed hash after ingestion
+</code></pre>
+<pre><code class="language-kql">// Detect sudden spike in IOC-based alerts from a single threat feed
+AlertMetrics
+| where ThreatFeed == &quot;&lt;feed-name&gt;&quot;
+| summarize AlertCount = count() by bin(TimeGenerated, 5m)
+| where AlertCount &gt; 100
+| order by AlertCount desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_13">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker poisons threat intel feed with bad IOCs]:::attack
+    A1 --> C1{Feed integrity hash validation is enforced?}:::control
+    C1 -->|Yes| B1[Feed ingestion rejected until feed hash matches expected value]:::blocked
+    C1 -->|No| A2[Poisoned IOCs are ingested into SIEM]:::attack
+    A2 --> C2{Alert thresholding prevents low-confidence IOC flood?}:::control
+    C2 -->|Yes| B2[False positives are contained and not escalated]:::blocked
+    C2 -->|No| A3[SOC flooded with bogus IOC alerts; attacker hides in noise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Attempt SIEM admin login with FIDO2 policy from untrusted device</td>
+<td>Access denied; PAM blocks console access</td>
+<td>Login succeeds without FIDO2 or PAM check</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Use a limited SIEM API key from an unauthorized IP in lab</td>
+<td>API call blocked or scope denied</td>
+<td>API key performs admin actions outside expected scope</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Stop forwarder on lab host and verify SIEM heartbeat alert fires</td>
+<td>Missing host telemetry alert within 10 minutes</td>
+<td>No alert; host goes dark silently</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Modify deployed rule directly in SIEM outside GitOps and verify drift alert</td>
+<td>Drift alert fires; rule auto-reverts or SOC investigates</td>
+<td>No drift alert and rule remains modified</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Send malformed log entries through the pipeline and confirm quarantine</td>
+<td>Logs quarantined; SIEM ingest unaffected</td>
+<td>Logs are ingested and parser errors are not flagged</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Run a known-bad event through both legacy and new SIEM in parallel</td>
+<td>Both SIEMs fire matching alerts</td>
+<td>New SIEM misses or deviates significantly from legacy alert</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Compare source inventory against SIEM ingest list</td>
+<td>No missing sensitive sources; mismatches are remediated</td>
+<td>Sensitive source not ingested</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Review provider BYOK key access controls in audit logs</td>
+<td>BYOK usage limited to authorized services</td>
+<td>Unauthorized key access detected</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Verify object lock is enabled on archive bucket</td>
+<td>Object lock configuration present</td>
+<td>Bucket not immutable; archive deletable</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Attempt to change a SOAR playbook without GitOps approval</td>
+<td>Change rejected or audited as unauthorized</td>
+<td>Change succeeds without proper approval</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Create suppression rule without ticket in lab and check for alert</td>
+<td>SIEM alerts on missing ticket reference</td>
+<td>No alert is generated</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Attempt MITM on ingestion path with invalid cert</td>
+<td>TLS handshake fails and pipeline alerts</td>
+<td>MITM succeeds; logs accepted</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>Find and rotate a plaintext forwarder credential in a lab build</td>
+<td>Credential decommissioned; no longer valid</td>
+<td>Credential remains valid and can be reused</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Inject a poisoned IOC into a threat feed in lab</td>
+<td>Feed ingestion rejects poisons or flags anomaly</td>
+<td>Poisoned IOC accepted and alerts flood</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity and authentication</td>
+<td>T1, T2</td>
+<td>SOC analyst MFA bypass and home office devices remain a residual gap</td>
+</tr>
+<tr>
+<td>Network segmentation and access control</td>
+<td>T2, T3, T5, T12</td>
+<td>Ingest path interception in shared network segments is still a risk</td>
+</tr>
+<tr>
+<td>Endpoint and workload protection</td>
+<td>T3, T13</td>
+<td>Legacy host forwarders may not support modern EDR protections</td>
+</tr>
+<tr>
+<td>Logging, detection, and SIEM</td>
+<td>T1, T2, T4, T6, T9, T11</td>
+<td>Rule drift detection depends on accurate GitOps integration</td>
+</tr>
+<tr>
+<td>Incident response and containment</td>
+<td>T10, T11</td>
+<td>SOAR playbook abuse is mitigated but still requires strong access controls</td>
+</tr>
+<tr>
+<td>Secrets and cryptographic material protection</td>
+<td>T2, T12, T13</td>
+<td>Forwarder credentials in legacy config files are often still present</td>
+</tr>
+<tr>
+<td>Supply chain and third-party risk</td>
+<td>T8, T14</td>
+<td>Cloud provider insider access and third-party threat intel poisoning are hard to eliminate fully</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<blockquote>
+<p>Ordered by risk reduction per implementation effort.</p>
+</blockquote>
+<ol>
+<li><strong>Harden cloud SIEM admin access with FIDO2 + PAM + conditional access</strong> — closes T1, T2, T4. Implementation: require FIDO2 for all SIEM admin and SOC analyst accounts; route admin console access through CyberArk; allow only managed SOC device or known SOC network IPs.</li>
+<li><strong>Enforce GitOps for detection rules and SOAR playbooks with drift detection</strong> — closes T4, T10, T11. Implementation: keep all rules/playbooks in Git, deploy via CI/CD, run nightly drift checks, and auto-revert any manual change outside the approved pipeline.</li>
+<li><strong>Run parallel ingestion to both old on-prem Splunk and new cloud SIEM for critical sources</strong> — closes T6. Implementation: route 100% of critical sources through Cribl Stream to both systems; maintain the legacy environment until parity is validated.</li>
+<li><strong>Deploy forwarder heartbeat and pipeline integrity monitoring with alerting</strong> — closes T3, T5, T12. Implementation: monitor host heartbeat, parser error spikes, and TLS certificate validation for ingestion; alert on missing telemetry or malformed log volumes.</li>
+<li><strong>Store historical logs in WORM-enabled cloud storage with out-of-band audit</strong> — closes T8, T9. Implementation: enable S3/GCS Object Lock on archive buckets, restrict access to approved investigator roles, and forward access logs to a separate immutable store.</li>
+</ol>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

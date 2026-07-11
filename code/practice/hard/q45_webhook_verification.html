@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q45_webhook_verification.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q45_webhook_verification.py</h1>
+  <p class="file-path">Source: code\practice\hard\q45_webhook_verification.py</p>
+  <p class="line-count">369 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q45 [Hard] — Secure Webhook Verification
+=============================================================================
+
+PROBLEM
+-------
+Implement webhook signature validation with:
+  1. HMAC-SHA256 signature verification (constant-time).
+  2. Timestamp tolerance: reject webhooks older than MAX_AGE_S seconds
+     (prevents replay attacks).
+  3. Replay protection: track nonces (or timestamp+sig) within the tolerance
+     window so the same payload can&#x27;t be delivered twice.
+  4. Support multiple signing key versions (key rotation).
+  5. Return a structured result with failure reason.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Signature format?
+   → As used by Stripe/GitHub: &quot;t=&lt;timestamp&gt;,v1=&lt;hex-sig&gt;&quot;
+     The signed payload is: &quot;&lt;timestamp&gt;.&lt;raw_body&gt;&quot;
+2. Multiple signatures in header?
+   → Yes; iterate all v1= values and accept if any matches.
+3. Replay window?
+   → Default 300 seconds (5 minutes); configurable.
+4. Key rotation?
+   → Accept a list of valid keys; verify against all in constant time.
+5. Tolerance for clock skew?
+   → ±MAX_AGE_S; reject if |now - timestamp| &gt; MAX_AGE_S.
+
+=============================================================================
+APPROACH 1 — NAIVE (no timestamp, no replay protection)
+=============================================================================
+  HMAC compare via ==; no timestamp check; single key; replayable.
+
+=============================================================================
+APPROACH 2 — STRIPE-STYLE WEBHOOK VERIFIER (OPTIMAL)
+=============================================================================
+  1. Parse header: extract timestamp and all v1 signatures.
+  2. Check timestamp freshness.
+  3. Compute expected = HMAC-SHA256(key, f&quot;{timestamp}.{body}&quot;).
+  4. Constant-time compare against each v1 signature.
+  5. Track (timestamp, sig) pairs in a deque/set for replay detection.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+MAX_AGE_S      = 300      # 5 minutes
+REPLAY_TTL_S   = 600      # keep nonces for 10 minutes
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WebhookVerifyResult:
+    valid: bool
+    timestamp: Optional[int] = None
+    key_version: Optional[int] = None    # index of matching key
+    failure_reason: str = &quot;&quot;
+
+    def __bool__(self) -&gt; bool:
+        return self.valid
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveWebhookVerifier:
+    &quot;&quot;&quot;Vulnerable to replay and timing attacks.&quot;&quot;&quot;
+
+    def __init__(self, secret: str):
+        self._secret = secret
+
+    def verify(self, body: bytes, signature: str) -&gt; bool:
+        expected = hmac.new(
+            self._secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        return signature == expected   # timing-vulnerable == comparison
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Secure webhook verifier
+# ---------------------------------------------------------------------------
+
+class WebhookVerifier:
+    &quot;&quot;&quot;
+    Stripe-style webhook signature verification.
+    Header format: &quot;t=&lt;unix_timestamp&gt;,v1=&lt;hex_sig&gt;[,v1=&lt;hex_sig2&gt;]&quot;
+    Signed string: f&quot;{timestamp}.{body_bytes}&quot;
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        secrets: List[str],           # current + previous signing secrets
+        max_age_s: int = MAX_AGE_S,
+        replay_ttl_s: int = REPLAY_TTL_S,
+    ):
+        if not secrets:
+            raise ValueError(&quot;At least one signing secret is required&quot;)
+        self._secrets    = [s.encode() for s in secrets]
+        self._max_age_s  = max_age_s
+        self._replay_ttl = replay_ttl_s
+        # Replay nonce store: set of (timestamp, hex_sig)
+        self._seen: Set[Tuple[int, str]] = set()
+        # Ordered by insertion time for cleanup: deque of (time.time(), nonce)
+        self._seen_queue: Deque[Tuple[float, Tuple[int, str]]] = deque()
+
+    def verify(self, body: bytes, header: str) -&gt; WebhookVerifyResult:
+        now = int(time.time())
+
+        # Parse header
+        timestamp, v1_sigs = self._parse_header(header)
+        if timestamp is None or not v1_sigs:
+            return WebhookVerifyResult(
+                valid=False, failure_reason=&quot;invalid_header&quot;
+            )
+
+        # Timestamp freshness check
+        age = abs(now - timestamp)
+        if age &gt; self._max_age_s:
+            return WebhookVerifyResult(
+                valid=False,
+                timestamp=timestamp,
+                failure_reason=f&quot;timestamp_too_old: age={age}s&quot;,
+            )
+
+        # Compute signed_payload
+        signed_payload = f&quot;{timestamp}.&quot;.encode() + body
+
+        # Try each key against each v1 signature
+        matched_key_idx  = None
+        matched_sig      = None
+
+        for key_idx, secret in enumerate(self._secrets):
+            expected_hex = hmac.new(secret, signed_payload, hashlib.sha256).hexdigest()
+            for v1_sig in v1_sigs:
+                if hmac.compare_digest(expected_hex, v1_sig):
+                    matched_key_idx = key_idx
+                    matched_sig     = v1_sig
+                    break
+            if matched_key_idx is not None:
+                break
+
+        if matched_sig is None:
+            return WebhookVerifyResult(
+                valid=False,
+                timestamp=timestamp,
+                failure_reason=&quot;signature_mismatch&quot;,
+            )
+
+        # Replay check
+        nonce = (timestamp, matched_sig)
+        self._evict_old_nonces(time.monotonic())
+        if nonce in self._seen:
+            return WebhookVerifyResult(
+                valid=False,
+                timestamp=timestamp,
+                failure_reason=&quot;replay_detected&quot;,
+            )
+
+        self._seen.add(nonce)
+        self._seen_queue.append((time.monotonic(), nonce))
+
+        return WebhookVerifyResult(
+            valid=True,
+            timestamp=timestamp,
+            key_version=matched_key_idx,
+        )
+
+    # --- Helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _parse_header(header: str) -&gt; Tuple[Optional[int], List[str]]:
+        &quot;&quot;&quot;
+        Parse &quot;t=&lt;ts&gt;,v1=&lt;sig&gt;[,v1=&lt;sig2&gt;]&quot;
+        Returns (timestamp_int, list_of_v1_sigs) or (None, []) on error.
+        &quot;&quot;&quot;
+        timestamp = None
+        v1_sigs: List[str] = []
+        for part in header.split(&quot;,&quot;):
+            part = part.strip()
+            if part.startswith(&quot;t=&quot;):
+                try:
+                    timestamp = int(part[2:])
+                except ValueError:
+                    return None, []
+            elif part.startswith(&quot;v1=&quot;):
+                sig = part[3:]
+                # Validate hex
+                try:
+                    bytes.fromhex(sig)
+                    v1_sigs.append(sig)
+                except ValueError:
+                    pass
+        return timestamp, v1_sigs
+
+    def _evict_old_nonces(self, now_mono: float) -&gt; None:
+        while self._seen_queue:
+            insert_time, nonce = self._seen_queue[0]
+            if now_mono - insert_time &gt; self._replay_ttl:
+                self._seen_queue.popleft()
+                self._seen.discard(nonce)
+            else:
+                break
+
+    @staticmethod
+    def build_header(body: bytes, secret: str, timestamp: Optional[int] = None) -&gt; str:
+        &quot;&quot;&quot;Helper to build a valid webhook header (used in tests / sending).&quot;&quot;&quot;
+        if timestamp is None:
+            timestamp = int(time.time())
+        signed_payload  = f&quot;{timestamp}.&quot;.encode() + body
+        sig = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+        return f&quot;t={timestamp},v1={sig}&quot;
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_valid_webhook():
+    secret  = &quot;whsec_test_supersecret_key&quot;
+    body    = b&#x27;{&quot;event&quot;:&quot;payment.completed&quot;,&quot;amount&quot;:100}&#x27;
+    verifier = WebhookVerifier([secret])
+    header   = WebhookVerifier.build_header(body, secret)
+    result   = verifier.verify(body, header)
+    assert result.valid, f&quot;Expected valid: {result.failure_reason}&quot;
+    assert result.key_version == 0
+    print(f&quot;Valid webhook: passed (ts={result.timestamp})&quot;)
+
+
+def test_signature_mismatch():
+    secret  = &quot;correct_secret&quot;
+    body    = b&#x27;{&quot;event&quot;:&quot;test&quot;}&#x27;
+    verifier = WebhookVerifier([secret])
+    header   = WebhookVerifier.build_header(body, &quot;wrong_secret&quot;)
+    result   = verifier.verify(body, header)
+    assert not result.valid
+    assert result.failure_reason == &quot;signature_mismatch&quot;
+    print(f&quot;Signature mismatch: passed&quot;)
+
+
+def test_expired_timestamp():
+    secret  = &quot;my_secret&quot;
+    body    = b&#x27;{&quot;event&quot;:&quot;old&quot;}&#x27;
+    old_ts  = int(time.time()) - 600    # 10 minutes ago
+    header  = WebhookVerifier.build_header(body, secret, timestamp=old_ts)
+    verifier = WebhookVerifier([secret], max_age_s=300)
+    result   = verifier.verify(body, header)
+    assert not result.valid
+    assert &quot;too_old&quot; in result.failure_reason
+    print(f&quot;Expired timestamp: passed ({result.failure_reason})&quot;)
+
+
+def test_replay_detection():
+    secret  = &quot;replay_secret&quot;
+    body    = b&#x27;{&quot;event&quot;:&quot;charge&quot;}&#x27;
+    verifier = WebhookVerifier([secret])
+    header   = WebhookVerifier.build_header(body, secret)
+    r1 = verifier.verify(body, header)
+    assert r1.valid
+    r2 = verifier.verify(body, header)   # Same header — replay
+    assert not r2.valid
+    assert r2.failure_reason == &quot;replay_detected&quot;
+    print(f&quot;Replay detection: passed&quot;)
+
+
+def test_key_rotation():
+    old_secret = &quot;old_key&quot;
+    new_secret = &quot;new_key&quot;
+    body = b&#x27;{&quot;event&quot;:&quot;subscription.created&quot;}&#x27;
+    # Signed with old key
+    header = WebhookVerifier.build_header(body, old_secret)
+    # Verifier accepts both
+    verifier = WebhookVerifier([new_secret, old_secret])
+    result   = verifier.verify(body, header)
+    assert result.valid
+    assert result.key_version == 1   # matched old_key at index 1
+    print(f&quot;Key rotation: passed (matched key_version={result.key_version})&quot;)
+
+
+def test_invalid_header():
+    verifier = WebhookVerifier([&quot;secret&quot;])
+    result   = verifier.verify(b&quot;body&quot;, &quot;not_a_valid_header&quot;)
+    assert not result.valid
+    assert result.failure_reason == &quot;invalid_header&quot;
+    print(f&quot;Invalid header: passed&quot;)
+
+
+def test_body_tampering():
+    secret   = &quot;tamper_secret&quot;
+    body     = b&#x27;{&quot;amount&quot;:100}&#x27;
+    header   = WebhookVerifier.build_header(body, secret)
+    tampered = b&#x27;{&quot;amount&quot;:99999}&#x27;
+    verifier = WebhookVerifier([secret])
+    result   = verifier.verify(tampered, header)
+    assert not result.valid
+    print(f&quot;Body tampering detected: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+WEBHOOK SECURITY THREAT MODEL
+--------------------------------
+Webhooks are server-to-server callbacks.  Threats:
+  1. SPOOFED WEBHOOKS: attacker sends a fake webhook to trigger actions
+     (e.g., fake &quot;payment.completed&quot; to release goods without payment).
+     Fix: HMAC signature verification.
+
+  2. REPLAY ATTACKS: attacker captures a legitimate webhook and resends it.
+     E.g., replay &quot;order.shipped&quot; triggers duplicate fulfillment.
+     Fix: Timestamp freshness (5-minute window) + nonce tracking.
+
+  3. TIMING ATTACKS ON SIGNATURE COMPARISON:
+     if sig == expected: leaks timing information.
+     Fix: hmac.compare_digest.
+
+  4. MAN-IN-THE-MIDDLE:
+     If delivered over HTTP, payload and signature visible.
+     Fix: Enforce HTTPS on webhook endpoint; validate TLS certificate.
+
+  5. CLOCK SKEW:
+     Sender and receiver clocks differ by more than tolerance.
+     Fix: Use NTP; 5-minute window accommodates typical skew.
+
+STRIPE WEBHOOK HEADER FORMAT (REAL-WORLD REFERENCE)
+-----------------------------------------------------
+  Stripe-Signature: t=1492774577,v1=5257a869...,v0=6ffbb59b...
+  v1 = HMAC-SHA256(secret, f&quot;{t}.{raw_body}&quot;)
+  v0 = legacy MD5 (deprecated); our implementation only validates v1.
+
+PRODUCTION CHECKLIST
+--------------------
+  ✓ Always verify signature before processing
+  ✓ Use constant-time comparison
+  ✓ Check timestamp freshness
+  ✓ Deduplicate by event ID (webhook_id field) not just timestamp+sig
+  ✓ Log all verification failures with body hash (not body) for forensics
+  ✓ Respond with 200 quickly; process async to avoid timeout retries
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_webhook()
+    test_signature_mismatch()
+    test_expired_timestamp()
+    test_replay_detection()
+    test_key_rotation()
+    test_invalid_header()
+    test_body_tampering()
+</code></pre>
+</body>
+</html>

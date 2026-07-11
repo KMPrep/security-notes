@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Cloud IAM — The Authorization Control Plane</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Identity\Cloud-IAM\README.md</p>
+<h1 id="gcp-cloud-iam-the-authorization-control-plane">GCP Cloud IAM — The Authorization Control Plane</h1>
+<p><strong>Cloud:</strong> Google Cloud Platform<br />
+<strong>Category:</strong> Identity, Authentication &amp; Authorization<br />
+<strong>Key Docs:</strong> <a href="https://cloud.google.com/iam/docs/overview">IAM Overview</a> · <a href="https://cloud.google.com/iam/docs/reference/rest/v1/Policy">Policy Reference</a> · <a href="https://cloud.google.com/iam/docs/conditions-overview">IAM Conditions / CEL</a> · <a href="https://cloud.google.com/iam/docs/deny-overview">Deny Policies</a><br />
+<strong>ATT&amp;CK:</strong> T1078.004 (Valid Accounts: Cloud), T1548 (Abuse Elevation Control), T1098 (Account Manipulation), T1550.001 (Application Access Token)</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Cloud IAM is the single authorization decision point for almost every Google Cloud API call. When a principal calls <code>storage.objects.get</code> or <code>compute.instances.setMetadata</code>, the request is routed through IAM's policy evaluation engine, which answers one question: <em>is this identity allowed to perform this permission on this resource, right now, under these conditions?</em> IAM is not an identity provider — it does not authenticate humans (Google Identity / Workspace / Cloud Identity does) — it is the authorization plane that binds already-authenticated principals to roles on resources arranged in a hierarchy (organization → folder → project → resource). Because a single over-broad binding at the org node cascades to every project beneath it, IAM misconfiguration is the highest-leverage misconfiguration in GCP: it is consistently the root cause behind cloud breaches, and service-account privilege escalation is the most common lateral-movement path attackers use once they land in a project.</p>
+<p>At scale the hard problems are not "how do I grant access" but "how do I prevent the accumulation of standing, unused, transitively-escalatable privilege across tens of thousands of principals and resources." That is where predefined roles, custom roles, IAM Conditions, deny policies, the policy analyzer, and the recommender come in.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- IAM answers authorization, not authentication; every request is evaluated against the <strong>union of allow-policies inherited down the hierarchy</strong>, minus any matching <strong>deny-policy</strong> — and IAM is <strong>additive with no allow-precedence over parents</strong> (a child cannot subtract a parent's grant; only a deny policy or Org Policy can).<br />
+- <strong>Deny always wins.</strong> Evaluation is: is there a matching deny rule? → deny. Otherwise, is there a matching allow binding (including inherited)? → allow. Otherwise → default deny.<br />
+- <strong>Primitive roles (owner/editor/viewer) are dangerous</strong> because they are thousands of permissions wide, cross-service, and <code>owner</code> includes <code>setIamPolicy</code> — meaning owner can re-grant itself anything. Prefer predefined, then custom.<br />
+- <strong>Service accounts are the crown jewels.</strong> <code>iam.serviceAccounts.getAccessToken</code>, <code>getOpenIdToken</code>, <code>implicitDelegation</code>, <code>signBlob</code>, and <code>actAs</code> are privilege-escalation primitives: they let a low-priv identity <em>become</em> a high-priv SA.<br />
+- <strong><code>allUsers</code> / <code>allAuthenticatedUsers</code></strong> are the public-access members; a single binding of <code>allUsers</code> to <code>roles/storage.objectViewer</code> makes a bucket world-readable. Detect and block with Org Policy <code>iam.allowedPolicyMemberDomains</code> (domain restricted sharing).</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>IAM's model has three nouns and one verb. The nouns are <strong>principals</strong> (who), <strong>roles</strong> (a named bundle of permissions), and <strong>resources</strong> (what, arranged in a hierarchy). The verb is the <strong>binding</strong> that ties a principal to a role on a resource inside an <strong>allow policy</strong> (<code>google.iam.v1.Policy</code>). A separate object type, the <strong>deny policy</strong>, attaches deny rules that are evaluated <em>before</em> allow.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Principal (member)</td>
+<td>The identity in a binding: <code>user:</code>, <code>group:</code>, <code>serviceAccount:</code>, <code>domain:</code>, <code>principal:</code>/<code>principalSet:</code> (Workload Identity Federation), <code>allUsers</code>, <code>allAuthenticatedUsers</code></td>
+</tr>
+<tr>
+<td>Permission</td>
+<td>Fine-grained action string <code>service.resource.verb</code>, e.g. <code>storage.objects.get</code>, <code>iam.serviceAccounts.getAccessToken</code>. You never grant these directly</td>
+</tr>
+<tr>
+<td>Role</td>
+<td>A named collection of permissions. Three kinds: <strong>primitive</strong> (owner/editor/viewer), <strong>predefined</strong> (Google-managed, e.g. <code>roles/storage.admin</code>), <strong>custom</strong> (org/project-defined)</td>
+</tr>
+<tr>
+<td>Binding</td>
+<td><code>{role, members[], condition?}</code> — the atomic grant inside an allow policy</td>
+</tr>
+<tr>
+<td>Allow policy</td>
+<td>The <code>Policy</code> object attached to a resource; a list of bindings + an <code>etag</code> for optimistic concurrency</td>
+</tr>
+<tr>
+<td>Deny policy</td>
+<td>A separate object (<code>v2/policies</code>) with deny rules that block permissions regardless of allow policy; evaluated first</td>
+</tr>
+<tr>
+<td>IAM Condition</td>
+<td>A CEL expression on request/resource attributes gating a single binding or deny rule</td>
+</tr>
+<tr>
+<td>Resource hierarchy</td>
+<td>Organization → Folder(s) → Project → Service resource. Policies <strong>inherit downward</strong> and are unioned</td>
+</tr>
+<tr>
+<td>Basic vs granular</td>
+<td>Basic = primitive roles (legacy, wide). Granular = predefined + custom (least privilege)</td>
+</tr>
+<tr>
+<td>etag</td>
+<td>Version tag on a policy read; setIamPolicy fails if etag is stale — prevents lost updates</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Effective policy = union of allow bindings from the resource and every ancestor</strong>, evaluated after subtracting any matching deny rule. There is no concept of a child policy "narrowing" a parent's grant through the allow policy — inheritance is purely additive. The only ways to <em>remove</em> effective access a parent grants are (a) a <strong>deny policy</strong>, (b) an <strong>Organization Policy</strong> constraint (a different system, e.g. <code>iam.disableServiceAccountKeyCreation</code>), or (c) <strong>VPC Service Controls</strong> perimeters (network-context, orthogonal to IAM identity).</p>
+<p><strong>Roles are versioned bundles.</strong> <code>roles/storage.objectAdmin</code> maps to a concrete permission set that Google maintains; when Google adds a new permission to a service they can add it to predefined roles (which is convenient but means predefined roles silently widen over time — a reason security teams sometimes freeze critical grants to custom roles).</p>
+<h3 id="22-concrete-configuration">2.2 Concrete Configuration</h3>
+<p><strong>Reading and understanding the effective policy on a project.</strong> Always start an investigation here:</p>
+<pre><code class="language-bash"># Full allow policy for a project (bindings + conditions + etag)
+gcloud projects get-iam-policy prod-payments-01 --format=json
+
+# Who has a specific dangerous role, across the project
+gcloud projects get-iam-policy prod-payments-01 \
+  --flatten=&quot;bindings[].members&quot; \
+  --filter=&quot;bindings.role:roles/owner&quot; \
+  --format=&quot;table(bindings.members)&quot;
+</code></pre>
+<p><strong>Granting a predefined role (least-privilege default).</strong> Grant the narrowest predefined role, not a primitive:</p>
+<pre><code class="language-bash"># GOOD: object-level read on ONE bucket, not project-wide storage.admin
+gcloud storage buckets add-iam-policy-binding gs://pay-invoices-prod \
+  --member=&quot;group:invoice-readers@example.com&quot; \
+  --role=&quot;roles/storage.objectViewer&quot;
+
+# BAD (do not do this): project-wide editor to a human
+# gcloud projects add-iam-policy-binding prod-payments-01 \
+#   --member=&quot;user:alice@example.com&quot; --role=&quot;roles/editor&quot;
+</code></pre>
+<p><strong>A policy binding as JSON</strong> — this is what <code>get-iam-policy</code> returns and what you'd store in IaC. Note the <code>condition</code> block and the <code>version: 3</code> (required whenever conditions are present):</p>
+<pre><code class="language-json">{
+  &quot;version&quot;: 3,
+  &quot;etag&quot;: &quot;BwYD1a2b3c4=&quot;,
+  &quot;bindings&quot;: [
+    {
+      &quot;role&quot;: &quot;roles/storage.objectViewer&quot;,
+      &quot;members&quot;: [
+        &quot;group:invoice-readers@example.com&quot;,
+        &quot;serviceAccount:reporting@prod-payments-01.iam.gserviceaccount.com&quot;
+      ]
+    },
+    {
+      &quot;role&quot;: &quot;roles/bigquery.dataViewer&quot;,
+      &quot;members&quot;: [&quot;user:analyst@example.com&quot;],
+      &quot;condition&quot;: {
+        &quot;title&quot;: &quot;biz-hours-corp-network-only&quot;,
+        &quot;description&quot;: &quot;Analyst can read BQ only during business hours from corp IPs&quot;,
+        &quot;expression&quot;: &quot;request.time.getHours('America/Los_Angeles') &gt;= 8 &amp;&amp; request.time.getHours('America/Los_Angeles') &lt;= 18&quot;
+      }
+    }
+  ]
+}
+</code></pre>
+<p><strong>Applying a policy from a file</strong> (the read-modify-write pattern with etag protection):</p>
+<pre><code class="language-bash">gcloud projects get-iam-policy prod-payments-01 --format=json &gt; policy.json
+# edit policy.json ...
+gcloud projects set-iam-policy prod-payments-01 policy.json
+# If the etag is stale (someone else changed it), this fails loudly — good.
+</code></pre>
+<p><strong>A real IAM Condition (CEL)</strong> gating access by resource name prefix and time — a common pattern for "read only the prod-* buckets, and only until an expiry date":</p>
+<pre><code class="language-bash">gcloud projects add-iam-policy-binding prod-payments-01 \
+  --member=&quot;serviceAccount:etl@prod-payments-01.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/storage.objectViewer&quot; \
+  --condition='expression=resource.name.startsWith(&quot;projects/_/buckets/prod-&quot;) &amp;&amp; request.time &lt; timestamp(&quot;2026-12-31T00:00:00Z&quot;),title=prod-buckets-until-eoy,description=ETL scoped read'
+</code></pre>
+<p>CEL attributes you can reference in IAM Conditions: <code>resource.name</code>, <code>resource.type</code>, <code>resource.service</code>, <code>request.time</code>, and for a subset of services <code>request.auth.claims</code>. Note the limit: conditions can inspect the <em>target resource</em> and the <em>request</em>, but <strong>not arbitrary resource tags or the caller's group membership</strong> — that scoping is coarser than AWS's condition keys.</p>
+<p><strong>A deny policy</strong> (the "even if allowed, block it" control). This blocks SA key creation org-wide except for a break-glass group — deny policies are attached to org/folder/project nodes via the <code>iam.googleapis.com</code> v2 API:</p>
+<pre><code class="language-json">{
+  &quot;displayName&quot;: &quot;Block SA key creation except break-glass&quot;,
+  &quot;rules&quot;: [
+    {
+      &quot;denyRule&quot;: {
+        &quot;deniedPrincipals&quot;: [&quot;principalSet://goog/public:all&quot;],
+        &quot;exceptionPrincipals&quot;: [&quot;principalSet://goog/group/breakglass-sa-admins@example.com&quot;],
+        &quot;deniedPermissions&quot;: [&quot;iam.googleapis.com/serviceAccountKeys.create&quot;],
+        &quot;denialCondition&quot;: {
+          &quot;expression&quot;: &quot;!resource.matchTag('12345/env', 'sandbox')&quot;
+        }
+      }
+    }
+  ]
+}
+</code></pre>
+<pre><code class="language-bash">gcloud iam policies create-policy deny-sa-keys \
+  --attachment-point=&quot;cloudresourcemanager.googleapis.com/organizations/1234567890&quot; \
+  --kind=denypolicies --policy-file=deny-sa-keys.json
+</code></pre>
+<p><strong>Creating a custom role</strong> to replace an over-wide predefined grant. Define exactly the permissions a workload needs:</p>
+<pre><code class="language-bash">gcloud iam roles create invoiceProcessor \
+  --project=prod-payments-01 \
+  --title=&quot;Invoice Processor&quot; \
+  --description=&quot;Read invoices, write results, no admin&quot; \
+  --permissions=storage.objects.get,storage.objects.list,storage.objects.create,pubsub.topics.publish \
+  --stage=GA
+</code></pre>
+<p><strong>Service-account impersonation done right</strong> — grant <code>roles/iam.serviceAccountTokenCreator</code> on a <em>specific SA</em> (never project-wide), so the on-call SRE can mint short-lived tokens for the deploy SA without holding a key:</p>
+<pre><code class="language-bash">gcloud iam service-accounts add-iam-policy-binding \
+  deploy@prod-payments-01.iam.gserviceaccount.com \
+  --member=&quot;group:sre-oncall@example.com&quot; \
+  --role=&quot;roles/iam.serviceAccountTokenCreator&quot;
+
+# Use it — no exported key, ~1h token:
+gcloud storage ls gs://pay-invoices-prod \
+  --impersonate-service-account=deploy@prod-payments-01.iam.gserviceaccount.com
+</code></pre>
+<p><strong>Workload Identity Federation</strong> — the modern keyless pattern that lets an external identity (GitHub Actions OIDC, AWS role, on-prem) act as a GCP SA without a downloaded key. The <code>principalSet</code> member ties a specific external subject to the SA:</p>
+<pre><code class="language-bash">gcloud iam service-accounts add-iam-policy-binding \
+  ci-deployer@prod-payments-01.iam.gserviceaccount.com \
+  --role=&quot;roles/iam.workloadIdentityUser&quot; \
+  --member=&quot;principalSet://iam.googleapis.com/projects/1234567890/locations/global/workloadIdentityPools/github-pool/attribute.repository/acme/payments&quot;
+</code></pre>
+<p><strong>Recommender &amp; Policy Analyzer</strong> — the tools that find over-grant and answer "who can reach what":</p>
+<pre><code class="language-bash"># Role recommendations: unused permissions → suggested smaller role
+gcloud recommender recommendations list \
+  --project=prod-payments-01 \
+  --recommender=google.iam.policy.Recommender \
+  --location=global --format=json
+
+# Policy Analyzer: &quot;who can call storage.objects.get on this bucket?&quot; (needs Policy Analyzer API)
+gcloud asset analyze-iam-policy \
+  --organization=1234567890 \
+  --permissions=storage.objects.get \
+  --resource-selector-full-resource-name=&quot;//storage.googleapis.com/pay-invoices-prod&quot;
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Resource hierarchy and downward policy inheritance.</strong></p>
+<pre class="mermaid">
+flowchart TD
+    Org[Organization node] --> FolderA[Folder Payments]
+    Org --> FolderB[Folder Analytics]
+    FolderA --> ProjA[Project prod-payments-01]
+    FolderA --> ProjB[Project stg-payments-01]
+    ProjA --> Bucket[Bucket pay-invoices-prod]
+    ProjA --> SA[Service account deploy]
+    Org -.grant at org inherits everywhere.-> Bucket
+    FolderA -.folder grant inherits to both projects.-> ProjB
+</pre>
+<p><strong>Diagram B — Request evaluation: deny first, then union of inherited allow.</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[API request with permission and resource] --> B[Authenticate principal]
+    B --> C{Matching deny rule on resource or ancestor}
+    C -->|Yes and condition true| D[Deny]
+    C -->|No| E[Gather allow bindings from resource and all ancestors]
+    E --> F{Any binding grants the permission}
+    F -->|No| G[Default deny]
+    F -->|Yes| H{Binding condition satisfied}
+    H -->|No| G
+    H -->|Yes| I[Allow]
+</pre>
+<p><strong>Diagram C — Service-account impersonation token flow.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant P as Low priv principal
+    participant IAM as IAM Credentials API
+    participant Pol as IAM policy engine
+    participant SA as Target service account
+    participant GCS as Cloud Storage
+    P->>IAM: generateAccessToken for target SA
+    IAM->>Pol: Does caller have serviceAccounts.getAccessToken on target SA
+    Pol-->>IAM: Allow
+    IAM-->>P: Short lived OAuth token as target SA
+    P->>GCS: storage.objects.get signed as target SA
+    GCS->>Pol: Evaluate target SA permissions
+    Pol-->>GCS: Allow
+    GCS-->>P: Object bytes
+</pre>
+<p><strong>Diagram D — Privilege-escalation state machine from a foothold.</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Foothold
+    Foothold --> EnumIAM: getIamPolicy testIamPermissions
+    EnumIAM --> ImpersonateSA: has getAccessToken on higher SA
+    EnumIAM --> EditPolicy: has setIamPolicy
+    ImpersonateSA --> ProjectAdmin: target SA is owner or editor
+    EditPolicy --> ProjectAdmin: bind self to owner
+    ProjectAdmin --> CrossProject: actAs deploy to other project
+    CrossProject --> [*]
+</pre>
+<p><strong>Diagram E — Workload Identity Federation keyless exchange.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant GH as GitHub Actions
+    participant STS as GCP STS
+    participant Pool as Workload Identity Pool
+    participant SA as GCP service account
+    participant API as Target GCP API
+    GH->>STS: Present OIDC token from GitHub
+    STS->>Pool: Validate issuer audience and attribute mapping
+    Pool-->>STS: Federated principal identity
+    STS-->>GH: Federated access token
+    GH->>SA: impersonate via workloadIdentityUser binding
+    SA-->>GH: Short lived SA token
+    GH->>API: Deploy call as SA
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root Cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GhostToken (CVE-class, Google Cloud)</td>
+<td>2023</td>
+<td>OAuth app tokens/SA grants survived project deletion in a "pending deletion" state, letting a malicious app stay hidden and re-attach</td>
+<td>Deleted ≠ revoked; audit lingering grants and tokens, not just live resources</td>
+</tr>
+<tr>
+<td>Rhino Security Labs <code>privesc</code> research</td>
+<td>2020–2024</td>
+<td>Documented 30+ GCP privilege-escalation methods via impersonation, <code>actAs</code>, <code>setIamPolicy</code>, deployment-manager</td>
+<td>Fine-grained permissions like <code>iam.serviceAccounts.getAccessToken</code> are admin-equivalent</td>
+</tr>
+<tr>
+<td>Vulnerable-by-Design SAs on GCE/GKE</td>
+<td>ongoing</td>
+<td>Default Compute Engine SA (<code>PROJECT_NUMBER-compute@</code>) granted <code>roles/editor</code> and attached to every VM</td>
+<td>A single SSRF/RCE on any VM yields project-wide editor via the metadata server</td>
+</tr>
+<tr>
+<td>Google Groups → GCP grant confusion</td>
+<td>2018</td>
+<td>Externally-joinable Google Groups bound to IAM roles; anyone could join the group and inherit access</td>
+<td>Treat group membership as an access boundary; lock group join policies</td>
+</tr>
+<tr>
+<td>Capital One (AWS, analog)</td>
+<td>2019</td>
+<td>SSRF → instance metadata → over-privileged role → S3 exfiltration of 100M records</td>
+<td>The GCP equivalent: SSRF → GCE metadata token → default editor SA. Same class, different cloud</td>
+</tr>
+<tr>
+<td>Codecov supply-chain (analog)</td>
+<td>2021</td>
+<td>CI env leaked long-lived cloud creds harvested from build logs</td>
+<td>Kill static SA keys; use Workload Identity Federation with short-lived tokens</td>
+</tr>
+<tr>
+<td>Public GCS buckets (recurring)</td>
+<td>2017–present</td>
+<td><code>allUsers</code> bound to <code>objectViewer</code>; buckets indexed by scanners</td>
+<td>Enforce <code>iam.allowedPolicyMemberDomains</code>; block public access at org level</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — the default Compute Engine SA as blast-radius amplifier.</strong> In a default GCP project, the Compute Engine default service account carries <code>roles/editor</code> and is attached to every GCE instance and GKE node unless you override it. Suppose an app on one VM has an SSRF vulnerability. An attacker who reaches the instance can call the metadata server (<code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code>) and retrieve an OAuth token for that SA. Because the SA is project editor, the token now grants write access to nearly every resource in the project — start VMs, read Cloud Storage, publish to Pub/Sub, edit firewall rules. This is precisely the shape of the Capital One breach translated to GCP. <strong>The control that stops it:</strong> create a purpose-built SA with only the roles the workload needs, set <code>--service-account</code> and <code>--scopes</code> explicitly on the instance, disable the default SA's editor grant, and block instance-metadata SSRF paths. Google's own hardening guidance now recommends disabling automatic role grants to default SAs via the <code>iam.automaticIamGrantsForDefaultServiceAccounts</code> Org Policy.</p>
+<p><strong>Case study — impersonation chain privilege escalation.</strong> A developer SA is granted <code>roles/iam.serviceAccountTokenCreator</code> at the <em>project</em> level (a common mistake — people scope it to the project rather than a single SA). That means the developer SA can mint tokens for <strong>any</strong> SA in the project, including a <code>terraform@</code> SA that holds <code>roles/owner</code>. The escalation is two API calls: enumerate SAs (<code>gcloud iam service-accounts list</code>), then <code>gcloud ... --impersonate-service-account=terraform@...</code>. Now the low-priv developer effectively owns the project. <strong>The control:</strong> never grant <code>serviceAccountTokenCreator</code>/<code>serviceAccountUser</code> at project or folder scope; bind it on the <em>specific target SA resource</em>, and use IAM Conditions + deny policies to prevent broad impersonation. Policy Analyzer would surface "developer SA can obtain owner" before an attacker does.</p>
+<p><strong>Case study — public bucket exfiltration.</strong> A team fronts a static site with a GCS bucket and, to "make it work," binds <code>allUsers</code> to <code>roles/storage.objectViewer</code> on the bucket. Later, sensitive exports land in the same bucket. Because <code>allUsers</code> means unauthenticated internet, any scanner (GrayhatWarfare-style bucket enumerators) can list and pull objects. <strong>The control:</strong> the <code>iam.allowedPolicyMemberDomains</code> (Domain Restricted Sharing) org policy would have rejected the <code>allUsers</code> binding at write time; Public Access Prevention on the bucket blocks it at the storage layer; SCC surfaces existing public buckets.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Primitive <code>owner</code>/<code>editor</code> granted to humans/SAs</td>
+<td>T1078.004 Valid Accounts</td>
+<td>Convenience over least privilege</td>
+<td>Thousands of permissions; owner can re-grant itself</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Default Compute SA is editor + attached to all VMs</td>
+<td>T1078.004 / T1552.005</td>
+<td>GCP defaults not overridden</td>
+<td>SSRF/RCE on any VM → project editor</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>iam.serviceAccounts.getAccessToken</code> broadly granted</td>
+<td>T1548 / T1550.001</td>
+<td>TokenCreator scoped to project not SA</td>
+<td>Impersonate higher-priv SAs; lateral &amp; vertical escalation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>actAs</code> / <code>serviceAccountUser</code> over-granted</td>
+<td>T1548 Abuse Elevation</td>
+<td>Needed to attach SA to compute; scoped too wide</td>
+<td>Deploy code running as a powerful SA</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>setIamPolicy</code> / <code>roles/iam.securityAdmin</code> abuse</td>
+<td>T1098 Account Manipulation</td>
+<td>Whoever can set policy can grant self anything</td>
+<td>Full self-escalation to owner</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Public bindings <code>allUsers</code>/<code>allAuthenticatedUsers</code></td>
+<td>T1530 Data from Cloud Storage</td>
+<td>"Make it public" shortcut</td>
+<td>World-readable/writable buckets, datasets, images</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Static SA key files (<code>.json</code>) leaked</td>
+<td>T1552.001 Credentials in Files</td>
+<td>Keys downloaded and embedded in repos/CI</td>
+<td>Long-lived, non-expiring cloud access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cross-project escalation via shared SA</td>
+<td>T1078.004</td>
+<td>SA in project A has roles in project B</td>
+<td>Pivot across project boundary</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Externally-joinable Google Group bound to role</td>
+<td>T1136 Create Account (analog)</td>
+<td>Group open-join + IAM binding</td>
+<td>Anyone joins group → inherits access</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Predefined roles silently widen over time</td>
+<td>Misconfiguration</td>
+<td>Google adds perms to predefined roles</td>
+<td>Latent scope creep on critical grants</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Conditions bypass — role granted un-conditioned elsewhere</td>
+<td>Detection gap</td>
+<td>Same principal has an un-conditioned binding</td>
+<td>Condition provides false sense of security</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Deleted-but-lingering grants / tokens (GhostToken)</td>
+<td>T1098 Persistence</td>
+<td>Revocation ≠ deletion semantics</td>
+<td>Hidden persistent access</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Recommender ignored; standing unused privilege</td>
+<td>Governance gap</td>
+<td>No least-privilege lifecycle</td>
+<td>Large idle attack surface</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Domain-wide delegation on Workspace SA</td>
+<td>T1550 / T1098</td>
+<td>SA granted org-wide OAuth scopes</td>
+<td>Read all users' Gmail/Drive across the tenant</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>deploymentmanager</code> / infra-as-code SA is owner</td>
+<td>T1548</td>
+<td>IaC SA over-privileged for convenience</td>
+<td>Any pipeline compromise = owner</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Basic-role grant at org node</td>
+<td>T1078.004</td>
+<td>Grant made at wrong hierarchy level</td>
+<td>Cascades to every project in the org</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Missing MFA / weak session for org admins</td>
+<td>T1621 MFA / T1078</td>
+<td>Human org-admin without strong 2SV</td>
+<td>Org takeover</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Workload Identity pool attribute mapping too loose</td>
+<td>T1550.001</td>
+<td><code>attribute.repository</code> not pinned; wildcard audience</td>
+<td>Any repo/branch can impersonate SA</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>testIamPermissions</code> recon undetected</td>
+<td>TA0007 Discovery</td>
+<td>Permission enumeration not alerted</td>
+<td>Attacker maps escalation path silently</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Firewall/API-key confusion mistaken for IAM</td>
+<td>Detection gap</td>
+<td>Assuming API keys carry IAM identity</td>
+<td>Unauthenticated API access via leaked key</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Primitive roles</td>
+<td>Ban owner/editor for workloads; use predefined/custom</td>
+<td>Policy design + Org Policy</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Default Compute SA editor</td>
+<td>Disable auto-grant; per-workload SA + scopes</td>
+<td>Org Policy <code>iam.automaticIamGrants...</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Broad TokenCreator</td>
+<td>Bind <code>serviceAccountTokenCreator</code> on the specific SA only</td>
+<td>Resource-level binding</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>actAs</code> over-grant</td>
+<td>Scope <code>serviceAccountUser</code> to one SA; audit <code>actAs</code></td>
+<td>Resource-level binding</td>
+</tr>
+<tr>
+<td>5</td>
+<td>setIamPolicy abuse</td>
+<td>Restrict <code>securityAdmin</code>/<code>resourcemanager.*Admin</code>; deny policy</td>
+<td>Deny policy + review</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Public bindings</td>
+<td><code>iam.allowedPolicyMemberDomains</code> + Public Access Prevention</td>
+<td>Org Policy + Storage</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Static SA keys</td>
+<td><code>iam.disableServiceAccountKeyCreation</code>; Workload Identity Fed</td>
+<td>Org Policy</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cross-project SA</td>
+<td>Separate SAs per trust boundary; Policy Analyzer sweeps</td>
+<td>Design + audit</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Open Google Groups</td>
+<td>Lock group join; restrict externally-owned members</td>
+<td>Workspace admin</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Predefined role creep</td>
+<td>Freeze critical grants to pinned custom roles</td>
+<td>Role design</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Condition bypass</td>
+<td>Ensure no parallel un-conditioned binding; deny policy backstop</td>
+<td>Deny policy + review</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Lingering grants</td>
+<td>Periodic token/grant audit; SCC + asset inventory</td>
+<td>Detection</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Standing privilege</td>
+<td>Act on IAM Recommender; expire grants via Conditions</td>
+<td>Recommender + Conditions</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Domain-wide delegation</td>
+<td>Inventory DWD SAs; restrict OAuth scopes; prefer per-user</td>
+<td>Workspace + IAM</td>
+</tr>
+<tr>
+<td>15</td>
+<td>IaC SA is owner</td>
+<td>Give IaC SA scoped predefined roles; separate plan/apply</td>
+<td>Role design</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Org-node basic role</td>
+<td>Grant at lowest hierarchy level; alert on org-node bindings</td>
+<td>Governance + detection</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Weak admin auth</td>
+<td>Enforce 2SV/security keys for privileged principals</td>
+<td>Cloud Identity</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Loose WIF mapping</td>
+<td>Pin <code>attribute.repository</code>/audience; condition on subject</td>
+<td>WIF config</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Recon undetected</td>
+<td>Alert on <code>testIamPermissions</code> spikes in audit logs</td>
+<td>Detection</td>
+</tr>
+<tr>
+<td>20</td>
+<td>API-key misuse</td>
+<td>Restrict/rotate API keys; they are not IAM identities</td>
+<td>API key config</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in Depth</h3>
+<p><strong>1. Eliminate primitive roles and the default-SA editor grant.</strong> Primitive roles (<code>roles/owner</code>, <code>roles/editor</code>, <code>roles/viewer</code>) predate the granular role system; each spans thousands of permissions across every service, and <code>owner</code> uniquely includes <code>resourcemanager.projects.setIamPolicy</code> — so an owner can grant itself or anyone else <em>any</em> role, making it a self-perpetuating admin. The concrete fix is a layered one: (a) set the Org Policy <code>constraints/iam.automaticIamGrantsForDefaultServiceAccounts</code> to prevent new projects from auto-granting editor to the Compute/App Engine default SAs; (b) sweep existing projects with <code>gcloud projects get-iam-policy ... --filter='bindings.role:roles/editor OR roles/owner'</code> and replace with predefined roles; (c) attach purpose-built SAs to compute with explicit <code>--service-account</code> and <code>--scopes</code>. Trade-off: least privilege generates churn — you must discover the real permission set (use Recommender / audit-log analysis), and overly-tight roles cause runtime <code>PERMISSION_DENIED</code> errors that are hard to debug. Budget for an iterate-and-widen loop.</p>
+<p><strong>2. Scope impersonation permissions to the target SA, never the project.</strong> The permissions <code>iam.serviceAccounts.getAccessToken</code>, <code>getOpenIdToken</code>, <code>signBlob</code>, <code>signJwt</code>, <code>implicitDelegation</code>, and <code>actAs</code> (via <code>roles/iam.serviceAccountUser</code> / <code>serviceAccountTokenCreator</code>) are the primary GCP privilege-escalation primitives — Rhino Security Labs' research catalogs how each turns a low-priv identity into a high-priv one. The control is <em>where</em> you bind them: attach the role to the specific SA resource (<code>gcloud iam service-accounts add-iam-policy-binding TARGET_SA ...</code>), not to the project. Add an IAM Condition to limit the source, and back it with a deny policy that blocks <code>iam.serviceAccounts.getAccessToken</code> except for named principals. Trade-off: teams love project-level TokenCreator because it "just works" for CI; you'll get pushback, so pair the restriction with a self-service, audited impersonation path.</p>
+<p><strong>3. Kill static service-account keys; use Workload Identity Federation.</strong> Downloaded SA key JSON files are long-lived (they don't expire), frequently committed to git, and pasted into CI secrets — they are the single most common GCP credential-leak vector. The mitigation is to make them impossible: set the Org Policy <code>constraints/iam.disableServiceAccountKeyCreation</code> (and <code>disableServiceAccountKeyUpload</code>), then migrate every workload to short-lived tokens — Workload Identity Federation for external CI (GitHub Actions OIDC, AWS, on-prem), and Workload Identity for GKE pods. Federation trades a downloaded secret for a trust relationship: you pin the external issuer, audience, and subject via attribute mappings so only a specific repo/branch can impersonate. Trade-off: WIF setup is fiddly (attribute conditions, audience mismatches produce opaque 403s), and some legacy tools still expect a key file — for those, mint short-lived keys via <code>signJwt</code> rather than a permanent key.</p>
+<p><strong>4. Block public and cross-domain sharing with Org Policy.</strong> <code>allUsers</code> (any unauthenticated caller) and <code>allAuthenticatedUsers</code> (any Google account, including personal Gmail) are the two public principals; a single binding makes a resource world-accessible. The strongest control is <code>constraints/iam.allowedPolicyMemberDomains</code> (Domain Restricted Sharing), which restricts IAM bindings to principals in your allowed Cloud Identity customer IDs — an attempt to bind <code>allUsers</code> is <em>rejected at write time</em> with an error, which is far better than detecting it after the fact. Layer Storage's Public Access Prevention on top for defense-in-depth. Trade-off: DRS breaks legitimate cross-org sharing (partners, external auditors) — you'll need an explicit exception process and folder-level policy overrides, and it can surprise teams that rely on <code>allAuthenticatedUsers</code> for "internal-ish" sharing.</p>
+<p><strong>5. Run the IAM Recommender and Policy Analyzer as a continuous loop.</strong> Standing, unused privilege is the ambient risk; the Recommender uses 90 days of audit-log usage to propose smaller roles ("this SA has <code>storage.admin</code> but only ever called <code>objects.get/list</code> → recommend <code>objectViewer</code>"), and Policy Analyzer answers reachability questions ("who can call <code>iam.serviceAccounts.getAccessToken</code> on the terraform SA?") that reveal escalation paths before attackers find them. Operationalize it: export recommendations via <code>gcloud recommender recommendations list</code>, feed them into ticketing, and gate high-risk grants in CI with a Policy Analyzer check. Trade-off: recommendations are usage-based, so a permission used quarterly (e.g. DR failover) looks unused and may be wrongly removed — always human-review before applying, and tag known-rare permissions as exceptions.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<p><strong>What to log / telemetry sources.</strong> Cloud IAM produces its highest-value signal in <strong>Cloud Audit Logs</strong>:<br />
+- <strong>Admin Activity logs</strong> (<code>logName</code> ending <code>activity</code>) — always on, non-disableable; capture <code>SetIamPolicy</code>, <code>CreateServiceAccountKey</code>, role creation, <code>google.iam.admin.v1.*</code>. This is your primary IAM-change tail.<br />
+- <strong>Data Access logs</strong> (<code>logName</code> ending <code>data_access</code>) — off by default except for BigQuery; must be enabled to see <code>getIamPolicy</code>/<code>testIamPermissions</code> reads and object-level access. Enable for sensitive services.<br />
+- <strong><code>protoPayload.serviceData.policyDelta.bindingDeltas</code></strong> — the field that shows <em>exactly which member/role was added or removed</em> on a <code>SetIamPolicy</code>. This is the field to alert on.<br />
+- <strong><code>protoPayload.authenticationInfo.principalEmail</code></strong> — who did it; watch for impersonation chains where <code>principalEmail</code> is a SA and <code>serviceAccountDelegationInfo</code> shows a chain.<br />
+- <strong>IAM Credentials API</strong> calls (<code>GenerateAccessToken</code>, <code>GenerateIdToken</code>, <code>SignBlob</code>) — impersonation events.</p>
+<p><strong>Sample detection 1 — dangerous role grant (Log Analytics / BigQuery SQL over exported audit logs):</strong></p>
+<pre><code class="language-sql">SELECT
+  timestamp,
+  proto_payload.audit_log.authentication_info.principal_email AS actor,
+  JSON_VALUE(binding_delta, '$.member')  AS granted_member,
+  JSON_VALUE(binding_delta, '$.role')    AS granted_role,
+  JSON_VALUE(binding_delta, '$.action')  AS action
+FROM `org_logs.cloudaudit_googleapis_com_activity`,
+  UNNEST(JSON_QUERY_ARRAY(
+    proto_payload.audit_log.service_data,
+    '$.policyDelta.bindingDeltas')) AS binding_delta
+WHERE proto_payload.method_name = 'SetIamPolicy'
+  AND JSON_VALUE(binding_delta, '$.action') = 'ADD'
+  AND JSON_VALUE(binding_delta, '$.role') IN (
+    'roles/owner', 'roles/editor',
+    'roles/iam.securityAdmin', 'roles/iam.serviceAccountTokenCreator',
+    'roles/iam.serviceAccountUser', 'roles/resourcemanager.organizationAdmin')
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+ORDER BY timestamp DESC;
+</code></pre>
+<p><strong>Sample detection 2 — public IAM binding added (<code>allUsers</code>/<code>allAuthenticatedUsers</code>), Sigma:</strong></p>
+<pre><code class="language-yaml">title: Public IAM Binding Added in GCP
+id: 8f2c1e44-gcp-public-iam
+status: stable
+logsource:
+  product: gcp
+  service: audit
+detection:
+  selection:
+    protoPayload.methodName: 'SetIamPolicy'
+    protoPayload.serviceData.policyDelta.bindingDeltas.action: 'ADD'
+    protoPayload.serviceData.policyDelta.bindingDeltas.member:
+      - 'allUsers'
+      - 'allAuthenticatedUsers'
+  condition: selection
+level: high
+falsepositives:
+  - Intentional public buckets for static websites (allowlist those resources)
+tags:
+  - attack.t1530
+  - attack.t1098
+</code></pre>
+<p><strong>Sample detection 3 — service-account impersonation spike (KQL-style / Chronicle):</strong></p>
+<pre><code class="language-sql">SELECT principal_email, target_service_account, COUNT(*) AS token_count
+FROM iam_credentials_events
+WHERE method_name = 'GenerateAccessToken'
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+GROUP BY principal_email, target_service_account
+HAVING token_count &gt; 50   -- tune per baseline
+ORDER BY token_count DESC;
+</code></pre>
+<p><strong>Response playbook (containment → eradication → recovery):</strong><br />
+1. <strong>Confirm &amp; scope.</strong> Pull the <code>SetIamPolicy</code> / <code>GenerateAccessToken</code> events; identify the <code>principalEmail</code>, the added binding(s), and the resource/hierarchy node. Determine blast radius with Policy Analyzer ("what can this principal now reach?").<br />
+2. <strong>Contain — revoke the grant.</strong> <code>gcloud &lt;resource&gt; remove-iam-policy-binding</code> the malicious binding (mind the <code>etag</code> race). For an active impersonation, disable the abused SA (<code>gcloud iam service-accounts disable</code>) — this immediately invalidates its ability to be impersonated for new tokens.<br />
+3. <strong>Contain — cut existing tokens.</strong> Outstanding OAuth tokens live up to ~1 hour and are <em>not</em> revoked by removing the binding. Disabling/deleting the SA and rotating any static keys forces re-auth. For humans, revoke sessions via Cloud Identity and reset credentials.<br />
+4. <strong>Eradicate — remove persistence.</strong> Hunt for attacker-created SAs, new keys (<code>serviceAccountKeys.create</code>), added bindings elsewhere in the hierarchy, and Workspace domain-wide-delegation changes. Check for GhostToken-style lingering OAuth grants.<br />
+5. <strong>Eradicate — apply the missing guardrail.</strong> Add the deny policy / Org Policy that should have prevented it (<code>disableServiceAccountKeyCreation</code>, <code>allowedPolicyMemberDomains</code>, scoped TokenCreator).<br />
+6. <strong>Recover &amp; verify.</strong> Restore intended least-privilege bindings from IaC (source of truth), re-run Policy Analyzer to confirm the escalation path is gone, and re-enable services.<br />
+7. <strong>Post-incident.</strong> Backfill detections (alert on the exact binding delta seen), enable Data Access logs on the affected services if they were off, and add the escalation path to your continuous Policy Analyzer sweep.</p>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What is the difference between primitive, predefined, and custom roles, and why are primitive roles discouraged?</strong><br />
+Primitive (basic) roles — owner, editor, viewer — predate granular IAM and each span thousands of permissions across every service. Predefined roles are Google-maintained, service-scoped bundles (e.g. <code>roles/pubsub.publisher</code>) that follow least privilege. Custom roles are org/project-defined sets of exactly the permissions you list. Primitive roles are discouraged because they grossly over-grant, and <code>owner</code> in particular includes <code>setIamPolicy</code>, letting the holder re-grant itself anything — so it's effectively unbounded admin. You use predefined by default and custom when no predefined role fits.<br />
+<em>Signal: knows the role taxonomy and the specific danger of setIamPolicy in owner.</em></p>
+<p><strong>Q2. Walk me through how IAM decides whether to allow a request.</strong><br />
+IAM first checks <strong>deny policies</strong> on the resource and its ancestors; if a deny rule matches the permission and its condition is true, the request is denied outright. Otherwise IAM gathers the <strong>union of allow bindings</strong> from the resource and every ancestor up to the org node, checks whether any binding grants the requested permission to the principal, and evaluates that binding's condition. If a matching allowed binding with a satisfied condition exists, allow; otherwise default deny. The key properties: deny wins, allow is additive up the hierarchy, and there's no default access.<br />
+<em>Signal: understands deny-first, inheritance-as-union, default-deny.</em></p>
+<p><strong>Q3. What are <code>allUsers</code> and <code>allAuthenticatedUsers</code>?</strong><br />
+They are the two special public principals. <code>allUsers</code> means <em>anyone on the internet, unauthenticated</em> — no Google account required. <code>allAuthenticatedUsers</code> means <em>any principal authenticated with a Google account</em>, which includes personal Gmail accounts, not just your org. Binding either to a role makes the resource public to that audience; a single <code>allUsers</code> + <code>objectViewer</code> binding makes a bucket world-readable. You block both org-wide with the Domain Restricted Sharing org policy.<br />
+<em>Signal: knows allAuthenticatedUsers is not "internal" — it includes any Gmail.</em></p>
+<p><strong>Q4. How does policy inheritance work in the GCP resource hierarchy?</strong><br />
+Resources form a tree: organization → folders → projects → service resources. An allow policy set at any node is inherited by all descendants, and effective permissions are the <strong>union</strong> of policies from the resource up to the org. So a <code>roles/viewer</code> grant at the org node gives that principal viewer on every project and resource beneath. Inheritance is purely additive — a child policy cannot subtract a parent's grant; only a deny policy, an Org Policy constraint, or VPC Service Controls can remove effective access.<br />
+<em>Signal: knows inheritance is additive and children can't narrow parents via allow policy.</em></p>
+<p><strong>Q5. What is a service account and how does it differ from a user?</strong><br />
+A service account is a non-human identity used by workloads (VMs, GKE pods, CI) to authenticate to GCP APIs; it is identified by an email like <code>svc@project.iam.gserviceaccount.com</code> and can be both a <em>principal</em> (it's granted roles) and a <em>resource</em> (you set IAM policy on it to control who can impersonate it). Unlike a user, it has no password/2SV and authenticates via keys or, preferably, short-lived tokens from impersonation or Workload Identity Federation. Its dual nature — identity you grant and resource others can impersonate — is exactly why SAs are the primary privilege-escalation target.<br />
+<em>Signal: recognizes the principal/resource duality of SAs.</em></p>
+<h3 id="tier-2-system-design-trade-off">Tier 2 — System Design / Trade-off</h3>
+<p><strong>Q6. Design an IAM model for a 200-project org with prod/non-prod separation and 500 engineers. How do you avoid privilege sprawl?</strong><br />
+I'd anchor on the hierarchy: an org node, folders per environment (prod, non-prod, shared-services) and per business unit, and projects as the unit of workload isolation. Grants go to <strong>groups</strong>, never individual users, and at the <strong>lowest node that satisfies the need</strong> — team access at the folder, workload access at the project. Humans get predefined roles via groups synced from the HR/IdP system; workloads get purpose-built SAs with custom or narrow predefined roles. Guardrails: Org Policies to ban primitive roles, disable SA key creation, and enforce Domain Restricted Sharing; deny policies to backstop impersonation. I'd wire the IAM Recommender into a quarterly right-sizing loop and gate risky grants in CI with Policy Analyzer. Access to prod is time-bound via IAM Conditions or a just-in-time elevation tool, so standing prod privilege trends toward zero. All bindings live in Terraform as the source of truth so drift is detectable.<br />
+<em>Signal: groups-not-users, lowest-node grants, guardrails, JIT, IaC as truth.</em></p>
+<p><strong>Q7. When would you use IAM Conditions versus deny policies versus Org Policy constraints? They seem to overlap.</strong><br />
+They operate at different layers. <strong>IAM Conditions</strong> attach to a single allow binding and <em>narrow</em> it — "grant this only for prod-<em> buckets during business hours"; they're additive-scope refinements. </em><em>Deny policies</em><em> are separate objects that </em>block<em> permissions for principals regardless of any allow — the right tool for "no one except break-glass can create SA keys," because deny wins over allow. </em><em>Org Policy constraints</em><em> are a different system entirely: they restrict resource </em>configuration and metadata<em> (e.g. <code>iam.disableServiceAccountKeyCreation</code>, <code>iam.allowedPolicyMemberDomains</code>, allowed regions) and are enforced at write time, so they </em>prevent bad state from ever existing<em>. Rule of thumb: use Conditions to scope legitimate grants, deny policies to carve exceptions into broad grants you can't easily remove, and Org Policy to enforce non-negotiable guardrails that reject bad configuration up front.<br />
+</em>Signal: understands the three are complementary layers, not interchangeable.*</p>
+<p><strong>Q8. Your CI needs to deploy to GCP. Compare downloaded SA keys, Workload Identity Federation, and running CI on GCE with an attached SA.</strong><br />
+Downloaded SA keys are the worst option: long-lived, non-expiring, easily leaked into logs or git, and a top breach vector — I'd disable their creation org-wide. Running CI on a GCE/GKE runner with an attached SA is good <em>if the runner is inside my trust boundary</em> — the workload gets short-lived metadata-server tokens, no secret to leak — but it requires me to host and secure runners, and a compromised runner still yields the SA. For external CI like GitHub Actions, <strong>Workload Identity Federation</strong> is best: GitHub's OIDC token is exchanged for a short-lived GCP token, with no stored secret, and I pin the trust to a specific repo and branch via attribute mappings so only that pipeline can impersonate the deploy SA. The trade-off is setup complexity and opaque 403s on audience/attribute mismatches. My default: WIF for external CI, attached SA for in-VPC runners, keys never.<br />
+<em>Signal: keyless-first, understands WIF attribute pinning and the trust-boundary distinction.</em></p>
+<p><strong>Q9. How do you design least-privilege for a workload when you don't know the exact permissions it needs?</strong><br />
+I start slightly broad but observable, then tighten. Grant a reasonable predefined role, deploy to a non-prod project, and run the workload through its real paths while collecting Data Access + Admin Activity audit logs. I then use the <strong>IAM Recommender</strong> (which analyzes ~90 days of usage) and log analysis to derive the actual permission set, and codify it as a <strong>custom role</strong> scoped to exactly those permissions. I iterate — over-tight roles surface as <code>PERMISSION_DENIED</code> errors I widen deliberately, one permission at a time, rather than reverting to editor. I explicitly tag rarely-used permissions (DR, quarterly jobs) as known exceptions so the recommender doesn't strip them. The output is a pinned custom role in Terraform, which also protects against predefined-role scope creep.<br />
+<em>Signal: iterate-and-tighten, uses Recommender + logs, handles rare-permission false-negatives.</em></p>
+<p><strong>Q10. An SRE says project-level <code>serviceAccountTokenCreator</code> is fine because "it's just our team." Argue the other side and propose an alternative.</strong><br />
+Project-level TokenCreator means the team can impersonate <em>every</em> SA in the project — including any owner/editor SA like a Terraform runner — so it's a latent full-owner escalation, and Policy Analyzer would flag exactly that reachability. It also erases attribution: actions appear as the target SA, not the human, complicating IR. The blast radius of one compromised team member is the whole project. The alternative: bind <code>serviceAccountTokenCreator</code> on the <em>specific</em> SAs they legitimately need to impersonate, add an IAM Condition limiting source (corp network / time), route elevation through an audited just-in-time flow, and add a deny policy backstop that blocks impersonation of the high-value SAs except for a named break-glass group. This preserves the SRE's workflow for the SAs that matter while removing the escalation path to owner.<br />
+<em>Signal: names the escalation-to-owner path, attribution loss, and a scoped + deny-backstop fix.</em></p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / Deep-dive</h3>
+<p><strong>Q11. Enumerate the GCP IAM privilege-escalation primitives and explain why each is admin-equivalent.</strong><br />
+The core primitives, catalogued by Rhino Security Labs, cluster around service-account abuse and policy control. Impersonation: <code>iam.serviceAccounts.getAccessToken</code> (mint an OAuth token as a target SA), <code>getOpenIdToken</code> (mint an ID token), <code>signBlob</code>/<code>signJwt</code> (sign as the SA, enabling token forging), and <code>implicitDelegation</code>. Deployment: <code>iam.serviceAccounts.actAs</code> (via <code>serviceAccountUser</code>) lets you attach a powerful SA to compute/Cloud Functions/Cloud Run and run your code as it. Policy control: <code>resourcemanager.projects.setIamPolicy</code> (or <code>roles/iam.securityAdmin</code>) lets you bind yourself any role directly. Indirect vectors: <code>cloudfunctions.functions.create</code> + <code>actAs</code>, <code>compute.instances.create</code> + <code>actAs</code>, <code>deploymentmanager.deployments.create</code>, <code>orgpolicy</code> edits, and creating SA keys (<code>serviceAccountKeys.create</code>) for persistence. Each is admin-equivalent because it grants a path to <em>act as, or become, a higher-privileged identity</em> — the permission itself looks narrow, but its transitive reach is total. This is why you evaluate IAM by reachability (Policy Analyzer), not by role names.<br />
+<em>Signal: names the actual permissions and articulates transitive reach vs nominal scope.</em></p>
+<p><strong>Q12. Deny policies and allow policies both exist. Walk through exact evaluation order and a case where a deny policy with a condition changes the outcome.</strong><br />
+Evaluation is deny-first: IAM collects all deny policies attached to the resource and its ancestors, and for each deny rule checks whether the requested permission is in <code>deniedPermissions</code>, the principal is in <code>deniedPrincipals</code> and not in <code>exceptionPrincipals</code>, and the <code>denialCondition</code> (CEL) evaluates true. If any deny rule matches, the request is denied — no allow policy can override it. Only if no deny matches does IAM evaluate the union of allow bindings. Example: a developer SA has <code>roles/editor</code> (allow) but a deny policy blocks <code>iam.serviceAccountKeys.create</code> for <code>principalSet://goog/public:all</code> with a <code>denialCondition</code> of <code>!resource.matchTag('env','sandbox')</code>. In prod (no sandbox tag) the condition is true → key creation denied despite editor. In a sandbox project the tag makes the condition false → the deny doesn't apply → editor's allow lets key creation proceed. So the same principal and permission resolve differently based on the resource's tag evaluated in the denial condition.<br />
+<em>Signal: precise deny-rule field semantics and condition-driven divergent outcomes.</em></p>
+<p><strong>Q13. How does IAM interact with VPC Service Controls, and why isn't IAM alone sufficient to prevent data exfiltration?</strong><br />
+IAM answers "does this identity have permission on this resource," but it says nothing about <em>network context</em> — a valid principal with legitimate <code>storage.objects.get</code> can read a bucket from anywhere, including an attacker's machine using stolen credentials. VPC Service Controls adds an orthogonal, identity-independent boundary: a <strong>service perimeter</strong> around projects that blocks API access to protected services unless the request originates from inside the perimeter (or an allowed access level / ingress rule). So even a stolen token with full IAM rights is stopped at the perimeter if the request comes from outside. They compose: IAM decides <em>who can do what</em>, VPC-SC decides <em>from where</em>. Neither replaces the other — IAM without VPC-SC leaks under credential theft; VPC-SC without IAM has no notion of least privilege. For sensitive data I'd use both, plus context-aware access levels so even in-perimeter requests need device/identity posture.<br />
+<em>Signal: articulates the identity vs network-context split and why both are needed against credential theft.</em></p>
+<p><strong>Q14. A compromised GCE VM's app has SSRF. Trace the full attack path to project-wide compromise and the layered controls that break each step.</strong><br />
+The SSRF lets the attacker make the VM issue HTTP requests to the metadata server (<code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code>, requiring the <code>Metadata-Flavor: Google</code> header). That returns an OAuth token for the VM's attached SA. If that's the default Compute SA with <code>roles/editor</code>, the token now grants project-wide write: enumerate resources, read all buckets, create new SAs and keys for persistence, edit firewall rules, and pivot. Layered breaks: (1) at the SSRF layer, block egress to the metadata IP and require the metadata header (GKE Workload Identity / metadata concealment); (2) at the identity layer, don't attach the default editor SA — use a purpose-built SA with only needed roles and explicit scopes, and set the <code>automaticIamGrants</code> org policy; (3) at the escalation layer, deny policies on <code>serviceAccountKeys.create</code> and scoped impersonation prevent persistence and lateral SA abuse; (4) at the network layer, VPC-SC stops the stolen token from being used outside the perimeter; (5) at detection, alert on the metadata-token-then-anomalous-API pattern and on new SA-key creation. Each control independently shrinks blast radius; defense-in-depth means no single failure yields owner.<br />
+<em>Signal: end-to-end chain plus a control at every layer, not just "use least privilege."</em></p>
+<p><strong>Q15. Predefined roles change over time and conditions have limits. What are the subtle IAM pitfalls a senior engineer must anticipate?</strong><br />
+Several. (1) <strong>Predefined-role drift</strong>: Google adds permissions to predefined roles, so a grant you audited last year may be wider today — pin critical grants to custom roles. (2) <strong>Condition coverage gaps</strong>: an IAM Condition only constrains the binding it's on; if the same principal has a parallel un-conditioned binding (perhaps inherited from a folder), the condition is moot — you must ensure no un-scoped path exists, and use deny policies as a backstop. (3) <strong>Token TTL vs revocation</strong>: removing a binding doesn't kill outstanding ~1h OAuth tokens; you must disable/rotate the SA for immediate effect. (4) <strong>Impersonation attribution</strong>: actions run as the impersonated SA, and <code>serviceAccountDelegationInfo</code> chains can obscure the human origin — build detections on the delegation chain. (5) <strong>Group-based grants inherit group membership risk</strong>: an externally-joinable Google Group bound to a role means group-join = access. (6) <strong>Data Access logs are off by default</strong>, so <code>getIamPolicy</code>/<code>testIamPermissions</code> recon and object reads are invisible until enabled. (7) <strong>Deleted ≠ revoked</strong> (GhostToken): grants and OAuth tokens can linger past resource deletion. A senior engineer designs assuming each of these, and validates with continuous Policy Analyzer reachability sweeps rather than trusting role names.<br />
+<em>Signal: depth beyond happy-path — drift, condition gaps, token TTL, attribution, logging defaults.</em></p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP Cloud IAM</th>
+<th>AWS IAM</th>
+<th>Azure RBAC / Entra ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity provider</td>
+<td>Cloud Identity / Workspace</td>
+<td>IAM users + IAM Identity Center</td>
+<td>Microsoft Entra ID</td>
+</tr>
+<tr>
+<td>Human principal</td>
+<td><code>user:alice@example.com</code></td>
+<td>IAM user / SSO identity</td>
+<td>Entra user</td>
+</tr>
+<tr>
+<td>Group principal</td>
+<td>Google Group <code>group:...</code></td>
+<td>IAM group</td>
+<td>Entra security group</td>
+</tr>
+<tr>
+<td>Workload identity</td>
+<td>Service account</td>
+<td>IAM role (assumed)</td>
+<td>Managed identity / service principal</td>
+</tr>
+<tr>
+<td>External federation</td>
+<td>Workload Identity Federation</td>
+<td>IAM roles + OIDC/SAML, STS</td>
+<td>Federated credentials / workload identity federation</td>
+</tr>
+<tr>
+<td>Public principal</td>
+<td><code>allUsers</code> / <code>allAuthenticatedUsers</code></td>
+<td><code>Principal: "*"</code> in resource policy</td>
+<td>Rare; anonymous access on storage</td>
+</tr>
+<tr>
+<td>Permission bundle</td>
+<td>Role (primitive/predefined/custom)</td>
+<td>Managed/inline policy</td>
+<td>Role definition (built-in/custom)</td>
+</tr>
+<tr>
+<td>Grant object</td>
+<td>Allow policy binding</td>
+<td>Policy attachment / resource policy</td>
+<td>Role assignment</td>
+</tr>
+<tr>
+<td>Explicit deny</td>
+<td>Deny policy</td>
+<td>Policy <code>Effect: Deny</code> (deny wins)</td>
+<td>Deny assignment</td>
+</tr>
+<tr>
+<td>Conditional access</td>
+<td>IAM Conditions (CEL)</td>
+<td>IAM policy <code>Condition</code> keys</td>
+<td>RBAC conditions / Conditional Access</td>
+</tr>
+<tr>
+<td>Hierarchy</td>
+<td>Org → Folder → Project → Resource</td>
+<td>Org → OU → Account</td>
+<td>Mgmt Group → Subscription → RG → Resource</td>
+</tr>
+<tr>
+<td>Org-wide guardrail</td>
+<td>Org Policy constraints</td>
+<td>Service Control Policies (SCP)</td>
+<td>Azure Policy / Mgmt Group</td>
+</tr>
+<tr>
+<td>Least-priv advisor</td>
+<td>IAM Recommender</td>
+<td>IAM Access Analyzer</td>
+<td>Entra Access Reviews / PIM</td>
+</tr>
+<tr>
+<td>Reachability analysis</td>
+<td>Policy Analyzer</td>
+<td>Access Analyzer (external/unused)</td>
+<td>Entra PIM insights</td>
+</tr>
+<tr>
+<td>Short-lived creds</td>
+<td>Impersonation / STS tokens</td>
+<td>STS AssumeRole</td>
+<td>Managed identity tokens</td>
+</tr>
+<tr>
+<td>Network boundary</td>
+<td>VPC Service Controls</td>
+<td>(VPC endpoints + policies)</td>
+<td>Private Link + network rules</td>
+</tr>
+<tr>
+<td>JIT elevation</td>
+<td>Conditions + PAM (Privileged Access Manager)</td>
+<td>IAM Identity Center session</td>
+<td>Entra PIM eligible roles</td>
+</tr>
+</tbody>
+</table>
+<p>Key translation notes for real systems: GCP's <strong>service account</strong> ≈ AWS's <strong>assumable IAM role</strong> ≈ Azure's <strong>managed identity/service principal</strong>. GCP <strong>impersonation</strong> ≈ AWS <strong>AssumeRole</strong>. GCP <strong>Org Policy</strong> ≈ AWS <strong>SCP</strong> ≈ Azure <strong>Azure Policy</strong>. GCP inheritance is additive-union like Azure RBAC; AWS is per-account with SCP guardrails. All three make <strong>explicit deny win</strong> over allow.</p>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>IAM is authorization, not authentication.</strong> It binds already-authenticated principals to roles on hierarchical resources; identity comes from Cloud Identity/Workspace.</li>
+<li><strong>Evaluation is deny-first, then additive union of inherited allow, then default-deny.</strong> A grant at the org node cascades to every descendant; only deny policies, Org Policy, and VPC-SC can subtract effective access.</li>
+<li><strong>Primitive roles are a trap</strong> — thousands of permissions wide, and <code>owner</code> includes <code>setIamPolicy</code>, making it self-perpetuating admin. Default to predefined, pin critical grants to custom roles.</li>
+<li><strong>Service accounts are the crown jewels and the top escalation target.</strong> <code>getAccessToken</code>, <code>actAs</code>, <code>signBlob</code>, and <code>setIamPolicy</code> are admin-equivalent primitives — scope them to a specific SA, never a project.</li>
+<li><strong>The default Compute SA with editor, attached to every VM, turns any SSRF into project-wide compromise.</strong> Disable auto-grants and use purpose-built SAs.</li>
+<li><strong>Public principals <code>allUsers</code>/<code>allAuthenticatedUsers</code> cause the classic public-bucket breach;</strong> block them at write time with Domain Restricted Sharing, not after the fact.</li>
+<li><strong>Kill static SA keys</strong> (<code>disableServiceAccountKeyCreation</code>) and move to Workload Identity Federation for short-lived, secret-less credentials.</li>
+<li><strong>Enforce guardrails as configuration, not vigilance:</strong> Org Policy constraints reject bad state up front; deny policies backstop broad grants; IAM Conditions scope legitimate ones.</li>
+<li><strong>Operate least privilege as a loop:</strong> IAM Recommender to right-size, Policy Analyzer for reachability, both wired into ticketing and CI.</li>
+<li><strong>Detect on the binding delta.</strong> Alert on <code>SetIamPolicy</code> adds of dangerous roles, public-principal bindings, and impersonation-token spikes in Cloud Audit Logs; enable Data Access logs on sensitive services.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/overview">IAM Overview</a> and <a href="https://cloud.google.com/iam/docs/overview#how_iam_works">How IAM works</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/understanding-roles">Understanding roles</a> (primitive, predefined, custom) and <a href="https://cloud.google.com/iam/docs/permissions-reference">Permissions reference</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/conditions-overview">IAM Conditions overview</a> and <a href="https://cloud.google.com/iam/docs/conditions-attribute-reference">CEL attribute reference</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/deny-overview">Deny policies</a> and <a href="https://cloud.google.com/iam/docs/resource-hierarchy-access-control">Policy hierarchy / inheritance</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/service-account-overview">Service accounts</a>, <a href="https://cloud.google.com/iam/docs/create-short-lived-credentials-direct">Impersonation</a>, <a href="https://cloud.google.com/iam/docs/workload-identity-federation">Workload Identity Federation</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/iam/docs/recommender-overview">IAM Recommender</a> and <a href="https://cloud.google.com/policy-intelligence/docs/analyze-iam-policies">Policy Analyzer</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints">Organization Policy constraints</a> (<code>iam.*</code> constraints) and <a href="https://cloud.google.com/vpc-service-controls/docs/overview">VPC Service Controls</a></li>
+<li>Google Cloud — <a href="https://cloud.google.com/logging/docs/audit">Cloud Audit Logs</a> (Admin Activity vs Data Access)</li>
+<li>Rhino Security Labs — <a href="https://rhinosecuritylabs.com/gcp/privilege-escalation-google-cloud-platform-part-1/">GCP Privilege Escalation research</a> (impersonation &amp; <code>actAs</code> methods)</li>
+<li>Astrix / Google Security — GhostToken advisory (2023), lingering OAuth/SA grant persistence</li>
+<li>MITRE ATT&amp;CK — <a href="https://attack.mitre.org/techniques/T1078/004/">T1078.004 Cloud Accounts</a>, <a href="https://attack.mitre.org/techniques/T1548/">T1548 Abuse Elevation Control</a>, <a href="https://attack.mitre.org/techniques/T1550/001/">T1550.001 Application Access Token</a></li>
+<li>NIST SP 800-207 (Zero Trust Architecture) and CIS Google Cloud Platform Foundation Benchmark (IAM section)</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

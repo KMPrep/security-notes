@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q2.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q2.py</h1>
+  <p class="file-path">Source: code\day7\answers\q2.py</p>
+  <p class="line-count">304 lines</p>
+  <pre><code class="language-python"># Q2 (Consolidation from Day 3 Q4) - Decode Compressed Log Token — Nested
+# Decode k[pattern] encoding with nesting up to 4 levels deep.
+# Also validate input before decoding — return None if invalid.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;The encoding is: a number followed by a bracket-enclosed string means repeat
+#    that string that many times. Nesting means the inner pattern is decoded first,
+#    then the outer count applies. I also need to validate the input — bad input
+#    should return None instead of crashing.&quot;
+#
+# STEP 2 — Assumptions
+#   - Numbers are positive integers (k &gt;= 1)
+#   - Only lowercase letters outside brackets
+#   - Brackets are always paired with a preceding number
+#   - Nesting depth up to 4 levels
+#   - Invalid: unmatched brackets, number without &#x27;[&#x27;, non-letters in wrong place,
+#              empty brackets &#x27;[]&#x27;
+#   - Valid characters: digits [0-9], lowercase letters [a-z], &#x27;[&#x27;, &#x27;]&#x27;
+#
+# STEP 3 — Validation approach
+#   &quot;Use a simple regex to match the full structure, or a manual scan:
+#    - Count brackets: must be balanced
+#    - Every &#x27;[&#x27; must be preceded by a digit
+#    - Every digit sequence must be followed by &#x27;[&#x27;
+#    - No trailing digits without &#x27;[&#x27;
+#    - No empty &#x27;[]&#x27;&quot;
+#
+# STEP 4 — Decoding approach (stack)
+#   &quot;Use a stack. When we see:
+#    - digit: build current number
+#    - &#x27;[&#x27;: push (current_string, current_number) onto stack; reset both
+#    - letter: append to current_string
+#    - &#x27;]&#x27;: pop (prev_string, repeat_count); current_string = prev_string + repeat_count * current_string&quot;
+#
+# STEP 5 — Edge cases
+#   - Plain string with no encoding: &quot;abc&quot; → &quot;abc&quot;
+#   - k=1: &quot;1[abc]&quot; → &quot;abc&quot;
+#   - Deep nesting: &quot;2[a3[b2[c]]]&quot;
+#   - Invalid: &quot;2[a]3&quot; — trailing digit without bracket
+#   - Invalid: &quot;abc[3]&quot; — bracket not preceded by digit
+#   - Invalid: &quot;[2[a]]&quot; — outer bracket not preceded by digit
+#   - Invalid: &quot;2[]&quot; — empty bracket content
+#
+# Complexity:
+#   Decode: O(n * k_max) time where n=len(input), k_max=max repeat count
+#   Validate: O(n) time
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re
+
+
+# ── VALIDATION ────────────────────────────────────────────────────────────────
+
+def validate_encoded(s: str) -&gt; tuple[bool, str]:
+    &quot;&quot;&quot;
+    Validate the encoded string. Returns (True, &quot;&quot;) if valid, or (False, reason).
+
+    Rules:
+    1. Only chars: digits, lowercase letters, &#x27;[&#x27;, &#x27;]&#x27;
+    2. Every &#x27;[&#x27; must be immediately preceded by a digit
+    3. Every &#x27;]&#x27; must close a previously opened &#x27;[&#x27;
+    4. Brackets must be balanced
+    5. No standalone digit not followed eventually by &#x27;[&#x27;
+    6. No empty &#x27;[]&#x27;
+    &quot;&quot;&quot;
+    if not isinstance(s, str):
+        return False, f&quot;Expected string, got {type(s).__name__}&quot;
+    if not s:
+        return True, &quot;&quot;   # empty string is technically valid (decodes to &quot;&quot;)
+
+    # Rule 1: allowed characters only
+    if not re.fullmatch(r&#x27;[0-9a-z\[\]]+&#x27;, s):
+        return False, &quot;Invalid characters detected (only digits, lowercase letters, brackets allowed)&quot;
+
+    # Use a stack to validate structure
+    stack = []
+    i = 0
+    n = len(s)
+    pending_number = False   # True after we finish parsing a number
+
+    while i &lt; n:
+        ch = s[i]
+        if ch.isdigit():
+            # Read full number
+            while i &lt; n and s[i].isdigit():
+                i += 1
+            # After a number, next non-trivial char must be &#x27;[&#x27;
+            if i &gt;= n or s[i] != &#x27;[&#x27;:
+                return False, f&quot;Digit at position {i} not followed by &#x27;[&#x27;&quot;
+            pending_number = True
+            continue
+        elif ch == &#x27;[&#x27;:
+            if not pending_number:
+                return False, f&quot;&#x27;[&#x27; at position {i} not preceded by a number&quot;
+            stack.append(&#x27;[&#x27;)
+            pending_number = False
+            # Check for empty bracket immediately
+            if i + 1 &lt; n and s[i + 1] == &#x27;]&#x27;:
+                return False, f&quot;Empty bracket at position {i}&quot;
+        elif ch == &#x27;]&#x27;:
+            if not stack:
+                return False, f&quot;Unmatched &#x27;]&#x27; at position {i}&quot;
+            stack.pop()
+        # lowercase letters: always valid between brackets or at start
+        i += 1
+
+    if stack:
+        return False, f&quot;Unmatched &#x27;[&#x27;: {len(stack)} bracket(s) not closed&quot;
+    if pending_number:
+        return False, &quot;Trailing digit(s) not followed by &#x27;[&#x27;&quot;
+
+    return True, &quot;&quot;
+
+
+# ── APPROACH 1: Stack-based decoder ──────────────────────────────────────────
+
+def decode_string(s: str) -&gt; str | None:
+    &quot;&quot;&quot;
+    Decode k[pattern] encoded string using a stack.
+
+    Algorithm:
+      stack holds (accumulated_string_so_far, repeat_count) when entering a bracket.
+      On &#x27;]&#x27;: pop and concatenate.
+
+    Time:  O(n * k_max) — output can be exponentially large
+    Space: O(n) stack depth
+
+    Returns None if input is invalid.
+    &quot;&quot;&quot;
+    if not isinstance(s, str):
+        return None
+
+    valid, reason = validate_encoded(s)
+    if not valid:
+        return None
+
+    stack        = []    # stack of (string_before_bracket, repeat_count)
+    current_str  = &quot;&quot;
+    current_num  = 0
+
+    for ch in s:
+        if ch.isdigit():
+            current_num = current_num * 10 + int(ch)
+        elif ch == &#x27;[&#x27;:
+            # Save state and start fresh
+            stack.append((current_str, current_num))
+            current_str = &quot;&quot;
+            current_num = 0
+        elif ch == &#x27;]&#x27;:
+            prev_str, repeat = stack.pop()
+            current_str = prev_str + repeat * current_str
+        else:
+            current_str += ch
+
+    return current_str
+
+
+# ── APPROACH 2: Recursive (for comparison — harder to validate) ───────────────
+
+def _decode_recursive(s: str, i: int) -&gt; tuple[str, int]:
+    &quot;&quot;&quot;
+    Recursive helper. Returns (decoded_string, new_index).
+    Called when we&#x27;re inside a bracket group.
+    &quot;&quot;&quot;
+    result = &quot;&quot;
+    while i &lt; len(s) and s[i] != &#x27;]&#x27;:
+        if s[i].isdigit():
+            # Parse number
+            num = 0
+            while i &lt; len(s) and s[i].isdigit():
+                num = num * 10 + int(s[i])
+                i += 1
+            # Expect &#x27;[&#x27;
+            i += 1   # skip &#x27;[&#x27;
+            inner, i = _decode_recursive(s, i)
+            i += 1   # skip &#x27;]&#x27;
+            result += num * inner
+        else:
+            result += s[i]
+            i += 1
+    return result, i
+
+
+def decode_string_recursive(s: str) -&gt; str | None:
+    &quot;&quot;&quot;
+    Recursive decoder. Validates first.
+
+    Time:  O(n * k_max)
+    Space: O(depth) stack frames
+    &quot;&quot;&quot;
+    if not isinstance(s, str):
+        return None
+    valid, _ = validate_encoded(s)
+    if not valid:
+        return None
+    result, _ = _decode_recursive(s, 0)
+    return result
+
+
+# ── MANUAL — no f-strings for building, no string multiplication ───────────────
+
+def decode_string_manual(s: str) -&gt; str | None:
+    &quot;&quot;&quot;
+    Stack decoder without string multiplication operator.
+    Manually repeats by appending in a loop.
+
+    Time:  O(n * k_max)
+    Space: O(n)
+    &quot;&quot;&quot;
+    if s is None:
+        return None
+    valid, _ = validate_encoded(s)
+    if not valid:
+        return None
+
+    stack       = []
+    current_str = []   # list of chars (efficient append)
+    current_num = 0
+
+    for ch in s:
+        if ch.isdigit():
+            current_num = current_num * 10 + int(ch)
+        elif ch == &#x27;[&#x27;:
+            stack.append((list(current_str), current_num))
+            current_str = []
+            current_num = 0
+        elif ch == &#x27;]&#x27;:
+            prev_str, repeat = stack.pop()
+            repeated = []
+            for _ in range(repeat):
+                for c in current_str:
+                    repeated.append(c)
+            current_str = prev_str + repeated
+        else:
+            current_str.append(ch)
+
+    return &quot;&quot;.join(current_str)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    # From the question
+    assert decode_string(&quot;2[a3[b2[c]]]&quot;) == &quot;abccbccbccabccbccbcc&quot;
+
+    # Simple cases
+    assert decode_string(&quot;3[a]&quot;)       == &quot;aaa&quot;
+    assert decode_string(&quot;2[abc]&quot;)     == &quot;abcabc&quot;
+    assert decode_string(&quot;2[ab]3[c]&quot;)  == &quot;ababccc&quot;
+    assert decode_string(&quot;abc&quot;)        == &quot;abc&quot;          # no encoding
+    assert decode_string(&quot;&quot;)           == &quot;&quot;
+
+    # More nesting
+    assert decode_string(&quot;3[a2[b]]&quot;)   == &quot;abbabbabb&quot;
+    assert decode_string(&quot;1[a1[b]]&quot;)   == &quot;ab&quot;
+
+    # All three approaches agree
+    test_cases = [
+        &quot;2[a3[b2[c]]]&quot;,
+        &quot;3[a]&quot;,
+        &quot;2[ab]3[c]&quot;,
+        &quot;3[a2[b]]&quot;,
+        &quot;abc&quot;,
+        &quot;&quot;,
+    ]
+    for tc in test_cases:
+        s = decode_string(tc)
+        r = decode_string_recursive(tc)
+        m = decode_string_manual(tc)
+        assert s == r == m, f&quot;Mismatch on {tc!r}: {s!r}, {r!r}, {m!r}&quot;
+
+    # Validation — invalid inputs
+    assert decode_string(&quot;2[a]3&quot;)     is None, &quot;Trailing digit should be invalid&quot;
+    assert decode_string(&quot;[abc]&quot;)     is None, &quot;&#x27;[&#x27; without preceding number&quot;
+    assert decode_string(&quot;2[]&quot;)       is None, &quot;Empty brackets&quot;
+    assert decode_string(&quot;2[a&quot;)       is None, &quot;Unmatched &#x27;[&#x27;&quot;
+    assert decode_string(&quot;2a]&quot;)       is None, &quot;Unmatched &#x27;]&#x27;&quot;
+    assert decode_string(&quot;2[A]&quot;)      is None, &quot;Uppercase letter not allowed&quot;
+    assert decode_string(None)        is None, &quot;None input&quot;
+
+    # Validate function directly
+    ok, _  = validate_encoded(&quot;2[a3[b]]&quot;)
+    bad, r = validate_encoded(&quot;2[a]3&quot;)
+    assert ok  is True
+    assert bad is False
+
+    print(&quot;Q2 — All assertions passed.&quot;)
+    print(f&quot;decode_string(&#x27;2[a3[b2[c]]]&#x27;) = {decode_string(&#x27;2[a3[b2[c]]]&#x27;)!r}&quot;)
+    print()
+    print(&quot;Stack trace for &#x27;2[a3[b2[c]]]&#x27;:&quot;)
+    print(&quot;  See &#x27;[&#x27;  num=2 → push (&#x27;&#x27;, 2), reset&quot;)
+    print(&quot;  See &#x27;a&#x27;  → current=&#x27;a&#x27;&quot;)
+    print(&quot;  See &#x27;[&#x27;  num=3 → push (&#x27;a&#x27;, 3), reset&quot;)
+    print(&quot;  See &#x27;b&#x27;  → current=&#x27;b&#x27;&quot;)
+    print(&quot;  See &#x27;[&#x27;  num=2 → push (&#x27;b&#x27;, 2), reset&quot;)
+    print(&quot;  See &#x27;c&#x27;  → current=&#x27;c&#x27;&quot;)
+    print(&quot;  See &#x27;]&#x27;  → pop (&#x27;b&#x27;,2): current=&#x27;b&#x27;+&#x27;cc&#x27;=&#x27;bcc&#x27;&quot;)
+    print(&quot;  See &#x27;]&#x27;  → pop (&#x27;a&#x27;,3): current=&#x27;a&#x27;+&#x27;bccbccbcc&#x27;=&#x27;abccbccbcc&#x27; (wait: 3×bcc)&quot;)
+    print(&quot;  See &#x27;]&#x27;  → pop (&#x27;&#x27;,2):  current=&#x27;&#x27;+&#x27;abccbccbcc&#x27;×2=&#x27;abccbccabccbcc&#x27;&quot;)
+    print()
+    print(&quot;Complexity: O(n * k_max) time, O(n) stack space&quot;)
+</code></pre>
+</body>
+</html>

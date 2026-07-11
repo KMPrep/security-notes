@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q2_nginx_ratelimit_evasion.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q2_nginx_ratelimit_evasion.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q2_nginx_ratelimit_evasion.py</p>
+  <p class="line-count">306 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q2. Nginx Rate-Limit Evasion Detector
+=======================================
+Detect IPs rotating user-agents, slow-drip attacks, and distributed
+path-hammering from Nginx access logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Count requests per IP; flag anything over a hard threshold.
+  Problem: misses UA rotation (same IP splits across many UAs to stay under
+  per-UA limits), slow-drip attacks (stay under rate-limit by spacing requests),
+  and distributed attacks (no single IP triggers threshold).
+
+BETTER: Track (IP, UA) pairs. Still misses temporal slow-drip and distributed.
+
+GOOGLE-LEVEL (this file):
+  - UA rotation: group requests by IP; if one IP has &gt; 5 distinct UAs AND
+    &gt; 50 total requests, flag it.
+  - Slow-drip: bucket requests per IP per 10s slot; if every bucket has
+    exactly 1–2 requests for &gt; 20 consecutive slots, it&#x27;s pacing.
+  - Distributed: bucket all requests by path per 60s; if &gt; 20 distinct IPs
+    hit the same path in a 60s window, flag the path.
+  - All pattern detectors are independent passes to keep logic clean.
+
+Complexity: O(N) time per pass, O(U) space where U = unique IPs.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime, timezone
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+203.0.113.5 - - [12/Mar/2024:08:00:00 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;Mozilla/5.0 Chrome&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:01 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;curl/7.88&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:02 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;python-requests/2.28&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:03 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;Go-http-client/1.1&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:04 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;Wget/1.21&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:05 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;libwww-perl/6.67&quot;
+203.0.113.5 - - [12/Mar/2024:08:00:06 +0000] &quot;GET /api/login HTTP/1.1&quot; 200 128 &quot;-&quot; &quot;Lynx/2.8.9&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:00 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:05 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:10 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:15 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:20 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:25 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:30 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:35 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:40 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:45 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:50 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:00:55 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:00 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:05 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:10 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:15 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:20 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:25 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:30 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:35 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:40 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+10.0.0.10 - - [12/Mar/2024:08:01:45 +0000] &quot;GET /health HTTP/1.1&quot; 200 12 &quot;-&quot; &quot;healthcheck/1.0&quot;
+192.168.1.1 - - [12/Mar/2024:08:00:00 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.2 - - [12/Mar/2024:08:00:05 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.3 - - [12/Mar/2024:08:00:10 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.4 - - [12/Mar/2024:08:00:15 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.5 - - [12/Mar/2024:08:00:20 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.6 - - [12/Mar/2024:08:00:25 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.7 - - [12/Mar/2024:08:00:30 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.8 - - [12/Mar/2024:08:00:35 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.9 - - [12/Mar/2024:08:00:40 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.10 - - [12/Mar/2024:08:00:45 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.11 - - [12/Mar/2024:08:00:50 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.12 - - [12/Mar/2024:08:00:55 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.13 - - [12/Mar/2024:08:01:00 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.14 - - [12/Mar/2024:08:01:05 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.15 - - [12/Mar/2024:08:01:10 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.16 - - [12/Mar/2024:08:01:15 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.17 - - [12/Mar/2024:08:01:20 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.18 - - [12/Mar/2024:08:01:25 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.19 - - [12/Mar/2024:08:01:30 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.20 - - [12/Mar/2024:08:01:35 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+192.168.1.21 - - [12/Mar/2024:08:01:40 +0000] &quot;POST /api/data HTTP/1.1&quot; 200 512 &quot;-&quot; &quot;Mozilla/5.0&quot;
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+UA_ROTATION_UA_THRESHOLD  = 5    # distinct UAs per IP
+UA_ROTATION_REQ_THRESHOLD = 50   # minimum total requests to flag
+SLOW_DRIP_SLOTS           = 20   # minimum consecutive 5-second slots with 1–2 requests
+SLOW_DRIP_SLOT_SECONDS    = 5
+DISTRIBUTED_WINDOW_SECS   = 60   # window size for distributed attack
+DISTRIBUTED_IP_THRESHOLD  = 20   # distinct IPs per path per window
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ip&gt;\S+)\s+\S+\s+\S+\s+&#x27;
+    r&#x27;\[(?P&lt;ts&gt;[^\]]+)\]\s+&#x27;
+    r&#x27;&quot;(?P&lt;method&gt;\S+)\s+(?P&lt;path&gt;\S+)[^&quot;]*&quot;\s+&#x27;
+    r&#x27;(?P&lt;status&gt;\d{3})\s+\S+&#x27;
+    r&#x27;(?:\s+&quot;[^&quot;]*&quot;)?&#x27;
+    r&#x27;(?:\s+&quot;(?P&lt;ua&gt;[^&quot;]*)&quot;)?&#x27;
+)
+
+TS_FORMAT = &quot;%d/%b/%Y:%H:%M:%S %z&quot;
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    try:
+        return datetime.strptime(ts_str, TS_FORMAT).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return {
+        &quot;ip&quot;:     m.group(&quot;ip&quot;),
+        &quot;ts&quot;:     ts,
+        &quot;method&quot;: m.group(&quot;method&quot;),
+        &quot;path&quot;:   m.group(&quot;path&quot;),
+        &quot;status&quot;: int(m.group(&quot;status&quot;)),
+        &quot;ua&quot;:     m.group(&quot;ua&quot;) or &quot;-&quot;,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 1: UA Rotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_ua_rotation(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Flag IPs using many distinct UAs to evade per-UA rate limits.&quot;&quot;&quot;
+    ip_uas:  dict[str, set]  = defaultdict(set)
+    ip_reqs: dict[str, int]  = defaultdict(int)
+
+    for r in records:
+        ip_uas[r[&quot;ip&quot;]].add(r[&quot;ua&quot;])
+        ip_reqs[r[&quot;ip&quot;]] += 1
+
+    alerts = []
+    for ip, uas in ip_uas.items():
+        if len(uas) &gt; UA_ROTATION_UA_THRESHOLD and ip_reqs[ip] &gt; UA_ROTATION_REQ_THRESHOLD:
+            alerts.append({
+                &quot;type&quot;:    &quot;UA_ROTATION&quot;,
+                &quot;ip&quot;:      ip,
+                &quot;ua_count&quot;: len(uas),
+                &quot;req_count&quot;: ip_reqs[ip],
+                &quot;uas&quot;:     sorted(uas),
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 2: Slow Drip
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_slow_drip(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Detect IPs pacing requests at 1–2 per N seconds to avoid thresholds.&quot;&quot;&quot;
+    # Group timestamps per IP
+    ip_ts: dict[str, list[float]] = defaultdict(list)
+    for r in records:
+        ip_ts[r[&quot;ip&quot;]].append(r[&quot;ts&quot;])
+
+    alerts = []
+    for ip, timestamps in ip_ts.items():
+        if len(timestamps) &lt; SLOW_DRIP_SLOTS:
+            continue
+        timestamps.sort()
+        t_min = int(timestamps[0])
+        t_max = int(timestamps[-1])
+
+        # Build slot counts
+        slot_counts: dict[int, int] = defaultdict(int)
+        for t in timestamps:
+            slot = int(t) // SLOW_DRIP_SLOT_SECONDS
+            slot_counts[slot] += 1
+
+        # Count consecutive slots with 1–2 requests
+        all_slots = sorted(slot_counts.keys())
+        consecutive = 0
+        max_consecutive = 0
+        prev = None
+        for slot in all_slots:
+            cnt = slot_counts[slot]
+            if 1 &lt;= cnt &lt;= 2 and (prev is None or slot == prev + 1):
+                consecutive += 1
+            else:
+                max_consecutive = max(max_consecutive, consecutive)
+                consecutive = 1 if 1 &lt;= cnt &lt;= 2 else 0
+            prev = slot
+        max_consecutive = max(max_consecutive, consecutive)
+
+        if max_consecutive &gt;= SLOW_DRIP_SLOTS:
+            alerts.append({
+                &quot;type&quot;:                &quot;SLOW_DRIP&quot;,
+                &quot;ip&quot;:                  ip,
+                &quot;total_requests&quot;:      len(timestamps),
+                &quot;max_consecutive_drip_slots&quot;: max_consecutive,
+                &quot;duration_seconds&quot;:    t_max - t_min,
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 3: Distributed Attack on Same Path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_distributed_attack(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Detect many IPs hitting the same path within a 60-second window.&quot;&quot;&quot;
+    # path -&gt; list of (ts, ip)
+    path_events: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    for r in records:
+        path_events[r[&quot;path&quot;]].append((r[&quot;ts&quot;], r[&quot;ip&quot;]))
+
+    alerts = []
+    for path, events in path_events.items():
+        events.sort(key=lambda x: x[0])
+        # Sliding window
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; DISTRIBUTED_WINDOW_SECS:
+                left += 1
+            window_ips = {events[i][1] for i in range(left, right + 1)}
+            if len(window_ips) &gt; DISTRIBUTED_IP_THRESHOLD:
+                window_start = events[left][0]
+                window_end   = events[right][0]
+                alerts.append({
+                    &quot;type&quot;:         &quot;DISTRIBUTED_ATTACK&quot;,
+                    &quot;path&quot;:         path,
+                    &quot;distinct_ips&quot;: len(window_ips),
+                    &quot;window_start&quot;: window_start,
+                    &quot;window_end&quot;:   window_end,
+                    &quot;sample_ips&quot;:   sorted(window_ips)[:5],
+                })
+                # Advance left past this window to avoid duplicate alerts
+                left = right + 1
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(ua_alerts, drip_alerts, dist_alerts) -&gt; None:
+    print(&quot;=&quot; * 60)
+    print(&quot;RATE-LIMIT EVASION DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 60)
+
+    print(f&quot;\n[UA_ROTATION] Flagged IPs: {len(ua_alerts)}&quot;)
+    for a in ua_alerts:
+        print(f&quot;  IP={a[&#x27;ip&#x27;]}  UAs={a[&#x27;ua_count&#x27;]}  requests={a[&#x27;req_count&#x27;]}&quot;)
+        for ua in a[&quot;uas&quot;][:5]:
+            print(f&quot;      {ua}&quot;)
+
+    print(f&quot;\n[SLOW_DRIP] Flagged IPs: {len(drip_alerts)}&quot;)
+    for a in drip_alerts:
+        print(f&quot;  IP={a[&#x27;ip&#x27;]}  requests={a[&#x27;total_requests&#x27;]}  &quot;
+              f&quot;drip_slots={a[&#x27;max_consecutive_drip_slots&#x27;]}  &quot;
+              f&quot;duration={a[&#x27;duration_seconds&#x27;]}s&quot;)
+
+    print(f&quot;\n[DISTRIBUTED_ATTACK] Flagged paths: {len(dist_alerts)}&quot;)
+    for a in dist_alerts:
+        print(f&quot;  path={a[&#x27;path&#x27;]}  distinct_ips={a[&#x27;distinct_ips&#x27;]}&quot;)
+        print(f&quot;  sample_ips={a[&#x27;sample_ips&#x27;]}&quot;)
+    print(&quot;=&quot; * 60)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    source = sys.argv[1] if len(sys.argv) &gt; 1 else None
+    if source:
+        with open(source, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} valid records.\n&quot;)
+
+    ua_alerts   = detect_ua_rotation(records)
+    drip_alerts = detect_slow_drip(records)
+    dist_alerts = detect_distributed_attack(records)
+
+    print_report(ua_alerts, drip_alerts, dist_alerts)
+</code></pre>
+</body>
+</html>

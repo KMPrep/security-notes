@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q15_process_snapshot_diff.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q15_process_snapshot_diff.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q15_process_snapshot_diff.py</p>
+  <p class="line-count">306 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q15. Process Snapshot Diff (ps aux) — Fileless &amp; Masquerade Detector
+======================================================================
+Parse periodic ps aux snapshots and diff them to detect transient
+processes (fileless payloads), process masquerading, high-memory
+surprise processes, and deleted-exe references.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Compare two snapshots, print new processes.
+  Problem: Every new process appears here — sshd child, cron job,
+  a developer&#x27;s shell. High false-positive rate, no filtering or
+  categorization.
+
+BETTER: Alert only on processes that appeared AND disappeared
+  between snapshots.
+  Problem: Still flags short-lived legitimate processes (sleep,
+  grep in a pipeline). Needs masquerade detection (systemd- prefix
+  from /tmp) and deleted-exe markers to be actionable.
+
+GOOGLE-LEVEL (this file):
+  - Transient process: present in snapshot N but gone in snapshot N+1.
+  - Masquerade: system-sounding name from a non-system path.
+  - High-memory: RSS &gt; threshold, not a known hungry process.
+  - Deleted exe: /proc/PID/exe is marked &quot;(deleted)&quot; — common for
+    in-memory payload execution.
+  - Handles multiple snapshot files passed as CLI args.
+
+Complexity: O(S × P) where S = number of snapshots, P = processes.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (two ps aux snapshots separated by --- SNAPSHOT_BREAK ---)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+--- SNAPSHOT 2024-03-12T09:00:00Z ---
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0 169796  6396 ?        Ss   08:00   0:03 /sbin/init
+root         500  0.0  0.1 102396 22000 ?        Ss   08:00   0:01 sshd
+alice       1001  0.0  0.0  21364  5812 pts/0    Ss   08:01   0:00 bash
+root        9999  0.0  0.1  10000  8192 ?        S    09:00   0:00 /tmp/systemd-update
+alice       1337  2.0  5.0 800000 1100000 pts/0   Rl   09:00   0:30 python3
+root        7777  0.0  0.0   5000  1024 ?        S    09:00   0:00 [kworker/u4:2]
+--- SNAPSHOT 2024-03-12T09:05:00Z ---
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0 169796  6396 ?        Ss   08:00   0:03 /sbin/init
+root         500  0.0  0.1 102396 22000 ?        Ss   08:00   0:01 sshd
+alice       1001  0.0  0.0  21364  5812 pts/0    Ss   08:01   0:00 bash
+alice       1337  2.0  5.0 800000 1100000 pts/0   Rl   09:00   0:30 python3
+root        8888  0.0  0.0   6000  2048 ?        S    09:05   0:00 /memfd:ld-linux (deleted)
+--- SNAPSHOT 2024-03-12T09:10:00Z ---
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0 169796  6396 ?        Ss   08:00   0:03 /sbin/init
+root         500  0.0  0.1 102396 22000 ?        Ss   08:00   0:01 sshd
+alice       1001  0.0  0.0  21364  5812 pts/0    Ss   08:01   0:00 bash
+alice       1337  0.1  5.0 800000 1100000 pts/0   Rl   09:00   1:30 python3
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+HIGH_RSS_THRESHOLD_KB = 500_000  # 500 MB
+
+# Processes that are legitimately large (exclude from HIGH_RSS alerts)
+KNOWN_HUNGRY = {
+    &quot;java&quot;, &quot;node&quot;, &quot;python&quot;, &quot;python3&quot;, &quot;chrome&quot;, &quot;firefox&quot;,
+    &quot;mysqld&quot;, &quot;postgres&quot;, &quot;mongod&quot;, &quot;redis-server&quot;,
+}
+
+# Name prefixes that look like system processes but shouldn&#x27;t run from /tmp, /dev, /run/user
+SYSTEM_LOOKING_NAMES = re.compile(
+    r&#x27;^(systemd|kworker|kthread|ksoftirqd|sshd|init|udev|dbus|cron|rsyslogd)&#x27;,
+    re.IGNORECASE,
+)
+
+NON_SYSTEM_PATHS = re.compile(
+    r&#x27;^(/tmp|/dev/shm|/var/tmp|/run/user|/home|/root)&#x27;,
+    re.IGNORECASE,
+)
+
+DELETED_EXE_RE = re.compile(r&#x27;\(deleted\)|/memfd:&#x27;, re.IGNORECASE)
+
+SNAPSHOT_MARKER_RE = re.compile(r&#x27;^---\s+SNAPSHOT\s+(\S+)\s+---&#x27;)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+PS_RE = re.compile(
+    r&#x27;^(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;pid&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;cpu&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;mem&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;vsz&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;rss&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;tty&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;stat&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;start&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;time&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;cmd&gt;.+)$&#x27;
+)
+
+
+def parse_snapshot(lines: list[str]) -&gt; dict[int, dict]:
+    &quot;&quot;&quot;Return dict of PID → process record from a block of ps aux lines.&quot;&quot;&quot;
+    procs: dict[int, dict] = {}
+    for line in lines:
+        line = line.strip()
+        m = PS_RE.match(line)
+        if not m:
+            continue
+        pid = int(m.group(&quot;pid&quot;))
+        cmd = m.group(&quot;cmd&quot;).strip()
+        # Extract binary name (first token, strip path)
+        cmd_name = cmd.split()[0].replace(&quot;\\&quot;, &quot;/&quot;).split(&quot;/&quot;)[-1].lstrip(&quot;[&quot;).rstrip(&quot;]&quot;)
+        try:
+            rss = int(m.group(&quot;rss&quot;))
+        except ValueError:
+            rss = 0
+        procs[pid] = {
+            &quot;user&quot;:     m.group(&quot;user&quot;),
+            &quot;pid&quot;:      pid,
+            &quot;rss&quot;:      rss,
+            &quot;stat&quot;:     m.group(&quot;stat&quot;),
+            &quot;cmd&quot;:      cmd,
+            &quot;cmd_name&quot;: cmd_name,
+        }
+    return procs
+
+
+def split_snapshots(lines: list[str]) -&gt; list[tuple[str, dict[int, dict]]]:
+    &quot;&quot;&quot;Split raw lines into list of (timestamp_str, process_dict) tuples.&quot;&quot;&quot;
+    snapshots: list[tuple[str, dict[int, dict]]] = []
+    current_ts = &quot;unknown&quot;
+    current_lines: list[str] = []
+
+    for line in lines:
+        m = SNAPSHOT_MARKER_RE.match(line.strip())
+        if m:
+            if current_lines:
+                snapshots.append((current_ts, parse_snapshot(current_lines)))
+            current_ts = m.group(1)
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        snapshots.append((current_ts, parse_snapshot(current_lines)))
+
+    return snapshots
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_transient(snapshots: list[tuple[str, dict[int, dict]]]) -&gt; list[dict]:
+    &quot;&quot;&quot;Processes that appear in snapshot N but are gone in snapshot N+1.&quot;&quot;&quot;
+    alerts = []
+    for i in range(len(snapshots) - 1):
+        ts_a, procs_a = snapshots[i]
+        ts_b, procs_b = snapshots[i + 1]
+        for pid, proc in procs_a.items():
+            if pid not in procs_b:
+                alerts.append({
+                    &quot;type&quot;:        &quot;TRANSIENT_PROCESS&quot;,
+                    &quot;pid&quot;:         pid,
+                    &quot;user&quot;:        proc[&quot;user&quot;],
+                    &quot;cmd&quot;:         proc[&quot;cmd&quot;],
+                    &quot;ts_appeared&quot;: ts_a,
+                    &quot;ts_gone&quot;:     ts_b,
+                })
+    return alerts
+
+
+def detect_masquerade(snapshots: list[tuple[str, dict[int, dict]]]) -&gt; list[dict]:
+    &quot;&quot;&quot;System-looking name running from non-system path.&quot;&quot;&quot;
+    seen: set[int] = set()  # avoid duplicate alerts across snapshots
+    alerts = []
+    for ts, procs in snapshots:
+        for pid, proc in procs.items():
+            if pid in seen:
+                continue
+            if SYSTEM_LOOKING_NAMES.match(proc[&quot;cmd_name&quot;]):
+                # Extract the path (first token of cmd)
+                path = proc[&quot;cmd&quot;].split()[0] if proc[&quot;cmd&quot;] else &quot;&quot;
+                if NON_SYSTEM_PATHS.match(path):
+                    alerts.append({
+                        &quot;type&quot;:     &quot;MASQUERADE&quot;,
+                        &quot;pid&quot;:      pid,
+                        &quot;user&quot;:     proc[&quot;user&quot;],
+                        &quot;cmd&quot;:      proc[&quot;cmd&quot;],
+                        &quot;ts&quot;:       ts,
+                    })
+                    seen.add(pid)
+    return alerts
+
+
+def detect_high_rss(snapshots: list[tuple[str, dict[int, dict]]]) -&gt; list[dict]:
+    seen: set[int] = set()
+    alerts = []
+    for ts, procs in snapshots:
+        for pid, proc in procs.items():
+            if pid in seen:
+                continue
+            if proc[&quot;rss&quot;] &gt; HIGH_RSS_THRESHOLD_KB and proc[&quot;cmd_name&quot;] not in KNOWN_HUNGRY:
+                alerts.append({
+                    &quot;type&quot;:    &quot;HIGH_RSS_SURPRISE&quot;,
+                    &quot;pid&quot;:     pid,
+                    &quot;user&quot;:    proc[&quot;user&quot;],
+                    &quot;rss_mb&quot;:  round(proc[&quot;rss&quot;] / 1024, 1),
+                    &quot;cmd&quot;:     proc[&quot;cmd&quot;],
+                    &quot;ts&quot;:      ts,
+                })
+                seen.add(pid)
+    return alerts
+
+
+def detect_deleted_exe(snapshots: list[tuple[str, dict[int, dict]]]) -&gt; list[dict]:
+    seen: set[int] = set()
+    alerts = []
+    for ts, procs in snapshots:
+        for pid, proc in procs.items():
+            if pid in seen:
+                continue
+            if DELETED_EXE_RE.search(proc[&quot;cmd&quot;]):
+                alerts.append({
+                    &quot;type&quot;: &quot;DELETED_EXE&quot;,
+                    &quot;pid&quot;:  pid,
+                    &quot;user&quot;: proc[&quot;user&quot;],
+                    &quot;cmd&quot;:  proc[&quot;cmd&quot;],
+                    &quot;ts&quot;:   ts,
+                })
+                seen.add(pid)
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(transient, masquerade, high_rss, deleted_exe) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;PROCESS SNAPSHOT DIFF — ANOMALY DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[TRANSIENT_PROCESS] {len(transient)} event(s)  &quot;
+          f&quot;(appeared and disappeared between snapshots)&quot;)
+    for a in transient:
+        print(f&quot;  pid={a[&#x27;pid&#x27;]}  user={a[&#x27;user&#x27;]}&quot;)
+        print(f&quot;    appeared={a[&#x27;ts_appeared&#x27;]}  gone={a[&#x27;ts_gone&#x27;]}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[MASQUERADE] {len(masquerade)} event(s)  &quot;
+          f&quot;(system-looking name from non-system path)&quot;)
+    for a in masquerade:
+        print(f&quot;  pid={a[&#x27;pid&#x27;]}  user={a[&#x27;user&#x27;]}  ts={a[&#x27;ts&#x27;]}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[HIGH_RSS_SURPRISE] {len(high_rss)} event(s)  &quot;
+          f&quot;(RSS &gt; {HIGH_RSS_THRESHOLD_KB // 1024} MB, not in allowlist)&quot;)
+    for a in high_rss:
+        print(f&quot;  pid={a[&#x27;pid&#x27;]}  user={a[&#x27;user&#x27;]}  rss={a[&#x27;rss_mb&#x27;]} MB  ts={a[&#x27;ts&#x27;]}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[DELETED_EXE] {len(deleted_exe)} event(s)  &quot;
+          f&quot;(exe deleted/memfd — in-memory payload execution)&quot;)
+    for a in deleted_exe:
+        print(f&quot;  pid={a[&#x27;pid&#x27;]}  user={a[&#x27;user&#x27;]}  ts={a[&#x27;ts&#x27;]}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:100]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    snapshots = split_snapshots(raw_lines)
+    print(f&quot;Loaded {len(snapshots)} snapshot(s).\n&quot;)
+
+    print_report(
+        detect_transient(snapshots),
+        detect_masquerade(snapshots),
+        detect_high_rss(snapshots),
+        detect_deleted_exe(snapshots),
+    )
+</code></pre>
+</body>
+</html>

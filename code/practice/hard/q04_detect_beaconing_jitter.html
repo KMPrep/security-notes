@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q04_detect_beaconing_jitter.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q04_detect_beaconing_jitter.py</h1>
+  <p class="file-path">Source: code\practice\hard\q04_detect_beaconing_jitter.py</p>
+  <p class="line-count">488 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q04 [Hard] — Detect Beaconing with Jitter
+=============================================================================
+
+PROBLEM
+-------
+C2 malware checks in to its server at a fixed interval (e.g. every 60 s) but
+adds random jitter (±10–30%) to avoid simple threshold detection.  Given a
+list of outbound connection timestamps from a single (src, dst) pair, detect
+whether the traffic is periodic (beaconing) even with jitter present.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input: a list of timestamps (floats/ISO strings) for one src-dst pair?
+   → Yes; also show a version that takes a list of (src, dst, ts) events.
+2. What is the minimum number of connections to declare beaconing?
+   → Configurable; default 5.
+3. What jitter tolerance to support?
+   → Up to ±40% of the nominal period (covers most real malware families).
+4. Should we return the detected period, or just a boolean?
+   → Return a BeaconResult with period, confidence, and supporting evidence.
+5. Multiple simultaneous periods (e.g. two beacons from same src)?
+   → Detect the dominant period; flag if secondary period also strong.
+6. Should timestamps be de-duplicated?
+   → Yes; duplicate timestamps within 1s should be collapsed.
+7. Streaming or batch?
+   → Batch per (src,dst) pair; show how to call for many pairs.
+
+=============================================================================
+APPROACH 1 — NAIVE  (pairwise interval histogram)
+=============================================================================
+Compute all pairwise differences between timestamps.  Build a histogram of
+intervals.  If any bucket has a count significantly above background, flag.
+
+  Time : O(N²) pairwise differences
+  Space: O(N² + B) where B = histogram buckets
+
+Works for small N (&lt;100 connections); breaks for large N.
+
+=============================================================================
+APPROACH 2 — INTER-ARRIVAL TIME + COEFFICIENT OF VARIATION  (simple, fast)
+=============================================================================
+Compute consecutive inter-arrival times Δ[i] = ts[i+1] - ts[i].
+Detect beaconing if:
+  - The coefficient of variation (CV = std/mean) is below a threshold (e.g. 0.4)
+    CV &lt; 0.4 means intervals are &quot;too regular&quot; for human or random traffic.
+  - The mean interval is within a plausible beacon range (e.g. 5s – 3600s).
+
+  Time : O(N log N) to sort + O(N) for stats
+  Space: O(N)
+
+Limitation: fails when jitter is multiplicative (adds noise proportional to
+current period) vs additive, and misses multi-modal jitter.
+
+=============================================================================
+APPROACH 3 — AUTOCORRELATION / REGULARITY SCORE  (optimal, production-grade)
+=============================================================================
+Compute the inter-arrival time (IAT) series, then apply autocorrelation:
+  - Autocorrelation at lag L: how similar is the IAT series to itself shifted
+    by L positions?
+  - A strong autocorrelation peak at some L &gt; 0 indicates periodicity.
+  - Alternatively, use the IAT histogram and look for a dominant peak whose
+    ratio to mean background exceeds a threshold.
+
+For production: use scipy.signal.periodogram (FFT-based) on a regular
+time-grid resampled from the events.  The dominant frequency = beacon period.
+
+Without scipy: use the IAT histogram with a sliding-window
+majority vote.
+
+  Time : O(N log N) FFT or O(N×W) histogram scan  (W = window range)
+  Space: O(N)
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+import statistics
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BeaconResult:
+    src: str
+    dst: str
+    is_beacon: bool
+    period_seconds: Optional[float]  # dominant period, None if not beacon
+    confidence: float                 # 0.0 – 1.0
+    cv: Optional[float]              # coefficient of variation of IATs
+    event_count: int
+    evidence: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _deduplicate(timestamps: List[float], min_gap: float = 1.0) -&gt; List[float]:
+    &quot;&quot;&quot;Collapse timestamps within min_gap seconds of each other.&quot;&quot;&quot;
+    if not timestamps:
+        return []
+    sorted_ts = sorted(timestamps)
+    deduped = [sorted_ts[0]]
+    for ts in sorted_ts[1:]:
+        if ts - deduped[-1] &gt;= min_gap:
+            deduped.append(ts)
+    return deduped
+
+
+def _inter_arrival_times(timestamps: List[float]) -&gt; List[float]:
+    return [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive pairwise histogram
+# ---------------------------------------------------------------------------
+
+class NaiveBeaconDetector:
+    &quot;&quot;&quot;
+    Builds a histogram of all pairwise timestamp differences.
+    A dominant bucket with count &gt; threshold indicates periodicity.
+    O(N²) time — only suitable for N &lt; 200.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        min_connections: int = 5,
+        bucket_seconds: float = 2.0,
+        dominance_ratio: float = 3.0,  # peak count / mean background ratio
+    ) -&gt; None:
+        self.min_connections = min_connections
+        self.bucket_seconds = bucket_seconds
+        self.dominance_ratio = dominance_ratio
+
+    def detect(self, src: str, dst: str, raw_timestamps) -&gt; BeaconResult:
+        timestamps = [_parse_ts(t) for t in raw_timestamps]
+        timestamps = [t for t in timestamps if t is not None]
+        timestamps = _deduplicate(sorted(timestamps))
+        n = len(timestamps)
+
+        if n &lt; self.min_connections:
+            return BeaconResult(src, dst, False, None, 0.0, None, n,
+                                [f&quot;Too few events: {n} &lt; {self.min_connections}&quot;])
+
+        # Build pairwise difference histogram
+        hist: Dict[int, int] = defaultdict(int)
+        for i in range(n):
+            for j in range(i + 1, n):
+                diff = timestamps[j] - timestamps[i]
+                if 5 &lt;= diff &lt;= 3600:  # plausible beacon range
+                    bucket = int(diff / self.bucket_seconds)
+                    hist[bucket] += 1
+
+        if not hist:
+            return BeaconResult(src, dst, False, None, 0.0, None, n,
+                                [&quot;No pairwise diffs in plausible range&quot;])
+
+        max_count = max(hist.values())
+        mean_count = sum(hist.values()) / len(hist)
+        ratio = max_count / mean_count if mean_count &gt; 0 else 0
+        best_bucket = max(hist, key=hist.get)
+        period = (best_bucket + 0.5) * self.bucket_seconds
+
+        is_beacon = ratio &gt;= self.dominance_ratio
+        confidence = min(1.0, (ratio - 1.0) / (self.dominance_ratio * 2))
+        evidence = [f&quot;Dominant period ~{period:.1f}s (ratio={ratio:.1f}x background)&quot;]
+
+        return BeaconResult(src, dst, is_beacon, period if is_beacon else None,
+                            confidence, None, n, evidence)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Inter-Arrival Time + CV  (fast, easy to explain)
+# ---------------------------------------------------------------------------
+
+class CVBeaconDetector:
+    &quot;&quot;&quot;
+    Coefficient-of-Variation approach on consecutive inter-arrival times.
+    CV &lt; cv_threshold AND mean IAT in plausible range → beacon.
+
+    Strength: O(N log N), simple to explain in practice.
+    Weakness: susceptible to multi-modal jitter and dropped connections.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        min_connections: int = 5,
+        cv_threshold: float = 0.35,
+        min_period_s: float = 5.0,
+        max_period_s: float = 3600.0,
+    ) -&gt; None:
+        self.min_connections = min_connections
+        self.cv_threshold = cv_threshold
+        self.min_period_s = min_period_s
+        self.max_period_s = max_period_s
+
+    def detect(self, src: str, dst: str, raw_timestamps) -&gt; BeaconResult:
+        timestamps = [_parse_ts(t) for t in raw_timestamps]
+        timestamps = sorted(t for t in timestamps if t is not None)
+        timestamps = _deduplicate(timestamps)
+        n = len(timestamps)
+
+        if n &lt; self.min_connections:
+            return BeaconResult(src, dst, False, None, 0.0, None, n,
+                                [f&quot;Too few events: {n}&quot;])
+
+        iats = _inter_arrival_times(timestamps)
+        if not iats:
+            return BeaconResult(src, dst, False, None, 0.0, None, n, [&quot;No IATs&quot;])
+
+        mean_iat = statistics.mean(iats)
+        stdev_iat = statistics.pstdev(iats)  # population stdev for N-1 IATs
+        cv = stdev_iat / mean_iat if mean_iat &gt; 0 else float(&quot;inf&quot;)
+
+        in_range = self.min_period_s &lt;= mean_iat &lt;= self.max_period_s
+        is_beacon = cv &lt;= self.cv_threshold and in_range
+
+        confidence = max(0.0, (self.cv_threshold - cv) / self.cv_threshold) if in_range else 0.0
+
+        evidence = [
+            f&quot;Mean IAT={mean_iat:.1f}s  StdDev={stdev_iat:.1f}s  CV={cv:.3f}&quot;,
+            f&quot;Plausible range: {in_range}&quot;,
+        ]
+        return BeaconResult(src, dst, is_beacon, mean_iat if is_beacon else None,
+                            confidence, cv, n, evidence)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 3 — IAT Histogram Autocorrelation  (optimal)
+# ---------------------------------------------------------------------------
+
+class AutocorrBeaconDetector:
+    &quot;&quot;&quot;
+    Autocorrelation on the inter-arrival time series.
+
+    Algorithm:
+    1. Compute IAT series Δ = [d_1, d_2, ..., d_{n-1}].
+    2. Normalise: Δ_norm = Δ - mean(Δ).
+    3. Compute autocorrelation R[lag] for lag = 1..max_lag.
+       R[lag] = sum(Δ_norm[i] * Δ_norm[i+lag]) / (variance * (len-lag))
+    4. A strong positive peak at some lag L means every L-th IAT resembles the
+       others → evidence of periodicity at period ≈ L × mean(IAT).
+    5. The dominant period = argmax(R) × mean(IAT).
+
+    This does NOT require scipy and runs in O(N × max_lag) — acceptable for
+    N &lt; 10,000 in an this context.  Production code should use FFT.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        min_connections: int = 5,
+        max_lag: int = 20,
+        autocorr_threshold: float = 0.4,
+        min_period_s: float = 5.0,
+        max_period_s: float = 3600.0,
+    ) -&gt; None:
+        self.min_connections = min_connections
+        self.max_lag = max_lag
+        self.autocorr_threshold = autocorr_threshold
+        self.min_period_s = min_period_s
+        self.max_period_s = max_period_s
+
+    def _autocorrelation(self, series: List[float]) -&gt; List[float]:
+        n = len(series)
+        mean = sum(series) / n
+        norm = [x - mean for x in series]
+        variance = sum(x * x for x in norm) / n
+        if variance == 0:
+            return [0.0] * self.max_lag
+        result = []
+        for lag in range(1, min(self.max_lag + 1, n)):
+            corr = sum(norm[i] * norm[i + lag] for i in range(n - lag))
+            corr /= variance * (n - lag)
+            result.append(corr)
+        return result
+
+    def detect(self, src: str, dst: str, raw_timestamps) -&gt; BeaconResult:
+        timestamps = [_parse_ts(t) for t in raw_timestamps]
+        timestamps = sorted(t for t in timestamps if t is not None)
+        timestamps = _deduplicate(timestamps)
+        n = len(timestamps)
+
+        if n &lt; self.min_connections:
+            return BeaconResult(src, dst, False, None, 0.0, None, n,
+                                [f&quot;Too few events: {n}&quot;])
+
+        iats = _inter_arrival_times(timestamps)
+        if len(iats) &lt; 3:
+            return BeaconResult(src, dst, False, None, 0.0, None, n,
+                                [&quot;Too few IATs for autocorrelation&quot;])
+
+        mean_iat = statistics.mean(iats)
+        acf = self._autocorrelation(iats)
+
+        if not acf:
+            return BeaconResult(src, dst, False, None, 0.0, None, n, [&quot;ACF empty&quot;])
+
+        best_lag = max(range(len(acf)), key=lambda i: acf[i])
+        best_corr = acf[best_lag]
+        # Period = (lag + 1) steps × mean IAT
+        # &quot;lag+1&quot; because lag=0 corresponds to shift of 1
+        period = (best_lag + 1) * mean_iat
+
+        in_range = self.min_period_s &lt;= period &lt;= self.max_period_s
+        is_beacon = best_corr &gt;= self.autocorr_threshold and in_range
+
+        confidence = min(1.0, max(0.0, best_corr)) if in_range else 0.0
+        cv = statistics.pstdev(iats) / mean_iat if mean_iat &gt; 0 else float(&quot;inf&quot;)
+
+        evidence = [
+            f&quot;Best autocorr lag={best_lag + 1} (corr={best_corr:.3f})&quot;,
+            f&quot;Implied period={period:.1f}s  CV={cv:.3f}&quot;,
+        ]
+        return BeaconResult(src, dst, is_beacon, period if is_beacon else None,
+                            confidence, cv, n, evidence)
+
+
+# ---------------------------------------------------------------------------
+# Multi-pair dispatcher
+# ---------------------------------------------------------------------------
+
+def detect_beacons_in_events(
+    events: List[dict],
+    detector: AutocorrBeaconDetector = None,
+    ts_field: str = &quot;ts&quot;,
+    src_field: str = &quot;src&quot;,
+    dst_field: str = &quot;dst&quot;,
+) -&gt; List[BeaconResult]:
+    &quot;&quot;&quot;
+    Group events by (src, dst) pair and run beacon detection on each group.
+    Returns only positive BeaconResults.
+    &quot;&quot;&quot;
+    if detector is None:
+        detector = AutocorrBeaconDetector()
+
+    groups: Dict[Tuple[str, str], List] = defaultdict(list)
+    for event in events:
+        src = event.get(src_field)
+        dst = event.get(dst_field)
+        ts = event.get(ts_field)
+        if src and dst and ts:
+            groups[(src, dst)].append(ts)
+
+    results = []
+    for (src, dst), tss in groups.items():
+        r = detector.detect(src, dst, tss)
+        if r.is_beacon:
+            results.append(r)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _beacon_timestamps(start: float, period: float, jitter: float, count: int) -&gt; List[float]:
+    &quot;&quot;&quot;Generate beaconing timestamps with random-ish jitter.&quot;&quot;&quot;
+    import random
+    random.seed(42)
+    ts = start
+    result = [ts]
+    for _ in range(count - 1):
+        ts += period + random.uniform(-jitter, jitter)
+        result.append(ts)
+    return result
+
+
+def test_cv_detector_positive():
+    tss = _beacon_timestamps(0, 60, 10, 20)  # 60s period ±10s jitter
+    det = CVBeaconDetector()
+    r = det.detect(&quot;10.0.0.1&quot;, &quot;1.2.3.4&quot;, tss)
+    assert r.is_beacon, f&quot;Expected beacon: {r}&quot;
+    assert 40 &lt;= r.period_seconds &lt;= 80, r.period_seconds
+    print(f&quot;CVDetector positive: period={r.period_seconds:.1f}s CV={r.cv:.3f}&quot;)
+
+
+def test_cv_detector_negative():
+    import random
+    random.seed(0)
+    # Human-like browsing: random intervals
+    tss = [i * 100 + random.uniform(0, 100) for i in range(20)]
+    det = CVBeaconDetector()
+    r = det.detect(&quot;10.0.0.1&quot;, &quot;1.2.3.4&quot;, tss)
+    assert not r.is_beacon or r.confidence &lt; 0.5, f&quot;False positive: {r}&quot;
+    print(f&quot;CVDetector negative: cv={r.cv:.3f}&quot;)
+
+
+def test_autocorr_detector_positive():
+    tss = _beacon_timestamps(1000, 120, 30, 15)  # 120s period ±30s (25% jitter)
+    det = AutocorrBeaconDetector()
+    r = det.detect(&quot;10.0.0.1&quot;, &quot;198.51.100.1&quot;, tss)
+    assert r.is_beacon, f&quot;Expected beacon: {r.evidence}&quot;
+    print(f&quot;AutocorrDetector positive: period={r.period_seconds:.1f}s conf={r.confidence:.2f}&quot;)
+
+
+def test_few_events():
+    det = CVBeaconDetector(min_connections=5)
+    r = det.detect(&quot;1.1.1.1&quot;, &quot;2.2.2.2&quot;, [1.0, 2.0, 3.0])
+    assert not r.is_beacon
+    print(&quot;Few events: passed&quot;)
+
+
+def test_empty():
+    det = AutocorrBeaconDetector()
+    r = det.detect(&quot;1.1.1.1&quot;, &quot;2.2.2.2&quot;, [])
+    assert not r.is_beacon
+    print(&quot;Empty: passed&quot;)
+
+
+def test_multi_pair_events():
+    # Build events with one beaconing pair and one random pair
+    beacon_tss = _beacon_timestamps(0, 60, 8, 10)
+    events = [{&quot;src&quot;: &quot;10.0.0.1&quot;, &quot;dst&quot;: &quot;evil.c2.net&quot;, &quot;ts&quot;: t} for t in beacon_tss]
+    events += [{&quot;src&quot;: &quot;10.0.0.2&quot;, &quot;dst&quot;: &quot;cdn.safe.net&quot;, &quot;ts&quot;: float(i * 137)} for i in range(10)]
+
+    results = detect_beacons_in_events(events)
+    assert any(r.src == &quot;10.0.0.1&quot; for r in results), &quot;Expected 10.0.0.1 to be flagged&quot;
+    print(f&quot;Multi-pair: {len(results)} beacon pair(s) detected&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Malware (RATs, botnets, ransomware loaders) call home at regular intervals.
+  Jitter is added deliberately to evade simple &quot;exactly N seconds apart&quot; rules.
+  Common real-world beacon intervals:
+    Cobalt Strike default: 60s ± 50% jitter
+    Metasploit Meterpreter: 5s default
+    Emotet: 60–300s
+
+DETECTION STRATEGY
+  CV-based detector: fast O(N) filter; catches 70-80% of beacons with no
+  tuning.  Use as a pre-filter.
+
+  Autocorrelation detector: catches beacons with higher jitter (up to ±40%)
+  and multi-connection-drop scenarios where IATs double or triple occasionally.
+
+FALSE POSITIVES
+  - NTP sync traffic (very regular) → whitelist known NTP destinations
+  - CDN health-check traffic → whitelist known CDN ranges
+  - Analytics heartbeats → baseline normal application traffic before alerting
+
+FALSE NEGATIVES
+  - Jitter &gt; 50%: both detectors may miss; use longer observation windows
+  - Sleep-jittered C2 (random delays in days range): needs longer lookback
+  - Domain-generation algorithm (DGA): same period but rotating dst IP/domain;
+    handle by grouping by src only, not (src,dst)
+
+PRODUCTION HARDENING
+  - Run detector per sliding 24h window per (src, dst) pair
+  - Enrich dst with threat-intel (known C2 IP/domain) → boost confidence
+  - Combine with high-entropy DNS query detection (Q18) for DGA C2s
+  - Store IAT series in time-series DB (Prometheus / VictoriaMetrics) for
+    trending and anomaly detection over longer windows
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_cv_detector_positive()
+    test_cv_detector_negative()
+    test_autocorr_detector_positive()
+    test_few_events()
+    test_empty()
+    test_multi_pair_events()
+</code></pre>
+</body>
+</html>

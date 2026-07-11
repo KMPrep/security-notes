@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q01_streaming_top_k_ips.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q01_streaming_top_k_ips.py</h1>
+  <p class="file-path">Source: code\practice\hard\q01_streaming_top_k_ips.py</p>
+  <p class="line-count">429 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q01 [Hard] — Streaming Top-K Source IPs
+=============================================================================
+
+PROBLEM
+-------
+Given an *unbounded* stream of network events (each event contains at least a
+`src` IP field), maintain an approximate list of the top-K most-frequent
+source IPs using **bounded memory** — i.e. memory must NOT grow with the
+number of distinct IPs seen.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input format — JSONL stream, or already-parsed dicts?
+   → Assume parsed dicts: {&quot;src&quot;: &quot;1.2.3.4&quot;, ...}
+2. What is K?  → Configurable, default 10.
+3. Exact or approximate top-K?
+   → Approximate is fine; must explain the error bound.
+4. Should malformed records (missing &quot;src&quot;) be skipped silently?
+   → Yes, skip and count as &quot;malformed&quot;.
+5. Are IPv4 and IPv6 both possible?
+   → Yes; treat them as opaque strings for counting.
+6. Is output sorted by frequency descending?
+   → Yes.
+7. Batch (offline) vs streaming (online)?
+   → Streaming; result queryable at any time.
+8. Distributed?
+   → Single-node for this solution; note how to scale.
+
+=============================================================================
+APPROACH 1 — NAIVE  (exact, unbounded memory)
+=============================================================================
+Use a plain dict to count every distinct IP.
+At query time, call heapq.nlargest(k, counts, key=counts.get).
+
+  Time : O(1) per event insert, O(D log K) per query  (D = distinct IPs)
+  Space: O(D) — grows unboundedly with distinct IPs ← PROBLEM for streams
+
+Suitable only for bounded batch inputs or small cardinality streams.
+
+=============================================================================
+APPROACH 2 — OPTIMAL  (Space-Saving / Misra-Gries, exact top-K guarantee)
+=============================================================================
+The **Space-Saving** algorithm (Metwally et al., 2005) tracks exactly m
+counters (m ≥ K).  When an IP is already tracked, increment its counter.
+When an IP is new AND there are fewer than m slots, add it with count 1.
+When an IP is new AND all m slots are taken, evict the minimum-count slot
+and replace it with the new IP, inheriting (min_count + 1).
+
+Guarantee: any IP whose true frequency &gt; N/m is guaranteed to appear in the
+tracker.  For K heavy-hitters, use m ≥ K / ε where ε is the acceptable
+frequency error fraction (e.g. m = 10K covers the top K with &lt; 10% error).
+
+  Time : O(log m) per event  (min-heap for eviction)
+  Space: O(m)  — strictly bounded
+
+=============================================================================
+APPROACH 3 — COUNT-MIN SKETCH + Min-Heap  (fully probabilistic)
+=============================================================================
+Use a Count-Min Sketch (CMS) for frequency estimation (O(1) per update,
+bounded array size) combined with a min-heap of size K to maintain candidates.
+CMS over-estimates but never under-estimates.  Error bound: ε with probability
+1-δ for chosen width/depth.
+
+  Time : O(d) per update  (d = CMS depth, typically 5-7)
+  Space: O(d × w + K)  — fully bounded
+
+This approach is preferred when the cardinality of distinct values is
+astronomically large (e.g. full IPv6 space) and even O(m) dict is too large.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import heapq
+import hashlib
+import math
+from collections import defaultdict
+from typing import Dict, Iterator, List, Tuple
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive exact counter (unbounded memory)
+# ---------------------------------------------------------------------------
+
+class NaiveTopKIPs:
+    &quot;&quot;&quot;Exact top-K using an unbounded dict.  Use only for small/batch inputs.&quot;&quot;&quot;
+
+    def __init__(self, k: int = 10) -&gt; None:
+        self.k = k
+        self.counts: Dict[str, int] = defaultdict(int)
+        self.malformed = 0
+
+    def process(self, event: dict) -&gt; None:
+        src = event.get(&quot;src&quot;)
+        if not src or not isinstance(src, str):
+            self.malformed += 1
+            return
+        self.counts[src] += 1
+
+    def top_k(self) -&gt; List[Tuple[str, int]]:
+        &quot;&quot;&quot;Return top-K IPs sorted by frequency descending.&quot;&quot;&quot;
+        return heapq.nlargest(self.k, self.counts.items(), key=lambda x: x[1])
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Space-Saving (Misra-Gries variant) — RECOMMENDED
+# ---------------------------------------------------------------------------
+
+class SpaceSavingTopKIPs:
+    &quot;&quot;&quot;
+    Bounded-memory approximate top-K using the Space-Saving algorithm.
+
+    Tracks at most `capacity` counters.  Any IP with true frequency &gt; N/capacity
+    is guaranteed to appear in the result.  Set capacity = k / epsilon for a
+    desired error fraction epsilon.
+
+    Data structure:
+      - A dict mapping ip → (estimated_count, max_error)
+      - A min-heap of (count, ip) for O(log m) eviction of the minimum counter
+    &quot;&quot;&quot;
+
+    def __init__(self, k: int = 10, capacity: int = 100) -&gt; None:
+        if capacity &lt; k:
+            raise ValueError(&quot;capacity must be &gt;= k&quot;)
+        self.k = k
+        self.capacity = capacity
+        self._counts: Dict[str, int] = {}   # ip → estimated count
+        self._errors: Dict[str, int] = {}   # ip → max over-count error
+        self._heap: List[Tuple[int, str]] = []  # min-heap of (count, ip)
+        self.total_events = 0
+        self.malformed = 0
+
+    def process(self, event: dict) -&gt; None:
+        src = event.get(&quot;src&quot;)
+        if not src or not isinstance(src, str):
+            self.malformed += 1
+            return
+
+        self.total_events += 1
+
+        if src in self._counts:
+            # Already tracked — increment
+            self._counts[src] += 1
+            # Lazy heap update: rebuild is avoided by using &quot;tombstone&quot; approach.
+            # For a production system use a Fibonacci heap or indexed heap.
+            # Here we do a lazy push and tolerate stale entries during eviction.
+            heapq.heappush(self._heap, (self._counts[src], src))
+        elif len(self._counts) &lt; self.capacity:
+            # Free slot — add new IP
+            self._counts[src] = 1
+            self._errors[src] = 0
+            heapq.heappush(self._heap, (1, src))
+        else:
+            # No free slot — evict the minimum
+            min_count = self._evict_min()
+            new_count = min_count + 1
+            self._counts[src] = new_count
+            self._errors[src] = min_count   # worst-case over-count error
+            heapq.heappush(self._heap, (new_count, src))
+
+    def _evict_min(self) -&gt; int:
+        &quot;&quot;&quot;Remove and return the count of the IP with the minimum estimated count.&quot;&quot;&quot;
+        while self._heap:
+            count, ip = heapq.heappop(self._heap)
+            if ip in self._counts and self._counts[ip] == count:
+                # Valid (non-stale) entry
+                del self._counts[ip]
+                del self._errors[ip]
+                return count
+        return 0  # should not reach here
+
+    def top_k(self) -&gt; List[Tuple[str, int, int]]:
+        &quot;&quot;&quot;
+        Return top-K IPs as (ip, estimated_count, max_error) sorted descending.
+        max_error is the upper bound on over-counting introduced by eviction.
+        &quot;&quot;&quot;
+        candidates = sorted(self._counts.items(), key=lambda x: x[1], reverse=True)
+        return [(ip, cnt, self._errors.get(ip, 0)) for ip, cnt in candidates[: self.k]]
+
+    def frequency_guarantee(self) -&gt; float:
+        &quot;&quot;&quot;Minimum true frequency fraction guaranteed to be in tracker.&quot;&quot;&quot;
+        return 1.0 / self.capacity if self.total_events &gt; 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 3 — Count-Min Sketch + Min-Heap
+# ---------------------------------------------------------------------------
+
+class CountMinSketch:
+    &quot;&quot;&quot;
+    Count-Min Sketch for frequency estimation.
+
+    width  : number of buckets per row (controls error magnitude ε ≈ e/width)
+    depth  : number of hash functions / rows (controls failure prob δ ≈ e^-depth)
+    Typical: width=2000, depth=7 → ε ≈ 0.0014, δ ≈ 0.001
+    &quot;&quot;&quot;
+
+    def __init__(self, width: int = 2000, depth: int = 7) -&gt; None:
+        self.width = width
+        self.depth = depth
+        self.table = [[0] * width for _ in range(depth)]
+        # Pre-compute distinct seeds via SHA256-derived offsets
+        self._seeds = [i * 2654435761 &amp; 0xFFFFFFFF for i in range(depth)]
+
+    def _hashes(self, key: str) -&gt; List[int]:
+        encoded = key.encode()
+        result = []
+        for seed in self._seeds:
+            # Combine SHA256 digest bytes with seed for independence
+            h = int(hashlib.sha256(seed.to_bytes(4, &quot;little&quot;) + encoded).hexdigest(), 16)
+            result.append(h % self.width)
+        return result
+
+    def add(self, key: str, count: int = 1) -&gt; None:
+        for row, col in enumerate(self._hashes(key)):
+            self.table[row][col] += count
+
+    def estimate(self, key: str) -&gt; int:
+        return min(self.table[row][col] for row, col in enumerate(self._hashes(key)))
+
+
+class CMSTopKIPs:
+    &quot;&quot;&quot;
+    Top-K IPs using Count-Min Sketch for counting + min-heap of size K
+    for candidate tracking.
+
+    Memory: O(width × depth + K)  — fully bounded regardless of cardinality.
+    Limitation: CMS only over-estimates; we may include false positives but
+    never miss a true heavy hitter.
+    &quot;&quot;&quot;
+
+    def __init__(self, k: int = 10, width: int = 2000, depth: int = 7) -&gt; None:
+        self.k = k
+        self.sketch = CountMinSketch(width, depth)
+        # min-heap of (estimated_count, ip)
+        self._heap: List[Tuple[int, str]] = []
+        self._heap_set: set = set()   # O(1) membership check
+        self.malformed = 0
+
+    def process(self, event: dict) -&gt; None:
+        src = event.get(&quot;src&quot;)
+        if not src or not isinstance(src, str):
+            self.malformed += 1
+            return
+
+        self.sketch.add(src)
+        est = self.sketch.estimate(src)
+
+        if src in self._heap_set:
+            # Re-push with updated count; stale entries tolerated (lazy deletion)
+            heapq.heappush(self._heap, (est, src))
+        elif len(self._heap_set) &lt; self.k:
+            heapq.heappush(self._heap, (est, src))
+            self._heap_set.add(src)
+        else:
+            # Check if this IP deserves to replace the current minimum
+            min_count, min_ip = self._heap[0]
+            if est &gt; min_count:
+                # Evict the min candidate
+                while self._heap and self._heap[0][1] not in self._heap_set:
+                    heapq.heappop(self._heap)
+                if self._heap:
+                    _, evicted = heapq.heappop(self._heap)
+                    self._heap_set.discard(evicted)
+                heapq.heappush(self._heap, (est, src))
+                self._heap_set.add(src)
+
+    def top_k(self) -&gt; List[Tuple[str, int]]:
+        &quot;&quot;&quot;Return top-K IPs sorted by estimated frequency descending.&quot;&quot;&quot;
+        valid = {ip: self.sketch.estimate(ip) for ip in self._heap_set}
+        return sorted(valid.items(), key=lambda x: x[1], reverse=True)[: self.k]
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_events(ip_counts: Dict[str, int]) -&gt; List[dict]:
+    events = []
+    for ip, cnt in ip_counts.items():
+        events.extend({&quot;src&quot;: ip, &quot;dst_port&quot;: 443} for _ in range(cnt))
+    return events
+
+
+def test_naive():
+    tracker = NaiveTopKIPs(k=3)
+
+    # Empty input
+    assert tracker.top_k() == []
+
+    # Normal input
+    events = _make_events({&quot;1.1.1.1&quot;: 100, &quot;2.2.2.2&quot;: 50, &quot;3.3.3.3&quot;: 200, &quot;4.4.4.4&quot;: 10})
+    for e in events:
+        tracker.process(e)
+    top = tracker.top_k()
+    assert top[0][0] == &quot;3.3.3.3&quot;
+    assert top[1][0] == &quot;1.1.1.1&quot;
+    assert top[2][0] == &quot;2.2.2.2&quot;
+
+    # Malformed input
+    tracker.process({})
+    tracker.process({&quot;src&quot;: None})
+    tracker.process({&quot;src&quot;: 12345})
+    assert tracker.malformed == 3
+
+    print(&quot;NaiveTopKIPs: all tests passed&quot;)
+
+
+def test_space_saving():
+    tracker = SpaceSavingTopKIPs(k=3, capacity=20)
+
+    # Empty
+    assert tracker.top_k() == []
+
+    # Normal: clear winner should appear
+    events = _make_events({&quot;10.0.0.1&quot;: 500, &quot;10.0.0.2&quot;: 300, &quot;10.0.0.3&quot;: 200,
+                           **{f&quot;10.0.1.{i}&quot;: 1 for i in range(50)}})
+    for e in events:
+        tracker.process(e)
+    top_ips = [ip for ip, _, _ in tracker.top_k()]
+    # The three dominant IPs must appear (Space-Saving guarantee)
+    assert &quot;10.0.0.1&quot; in top_ips, f&quot;Expected 10.0.0.1 in {top_ips}&quot;
+
+    # Malformed
+    tracker.process({&quot;src&quot;: &quot;&quot;})
+    assert tracker.malformed == 1
+
+    print(&quot;SpaceSavingTopKIPs: all tests passed&quot;)
+
+
+def test_cms_top_k():
+    tracker = CMSTopKIPs(k=3, width=1000, depth=5)
+
+    # Empty
+    assert tracker.top_k() == []
+
+    # Normal
+    events = _make_events({&quot;192.168.1.1&quot;: 400, &quot;192.168.1.2&quot;: 250, &quot;192.168.1.3&quot;: 150,
+                           **{f&quot;10.0.{i}.{j}&quot;: 1 for i in range(5) for j in range(5)}})
+    for e in events:
+        tracker.process(e)
+    top_ips = [ip for ip, _ in tracker.top_k()]
+    assert &quot;192.168.1.1&quot; in top_ips, f&quot;Expected 192.168.1.1 in {top_ips}&quot;
+
+    # Malformed
+    tracker.process({&quot;other_field&quot;: &quot;x&quot;})
+    assert tracker.malformed == 1
+
+    print(&quot;CMSTopKIPs: all tests passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
+def simulate_stream() -&gt; None:
+    &quot;&quot;&quot;Simulate an unbounded stream and compare all three approaches.&quot;&quot;&quot;
+    import random
+
+    # Simulate 100k events: Zipf-distributed IPs (few dominate)
+    random.seed(42)
+    ips = [f&quot;10.0.{i}.{j}&quot; for i in range(256) for j in range(256)]  # 65536 IPs
+    weights = [1 / (rank + 1) for rank in range(len(ips))]  # Zipf
+    total = sum(weights)
+    weights = [w / total for w in weights]
+
+    stream = ({&quot;src&quot;: random.choices(ips, weights=weights)[0]} for _ in range(100_000))
+
+    naive = NaiveTopKIPs(k=5)
+    space_saving = SpaceSavingTopKIPs(k=5, capacity=100)
+    cms = CMSTopKIPs(k=5, width=2000, depth=7)
+
+    for event in stream:
+        naive.process(event)
+        space_saving.process(event)
+        cms.process(event)
+
+    print(&quot;\n=== Top-5 IPs (Naive exact) ===&quot;)
+    for ip, cnt in naive.top_k():
+        print(f&quot;  {ip:20s}  count={cnt}&quot;)
+
+    print(&quot;\n=== Top-5 IPs (Space-Saving) ===&quot;)
+    for ip, cnt, err in space_saving.top_k():
+        print(f&quot;  {ip:20s}  est={cnt}  max_error={err}&quot;)
+
+    print(&quot;\n=== Top-5 IPs (CMS + Heap) ===&quot;)
+    for ip, cnt in cms.top_k():
+        print(f&quot;  {ip:20s}  est={cnt}&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Attackers generating high-volume traffic (DDoS, brute-force, scanning) will
+  appear as heavy hitters in source-IP frequency.  Bounded-memory top-K gives
+  the SOC a real-time view of top offenders even on 100 Gbps links.
+
+FAILURE MODES
+  - Space-Saving can over-count a rare IP if eviction happens at the wrong time.
+    The max_error field bounds this.
+  - CMS only over-estimates; under-counting is impossible → no missed heavy hitters.
+  - Both algorithms miss attackers who deliberately spread traffic across many IPs
+    (distributed attack) — combine with per-subnet aggregation.
+
+FALSE POSITIVES / NEGATIVES
+  - False positive: a bursty-but-legitimate CDN egress IP could rank highly.
+    Enrich with IP reputation / ASN allowlisting.
+  - False negative: low-and-slow attackers below the heavy-hitter threshold.
+    Use a separate rate-based sliding window detector for those.
+
+PRODUCTION HARDENING
+  - Run one tracker per 5-minute epoch; rotate and archive.
+  - Feed output to downstream alerting if any IP exceeds e.g. 1% of all traffic.
+  - Use Redis Sorted Sets for distributed top-K across multiple collector nodes.
+  - Combine with GeoIP enrichment before surfacing to analysts.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive()
+    test_space_saving()
+    test_cms_top_k()
+    simulate_stream()
+</code></pre>
+</body>
+</html>

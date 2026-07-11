@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BeyondCorp — Google's Zero-Trust Security Model</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: infra\Zero-Trust\BeyondCorp\README.md</p>
+<h1 id="beyondcorp-googles-zero-trust-security-model">BeyondCorp — Google's Zero-Trust Security Model</h1>
+<p><strong>Category:</strong> Zero Trust — Network Access Architecture<br />
+<strong>Published:</strong> BeyondCorp: A New Approach to Enterprise Security (2014 USENIX paper series)<br />
+<strong>Applies To:</strong> Enterprise access, internal application access, remote workers, cloud-native organizations<br />
+<strong>GCP Product:</strong> BeyondCorp Enterprise (now part of Chrome Enterprise)</p>
+<h2 id="overview">Overview</h2>
+<p>BeyondCorp is Google's internal implementation of Zero Trust network access, developed over 6 years (2009–2017) and described in a series of papers. The model was born out of Operation Aurora — a 2010 state-sponsored attack against Google that used a corporate VPN as a pivot point. The lesson: <strong>the corporate network is not trustworthy. Access decisions should be based on device identity and user identity, not network location.</strong></p>
+<p>The traditional enterprise security model grants implicit trust to anything inside the corporate network (VPN-connected or on-site). BeyondCorp eliminates this implicit trust entirely. Every access request must be authenticated and authorized based on:<br />
+1. <strong>Who</strong> is the user? (identity, group membership, authentication strength)<br />
+2. <strong>What device</strong> are they on? (device health, management status, OS version, certificate)<br />
+3. <strong>What are they requesting?</strong> (application, action, sensitivity level)</p>
+<p>At Google scale, this means: 50,000+ Google employees access internal applications from any network (home, coffee shop, international travel) with no VPN, yet access is limited precisely to what each person needs given the device state and context at the time of the request.</p>
+<h2 id="core-principles">Core Principles</h2>
+<table>
+<thead>
+<tr>
+<th>Principle</th>
+<th>Traditional Model</th>
+<th>BeyondCorp Model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trust model</td>
+<td>Trust the network; distrust the internet</td>
+<td>Trust nothing by default; verify every request</td>
+</tr>
+<tr>
+<td>Network location</td>
+<td>Corp network = trusted zone</td>
+<td>Network location is irrelevant</td>
+</tr>
+<tr>
+<td>VPN</td>
+<td>VPN grants broad access to internal network</td>
+<td>No VPN; each application is its own access control point</td>
+</tr>
+<tr>
+<td>Authentication</td>
+<td>Username/password at perimeter</td>
+<td>Multi-factor authentication per request; context-aware</td>
+</tr>
+<tr>
+<td>Device trust</td>
+<td>Assumed if on corp network</td>
+<td>Device must be managed, healthy, and with valid cert</td>
+</tr>
+<tr>
+<td>Lateral movement</td>
+<td>Easy once inside the network</td>
+<td>Very difficult; each service is isolated with its own access policy</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="beyondcorp-architecture-components">BeyondCorp Architecture Components</h2>
+<pre class="mermaid">
+flowchart TD
+    A[User on any device any network] --> B[Access Proxy - Google Front End GFE]
+    B --> C{Access Policy Engine}
+    C --> D[Device Inventory Database - cert + health check]
+    C --> E[User Identity Provider - SSO + MFA]
+    C --> F[Access Control List - per app policy]
+    D --> C
+    E --> C
+    F --> C
+    C -- Allowed --> G[Internal Application Backend]
+    C -- Denied --> H[403 Forbidden - redirect to remediation]
+    style C fill:#4ecdc4
+    style G fill:#4ecdc4
+    style H fill:#ff6b6b,color:#fff
+</pre>
+<h3 id="component-breakdown">Component Breakdown</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Description</th>
+<th>Google Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Access Proxy</td>
+<td>Terminates all user connections; enforces policy before forwarding</td>
+<td>Google Front End (GFE); nginx-based</td>
+</tr>
+<tr>
+<td>Device Inventory</td>
+<td>Database of all managed devices with their health, OS version, patch level, certificates</td>
+<td>MDM-fed device database</td>
+</tr>
+<tr>
+<td>Device Certificate</td>
+<td>Each managed device has a certificate issued by corporate CA; identifies the device</td>
+<td>Google Certificate Authority</td>
+</tr>
+<tr>
+<td>Identity Provider (IdP)</td>
+<td>Authenticates users; provides identity claims and group membership</td>
+<td>Google SSO with FIDO2 hardware keys</td>
+</tr>
+<tr>
+<td>Trust Tiers</td>
+<td>Different levels of trust for different devices/users</td>
+<td>Managed Google device vs contractor device</td>
+</tr>
+<tr>
+<td>Access Control Engine</td>
+<td>Evaluates per-application policy: is this user+device combination allowed?</td>
+<td>Context-Aware Access Engine</td>
+</tr>
+<tr>
+<td>Session Management</td>
+<td>Issues short-lived access tokens after policy check passes</td>
+<td>Per-user per-session JWTs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="trust-tier-model">Trust Tier Model</h2>
+<p>Google classifies devices into trust tiers. Higher-trust devices get access to more sensitive resources:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Device Type</th>
+<th>Access Level</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>Unmanaged personal device</td>
+<td>Public-only applications; nothing internal</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Contractor managed device</td>
+<td>Limited internal apps; no sensitive data</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Google-managed device (standard employee)</td>
+<td>Most internal apps; G3 and below sensitivity</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Google-managed high-security device (corp image, secure boot verified, no extensions)</td>
+<td>Sensitive apps; security operations tooling</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Dedicated secure access workstation</td>
+<td>Highest-sensitivity systems: production access, admin consoles</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="beyondcorp-access-request-flow">BeyondCorp Access Request Flow</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant User as User (any network)
+    participant AP as Access Proxy
+    participant IdP as Identity Provider
+    participant DI as Device Inventory
+    participant PE as Policy Engine
+    participant App as Internal App
+
+    User->>AP: HTTPS request to internal-app.google.com
+    AP->>IdP: Redirect to SSO; user authenticates with FIDO2 key
+    IdP->>AP: Return identity assertion (email, groups)
+    AP->>DI: Lookup device certificate; check health status
+    DI->>AP: Device state: managed=yes, cert=valid, OS=current, patch=current
+    AP->>PE: Evaluate policy: user=sre@google.com + device=managed + app=prod-monitoring
+    PE->>AP: Decision: ALLOW (user is in SRE group; device is tier 3)
+    AP->>App: Forward request; inject user identity headers
+    App->>User: Response
+</pre>
+<hr />
+<h2 id="context-aware-access-key-signals">Context-Aware Access — Key Signals</h2>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>How Used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User identity</td>
+<td>Is the user's account valid and authenticated with required MFA level?</td>
+</tr>
+<tr>
+<td>User group membership</td>
+<td>Is the user in the group that has access to this app?</td>
+</tr>
+<tr>
+<td>Device certificate</td>
+<td>Does the device have a valid corp-issued certificate? Is it enrolled in MDM?</td>
+</tr>
+<tr>
+<td>Device health</td>
+<td>Is the OS patched to minimum required version? Is disk encryption enabled? Is antivirus status healthy?</td>
+</tr>
+<tr>
+<td>Device location</td>
+<td>Is this a registered corporate location? (Optional — BeyondCorp is network-agnostic)</td>
+</tr>
+<tr>
+<td>Risk score</td>
+<td>Anomaly detection: is this the user's normal pattern? Is the device at unusual location?</td>
+</tr>
+<tr>
+<td>Time of access</td>
+<td>Is this outside normal working hours for this user?</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="beyondcorp-vs-vpn-comparison">BeyondCorp vs VPN Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Traditional VPN</th>
+<th>BeyondCorp</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What gets access</td>
+<td>Full internal network once connected</td>
+<td>Only specific permitted applications</td>
+</tr>
+<tr>
+<td>Trust basis</td>
+<td>Being connected to VPN</td>
+<td>User identity + device health</td>
+</tr>
+<tr>
+<td>Lateral movement</td>
+<td>Easy — connected to all internal subnets</td>
+<td>Hard — each app has independent access policy</td>
+</tr>
+<tr>
+<td>Scalability</td>
+<td>VPN concentrators bottleneck; complex split-tunneling</td>
+<td>Scales horizontally; GFE handles all load</td>
+</tr>
+<tr>
+<td>Remote access performance</td>
+<td>VPN hairpin adds latency</td>
+<td>Direct connection to GFE; lower latency</td>
+</tr>
+<tr>
+<td>Compliance / audit</td>
+<td>Limited per-request logging</td>
+<td>Every access request logged with full context</td>
+</tr>
+<tr>
+<td>Contractor access</td>
+<td>Full VPN access or complex split tunneling</td>
+<td>Fine-grained per-resource access at lower trust tier</td>
+</tr>
+<tr>
+<td>Zero-day malware on corp network</td>
+<td>Spreads laterally to any corp subnet</td>
+<td>Cannot reach internal apps without identity + device policy</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Stolen user credentials + unmanaged device</td>
+<td>No device-trust requirement; MFA bypass</td>
+<td>Access granted without device check</td>
+<td>Med (if device check skipped)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Managed device malware</td>
+<td>Malware runs on corp device; device cert still valid</td>
+<td>Access granted to compromised device</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Access proxy bypass</td>
+<td>Internal traffic bypass that skips the proxy</td>
+<td>No policy enforcement for that path</td>
+<td>Low-Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-broad access policies</td>
+<td>Groups too large; apps grant access to "all engineers"</td>
+<td>Compromised account gets broad access</td>
+<td>High (policy hygiene issue)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Stale device database</td>
+<td>MDM not updating device health in real time</td>
+<td>Compromised or unpatched device still passes</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Session token theft</td>
+<td>Long-lived JWT for access session stolen</td>
+<td>Access for session duration without reauthentication</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Layer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Credential theft</td>
+<td>Require FIDO2 hardware keys; phishing-resistant MFA always</td>
+<td>IdP</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Compromised managed device</td>
+<td>Continuous device health signals (EDR → device inventory); revoke cert on compromise</td>
+<td>MDM + device inventory</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Over-broad policies</td>
+<td>Periodic policy reviews; use just-in-time access for sensitive apps</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Session token theft</td>
+<td>Short-lived sessions; step-up authentication for sensitive actions</td>
+<td>Access Layer</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Stale device health</td>
+<td>Near-real-time health feed from EDR to device inventory service</td>
+<td>Security infrastructure</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Internal service bypasses</td>
+<td>Enforce mTLS for all internal service-to-service calls (ALTS at Google)</td>
+<td>Service mesh</td>
+</tr>
+</tbody>
+</table>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What motivated Google to develop BeyondCorp and what fundamental security assumption does it reject?</li>
+<li>Explain the three signals that BeyondCorp uses to make access decisions. Why are all three required?</li>
+<li>How does BeyondCorp make lateral movement harder for an attacker who has already compromised one machine?</li>
+<li>What is a device certificate and how does BeyondCorp use it? What happens when a device is lost or stolen?</li>
+<li>Compare the security and usability trade-offs of BeyondCorp vs a traditional VPN for a 50,000-person organization.</li>
+<li>How does BeyondCorp handle contractors and partners who use their own unmanaged devices?</li>
+<li>What is context-aware access and what additional signals does it use beyond basic identity and device trust?</li>
+<li>How does BeyondCorp achieve zero-trust for service-to-service communication inside the data center (not just user access)?</li>
+<li>Walk through a BeyondCorp access request for a security engineer accessing a production monitoring dashboard.</li>
+<li>What would your migration plan look like to move a 10,000-employee company from VPN to a BeyondCorp-style model over 18 months?</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>BeyondCorp rejects the concept of a trusted network — access is based on user identity + device health + application policy, not network location.</li>
+<li>No VPN — users connect directly from any network; the Access Proxy enforces policy before any traffic reaches internal services.</li>
+<li>Device certificates are the hardware anchor of device trust — enrollment in MDM, OS patch status, and certificate validity are all checked at access time.</li>
+<li>FIDO2 hardware keys are required for phishing-resistant MFA — this is the strongest authentication Google could deploy at scale.</li>
+<li>Lateral movement is dramatically reduced because each internal application is its own access control enforcement point.</li>
+<li>BeyondCorp inspired Chrome's BeyondCorp Enterprise product, Google Cloud IAP (Identity-Aware Proxy), and the broader Zero Trust industry movement.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

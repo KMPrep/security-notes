@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tunneling — Encapsulation, VPNs, and Covert Channels</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: network\Tunneling\README.md</p>
+<h1 id="tunneling-encapsulation-vpns-and-covert-channels">Tunneling — Encapsulation, VPNs, and Covert Channels</h1>
+<p><strong>OSI Layer:</strong> Cross-layer (tunnels exist at L2, L3, L5, and L7)<br />
+<strong>Related RFCs/specs:</strong> RFC 2784 (GRE), RFC 4301/4303 (IPsec/ESP), RFC 2637 (PPTP), RFC 8446 (TLS 1.3), RFC 9000 (QUIC), WireGuard whitepaper<br />
+<strong>Related notes:</strong> <a href="../Layer3/VPN/README.md">VPN</a> · <a href="../Layer3/IPsec/README.md">IPsec</a> · <a href="../Layer3/GRE/README.md">GRE</a> · <a href="../Layer5/PPTP/README.md">PPTP</a> · <a href="../Layer7/SSH/README.md">SSH</a> · <a href="../../infra/Zero-Trust/BeyondCorp/README.md">BeyondCorp / ZTNA</a></p>
+<h2 id="overview">Overview</h2>
+<p>Tunneling is <strong>encapsulating one network protocol inside another</strong> so that packets can traverse a network that would otherwise not carry, permit, or protect them. The original packet (the <em>payload</em> or <em>passenger</em> protocol) is wrapped in a new header (the <em>delivery</em> protocol) at one endpoint, routed across the intermediate network, and unwrapped at the far endpoint. Tunneling is the mechanism underneath most VPNs, and it is equally a favorite technique of attackers, who tunnel command-and-control (C2) and data exfiltration inside protocols firewalls are forced to allow (DNS, HTTPS). The same primitive — "hide traffic X inside traffic Y" — is defensive or offensive depending on who controls the endpoints, which is exactly why it shows up on both sides of a security engineering.</p>
+<p>Because encapsulation can happen at any layer, tunnels are best understood by three questions: <strong>what is encapsulated</strong>, <strong>what carries it</strong>, and <strong>what (if anything) protects it</strong>. A tunnel that encapsulates but does not authenticate or encrypt (GRE, plain IP-in-IP) provides connectivity, not security; security comes from pairing encapsulation with cryptography (IPsec, TLS, WireGuard).</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>Every tunnel does the same three things: <strong>encapsulate</strong> (prepend a delivery header to the original packet), <strong>transport</strong> (route the outer packet by its new header across the underlay), and <strong>decapsulate</strong> (strip the outer header and inject the original packet into the far network). The endpoints share tunnel state — addresses, keys, selectors, and sequence numbers — so both sides agree on what is inside the wrapper.</p>
+<p>Two orthogonal design axes matter for real systems:</p>
+<ul>
+<li><strong>Tunnel mode vs transport mode</strong> (IPsec framing, but the idea generalizes). <em>Tunnel mode</em> wraps the <strong>entire original IP packet</strong> in a new IP header — used gateway-to-gateway (site-to-site VPN), and it hides the original addresses. <em>Transport mode</em> protects only the <strong>payload</strong>, leaving the original IP header — used host-to-host, lower overhead, but exposes endpoints.</li>
+<li><strong>Full tunnel vs split tunnel</strong> (remote-access VPN routing). <em>Full tunnel</em> sends <strong>all</strong> client traffic through the tunnel (maximum visibility/control, higher latency and load). <em>Split tunnel</em> sends only selected routes through the tunnel and the rest direct (better performance, but a misconfigured split leaks sensitive traffic outside the protected path).</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it means</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Encapsulation</td>
+<td>Wrap passenger packet in a delivery header</td>
+<td>All tunnels</td>
+</tr>
+<tr>
+<td>Tunnel mode</td>
+<td>New IP header wraps the full original packet</td>
+<td>Site-to-site VPN gateways</td>
+</tr>
+<tr>
+<td>Transport mode</td>
+<td>Protect payload only; keep original IP header</td>
+<td>Host-to-host</td>
+</tr>
+<tr>
+<td>Full tunnel</td>
+<td>All traffic egresses via the tunnel</td>
+<td>High-assurance remote access</td>
+</tr>
+<tr>
+<td>Split tunnel</td>
+<td>Only selected routes traverse the tunnel</td>
+<td>Performance-sensitive remote work</td>
+</tr>
+<tr>
+<td>Overlay / underlay</td>
+<td>Tunnel builds a logical net over a physical one</td>
+<td>SD-WAN, cloud VPC peering, k8s CNIs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="common-tunneling-technologies">Common tunneling technologies</h3>
+<table>
+<thead>
+<tr>
+<th>Protocol</th>
+<th>Layer</th>
+<th>Encapsulates</th>
+<th>Protection</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GRE</td>
+<td>3</td>
+<td>Arbitrary L3 payloads</td>
+<td>None (needs IPsec)</td>
+<td>Simple, flexible; multicast/routing over tunnel</td>
+</tr>
+<tr>
+<td>IP-in-IP</td>
+<td>3</td>
+<td>IP in IP</td>
+<td>None</td>
+<td>Minimal overhead, no security</td>
+</tr>
+<tr>
+<td>IPsec (ESP, tunnel mode)</td>
+<td>3</td>
+<td>Full IP packet</td>
+<td>Auth + encryption</td>
+<td>Dominant secure site-to-site VPN</td>
+</tr>
+<tr>
+<td>PPTP</td>
+<td>5 (over GRE)</td>
+<td>PPP frames</td>
+<td>Weak (MS-CHAPv2/MPPE — broken)</td>
+<td>Legacy; avoid</td>
+</tr>
+<tr>
+<td>L2TP/IPsec</td>
+<td>2/3</td>
+<td>L2 frames</td>
+<td>Via IPsec</td>
+<td>L2TP alone has no crypto</td>
+</tr>
+<tr>
+<td>SSH port forwarding</td>
+<td>7</td>
+<td>TCP streams</td>
+<td>SSH (strong)</td>
+<td><code>-L</code> local, <code>-R</code> remote, <code>-D</code> SOCKS</td>
+</tr>
+<tr>
+<td>TLS / HTTPS tunnels</td>
+<td>7</td>
+<td>Anything over TCP</td>
+<td>TLS (strong)</td>
+<td>Basis of many C2 channels; hard to distinguish from normal web</td>
+</tr>
+<tr>
+<td>DNS tunneling</td>
+<td>7</td>
+<td>Data in DNS queries/answers</td>
+<td>None inherent</td>
+<td>Covert exfil/C2; abuses always-allowed DNS</td>
+</tr>
+<tr>
+<td>WireGuard</td>
+<td>3</td>
+<td>IP packets</td>
+<td>Modern crypto</td>
+<td>Lean, fast, UDP-based</td>
+</tr>
+<tr>
+<td>VXLAN / GENEVE</td>
+<td>2 over 3</td>
+<td>L2 frames</td>
+<td>None (fabric-level)</td>
+<td>Data-center/cloud overlays</td>
+</tr>
+</tbody>
+</table>
+<h3 id="diagram-a-encapsulation-and-decapsulation">Diagram A — Encapsulation and decapsulation</h3>
+<pre class="mermaid">
+flowchart LR
+    O[Original packet] --> E[Ingress endpoint encapsulate]
+    E --> N[Outer header plus original packet]
+    N --> U[Underlay network routes by outer header]
+    U --> D[Egress endpoint decapsulate]
+    D --> P[Original packet delivered]
+</pre>
+<h3 id="diagram-b-secure-tunnel-establishment-and-data-flow-ipsecvpn-style">Diagram B — Secure tunnel establishment and data flow (IPsec/VPN style)</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant C as Client or Gateway A
+    participant S as Gateway B
+    C->>S: Propose parameters and authenticate (IKE)
+    S-->>C: Agree parameters and authenticate
+    C->>S: Derive shared keys, tunnel ready
+    S-->>C: Confirm tunnel ready
+    C->>S: Encapsulated encrypted data
+    S-->>C: Encapsulated encrypted data
+</pre>
+<h3 id="diagram-c-split-vs-full-tunnel-routing-decision">Diagram C — Split vs full tunnel routing decision</h3>
+<pre class="mermaid">
+flowchart TD
+    A[Outbound packet from client] --> B{Destination in tunnel routes}
+    B -->|Yes| C[Encapsulate and send through VPN]
+    B -->|No, split tunnel| D[Send directly to internet]
+    B -->|Full tunnel| C
+    D --> E[Risk: traffic bypasses inspection and policy]
+</pre>
+<h3 id="diagram-d-dns-tunneling-as-a-covert-exfil-channel">Diagram D — DNS tunneling as a covert exfil channel</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant M as Compromised host
+    participant R as Recursive resolver
+    participant A as Attacker authoritative server
+    M->>R: DNS query data-chunk.evil.example
+    R->>A: Forward query for evil.example
+    A-->>R: TXT record with encoded command
+    R-->>M: Answer carrying command
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Split-tunnel data leak</td>
+<td>Sensitive routes not sent through tunnel</td>
+<td>Bypasses DLP/inspection; data exposure</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>DNS tunneling exfil / C2</td>
+<td>DNS is universally allowed and rarely inspected</td>
+<td>Covert exfiltration and command channel</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>HTTPS/TLS tunnel C2</td>
+<td>Encrypted tunnels blend with normal web traffic</td>
+<td>C2 evades signature detection</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Tunnel = trust over-grant</td>
+<td>Reaching the tunnel treated as authorization</td>
+<td>Flat-network lateral movement after one entry</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Weak legacy tunnels (PPTP, IKEv1 aggressive, MS-CHAPv2)</td>
+<td>Broken/old crypto</td>
+<td>Credential capture, tunnel decryption</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Unauthenticated encapsulation (GRE, IP-in-IP, VXLAN)</td>
+<td>Encapsulation without crypto</td>
+<td>Injection, spoofing, tenant hopping in overlays</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td>MTU / fragmentation problems</td>
+<td>Outer header shrinks usable MTU</td>
+<td>Black-holed connections, PMTUD failures</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>NAT traversal breakage</td>
+<td>ESP/AH interact poorly with NAT</td>
+<td>Tunnel instability, dropped sessions</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>DNS/resolver leak on VPN</td>
+<td>Client uses non-tunnel resolver</td>
+<td>Deanonymization, policy bypass</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Endpoint/key compromise</td>
+<td>Stolen device, PSK reuse, static keys</td>
+<td>Full tunnel takeover; broad blast radius</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Tunnel visibility loss</td>
+<td>Security tooling can't see inside encrypted tunnel</td>
+<td>Detection blind spots</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Split-tunnel leak</td>
+<td>Explicit route + DNS policy; force sensitive traffic through tunnel</td>
+<td>VPN client config</td>
+</tr>
+<tr>
+<td>2</td>
+<td>DNS tunneling</td>
+<td>Inspect DNS volume/entropy/length; anomaly detection; sinkhole; limit egress resolvers</td>
+<td>DNS security / SIEM</td>
+</tr>
+<tr>
+<td>3</td>
+<td>TLS-tunnel C2</td>
+<td>Egress filtering, TLS fingerprinting (JA3/JA4), allowlist domains, decrypt at proxy where lawful</td>
+<td>Egress proxy / NDR</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Tunnel over-trust</td>
+<td>Zero-trust authZ <em>behind</em> the tunnel; microsegmentation</td>
+<td>Architecture (BeyondCorp/ZTNA)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Weak crypto</td>
+<td>Ban PPTP/IKEv1-aggressive; enforce IKEv2/ESP, WireGuard, TLS 1.3</td>
+<td>Standards / config</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Unauthenticated encapsulation</td>
+<td>Pair GRE/L2TP with IPsec; authenticate overlay fabric</td>
+<td>Network design</td>
+</tr>
+<tr>
+<td>7</td>
+<td>MTU issues</td>
+<td>Set correct MSS clamp / tunnel MTU; allow PMTUD (don't block ICMP)</td>
+<td>Gateway config</td>
+</tr>
+<tr>
+<td>8</td>
+<td>NAT breakage</td>
+<td>Use NAT-T (UDP 4500) / UDP-based tunnels</td>
+<td>VPN config</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Resolver leak</td>
+<td>Push tunnel DNS; block fallback resolvers</td>
+<td>Client policy</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Key/endpoint compromise</td>
+<td>Per-peer keys, short rekey intervals, device posture, MFA</td>
+<td>IdP + VPN</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Visibility loss</td>
+<td>Terminate/inspect at a controlled edge; rich tunnel + flow telemetry</td>
+<td>NDR / logging</td>
+</tr>
+</tbody>
+</table>
+<h3 id="deeper-context-top-3-controls">Deeper context — top 3 controls</h3>
+<p><strong>1. Zero-trust authorization behind the tunnel (defeats over-trust + lateral movement).</strong> The single most important mindset shift: <strong>tunnel access is transport, not authorization.</strong> A remote-access VPN that dumps users onto a flat internal network means one stolen laptop = broad reach. BeyondCorp/ZTNA inverts this — every request is authorized on identity + device posture + context <em>regardless</em> of network location, so being "inside the tunnel" grants nothing by itself. Pair with microsegmentation so a compromised endpoint can't pivot. Trade-off: requires a mature identity/device-inventory backbone to enforce per-request policy.</p>
+<p><strong>2. DNS and egress inspection (defeats covert tunneling/exfil).</strong> DNS tunneling and TLS-based C2 succeed because those protocols are always allowed and rarely inspected. Controls: force all DNS through logged, policy-enforcing resolvers; alert on anomalous query length, entropy, subdomain cardinality, and TXT-record volume per domain; apply egress allowlists and TLS fingerprinting (JA3/JA4) to spot non-browser clients. Trade-off: encryption (DoH/DoT and TLS 1.3 ESNI/ECH) increasingly blinds on-path inspection, pushing detection to the endpoint and to behavioral/volumetric signals rather than payload content.</p>
+<p><strong>3. Strong tunnel crypto + disciplined key management (defeats weak/legacy tunnels and key compromise).</strong> Standardize on IKEv2/ESP, WireGuard, or TLS 1.3; ban PPTP and MS-CHAPv2 outright (broken). Use per-peer keys (never a shared PSK across many tunnels), short rekey intervals, and gate tunnel setup on device posture + MFA. Monitor tunnel establishment, rekey events, and selector scope for silent degradation. Trade-off: modern crypto plus posture checks add operational overhead and can break older clients — usually the right price.</p>
+<h2 id="practice-questions">Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li>
+<p><strong>What is tunneling, and why is encapsulation the core idea?</strong><br />
+<em>Answer:</em> Tunneling wraps one protocol's packet inside another so it can cross a network that wouldn't otherwise carry or permit it; the passenger packet is encapsulated at one end and decapsulated at the other. <em>Signal:</em> Do they separate encapsulation (connectivity) from encryption (security)?</p>
+</li>
+<li>
+<p><strong>Difference between tunnel mode and transport mode in IPsec?</strong><br />
+<em>Answer:</em> Tunnel mode encrypts and wraps the entire original IP packet in a new IP header (gateway-to-gateway, hides internal addresses); transport mode protects only the payload and keeps the original IP header (host-to-host, less overhead). <em>Signal:</em> Precise packet-structure understanding.</p>
+</li>
+<li>
+<p><strong>Full tunnel vs split tunnel — trade-offs?</strong><br />
+<em>Answer:</em> Full tunnel routes all traffic through the VPN (max visibility/control, more latency/load); split tunnel sends only selected routes through it (better performance, but misconfiguration can leak sensitive traffic outside inspection). <em>Signal:</em> Recognizes the security-vs-performance tension.</p>
+</li>
+<li>
+<p><strong>Name three tunneling protocols and whether each provides security.</strong><br />
+<em>Answer:</em> GRE — encapsulation only, no security (needs IPsec); IPsec ESP — auth + encryption; SSH port forwarding — strong (SSH-protected). <em>Signal:</em> Knows encapsulation ≠ protection.</p>
+</li>
+<li>
+<p><strong>Why is DNS a popular tunneling channel for attackers?</strong><br />
+<em>Answer:</em> DNS is almost always allowed outbound and rarely deeply inspected, so data can be encoded into query names and answers to exfiltrate data or carry C2 past firewalls. <em>Signal:</em> Connects protocol ubiquity to abuse.</p>
+</li>
+</ol>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System Design &amp; Trade-offs</h3>
+<ol>
+<li>
+<p><strong>Design secure remote access for a global workforce — VPN or ZTNA, and why?</strong><br />
+<em>Answer:</em> Prefer ZTNA/BeyondCorp: authorize each request on identity + device posture + context rather than trusting network location, avoiding the flat-network blast radius of classic VPNs; if a VPN is required, use IKEv2/WireGuard, full tunnel or tightly scoped split routes, pushed DNS, and microsegmentation behind it. <em>Signal:</em> Treats tunnel access as transport, not trust.</p>
+</li>
+<li>
+<p><strong>How would you detect DNS tunneling at scale?</strong><br />
+<em>Answer:</em> Baseline normal DNS and alert on anomalies — long/high-entropy labels, high subdomain cardinality per domain, unusual TXT/NULL record volume, and query rates from single hosts; centralize resolvers with logging and sinkhole known-bad domains. <em>Signal:</em> Behavioral/volumetric thinking over signatures.</p>
+</li>
+<li>
+<p><strong>A VPN gateway works but users report broken connections to some sites. What's your first hypothesis?</strong><br />
+<em>Answer:</em> MTU/MSS problem — the tunnel's outer header reduces usable MTU, and blocked ICMP breaks PMTUD, black-holing larger packets; fix with MSS clamping / correct tunnel MTU and allow PMTUD. <em>Signal:</em> Knows the classic tunnel operational failure.</p>
+</li>
+<li>
+<p><strong>Why pair GRE with IPsec instead of using either alone?</strong><br />
+<em>Answer:</em> GRE flexibly encapsulates arbitrary L3 (including multicast/routing protocols) but offers no confidentiality or authentication; IPsec adds crypto but tunnel-mode ESP doesn't natively carry multicast/routing well — GRE-over-IPsec gets both flexibility and protection. <em>Signal:</em> Understands each tool's gap.</p>
+</li>
+<li>
+<p><strong>TLS 1.3 with ECH is rolling out. What does it do to your tunnel-inspection strategy?</strong><br />
+<em>Answer:</em> Payload and even SNI become opaque on-path, so content inspection degrades; shift detection to endpoints, TLS fingerprinting (JA3/JA4), destination reputation, and behavioral/volumetric signals, and decrypt only at controlled, lawful proxy points. <em>Signal:</em> Adapts controls to encryption trends.</p>
+</li>
+</ol>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert &amp; Deep-Dive</h3>
+<ol>
+<li>
+<p><strong>Walk through how you'd exfiltrate data from a segmented network with only DNS allowed, and how a defender counters each step.</strong><br />
+<em>Answer:</em> Encode data into subdomain labels queried against an attacker-controlled authoritative server, chunking and base32-encoding to fit label limits, with answers carrying commands; defender counters via egress resolver choke points, per-domain query anomaly detection, response-size/entropy alerts, and blocking authoritative lookups to unknown domains. <em>Signal:</em> Both offense and layered defense.</p>
+</li>
+<li>
+<p><strong>Why is "reaching the tunnel endpoint" a dangerous definition of trust, and how does zero trust reframe it?</strong><br />
+<em>Answer:</em> Network position is easy to reach (stolen device, compromised endpoint, malicious insider) yet classic designs equate it with authorization, enabling lateral movement; zero trust authorizes each request on verifiable identity + device state + context independent of location, so tunnel membership grants no implicit access. <em>Signal:</em> Architectural maturity.</p>
+</li>
+<li>
+<p><strong>How does NAT break IPsec, and how does NAT-T solve it?</strong><br />
+<em>Answer:</em> NAT rewrites IP/port fields, but ESP has no ports and AH authenticates the IP header, so NAT invalidates integrity checks and can't demux multiple tunnels; NAT-T encapsulates ESP in UDP (port 4500) so NAT devices can translate and track it. <em>Signal:</em> Deep protocol knowledge.</p>
+</li>
+<li>
+<p><strong>Compare WireGuard and IPsec/IKEv2 for a new deployment.</strong><br />
+<em>Answer:</em> WireGuard is lean (small codebase, modern fixed crypto, UDP, fast handshakes, roaming-friendly) but opinionated and stateless-IP-per-peer; IPsec/IKEv2 is feature-rich, standardized, interoperable, and policy-flexible but complex and larger attack surface — choose WireGuard for simplicity/perf, IKEv2 for interop/enterprise policy. <em>Signal:</em> Nuanced modern trade-offs.</p>
+</li>
+<li>
+<p><strong>In a multi-tenant cloud using VXLAN overlays, what's the tunneling risk and mitigation?</strong><br />
+<em>Answer:</em> VXLAN encapsulation itself is unauthenticated, so VNI spoofing or fabric access could let traffic hop tenants; mitigate by securing/authenticating the underlay and control plane (EVPN with controls), restricting who can inject VTEP traffic, and not relying on VNI alone for isolation. <em>Signal:</em> Applies tunneling security to cloud fabrics.</p>
+</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Tunneling = <strong>encapsulate → transport → decapsulate</strong>; it's cross-layer and the primitive behind both VPNs and covert C2.</li>
+<li><strong>Encapsulation is not protection</strong> — GRE/IP-in-IP/VXLAN give connectivity; IPsec/TLS/WireGuard/SSH add the crypto.</li>
+<li><strong>Tunnel mode</strong> wraps the whole packet (gateway-to-gateway); <strong>transport mode</strong> protects only payload (host-to-host).</li>
+<li><strong>Split tunnels leak</strong> when routes/DNS aren't scoped; full tunnels trade performance for visibility.</li>
+<li>Attackers tunnel through <strong>what's always allowed</strong> — DNS and HTTPS; detect with behavioral/volumetric signals and egress control, not just signatures.</li>
+<li><strong>Tunnel access is transport, not authorization</strong> — put zero-trust authZ and segmentation behind every tunnel.</li>
+<li>Ban legacy tunnels (<strong>PPTP/MS-CHAPv2</strong>); standardize on <strong>IKEv2/ESP, WireGuard, TLS 1.3</strong> with per-peer keys and posture checks.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

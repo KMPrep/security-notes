@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q13_rule_based_tagger.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q13_rule_based_tagger.py</h1>
+  <p class="file-path">Source: code\day5\answers\q13_rule_based_tagger.py</p>
+  <p class="line-count">284 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q13. Rule-Based Log Tagger
+===========================
+Given (tag, regex) detection rules and a log file:
+- For each line, find all matching tags.
+- Output (line_number, line, [tags]) for any line with at least one match.
+
+rules = [
+    (&quot;brute_force&quot;, r&quot;Failed password.*(\d+) times&quot;),
+    (&quot;privesc&quot;,     r&quot;sudo:.*COMMAND=/bin/bash&quot;),
+    (&quot;exfil&quot;,       r&quot;bytes_sent=[0-9]{7,}&quot;),
+]
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Build a detection engine: apply a ruleset to each log line.&quot;
+
+--- CANDIDATE FIRST RESPONSE (compile regex per line, per rule) ---
+&quot;For each line, for each rule, do re.search(pattern, line).&quot;
+
+Follow-up: &quot;What&#x27;s wrong with compiling the regex inside the loop?&quot;
+→ Python re.compile caches patterns internally, but explicitly compiling
+  ONCE before the loop is clearer and guarantees no recompilation cost.
+
+Follow-up: &quot;What if two rules match the same part of a line? Should both fire?&quot;
+→ Yes — a line can have multiple tags. We&#x27;re not doing exclusive matching.
+
+Follow-up: &quot;What if a rule&#x27;s regex is malformed (e.g., unclosed parenthesis)?&quot;
+→ re.compile() raises re.error. We should validate rules at startup and
+  skip/reject invalid ones rather than crashing mid-run.
+
+Follow-up: &quot;What about performance with 10,000 rules on 10M log lines?&quot;
+→ Compile all patterns once. Consider combining patterns into one alternation
+  regex (Aho-Corasick for substring matching, or combined regex).
+  For Google-scale: use a YARA-like engine or distribute across workers.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Pre-compile all rules, validate each pattern, tag multiple matches per line,
+streaming input, structured output.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTION RULES
+# ─────────────────────────────────────────────────────────────────────────────
+
+RULES = [
+    (&quot;brute_force&quot;,       r&quot;Failed password.*(\d+) times&quot;),
+    (&quot;failed_login&quot;,      r&quot;Failed password&quot;),
+    (&quot;privesc&quot;,           r&quot;sudo:.*COMMAND=/bin/bash&quot;),
+    (&quot;invalid_user&quot;,      r&quot;[Ii]nvalid user&quot;),
+    (&quot;exfil&quot;,             r&quot;bytes_sent=[0-9]{7,}&quot;),
+    (&quot;large_upload&quot;,      r&quot;bytes_out=[0-9]{8,}&quot;),
+    (&quot;lateral_movement&quot;,  r&quot;ssh.*\b(?:10|172|192)\.\d+\.\d+\.\d+&quot;),
+    (&quot;INVALID_RULE&quot;,      r&quot;(unclosed&quot;),   # intentionally bad — should be rejected gracefully
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+Jan 15 10:00:01 host sshd[100]: Failed password for root from 10.0.0.1 port 22 ssh2
+Jan 15 10:00:02 host sshd[100]: Failed password for root from 10.0.0.1 5 times
+Jan 15 10:00:03 host sudo[200]:   alice : TTY=pts/0 ; COMMAND=/bin/bash
+Jan 15 10:00:04 host nginx[300]: 10.0.0.5 GET /api/download bytes_sent=10500000
+Jan 15 10:00:05 host sshd[101]: Invalid user admin from 203.0.113.5
+Jan 15 10:00:06 host app[400]: upload bytes_out=250000000 dst=198.51.100.1
+Jan 15 10:00:07 host sshd[102]: Accepted publickey for alice from 10.0.0.2
+Jan 15 10:00:08 host kernel: normal log line, nothing suspicious here
+Jan 15 10:00:09 host sshd[103]: ssh connection from 192.168.1.200 established
+Jan 15 10:00:10 host sudo[201]:   bob : TTY=pts/1 ; COMMAND=/usr/bin/vi
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RULE COMPILER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compile_rules(rules):
+    &quot;&quot;&quot;
+    Pre-compile all rules. Skip and warn on invalid patterns.
+    Returns list of (tag, compiled_pattern).
+    &quot;&quot;&quot;
+    compiled = []
+    for tag, pattern in rules:
+        try:
+            compiled.append((tag, re.compile(pattern)))
+        except re.error as exc:
+            print(f&quot;[WARN] Rule &#x27;{tag}&#x27; has invalid regex &#x27;{pattern}&#x27;: {exc}. &quot;
+                  f&quot;Skipping.&quot;, file=sys.stderr)
+    return compiled
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual tag deduplication, no list comprehension, no any())
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tag_lines_without_builtins(lines, compiled_rules):
+    &quot;&quot;&quot;
+    Returns list of (line_number, line_text, [tags]).
+    Only includes lines that match at least one rule.
+    &quot;&quot;&quot;
+    results = []
+
+    for line_num, raw in enumerate(lines, start=1):
+        line = raw.rstrip(&quot;\n&quot;)
+        if not line.strip():
+            continue
+
+        matched_tags = []
+        for tag, pattern in compiled_rules:
+            if pattern.search(line):
+                # Manual dedup
+                already = False
+                for t in matched_tags:
+                    if t == tag:
+                        already = True
+                        break
+                if not already:
+                    matched_tags.append(tag)
+
+        if matched_tags:
+            results.append((line_num, line, matched_tags))
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (list comprehension, dict.fromkeys dedup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tag_lines_with_builtins(lines, compiled_rules):
+    results = []
+
+    for line_num, raw in enumerate(lines, start=1):
+        line = raw.rstrip(&quot;\n&quot;)
+        if not line.strip():
+            continue
+
+        # dict.fromkeys preserves insertion order and deduplicates
+        matched_tags = list(dict.fromkeys(
+            tag for tag, pattern in compiled_rules
+            if pattern.search(line)
+        ))
+
+        if matched_tags:
+            results.append((line_num, line, matched_tags))
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(results, total_lines, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  RULE-BASED LOG TAGGER  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Total lines processed  : {total_lines}&quot;)
+    print(f&quot;Lines with detections  : {len(results)}\n&quot;)
+
+    if not results:
+        print(&quot;  No detections.\n&quot;)
+        return
+
+    # Tag frequency summary (manual count for clarity)
+    tag_freq = {}
+    for _, _, tags in results:
+        for tag in tags:
+            tag_freq[tag] = tag_freq.get(tag, 0) + 1
+
+    print(&quot;Tag Frequency:&quot;)
+    for tag, count in sorted(tag_freq.items(), key=lambda x: -x[1]):
+        print(f&quot;  {tag:&lt;25} {count} line(s)&quot;)
+
+    print(f&quot;\nDetected Lines:&quot;)
+    for line_num, line, tags in results:
+        tags_str = &quot;, &quot;.join(tags)
+        # Truncate long lines for display
+        display = line if len(line) &lt;= 80 else line[:77] + &quot;...&quot;
+        print(f&quot;  Line {line_num:&gt;4} [{tags_str}]&quot;)
+        print(f&quot;         {display}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stream_lines(filepath: str):
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            for line in fh:
+                yield line
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+    except OSError as exc:
+        print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    # Compile rules once — invalid rules are skipped with a warning
+    compiled_rules = compile_rules(RULES)
+    print(f&quot;[INFO] Loaded {len(compiled_rules)} valid rule(s) &quot;
+          f&quot;(skipped {len(RULES) - len(compiled_rules)} invalid).\n&quot;)
+
+    if len(sys.argv) &gt; 1:
+        lines = list(stream_lines(sys.argv[1]))
+        if not lines:
+            print(&quot;[WARN] No lines read.&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    results_manual  = tag_lines_without_builtins(lines, compiled_rules)
+    results_builtin = tag_lines_with_builtins(lines, compiled_rules)
+
+    total_lines = sum(1 for raw in lines if raw.strip())
+
+    print_report(results_manual,  total_lines, label=&quot;(Manual / No Builtins)&quot;)
+    print_report(results_builtin, total_lines, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check
+    assert len(results_manual) == len(results_builtin), \
+        f&quot;Result count mismatch: {len(results_manual)} vs {len(results_builtin)}&quot;
+    for m, b in zip(results_manual, results_builtin):
+        assert m[0] == b[0],        f&quot;Line number mismatch: {m[0]} vs {b[0]}&quot;
+        assert sorted(m[2]) == sorted(b[2]), \
+            f&quot;Tags mismatch at line {m[0]}: {m[2]} vs {b[2]}&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(L * R) where L = lines, R = number of rules
+#         Each rule is a compiled regex: O(|line|) per rule per line.
+# Space : O(L_flagged) for storing flagged results
+#
+# SCALING APPROACHES:
+# 1. Combine all regexes into one alternation with named groups:
+#    pattern = re.compile(&quot;|&quot;.join(f&quot;(?P&lt;{tag}&gt;{pat})&quot; for tag, pat in rules))
+#    Then scan once per line → O(L * |combined pattern|)
+#    Drawback: Python&#x27;s re engine recompiles combined patterns slowly for large R.
+#
+# 2. For substring rules (no anchors): use Aho-Corasick (pyahocorasick).
+#    O(L * |line| + R * |pattern|) preprocessing, O(|line|) per line matching.
+#
+# 3. For Google-scale: use a compiled YARA ruleset. YARA is optimized for
+#    exactly this use case and can process millions of lines/sec.
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;A rule has a regex with catastrophic backtracking. How do you detect it?&quot;
+#     → Use a timeout wrapper around re.search (signal.alarm on Unix, or
+#       run in a separate thread with a timeout). Consider using re2 (Google&#x27;s
+#       library) which guarantees O(n) matching with no backtracking.
+# - &quot;Rules come from user input (analyst-written). What are the security risks?&quot;
+#     → ReDoS (catastrophic backtracking). Sanitize with re2 or a timeout.
+#       Also: ensure rules are sandboxed — a rule should only match/not match,
+#       not execute code (use re, not eval).
+# - &quot;You need to add/remove rules without restarting the process.&quot;
+#     → Hot-reload: watch the rules file for changes, recompile in a background
+#       thread, swap the compiled ruleset atomically (replace reference).
+# =============================================================================
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q9_kerberos_anomaly.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q9_kerberos_anomaly.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q9_kerberos_anomaly.py</p>
+  <p class="line-count">291 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q9. Kerberos TGT/TGS Anomaly Detector
+========================================
+Detect Golden Ticket, Silver Ticket, Kerberoasting, and encryption downgrade
+from KDC event logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Look for too many TGS requests.
+  Problem: Service accounts may legitimately request many tickets.
+  No lifetime analysis (Golden Ticket), no RC4 downgrade check.
+
+BETTER: Flag TGS requests &gt; threshold per user.
+  Problem: Kerberoasting targets specific SPN accounts (roastable = RC4 +
+  no constrained delegation). Golden Ticket requires inspecting ticket
+  lifetime fields, not just count. Silver Ticket has NO corresponding TGT
+  in the logs — that&#x27;s the key indicator.
+
+GOOGLE-LEVEL (this file):
+  - Golden Ticket: TGT lifetime &gt; 10h or renewal window &gt; 7 days.
+  - Silver Ticket: TGS for a service with no preceding AS-REQ (TGT request)
+    from that client host in the log window.
+  - Kerberoasting: same account requests TGS for &gt; 5 SPNs within 60s.
+  - RC4 downgrade: etype=23 (RC4-HMAC) for an account that normally uses AES.
+  - Overpass-the-Hash: AS-REQ using RC4 for an account whose prior logins used AES.
+
+Complexity: O(N) parse, O(U) space where U = unique users/hosts.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified KDC Security Event log, key=value format)
+# Fields: ts, event_type (AS-REQ=TGT request, TGS-REQ=service ticket),
+#         client, client_host, service_spn, etype, ticket_lifetime_h,
+#         renew_window_h
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+ts=2024-03-12T08:00:00Z event=AS-REQ client=alice@CORP client_host=WKSTN01 etype=18 ticket_lifetime_h=10 renew_window_h=168
+ts=2024-03-12T08:00:05Z event=TGS-REQ client=alice@CORP client_host=WKSTN01 service_spn=cifs/FILE01 etype=18
+ts=2024-03-12T08:01:00Z event=AS-REQ client=ATTACKER@CORP client_host=EVIL01 etype=23 ticket_lifetime_h=99 renew_window_h=9999
+ts=2024-03-12T08:02:00Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=MSSQLSvc/SQL01 etype=23
+ts=2024-03-12T08:02:05Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=MSSQLSvc/SQL02 etype=23
+ts=2024-03-12T08:02:10Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=MSSQLSvc/SQL03 etype=23
+ts=2024-03-12T08:02:15Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=MSSQLSvc/SQL04 etype=23
+ts=2024-03-12T08:02:20Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=HTTP/WEB01 etype=23
+ts=2024-03-12T08:02:25Z event=TGS-REQ client=bob@CORP client_host=WKSTN02 service_spn=HTTP/WEB02 etype=23
+ts=2024-03-12T08:05:00Z event=TGS-REQ client=carol@CORP client_host=WKSTN03 service_spn=cifs/BACKUP01 etype=23
+ts=2024-03-12T08:10:00Z event=AS-REQ client=alice@CORP client_host=WKSTN01 etype=18 ticket_lifetime_h=10 renew_window_h=168
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+GOLDEN_TICKET_MAX_LIFETIME_H  = 10    # hours
+GOLDEN_TICKET_MAX_RENEW_H     = 168   # 7 days
+KERBEROASTING_SPN_THRESHOLD   = 5     # distinct SPNs within window
+KERBEROASTING_WINDOW_SECS     = 60
+AES_ETYPE                     = {17, 18}   # AES128, AES256
+RC4_ETYPE                     = {23}       # RC4-HMAC (DES is deprecated; etype 3 = DES-CBC-MD5)
+
+LOG_RE = re.compile(
+    r&#x27;ts=(?P&lt;ts&gt;\S+)\s+event=(?P&lt;event&gt;\S+)\s+client=(?P&lt;client&gt;\S+)\s+&#x27;
+    r&#x27;client_host=(?P&lt;host&gt;\S+)&#x27;
+    r&#x27;(?:\s+service_spn=(?P&lt;spn&gt;\S+))?&#x27;
+    r&#x27;(?:\s+etype=(?P&lt;etype&gt;\d+))?&#x27;
+    r&#x27;(?:\s+ticket_lifetime_h=(?P&lt;lifetime&gt;\S+))?&#x27;
+    r&#x27;(?:\s+renew_window_h=(?P&lt;renew&gt;\S+))?&#x27;
+)
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    try:
+        return datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return {
+        &quot;ts&quot;:       ts,
+        &quot;event&quot;:    m.group(&quot;event&quot;),
+        &quot;client&quot;:   m.group(&quot;client&quot;),
+        &quot;host&quot;:     m.group(&quot;host&quot;),
+        &quot;spn&quot;:      m.group(&quot;spn&quot;),
+        &quot;etype&quot;:    int(m.group(&quot;etype&quot;)) if m.group(&quot;etype&quot;) else None,
+        &quot;lifetime&quot;: float(m.group(&quot;lifetime&quot;)) if m.group(&quot;lifetime&quot;) else None,
+        &quot;renew&quot;:    float(m.group(&quot;renew&quot;)) if m.group(&quot;renew&quot;) else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 1: Golden Ticket
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_golden_ticket(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;TGT with ticket lifetime &gt; 10h or renewal window &gt; 7 days.&quot;&quot;&quot;
+    alerts = []
+    for r in records:
+        if r[&quot;event&quot;] != &quot;AS-REQ&quot;:
+            continue
+        golden = False
+        reasons = []
+        if r[&quot;lifetime&quot;] is not None and r[&quot;lifetime&quot;] &gt; GOLDEN_TICKET_MAX_LIFETIME_H:
+            golden = True
+            reasons.append(f&quot;lifetime={r[&#x27;lifetime&#x27;]}h (max {GOLDEN_TICKET_MAX_LIFETIME_H}h)&quot;)
+        if r[&quot;renew&quot;] is not None and r[&quot;renew&quot;] &gt; GOLDEN_TICKET_MAX_RENEW_H:
+            golden = True
+            reasons.append(f&quot;renew_window={r[&#x27;renew&#x27;]}h (max {GOLDEN_TICKET_MAX_RENEW_H}h)&quot;)
+        if golden:
+            alerts.append({
+                &quot;type&quot;:    &quot;GOLDEN_TICKET&quot;,
+                &quot;client&quot;:  r[&quot;client&quot;],
+                &quot;host&quot;:    r[&quot;host&quot;],
+                &quot;ts&quot;:      r[&quot;ts&quot;],
+                &quot;reasons&quot;: reasons,
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 2: Silver Ticket
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_silver_ticket(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    TGS-REQ for a service with no preceding AS-REQ from the same host.
+    Silver tickets are forged offline — no KDC contact for TGT.
+    &quot;&quot;&quot;
+    # Track hosts that have made a valid AS-REQ
+    hosts_with_tgt: set[str] = set()
+    for r in records:
+        if r[&quot;event&quot;] == &quot;AS-REQ&quot;:
+            hosts_with_tgt.add(r[&quot;host&quot;])
+
+    alerts = []
+    for r in records:
+        if r[&quot;event&quot;] == &quot;TGS-REQ&quot; and r[&quot;host&quot;] not in hosts_with_tgt:
+            alerts.append({
+                &quot;type&quot;:    &quot;SILVER_TICKET&quot;,
+                &quot;client&quot;:  r[&quot;client&quot;],
+                &quot;host&quot;:    r[&quot;host&quot;],
+                &quot;spn&quot;:     r[&quot;spn&quot;],
+                &quot;ts&quot;:      r[&quot;ts&quot;],
+                &quot;detail&quot;:  &quot;TGS-REQ with no prior AS-REQ from this host&quot;,
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 3: Kerberoasting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_kerberoasting(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Single client requesting TGS for &gt; 5 distinct SPNs within 60 seconds.&quot;&quot;&quot;
+    client_tgs: dict[str, list[tuple]] = defaultdict(list)
+    for r in records:
+        if r[&quot;event&quot;] == &quot;TGS-REQ&quot; and r[&quot;spn&quot;]:
+            client_tgs[r[&quot;client&quot;]].append((r[&quot;ts&quot;], r[&quot;spn&quot;]))
+
+    alerts = []
+    for client, events in client_tgs.items():
+        events.sort()
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; KERBEROASTING_WINDOW_SECS:
+                left += 1
+            spns = {events[i][1] for i in range(left, right + 1)}
+            if len(spns) &gt; KERBEROASTING_SPN_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:    &quot;KERBEROASTING&quot;,
+                    &quot;client&quot;:  client,
+                    &quot;spns&quot;:    sorted(spns),
+                    &quot;count&quot;:   len(spns),
+                    &quot;window&quot;:  (events[left][0], events[right][0]),
+                })
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 4: RC4 Downgrade
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_rc4_downgrade(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Flag TGS-REQ or AS-REQ using RC4 (etype 23) for accounts that have
+    previously used AES. Also flag any AS-REQ with RC4 outright (OPtH indicator).
+    &quot;&quot;&quot;
+    # Track etype history per client
+    client_etypes: dict[str, set] = defaultdict(set)
+    for r in records:
+        if r[&quot;etype&quot;] is not None:
+            client_etypes[r[&quot;client&quot;]].add(r[&quot;etype&quot;])
+
+    # Clients that have used AES previously
+    aes_clients = {c for c, etypes in client_etypes.items() if etypes &amp; AES_ETYPE}
+
+    alerts = []
+    for r in records:
+        if r[&quot;etype&quot;] in RC4_ETYPE:
+            is_downgrade = r[&quot;client&quot;] in aes_clients
+            alerts.append({
+                &quot;type&quot;:         &quot;RC4_DOWNGRADE&quot; if is_downgrade else &quot;RC4_USAGE&quot;,
+                &quot;client&quot;:       r[&quot;client&quot;],
+                &quot;event&quot;:        r[&quot;event&quot;],
+                &quot;spn&quot;:          r[&quot;spn&quot;],
+                &quot;ts&quot;:           r[&quot;ts&quot;],
+                &quot;is_downgrade&quot;: is_downgrade,
+                &quot;detail&quot;:       &quot;Client previously used AES; RC4 now requested&quot; if is_downgrade else &quot;RC4 used in environment&quot;,
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(golden, silver, roasting, rc4) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;KERBEROS KDC LOG — ANOMALY DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[GOLDEN_TICKET] {len(golden)} alert(s)&quot;)
+    for a in golden:
+        print(f&quot;  client={a[&#x27;client&#x27;]}  host={a[&#x27;host&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        for r in a[&quot;reasons&quot;]:
+            print(f&quot;    reason: {r}&quot;)
+
+    print(f&quot;\n[SILVER_TICKET] {len(silver)} alert(s)&quot;)
+    for a in silver:
+        print(f&quot;  client={a[&#x27;client&#x27;]}  host={a[&#x27;host&#x27;]}  spn={a[&#x27;spn&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;    {a[&#x27;detail&#x27;]}&quot;)
+
+    print(f&quot;\n[KERBEROASTING] {len(roasting)} alert(s)&quot;)
+    for a in roasting:
+        print(f&quot;  client={a[&#x27;client&#x27;]}  spns_in_window={a[&#x27;count&#x27;]}&quot;)
+        print(f&quot;  window={ts_fmt(a[&#x27;window&#x27;][0])} → {ts_fmt(a[&#x27;window&#x27;][1])}&quot;)
+        print(f&quot;  spns={a[&#x27;spns&#x27;]}&quot;)
+
+    print(f&quot;\n[RC4_DOWNGRADE/USAGE] {len(rc4)} alert(s)&quot;)
+    for a in rc4:
+        severity = &quot;DOWNGRADE&quot; if a[&quot;is_downgrade&quot;] else &quot;INFO&quot;
+        print(f&quot;  [{severity}] client={a[&#x27;client&#x27;]}  event={a[&#x27;event&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;    {a[&#x27;detail&#x27;]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} KDC events.\n&quot;)
+    print_report(
+        detect_golden_ticket(records),
+        detect_silver_ticket(records),
+        detect_kerberoasting(records),
+        detect_rc4_downgrade(records),
+    )
+</code></pre>
+</body>
+</html>

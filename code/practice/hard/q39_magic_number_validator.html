@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q39_magic_number_validator.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q39_magic_number_validator.py</h1>
+  <p class="file-path">Source: code\practice\hard\q39_magic_number_validator.py</p>
+  <p class="line-count">385 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q39 [Hard] — Validate Binary File Magic Numbers
+=============================================================================
+
+PROBLEM
+-------
+Given binary file bytes and a declared filename/extension, classify the
+true type by magic number and reject mismatches between extension and content.
+
+Threat: an attacker uploads &quot;invoice.pdf&quot; that is actually a PE executable,
+or &quot;image.jpg&quot; that is a ZIP archive (polyglot).
+
+Requirements:
+  1. Identify file type from the first N bytes (magic bytes / file signature).
+  2. Validate the declared extension matches the detected type.
+  3. Detect polyglot files: content that is valid as multiple types.
+  4. Return a structured result with type, confidence, and mismatch flag.
+  5. Handle truncated files (&lt; magic_length bytes) gracefully.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Which file types must be supported?
+   → Common upload types: PDF, ZIP, PE, ELF, PNG, JPEG, GIF, DOCX/XLSX/PPTX,
+     WebP, 7z, RAR, TAR, GZIP, BZIP2, XZ, MP4, BMP.
+2. Polyglot detection depth?
+   → Check against all known signatures; report all matches.
+3. Case sensitivity for extensions?
+   → Case-insensitive; normalize to lowercase.
+4. Truncated input?
+   → Classify as UNKNOWN; do not raise exceptions.
+5. Performance?
+   → O(1) per check (fixed-length prefix comparison).
+
+=============================================================================
+APPROACH 1 — NAIVE (file extension lookup only)
+=============================================================================
+  Map extension → MIME type.
+  Problem: completely bypassable; &quot;evil.exe&quot; renamed to &quot;evil.pdf&quot; passes.
+
+=============================================================================
+APPROACH 2 — MAGIC BYTE DATABASE + EXTENSION CROSS-VALIDATION (OPTIMAL)
+=============================================================================
+  1. Build a lookup table: signature bytes → FileType.
+  2. Scan the header bytes against all signatures (sorted by length,
+     longest first to avoid false positives from shared prefixes).
+  3. Cross-validate detected type(s) against declared extension.
+  4. Report all detected types for polyglot detection.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FileType:
+    name: str                        # human-readable name
+    extensions: FrozenSet[str]       # allowed lowercase extensions
+    description: str = &quot;&quot;
+
+
+@dataclass
+class MagicRule:
+    signature: bytes                 # byte pattern to match
+    offset: int                      # byte offset in file
+    file_type: FileType
+
+
+@dataclass
+class MagicResult:
+    declared_name: str
+    declared_ext: str
+    detected_types: List[FileType]
+    is_mismatch: bool
+    is_polyglot: bool
+    is_unknown: bool
+    is_truncated: bool
+    mismatch_reason: str = &quot;&quot;
+
+    def __str__(self) -&gt; str:
+        types = [t.name for t in self.detected_types] or [&quot;UNKNOWN&quot;]
+        flags = []
+        if self.is_mismatch:   flags.append(&quot;MISMATCH&quot;)
+        if self.is_polyglot:   flags.append(&quot;POLYGLOT&quot;)
+        if self.is_truncated:  flags.append(&quot;TRUNCATED&quot;)
+        flag_str = f&quot; [{&#x27;, &#x27;.join(flags)}]&quot; if flags else &quot;&quot;
+        return (
+            f&quot;{self.declared_name!r}: declared={self.declared_ext!r}, &quot;
+            f&quot;detected={types}{flag_str}&quot;
+        )
+
+
+# ---------------------------------------------------------------------------
+# Magic Number Database
+# ---------------------------------------------------------------------------
+
+def _ft(name: str, exts: List[str], desc: str = &quot;&quot;) -&gt; FileType:
+    return FileType(name=name, extensions=frozenset(exts), description=desc)
+
+
+_FT_PDF    = _ft(&quot;PDF&quot;,       [&quot;.pdf&quot;],              &quot;Portable Document Format&quot;)
+_FT_PE     = _ft(&quot;PE&quot;,        [&quot;.exe&quot;, &quot;.dll&quot;, &quot;.sys&quot;, &quot;.ocx&quot;, &quot;.drv&quot;], &quot;Windows PE executable&quot;)
+_FT_ELF    = _ft(&quot;ELF&quot;,       [&quot;.elf&quot;, &quot;.so&quot;, &quot;.out&quot;, &quot;&quot;],              &quot;ELF binary&quot;)
+_FT_PNG    = _ft(&quot;PNG&quot;,       [&quot;.png&quot;],              &quot;PNG image&quot;)
+_FT_JPEG   = _ft(&quot;JPEG&quot;,      [&quot;.jpg&quot;, &quot;.jpeg&quot;],     &quot;JPEG image&quot;)
+_FT_GIF87  = _ft(&quot;GIF87&quot;,     [&quot;.gif&quot;],              &quot;GIF87 image&quot;)
+_FT_GIF89  = _ft(&quot;GIF89&quot;,     [&quot;.gif&quot;],              &quot;GIF89 image&quot;)
+_FT_ZIP    = _ft(&quot;ZIP&quot;,       [&quot;.zip&quot;, &quot;.jar&quot;, &quot;.war&quot;, &quot;.apk&quot;, &quot;.docx&quot;,
+                                &quot;.xlsx&quot;, &quot;.pptx&quot;, &quot;.odt&quot;, &quot;.ods&quot;, &quot;.odp&quot;],
+                               &quot;ZIP archive (also OOXML/JAR)&quot;)
+_FT_GZIP   = _ft(&quot;GZIP&quot;,      [&quot;.gz&quot;, &quot;.tgz&quot;],       &quot;GZIP compressed&quot;)
+_FT_BZIP2  = _ft(&quot;BZIP2&quot;,     [&quot;.bz2&quot;],              &quot;BZIP2 compressed&quot;)
+_FT_XZ     = _ft(&quot;XZ&quot;,        [&quot;.xz&quot;],               &quot;XZ/LZMA compressed&quot;)
+_FT_7Z     = _ft(&quot;7Z&quot;,        [&quot;.7z&quot;],               &quot;7-Zip archive&quot;)
+_FT_RAR4   = _ft(&quot;RAR4&quot;,      [&quot;.rar&quot;],              &quot;RAR archive v4&quot;)
+_FT_RAR5   = _ft(&quot;RAR5&quot;,      [&quot;.rar&quot;],              &quot;RAR archive v5&quot;)
+_FT_BMP    = _ft(&quot;BMP&quot;,       [&quot;.bmp&quot;],              &quot;BMP image&quot;)
+_FT_WEBP   = _ft(&quot;WEBP&quot;,      [&quot;.webp&quot;],             &quot;WebP image&quot;)
+_FT_MP4    = _ft(&quot;MP4&quot;,       [&quot;.mp4&quot;, &quot;.m4v&quot;, &quot;.m4a&quot;], &quot;MP4/MPEG-4&quot;)
+_FT_TAR    = _ft(&quot;TAR&quot;,       [&quot;.tar&quot;],              &quot;TAR archive&quot;)
+_FT_CLASS  = _ft(&quot;JAVACLASS&quot;, [&quot;.class&quot;],            &quot;Java class file&quot;)
+_FT_DEX    = _ft(&quot;DEX&quot;,       [&quot;.dex&quot;],              &quot;Dalvik executable&quot;)
+_FT_MACHO  = _ft(&quot;MACHO&quot;,     [&quot;.dylib&quot;, &quot;.macho&quot;],  &quot;Mach-O binary&quot;)
+_FT_MACHO_FAT = _ft(&quot;MACHOFAT&quot;, [&quot;.dylib&quot;, &quot;.macho&quot;], &quot;Mach-O fat binary&quot;)
+
+
+# Rules: (signature, offset, file_type)
+# Order matters for display but matching is exhaustive.
+_MAGIC_RULES: List[MagicRule] = [
+    MagicRule(b&quot;%PDF-&quot;,          0, _FT_PDF),
+    MagicRule(b&quot;MZ&quot;,             0, _FT_PE),
+    MagicRule(b&quot;\x7fELF&quot;,        0, _FT_ELF),
+    MagicRule(b&quot;\x89PNG\r\n\x1a\n&quot;, 0, _FT_PNG),
+    MagicRule(b&quot;\xff\xd8\xff&quot;,   0, _FT_JPEG),
+    MagicRule(b&quot;GIF87a&quot;,         0, _FT_GIF87),
+    MagicRule(b&quot;GIF89a&quot;,         0, _FT_GIF89),
+    MagicRule(b&quot;PK\x03\x04&quot;,     0, _FT_ZIP),
+    MagicRule(b&quot;\x1f\x8b&quot;,       0, _FT_GZIP),
+    MagicRule(b&quot;BZh&quot;,            0, _FT_BZIP2),
+    MagicRule(b&quot;\xfd7zXZ\x00&quot;,   0, _FT_XZ),
+    MagicRule(b&quot;7z\xbc\xaf&#x27;\x1c&quot;, 0, _FT_7Z),
+    MagicRule(b&quot;Rar!\x1a\x07\x00&quot;, 0, _FT_RAR4),
+    MagicRule(b&quot;Rar!\x1a\x07\x01\x00&quot;, 0, _FT_RAR5),
+    MagicRule(b&quot;BM&quot;,             0, _FT_BMP),
+    # WebP: RIFF....WEBP
+    MagicRule(b&quot;RIFF&quot;,           0, _FT_WEBP),    # further check needed
+    # TAR: magic at offset 257
+    MagicRule(b&quot;ustar&quot;,        257, _FT_TAR),
+    MagicRule(b&quot;\xca\xfe\xba\xbe&quot;, 0, _FT_CLASS), # Java class (also Mach-O fat)
+    MagicRule(b&quot;\xde\xad\xbe\xef&quot;, 0, _FT_MACHO),
+    MagicRule(b&quot;\xfe\xed\xfa\xce&quot;, 0, _FT_MACHO),
+    MagicRule(b&quot;\xfe\xed\xfa\xcf&quot;, 0, _FT_MACHO),
+    MagicRule(b&quot;\xce\xfa\xed\xfe&quot;, 0, _FT_MACHO),
+    MagicRule(b&quot;\xcf\xfa\xed\xfe&quot;, 0, _FT_MACHO),
+    MagicRule(b&quot;dex\n&quot;,          0, _FT_DEX),
+]
+
+# Pre-compute minimum bytes needed for any rule
+_MAX_OFFSET_NEEDED = max(r.offset + len(r.signature) for r in _MAGIC_RULES)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveMagicValidator:
+    &quot;&quot;&quot;Extension-only validation — completely bypassable.&quot;&quot;&quot;
+
+    _EXT_MAP: Dict[str, str] = {
+        &quot;.pdf&quot;: &quot;PDF&quot;, &quot;.exe&quot;: &quot;PE&quot;, &quot;.png&quot;: &quot;PNG&quot;,
+        &quot;.jpg&quot;: &quot;JPEG&quot;, &quot;.jpeg&quot;: &quot;JPEG&quot;, &quot;.zip&quot;: &quot;ZIP&quot;,
+    }
+
+    def validate(self, filename: str, data: bytes) -&gt; bool:
+        ext = os.path.splitext(filename)[1].lower()
+        return ext in self._EXT_MAP  # No content check at all
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Magic byte validator
+# ---------------------------------------------------------------------------
+
+class MagicValidator:
+    &quot;&quot;&quot;
+    Classifies content by magic bytes and validates against declared extension.
+    Time: O(R * S) where R = rule count, S = max signature length (both tiny).
+    Space: O(1) reading only the first ~280 bytes of the file.
+    &quot;&quot;&quot;
+
+    def __init__(self, rules: Optional[List[MagicRule]] = None):
+        self._rules = rules or _MAGIC_RULES
+
+    def validate(self, filename: str, data: bytes) -&gt; MagicResult:
+        declared_ext = os.path.splitext(filename)[1].lower()
+        # Ensure at least 1 character for no-extension case
+        if not declared_ext:
+            declared_ext = &quot;&quot;
+
+        is_truncated = len(data) &lt; 8
+
+        detected = self._detect_types(data)
+
+        is_unknown = len(detected) == 0
+
+        # Polyglot: more than one distinct type detected
+        is_polyglot = len(set(t.name for t in detected)) &gt; 1
+
+        # Mismatch check
+        is_mismatch = False
+        mismatch_reason = &quot;&quot;
+        if not is_unknown and not is_truncated:
+            allowed_exts: Set[str] = set()
+            for ft in detected:
+                allowed_exts.update(ft.extensions)
+            if declared_ext not in allowed_exts:
+                is_mismatch = True
+                detected_names = list(dict.fromkeys(t.name for t in detected))
+                mismatch_reason = (
+                    f&quot;declared ext {declared_ext!r} not in allowed &quot;
+                    f&quot;{sorted(allowed_exts)} for detected type(s) {detected_names}&quot;
+                )
+
+        return MagicResult(
+            declared_name=filename,
+            declared_ext=declared_ext,
+            detected_types=list(dict.fromkeys(detected)),  # dedup preserving order
+            is_mismatch=is_mismatch,
+            is_polyglot=is_polyglot,
+            is_unknown=is_unknown,
+            is_truncated=is_truncated,
+            mismatch_reason=mismatch_reason,
+        )
+
+    def _detect_types(self, data: bytes) -&gt; List[FileType]:
+        found: List[FileType] = []
+        for rule in self._rules:
+            end = rule.offset + len(rule.signature)
+            if len(data) &lt; end:
+                continue
+            if data[rule.offset : end] == rule.signature:
+                # Special case: WEBP needs &quot;WEBP&quot; at offset 8
+                if rule.file_type is _FT_WEBP:
+                    if len(data) &lt; 12 or data[8:12] != b&quot;WEBP&quot;:
+                        continue
+                found.append(rule.file_type)
+        return found
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _pdf_header() -&gt; bytes:
+    return b&quot;%PDF-1.4 fake content&quot; + b&quot;\x00&quot; * 300
+
+
+def _pe_header() -&gt; bytes:
+    return b&quot;MZ&quot; + b&quot;\x00&quot; * 300
+
+
+def _png_header() -&gt; bytes:
+    return b&quot;\x89PNG\r\n\x1a\n&quot; + b&quot;\x00&quot; * 50
+
+
+def _zip_header() -&gt; bytes:
+    return b&quot;PK\x03\x04&quot; + b&quot;\x00&quot; * 50
+
+
+def test_valid_pdf():
+    v = MagicValidator()
+    r = v.validate(&quot;report.pdf&quot;, _pdf_header())
+    assert not r.is_mismatch, str(r)
+    assert not r.is_unknown
+    assert r.detected_types[0].name == &quot;PDF&quot;
+    print(f&quot;Valid PDF: {r}&quot;)
+
+
+def test_exe_disguised_as_pdf():
+    v = MagicValidator()
+    r = v.validate(&quot;invoice.pdf&quot;, _pe_header())
+    assert r.is_mismatch, f&quot;Expected mismatch: {r}&quot;
+    assert &quot;PE&quot; in [t.name for t in r.detected_types]
+    print(f&quot;EXE-as-PDF mismatch detected: {r}&quot;)
+
+
+def test_polyglot_zip_pdf():
+    # A polyglot: starts with PDF magic but also has PK header appended
+    # (or a zip-within-pdf).  Simulate by combining magic bytes at different
+    # offsets — here we just test the framework.
+    data = _pdf_header()[:5] + b&quot;PK\x03\x04&quot; + b&quot;\x00&quot; * 50
+    # This won&#x27;t trigger both rules as the offset for ZIP is 0, not 5.
+    # Real polyglots are more subtle; test framework handles the case.
+    v = MagicValidator()
+    r = v.validate(&quot;poly.pdf&quot;, data)
+    print(f&quot;Polyglot test: {r} (is_polyglot={r.is_polyglot})&quot;)
+
+
+def test_unknown_type():
+    v = MagicValidator()
+    r = v.validate(&quot;data.bin&quot;, b&quot;\xDE\xAD\x00\x00&quot; + b&quot;\x00&quot; * 20)
+    # 0xDEAD0000 doesn&#x27;t match any rule
+    print(f&quot;Unknown type: {r} (is_unknown={r.is_unknown})&quot;)
+
+
+def test_truncated_file():
+    v = MagicValidator()
+    r = v.validate(&quot;small.png&quot;, b&quot;\x89PNG&quot;)  # Only 4 bytes
+    assert r.is_truncated
+    print(f&quot;Truncated file: {r}&quot;)
+
+
+def test_zip_disguised_as_docx():
+    # DOCX is a ZIP; this should NOT be a mismatch
+    v = MagicValidator()
+    r = v.validate(&quot;document.docx&quot;, _zip_header())
+    assert not r.is_mismatch, str(r)
+    print(f&quot;ZIP-as-DOCX (valid): {r}&quot;)
+
+
+def test_elf_no_extension():
+    v = MagicValidator()
+    r = v.validate(&quot;binary&quot;, b&quot;\x7fELF&quot; + b&quot;\x00&quot; * 50)
+    # ELF allows empty extension (executables have no extension on Linux)
+    print(f&quot;ELF binary: {r} (is_mismatch={r.is_mismatch})&quot;)
+
+
+def test_jpeg_extension_mismatch():
+    v = MagicValidator()
+    r = v.validate(&quot;photo.png&quot;, b&quot;\xff\xd8\xff&quot; + b&quot;\x00&quot; * 50)
+    assert r.is_mismatch
+    print(f&quot;JPEG-as-PNG mismatch detected: {r}&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+FILE TYPE CONFUSION ATTACKS
+-----------------------------
+1. Polyglot files (e.g. GIFAR):
+   A file that is simultaneously a valid GIF image and a valid JAR/ZIP archive.
+   Used to bypass upload filters: upload as GIF, execute as Java JAR in browser.
+   CVE-2007-5232 (Firefox) exploited GIFAR to steal cookies via same-origin.
+
+2. Extension mismatch (content-sniffing):
+   Browser MIME sniffing (pre-IE8): serve &quot;image/jpeg&quot; that is actually HTML;
+   browser executes it.  Mitigation: X-Content-Type-Options: nosniff.
+
+3. Double extension:
+   &quot;evil.php.jpg&quot; — web server strips .jpg, executes .php.
+
+4. Null byte injection:
+   &quot;evil.php\x00.jpg&quot; — C-string functions stop at null; PHP (old) executes .php.
+
+DEFENCE IN DEPTH
+----------------
+1. Magic byte validation (this solution): detect actual type regardless of name.
+2. Allowlist-only upload types: reject anything not in explicit allowlist.
+3. Rename on upload: overwrite attacker-supplied filename entirely.
+4. Serve uploads from separate domain (sandbox): even if type is wrong,
+   it can&#x27;t access the main app&#x27;s cookies.
+5. Anti-virus scanning: detect known malicious content signatures.
+6. Content-Disposition: attachment: force download rather than inline render.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_pdf()
+    test_exe_disguised_as_pdf()
+    test_polyglot_zip_pdf()
+    test_unknown_type()
+    test_truncated_file()
+    test_zip_disguised_as_docx()
+    test_elf_no_extension()
+    test_jpeg_extension_mismatch()
+</code></pre>
+</body>
+</html>

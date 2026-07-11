@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q21_email_header_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q21_email_header_parser.py</h1>
+  <p class="file-path">Source: code\practice\hard\q21_email_header_parser.py</p>
+  <p class="line-count">570 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q21 [Hard] — Robust Email Header Parser
+=============================================================================
+
+PROBLEM
+-------
+Parse raw email headers and extract security-relevant metadata for
+phishing/spam analysis:
+
+  1. From / To / Cc / Reply-To addresses (with display name and angle-bracket
+     addr forms; handle RFC 2047 encoded words like =?UTF-8?B?...?=).
+  2. Received headers: extract hop IP, sending host, timestamp for each hop.
+  3. DKIM-Signature: extract d= (signing domain), s= (selector), bh= (body hash).
+  4. Authentication-Results: extract DKIM, SPF, DMARC pass/fail.
+  5. X-Originating-IP / X-Forwarded-For.
+  6. Subject (decoded).
+  7. Return-Path.
+  8. Message-ID.
+
+Security focus: detect mismatch between From display name domain, Return-Path
+domain, DKIM signing domain, and the first external Received hop IP.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Single-pass or streaming input?
+   → Accept either: full header string or list of (name, value) pairs.
+2. Handle folded (multi-line) headers?
+   → Yes; unfold CRLF + whitespace continuation.
+3. Multiple Received headers?
+   → Preserve all; order is newest-first as they appear in the message.
+4. Should we validate domain syntax?
+   → Basic validation; don&#x27;t do DNS lookups.
+5. Handle malformed headers gracefully?
+   → Return partial result + list of parse_errors; never raise.
+
+=============================================================================
+APPROACH 1 — NAIVE (line-by-line split on &quot;: &quot;)
+=============================================================================
+  Split each line on &quot;: &quot; and store key→value.
+  Does not handle folded headers, RFC 2047, or multiple same-name headers.
+  O(N)  N = number of lines.
+
+=============================================================================
+APPROACH 2 — STATE-MACHINE UNFOLDER + PER-HEADER PARSERS (RECOMMENDED)
+=============================================================================
+  Phase 1: Unfold folded headers into (name, value) pairs.
+  Phase 2: Dispatch each header to a dedicated parser function.
+  O(N) total.  Handles folding, RFC 2047, multiple Received headers.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import base64
+import ipaddress
+import quopri
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Regexes
+# ---------------------------------------------------------------------------
+
+# RFC 2047 encoded word:  =?charset?encoding?text?=
+_ENC_WORD_RE = re.compile(
+    r&#x27;=\?([^?]+)\?([BbQq])\?([^?]*)\?=&#x27;,
+    re.ASCII,
+)
+
+# Email address extractor (lenient)
+_ADDR_RE = re.compile(
+    r&#x27;(?:&lt;([^&gt;]+)&gt;|([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}))&#x27;,
+)
+
+# IPv4 in Received header
+_IPV4_IN_RECEIVED_RE = re.compile(
+    r&#x27;\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]&#x27;
+)
+
+# IPv6 in Received header
+_IPV6_IN_RECEIVED_RE = re.compile(
+    r&#x27;\[(?:IPv6:)?([0-9a-fA-F:]+)\]&#x27;
+)
+
+# DKIM-Signature tag=value parser
+_DKIM_TAG_RE = re.compile(r&#x27;([a-z]+)=([^;]*)&#x27;)
+
+# Auth-Results: individual method result
+_AUTH_METHOD_RE = re.compile(
+    r&#x27;(dkim|spf|dmarc|arc)\s*=\s*(pass|fail|neutral|none|temperror|permerror|hardfail|softfail)&#x27;,
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EmailAddress:
+    display_name: str
+    address: str     # local@domain
+
+    @property
+    def domain(self) -&gt; str:
+        parts = self.address.rsplit(&quot;@&quot;, 1)
+        return parts[1].lower() if len(parts) == 2 else &quot;&quot;
+
+
+@dataclass
+class ReceivedHop:
+    raw: str
+    from_host: str = &quot;&quot;
+    by_host: str = &quot;&quot;
+    with_protocol: str = &quot;&quot;
+    ip: Optional[str] = None
+    timestamp: str = &quot;&quot;
+
+
+@dataclass
+class DkimSignature:
+    version: str = &quot;1&quot;
+    algorithm: str = &quot;&quot;
+    signing_domain: str = &quot;&quot;    # d=
+    selector: str = &quot;&quot;          # s=
+    header_fields: str = &quot;&quot;     # h=
+    body_hash: str = &quot;&quot;         # bh=
+    signature: str = &quot;&quot;         # b=
+
+
+@dataclass
+class AuthResult:
+    method: str   # dkim | spf | dmarc
+    result: str   # pass | fail | neutral | …
+    extra: str = &quot;&quot;
+
+
+@dataclass
+class ParsedEmail:
+    from_addr: Optional[EmailAddress] = None
+    to_addrs: List[EmailAddress] = field(default_factory=list)
+    cc_addrs: List[EmailAddress] = field(default_factory=list)
+    reply_to: Optional[EmailAddress] = None
+    return_path: Optional[EmailAddress] = None
+    subject: str = &quot;&quot;
+    message_id: str = &quot;&quot;
+    date: str = &quot;&quot;
+    received_hops: List[ReceivedHop] = field(default_factory=list)
+    dkim_signatures: List[DkimSignature] = field(default_factory=list)
+    auth_results: List[AuthResult] = field(default_factory=list)
+    x_originating_ip: Optional[str] = None
+    x_forwarded_for: List[str] = field(default_factory=list)
+    raw_headers: List[Tuple[str, str]] = field(default_factory=list)
+    parse_errors: List[str] = field(default_factory=list)
+
+    # Security analysis outputs
+    def domain_mismatch(self) -&gt; List[str]:
+        &quot;&quot;&quot;
+        Return list of mismatches between From domain, Return-Path domain,
+        and DKIM signing domains.  Non-empty → phishing indicator.
+        &quot;&quot;&quot;
+        issues = []
+        from_domain = self.from_addr.domain if self.from_addr else &quot;&quot;
+        rp_domain = self.return_path.domain if self.return_path else &quot;&quot;
+        dkim_domains = {sig.signing_domain.lower() for sig in self.dkim_signatures
+                        if sig.signing_domain}
+        if from_domain and rp_domain and from_domain != rp_domain:
+            issues.append(f&quot;From domain {from_domain!r} != Return-Path domain {rp_domain!r}&quot;)
+        if from_domain and dkim_domains and from_domain not in dkim_domains:
+            issues.append(f&quot;From domain {from_domain!r} not in DKIM d= {dkim_domains}&quot;)
+        return issues
+
+    def auth_summary(self) -&gt; Dict[str, str]:
+        &quot;&quot;&quot;Return dict of method → worst result seen.&quot;&quot;&quot;
+        summary: Dict[str, str] = {}
+        for ar in self.auth_results:
+            m = ar.method.lower()
+            summary[m] = ar.result.lower()
+        return summary
+
+
+# ---------------------------------------------------------------------------
+# RFC 2047 decoding
+# ---------------------------------------------------------------------------
+
+def _decode_rfc2047(text: str) -&gt; str:
+    &quot;&quot;&quot;Decode encoded words in `text`.  Returns plain UTF-8 string.&quot;&quot;&quot;
+    def _replace(m: re.Match) -&gt; str:
+        charset, encoding, payload = m.group(1), m.group(2).upper(), m.group(3)
+        try:
+            if encoding == &quot;B&quot;:
+                raw = base64.b64decode(payload + &quot;==&quot;)  # pad forgivingly
+            else:  # Q encoding
+                # Replace _ with space (RFC 2047 Q encoding quirk)
+                raw = quopri.decodestring(payload.replace(&quot;_&quot;, &quot; &quot;))
+            return raw.decode(charset, errors=&quot;replace&quot;)
+        except Exception:
+            return m.group(0)  # leave undecoded if error
+    return _ENC_WORD_RE.sub(_replace, text)
+
+
+# ---------------------------------------------------------------------------
+# Address parsing
+# ---------------------------------------------------------------------------
+
+def _parse_address_list(header_value: str) -&gt; List[EmailAddress]:
+    &quot;&quot;&quot;
+    Parse one or more email addresses from a header value.
+    Handles:
+      - &quot;Display Name&quot; &lt;addr@example.com&gt;
+      - addr@example.com
+      - =?UTF-8?B?...?= &lt;addr@example.com&gt;
+    &quot;&quot;&quot;
+    decoded = _decode_rfc2047(header_value)
+    results = []
+    # Split on commas that are not inside angle brackets or quotes
+    # Simple approach: find all addresses via regex
+    for m in _ADDR_RE.finditer(decoded):
+        addr = (m.group(1) or m.group(2) or &quot;&quot;).strip()
+        if not addr:
+            continue
+        # Extract display name: text before the &lt;&gt; group
+        start = m.start()
+        preceding = decoded[:start].strip().strip(&#x27;&quot;&#x27;).strip(&quot;&#x27;&quot;).strip()
+        results.append(EmailAddress(display_name=preceding, address=addr.lower()))
+    return results
+
+
+def _parse_single_address(value: str) -&gt; Optional[EmailAddress]:
+    addrs = _parse_address_list(value)
+    return addrs[0] if addrs else None
+
+
+# ---------------------------------------------------------------------------
+# Received header parsing
+# ---------------------------------------------------------------------------
+
+def _parse_received(value: str) -&gt; ReceivedHop:
+    hop = ReceivedHop(raw=value)
+    # Extract from / by / with
+    from_m = re.search(r&#x27;\bfrom\s+(\S+)&#x27;, value, re.IGNORECASE)
+    by_m = re.search(r&#x27;\bby\s+(\S+)&#x27;, value, re.IGNORECASE)
+    with_m = re.search(r&#x27;\bwith\s+(\S+)&#x27;, value, re.IGNORECASE)
+    if from_m:
+        hop.from_host = from_m.group(1)
+    if by_m:
+        hop.by_host = by_m.group(1)
+    if with_m:
+        hop.with_protocol = with_m.group(1)
+    # Extract IP
+    ipv4_m = _IPV4_IN_RECEIVED_RE.search(value)
+    if ipv4_m:
+        try:
+            ipaddress.IPv4Address(ipv4_m.group(1))
+            hop.ip = ipv4_m.group(1)
+        except ValueError:
+            pass
+    if not hop.ip:
+        ipv6_m = _IPV6_IN_RECEIVED_RE.search(value)
+        if ipv6_m:
+            hop.ip = ipv6_m.group(1)
+    # Extract timestamp (everything after &quot;;&quot;)
+    semi = value.rfind(&quot;;&quot;)
+    if semi &gt;= 0:
+        hop.timestamp = value[semi + 1:].strip()
+    return hop
+
+
+# ---------------------------------------------------------------------------
+# DKIM-Signature parsing
+# ---------------------------------------------------------------------------
+
+def _parse_dkim_signature(value: str) -&gt; DkimSignature:
+    sig = DkimSignature()
+    for m in _DKIM_TAG_RE.finditer(value.replace(&quot;\n&quot;, &quot;&quot;).replace(&quot;\r&quot;, &quot;&quot;)):
+        tag, val = m.group(1), m.group(2).strip()
+        if tag == &quot;v&quot;:
+            sig.version = val
+        elif tag == &quot;a&quot;:
+            sig.algorithm = val
+        elif tag == &quot;d&quot;:
+            sig.signing_domain = val.lower()
+        elif tag == &quot;s&quot;:
+            sig.selector = val
+        elif tag == &quot;h&quot;:
+            sig.header_fields = val
+        elif tag == &quot;bh&quot;:
+            sig.body_hash = val
+        elif tag == &quot;b&quot;:
+            sig.signature = val
+    return sig
+
+
+# ---------------------------------------------------------------------------
+# Authentication-Results parsing
+# ---------------------------------------------------------------------------
+
+def _parse_auth_results(value: str) -&gt; List[AuthResult]:
+    results = []
+    for m in _AUTH_METHOD_RE.finditer(value):
+        results.append(AuthResult(method=m.group(1).lower(), result=m.group(2).lower()))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive parser
+# ---------------------------------------------------------------------------
+
+class NaiveEmailHeaderParser:
+    &quot;&quot;&quot;
+    Naive line-by-line split.  Does not handle folded headers.
+    O(N) lines.
+    &quot;&quot;&quot;
+
+    def parse(self, raw_headers: str) -&gt; ParsedEmail:
+        result = ParsedEmail()
+        for line in raw_headers.splitlines():
+            if &quot;: &quot; not in line:
+                continue
+            name, _, value = line.partition(&quot;: &quot;)
+            name = name.lower().strip()
+            value = value.strip()
+            result.raw_headers.append((name, value))
+            try:
+                if name == &quot;from&quot;:
+                    result.from_addr = _parse_single_address(value)
+                elif name == &quot;to&quot;:
+                    result.to_addrs = _parse_address_list(value)
+                elif name == &quot;subject&quot;:
+                    result.subject = _decode_rfc2047(value)
+                elif name == &quot;message-id&quot;:
+                    result.message_id = value
+                elif name == &quot;received&quot;:
+                    result.received_hops.append(_parse_received(value))
+                elif name == &quot;dkim-signature&quot;:
+                    result.dkim_signatures.append(_parse_dkim_signature(value))
+                elif name == &quot;authentication-results&quot;:
+                    result.auth_results.extend(_parse_auth_results(value))
+                elif name == &quot;return-path&quot;:
+                    result.return_path = _parse_single_address(value)
+                elif name == &quot;reply-to&quot;:
+                    result.reply_to = _parse_single_address(value)
+                elif name == &quot;x-originating-ip&quot;:
+                    result.x_originating_ip = value.strip(&quot;[]&quot;)
+                elif name == &quot;date&quot;:
+                    result.date = value
+            except Exception as e:
+                result.parse_errors.append(f&quot;{name}: {e}&quot;)
+        return result
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full state-machine unfolding + dispatch (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class EmailHeaderParser:
+    &quot;&quot;&quot;
+    Full RFC 5322 header parser.
+    Phase 1: unfold (CRLF + whitespace continuation).
+    Phase 2: dispatch each header to a dedicated handler.
+    &quot;&quot;&quot;
+
+    def parse(self, raw_headers: str) -&gt; ParsedEmail:
+        result = ParsedEmail()
+        pairs = self._unfold(raw_headers)
+        for name, value in pairs:
+            result.raw_headers.append((name, value))
+            n = name.lower()
+            try:
+                if n == &quot;from&quot;:
+                    result.from_addr = _parse_single_address(value)
+                elif n == &quot;to&quot;:
+                    result.to_addrs.extend(_parse_address_list(value))
+                elif n == &quot;cc&quot;:
+                    result.cc_addrs.extend(_parse_address_list(value))
+                elif n == &quot;reply-to&quot;:
+                    result.reply_to = _parse_single_address(value)
+                elif n == &quot;return-path&quot;:
+                    result.return_path = _parse_single_address(value)
+                elif n == &quot;subject&quot;:
+                    result.subject = _decode_rfc2047(value)
+                elif n == &quot;message-id&quot;:
+                    result.message_id = value.strip(&quot;&lt;&gt;&quot;)
+                elif n == &quot;date&quot;:
+                    result.date = value
+                elif n == &quot;received&quot;:
+                    result.received_hops.append(_parse_received(value))
+                elif n == &quot;dkim-signature&quot;:
+                    result.dkim_signatures.append(_parse_dkim_signature(value))
+                elif n == &quot;authentication-results&quot;:
+                    result.auth_results.extend(_parse_auth_results(value))
+                elif n == &quot;x-originating-ip&quot;:
+                    result.x_originating_ip = value.strip(&quot;[]&quot;)
+                elif n == &quot;x-forwarded-for&quot;:
+                    result.x_forwarded_for.extend(
+                        ip.strip() for ip in value.split(&quot;,&quot;) if ip.strip()
+                    )
+            except Exception as e:
+                result.parse_errors.append(f&quot;{n}: {e}&quot;)
+        return result
+
+    @staticmethod
+    def _unfold(raw: str) -&gt; List[Tuple[str, str]]:
+        &quot;&quot;&quot;
+        Unfold RFC 5322 folded headers.
+        Lines starting with whitespace are continuations of the previous header.
+        &quot;&quot;&quot;
+        lines = raw.replace(&quot;\r\n&quot;, &quot;\n&quot;).replace(&quot;\r&quot;, &quot;\n&quot;).split(&quot;\n&quot;)
+        pairs: List[Tuple[str, str]] = []
+        current_name = &quot;&quot;
+        current_value = &quot;&quot;
+        for line in lines:
+            if not line:
+                continue
+            if line[0] in (&quot; &quot;, &quot;\t&quot;):
+                # Continuation: append to current value
+                current_value += &quot; &quot; + line.strip()
+            else:
+                if current_name:
+                    pairs.append((current_name, current_value))
+                if &quot;:&quot; in line:
+                    name, _, value = line.partition(&quot;:&quot;)
+                    current_name = name.strip()
+                    current_value = value.strip()
+                else:
+                    current_name = line.strip()
+                    current_value = &quot;&quot;
+        if current_name:
+            pairs.append((current_name, current_value))
+        return pairs
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+SAMPLE_HEADERS = &quot;&quot;&quot;\
+From: &quot;Evil Sender&quot; &lt;phishing@evil.com&gt;
+To: victim@example.com
+Reply-To: reply@evil.com
+Return-Path: &lt;bounce@differentdomain.com&gt;
+Subject: =?UTF-8?B?V2lubmVyISBZb3Ugd29uIQ==?=
+Message-ID: &lt;12345@evil.com&gt;
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Received: from mail.evil.com ([203.0.113.5]) by mx.example.com with ESMTP;
+ Mon, 1 Jan 2024 00:00:00 +0000
+DKIM-Signature: v=1; a=rsa-sha256; d=legitimate.com; s=selector1;
+ h=from:to:subject; bh=abc123; b=sigdata==
+Authentication-Results: mx.example.com;
+ dkim=fail; spf=fail; dmarc=fail
+X-Originating-IP: [198.51.100.7]
+&quot;&quot;&quot;
+
+
+def test_basic_parse():
+    p = EmailHeaderParser()
+    result = p.parse(SAMPLE_HEADERS)
+    assert result.from_addr and &quot;evil.com&quot; in result.from_addr.domain
+    assert result.subject == &quot;Winner! You won!&quot;
+    assert result.message_id == &quot;12345@evil.com&quot;
+    assert result.x_originating_ip == &quot;198.51.100.7&quot;
+    print(&quot;Basic parse: passed&quot;)
+
+
+def test_received_hop():
+    p = EmailHeaderParser()
+    result = p.parse(SAMPLE_HEADERS)
+    assert len(result.received_hops) &gt;= 1
+    hop = result.received_hops[0]
+    assert hop.ip == &quot;203.0.113.5&quot;
+    print(&quot;Received hop: passed&quot;)
+
+
+def test_dkim_parse():
+    p = EmailHeaderParser()
+    result = p.parse(SAMPLE_HEADERS)
+    assert len(result.dkim_signatures) == 1
+    sig = result.dkim_signatures[0]
+    assert sig.signing_domain == &quot;legitimate.com&quot;
+    assert sig.selector == &quot;selector1&quot;
+    print(&quot;DKIM parse: passed&quot;)
+
+
+def test_auth_results():
+    p = EmailHeaderParser()
+    result = p.parse(SAMPLE_HEADERS)
+    summary = result.auth_summary()
+    assert summary.get(&quot;dkim&quot;) == &quot;fail&quot;
+    assert summary.get(&quot;spf&quot;) == &quot;fail&quot;
+    assert summary.get(&quot;dmarc&quot;) == &quot;fail&quot;
+    print(&quot;Auth results: passed&quot;)
+
+
+def test_domain_mismatch():
+    p = EmailHeaderParser()
+    result = p.parse(SAMPLE_HEADERS)
+    issues = result.domain_mismatch()
+    assert len(issues) &gt; 0  # From domain ≠ Return-Path domain AND DKIM d=
+    print(f&quot;Domain mismatch ({len(issues)} issues): passed&quot;)
+
+
+def test_folded_header():
+    folded = (
+        &quot;Subject: Hello\n&quot;
+        &quot; world this is folded\n&quot;
+        &quot;From: test@example.com\n&quot;
+    )
+    p = EmailHeaderParser()
+    result = p.parse(folded)
+    assert &quot;world&quot; in result.subject
+    print(&quot;Folded header: passed&quot;)
+
+
+def test_naive_parser():
+    p = NaiveEmailHeaderParser()
+    headers = &quot;From: alice@example.com\nSubject: test\n&quot;
+    result = p.parse(headers)
+    assert result.from_addr and result.from_addr.address == &quot;alice@example.com&quot;
+    print(&quot;Naive parser: passed&quot;)
+
+
+def test_rfc2047_b_encoding():
+    # &quot;Hello&quot; in Base64 = &quot;SGVsbG8=&quot;
+    text = &quot;=?UTF-8?B?SGVsbG8=?=&quot;
+    decoded = _decode_rfc2047(text)
+    assert decoded == &quot;Hello&quot;
+    print(&quot;RFC 2047 B-encoding: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Phishing emails forge the From display name while using a different
+  actual sending address and domain to evade domain-level filtering.
+
+KEY INDICATORS
+  1. From ≠ Return-Path domain: &quot;From: ceo@company.com&quot; but
+     &quot;Return-Path: &lt;attacker@evil.com&gt;&quot; → forged display name.
+  2. DKIM fail or DKIM d= ≠ From domain: the email was not signed by the
+     legitimate domain.
+  3. SPF fail: the sending server IP is not authorised for the From domain.
+  4. DMARC fail: combined DKIM + SPF check; strongest anti-spoofing signal.
+  5. Reply-To mismatch: victim&#x27;s reply goes to attacker&#x27;s mailbox.
+  6. X-Originating-IP outside expected geography.
+  7. Received chain gap: first external IP not matching claimed sending host.
+
+HARDENING
+  - Enforce DMARC p=reject on your own domain.
+  - MTA tag-on-inbound: mark mails as [EXTERNAL].
+  - Display name spoofing detection: alert when display name contains company
+    domain but From address does not.
+  - Machine learning on header features for spam/phishing scoring.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic_parse()
+    test_received_hop()
+    test_dkim_parse()
+    test_auth_results()
+    test_domain_mismatch()
+    test_folded_header()
+    test_naive_parser()
+    test_rfc2047_b_encoding()
+</code></pre>
+</body>
+</html>

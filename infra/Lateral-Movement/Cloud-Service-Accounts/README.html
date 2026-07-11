@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud Service Accounts — Lateral Movement and Privilege Escalation</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: infra\Lateral-Movement\Cloud-Service-Accounts\README.md</p>
+<h1 id="cloud-service-accounts-lateral-movement-and-privilege-escalation">Cloud Service Accounts — Lateral Movement and Privilege Escalation</h1>
+<p><strong>Category:</strong> Cloud Security — Identity and Access Management<br />
+<strong>Applies To:</strong> GCP Service Accounts, AWS IAM Roles, Azure Managed Identities, Kubernetes Service Accounts</p>
+<h2 id="overview">Overview</h2>
+<p>Cloud service accounts are machine identities used by workloads, applications, and automated systems to authenticate to cloud APIs. Unlike human user accounts, service accounts are often long-lived, over-privileged, and their credentials (keys, tokens) are frequently embedded in code, config files, environment variables, or accessible from the cloud metadata service. Abusing service accounts is the primary method for lateral movement and privilege escalation in cloud environments.</p>
+<p>At Google scale, every GCP resource (GCE VM, Cloud Run instance, Cloud Function, GKE pod) runs as a service account. Attackers who gain code execution on any of these resources immediately inherit the service account's permissions. If the service account is over-privileged — common in environments where convenience was prioritized over least-privilege — the attacker can access storage, databases, other projects, and potentially escalate to organization-level admin.</p>
+<h2 id="how-cloud-service-accounts-work">How Cloud Service Accounts Work</h2>
+<h3 id="gcp-service-accounts">GCP Service Accounts</h3>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Service Account</td>
+<td>A Google-managed identity for non-human principals (<code>name@project.iam.gserviceaccount.com</code>)</td>
+</tr>
+<tr>
+<td>Service Account Key</td>
+<td>Long-lived JSON key file that can authenticate as the SA from anywhere (dangerous)</td>
+</tr>
+<tr>
+<td>Workload Identity</td>
+<td>Short-lived OIDC token issued via GKE/Cloud Run; federated to GCP IAM without a key file</td>
+</tr>
+<tr>
+<td>Metadata Server</td>
+<td>VM/Container inherits SA at runtime; token available from <code>metadata.google.internal</code></td>
+</tr>
+<tr>
+<td>IAM Role</td>
+<td>Set of permissions bound to the SA for specific resources</td>
+</tr>
+<tr>
+<td><code>actAs</code> permission</td>
+<td>Allows impersonation of another SA — the key privilege escalation permission</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GCP metadata server token retrieval:</strong></p>
+<pre><code class="language-bash">curl -H &quot;Metadata-Flavor: Google&quot; \
+  &quot;http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token&quot;
+# Returns: {&quot;access_token&quot;:&quot;ya29.xxx&quot;,&quot;expires_in&quot;:3599,&quot;token_type&quot;:&quot;Bearer&quot;}
+</code></pre>
+<p>This token is a short-lived OAuth2 bearer token valid for the SA bound to the resource. Any code execution on a GCE VM, GKE pod, or Cloud Run instance can retrieve it without any additional credentials.</p>
+<h3 id="aws-iam-roles-equivalent">AWS IAM Roles (Equivalent)</h3>
+<pre><code class="language-bash"># AWS EC2 Instance Metadata Service (IMDSv1)
+curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
+# Returns IAM role name; then:
+curl http://169.254.169.254/latest/meta-data/iam/security-credentials/MyRoleName
+# Returns: AccessKeyId, SecretAccessKey, Token, Expiration
+</code></pre>
+<p>IMDSv2 requires a session-oriented PUT request first, significantly reducing SSRF-based credential theft.</p>
+<hr />
+<h2 id="privilege-escalation-via-service-accounts">Privilege Escalation via Service Accounts</h2>
+<h3 id="gcp-escalation-paths">GCP Escalation Paths</h3>
+<pre class="mermaid">
+flowchart TD
+    A[Initial Access: code exec on GCE VM or GKE pod] --> B[Read metadata: get SA access token]
+    B --> C[Enumerate SA permissions with IAM API]
+    C --> D{What permissions does SA have?}
+    D --> E[storage.objects.list/.get - read all GCS buckets]
+    D --> F[iam.serviceAccounts.list - discover other SAs]
+    D --> G[iam.serviceAccounts.actAs on Target-SA - impersonate]
+    D --> H[resourcemanager.projects.setIamPolicy - grant self editor]
+    D --> I[cloudfunctions.functions.update - deploy backdoor]
+    G --> J[Get token for Target-SA - higher privileges]
+    H --> K[Project-level owner/editor]
+    I --> L[Code execution as function SA]
+    style K fill:#ff6b6b,color:#fff
+    style J fill:#ff6b6b,color:#fff
+</pre>
+<h3 id="critical-gcp-iam-permissions-for-escalation">Critical GCP IAM Permissions for Escalation</h3>
+<table>
+<thead>
+<tr>
+<th>Permission</th>
+<th>Why It's Dangerous</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>iam.serviceAccounts.actAs</code></td>
+<td>Impersonate any SA you have this permission on; inherit all that SA's permissions</td>
+</tr>
+<tr>
+<td><code>iam.serviceAccounts.getAccessToken</code></td>
+<td>Generate an OAuth2 token for any SA you have this on</td>
+</tr>
+<tr>
+<td><code>iam.serviceAccounts.implicitDelegation</code></td>
+<td>Use SA in delegation chains</td>
+</tr>
+<tr>
+<td><code>resourcemanager.projects.setIamPolicy</code></td>
+<td>Grant any principal any role on the project including Owner</td>
+</tr>
+<tr>
+<td><code>resourcemanager.organizations.setIamPolicy</code></td>
+<td>Same but at org level</td>
+</tr>
+<tr>
+<td><code>cloudfunctions.functions.create</code> + <code>run.services.create</code></td>
+<td>Deploy function/service running as high-priv SA</td>
+</tr>
+<tr>
+<td><code>deploymentmanager.deployments.create</code></td>
+<td>Deploy infrastructure including IAM bindings</td>
+</tr>
+<tr>
+<td><code>iam.roles.update</code></td>
+<td>Update a custom role that your SA has → add permissions to that role</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gcp-service-account-impersonation">GCP Service Account Impersonation</h3>
+<p>With <code>iam.serviceAccounts.actAs</code> on a high-privileged SA, an attacker can:</p>
+<pre><code class="language-bash"># Generate access token for the target SA
+curl -X POST &quot;https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/target-sa@project.iam.gserviceaccount.com:generateAccessToken&quot; \
+  -H &quot;Authorization: Bearer $CURRENT_TOKEN&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -d '{&quot;scope&quot;:[&quot;https://www.googleapis.com/auth/cloud-platform&quot;]}'
+
+# Use the new token to access resources as target-sa
+curl &quot;https://storage.googleapis.com/storage/v1/b?project=target-project&quot; \
+  -H &quot;Authorization: Bearer $TARGET_SA_TOKEN&quot;
+</code></pre>
+<hr />
+<h2 id="service-account-key-files-the-long-lived-credential-problem">Service Account Key Files — The Long-Lived Credential Problem</h2>
+<p>SA key files (JSON) are long-lived credentials that never expire unless explicitly deleted. They can authenticate from any machine worldwide.</p>
+<p><strong>Common ways SA keys are leaked:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Leak Vector</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GitHub/GitLab commits</td>
+<td>Developer commits key JSON file; bots scan GitHub for <code>service_account.json</code> patterns</td>
+</tr>
+<tr>
+<td>Docker image layers</td>
+<td>Key embedded in build step; visible in image history</td>
+</tr>
+<tr>
+<td>CI/CD environment variables</td>
+<td>Key stored as CI secret; leaked via verbose build logs</td>
+</tr>
+<tr>
+<td>Application config files</td>
+<td>Key in <code>config.yaml</code> or <code>.env</code> committed to version control</td>
+</tr>
+<tr>
+<td>GCS buckets (public or over-shared)</td>
+<td>Key file stored in a bucket with incorrect ACLs</td>
+</tr>
+<tr>
+<td>Cloud Function environment variables</td>
+<td>SA key stored as env var; visible to anyone who can describe the function</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Best practice:</strong> Never create SA key files. Use Workload Identity instead.</p>
+<h3 id="workload-identity-vs-sa-keys">Workload Identity vs SA Keys</h3>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>SA Key File</th>
+<th>Workload Identity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lifespan</td>
+<td>Years (until deleted)</td>
+<td>1 hour (auto-refreshed)</td>
+</tr>
+<tr>
+<td>Scope of exposure</td>
+<td>Usable from anywhere on the internet</td>
+<td>Scoped to a specific K8s SA + namespace</td>
+</tr>
+<tr>
+<td>Rotation</td>
+<td>Manual</td>
+<td>Automatic</td>
+</tr>
+<tr>
+<td>Revocation</td>
+<td>Requires deleting the key</td>
+<td>Removing Workload Identity binding</td>
+</tr>
+<tr>
+<td>Audit trail</td>
+<td>Minimal</td>
+<td>Full Cloud Audit Log trace with namespace/pod identity</td>
+</tr>
+<tr>
+<td>Risk if leaked</td>
+<td>Full SA access from attacker's machine</td>
+<td>Limited; token expires quickly</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="aws-iam-lateral-movement">AWS IAM Lateral Movement</h2>
+<h3 id="aws-specific-escalation-paths">AWS-Specific Escalation Paths</h3>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Permissions Required</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create policy and attach</td>
+<td><code>iam:CreatePolicy</code>, <code>iam:AttachRolePolicy</code></td>
+<td>Attach admin policy to own role</td>
+</tr>
+<tr>
+<td>Create role and assume</td>
+<td><code>iam:CreateRole</code>, <code>sts:AssumeRole</code></td>
+<td>Create and assume admin role</td>
+</tr>
+<tr>
+<td>EC2 instance profile swap</td>
+<td><code>iam:AddRoleToInstanceProfile</code>, <code>ec2:AssociateIamInstanceProfile</code></td>
+<td>Swap instance profile to higher-priv role</td>
+</tr>
+<tr>
+<td>Lambda create with role</td>
+<td><code>lambda:CreateFunction</code>, <code>iam:PassRole</code>, <code>lambda:InvokeFunction</code></td>
+<td>Execute as high-priv role</td>
+</tr>
+<tr>
+<td>CloudFormation with role</td>
+<td><code>cloudformation:CreateStack</code>, <code>iam:PassRole</code></td>
+<td>Deploy stack that grants admin</td>
+</tr>
+<tr>
+<td>Update Lambda function</td>
+<td><code>lambda:UpdateFunctionCode</code> on existing lambda</td>
+<td>Run code as that lambda's role</td>
+</tr>
+<tr>
+<td>Pass role to EC2</td>
+<td><code>ec2:RunInstances</code>, <code>iam:PassRole</code></td>
+<td>Launch EC2 with admin instance profile</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>SA key file in GitHub repo</td>
+<td>Developer committed key file</td>
+<td>Full SA access from attacker machine</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SSRF to metadata service</td>
+<td>Web app SSRF + metadata endpoint accessible</td>
+<td>Node SA token stolen → lateral movement</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Over-privileged SA on GKE node</td>
+<td>All pods on node inherit node SA's permissions</td>
+<td>Any compromised pod → node-level GCP access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>actAs escalation chain</td>
+<td>SA has actAs on higher-privileged SA</td>
+<td>Hop to project admin</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>SA key file in Docker image</td>
+<td>Key baked into image layer; pushed to public registry</td>
+<td>Full SA access to anyone who pulls the image</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Default SA with Editor role</td>
+<td>GCP default SA for Compute has Editor by default</td>
+<td>Any code exec → project-wide editor access</td>
+<td>Med-High</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>SA key leakage</td>
+<td>Disable/avoid SA key creation; enforce via org policy <code>constraints/iam.disableServiceAccountKeyCreation</code></td>
+<td>GCP Org Policy</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Over-privileged SA</td>
+<td>Least-privilege SA per service; regularly audit with Policy Analyzer</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Default Compute SA with Editor</td>
+<td>Disable default SA or change from Editor role to no roles; create purpose-built SAs</td>
+<td>IAM</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Metadata service SA token theft</td>
+<td>Use Workload Identity on GKE; block metadata from pods via NetworkPolicy egress</td>
+<td>K8s + networking</td>
+</tr>
+<tr>
+<td>5</td>
+<td>actAs misuse</td>
+<td>Never grant <code>actAs</code> on admin SAs to lower-trust workloads; monitor with Cloud Audit Logs</td>
+<td>IAM audit</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Cross-project SA escalation</td>
+<td>Limit cross-project SA roles; use VPC Service Controls to bound API access by perimeter</td>
+<td>VPC-SC + IAM</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Detect leaked keys</td>
+<td>Use Secret Scanner in GitHub; enable Cloud Audit Log alerts on SA token use from unexpected IPs</td>
+<td>SIEM + detection</td>
+</tr>
+</tbody>
+</table>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What is GCP Workload Identity and why is it strictly better than SA key files for GKE workloads?</li>
+<li>Walk through how an attacker with code execution on a GKE pod can escalate to project owner using only IAM API calls.</li>
+<li>What is the <code>iam.serviceAccounts.actAs</code> permission and why is it one of the most dangerous permissions in GCP?</li>
+<li>How does the GCP metadata service expose SA credentials and what controls prevent SSRF-based credential theft?</li>
+<li>What GCP org-level policies would you enforce to prevent SA key creation and over-privileged default SAs?</li>
+<li>Describe the AWS IMDSv1 vs IMDSv2 difference and why IMDSv2 mitigates SSRF-based credential theft.</li>
+<li>How would you detect a stolen SA key being used from an unexpected geographic location using Cloud Audit Logs?</li>
+<li>What is the principle of least privilege applied to service accounts in a Google-scale microservices environment?</li>
+<li>How does GCP VPC Service Controls restrict what a compromised SA can access even if the attacker has the token?</li>
+<li>Walk through the GitHub repo secret scan pipeline you would build to catch SA key files before they are pushed.</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Service accounts are the primary lateral movement vehicle in cloud environments — every resource has one and they're poorly governed.</li>
+<li>The GCP metadata service gives every VM/pod/function access to its SA token with zero additional authentication.</li>
+<li>SA key files are the most dangerous credential type — long-lived, globally valid, frequently leaked in code and Docker images.</li>
+<li>Workload Identity replaces SA keys with short-lived, scope-limited OIDC tokens — mandatory in any secure GKE deployment.</li>
+<li>The <code>actAs</code> permission creates privilege escalation chains; audit all actAs bindings across a project.</li>
+<li>GCP default Compute Service Account with Editor role is a common misconfiguration that turns any compromised VM into a project-level compromise.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

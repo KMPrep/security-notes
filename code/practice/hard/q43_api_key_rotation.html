@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q43_api_key_rotation.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q43_api_key_rotation.py</h1>
+  <p class="file-path">Source: code\practice\hard\q43_api_key_rotation.py</p>
+  <p class="line-count">438 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q43 [Hard] — API Key Rotation System
+=============================================================================
+
+PROBLEM
+-------
+Design and implement logic for rotating API keys with zero-downtime:
+  1. Generate new key while keeping the previous key active during a
+     configurable overlap (grace period).
+  2. Accept both &quot;active&quot; and &quot;previous&quot; keys during overlap.
+  3. Mark &quot;previous&quot; key as deprecated (log a warning on each use).
+  4. After grace period expires, invalidate the previous key.
+  5. Each key has version, created_at, expires_at, and a key_id prefix
+     (first 8 chars, safe to log).
+  6. Verify key via constant-time HMAC.
+  7. Scope keys to a service principal.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Key format?
+   → &lt;prefix&gt;_&lt;base64url random bytes&gt;  (e.g., &quot;sk_live_AbCd1234...&quot;)
+2. Rotation strategy: immediate or dual-key?
+   → Dual-key: active + previous both valid for grace period.
+3. Persistence?
+   → In-memory for this solution; production = database.
+4. Key length?
+   → 32 random bytes (256 bits) + 8-char prefix.
+5. How many prior keys to retain?
+   → Only one (current + one previous); older keys immediately revoked.
+
+=============================================================================
+APPROACH 1 — NAIVE (no overlap, hard cutover)
+=============================================================================
+  Replace active key immediately; all callers with old key fail instantly.
+  No grace period; operational risk of downtime.
+
+=============================================================================
+APPROACH 2 — DUAL-KEY ROTATION WITH GRACE PERIOD (OPTIMAL)
+=============================================================================
+  Data structure: per-principal {active: Key, previous: Key|None}
+  On rotate():
+    1. Promote active → previous (set previous_expires_at = now + grace).
+    2. Generate new active key.
+  On verify(key):
+    1. Hash key; compare to active_hash (constant-time).
+    2. If no match, compare to previous_hash (if not expired).
+    3. Return VerifyResult with deprecation warning if previous used.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import secrets
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+KEY_PREFIX            = &quot;sk_&quot;
+KEY_RANDOM_BYTES      = 32
+DEFAULT_KEY_TTL_S     = 86_400 * 90   # 90 days
+DEFAULT_GRACE_S       = 86_400 * 7    # 7-day overlap
+MAX_PRINCIPAL_LEN     = 64
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ApiKey:
+    key_id: str          # first 8 chars of the key (safe to log)
+    key_hash: str        # SHA-256(full_key)
+    version: int
+    principal: str
+    created_at: float
+    expires_at: float
+    is_deprecated: bool = False
+
+    @property
+    def is_expired(self) -&gt; bool:
+        return time.monotonic() &gt; self.expires_at
+
+
+@dataclass
+class VerifyResult:
+    valid: bool
+    principal: str
+    key_id: str
+    version: int
+    is_deprecated: bool = False
+    deprecation_message: str = &quot;&quot;
+    failure_reason: str = &quot;&quot;
+
+
+@dataclass
+class RotationResult:
+    new_key: str          # full raw key (return once; don&#x27;t store)
+    new_key_id: str
+    new_version: int
+    previous_key_id: Optional[str]
+    grace_expires_at: float
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (hard cutover)
+# ---------------------------------------------------------------------------
+
+class NaiveApiKeyManager:
+    &quot;&quot;&quot;No grace period; old keys immediately revoked on rotation.&quot;&quot;&quot;
+
+    def __init__(self):
+        self._keys: Dict[str, str] = {}  # principal → raw key (plaintext!)
+
+    def generate(self, principal: str) -&gt; str:
+        raw = KEY_PREFIX + secrets.token_urlsafe(KEY_RANDOM_BYTES)
+        self._keys[principal] = raw          # stored in plaintext!
+        return raw
+
+    def rotate(self, principal: str) -&gt; str:
+        return self.generate(principal)      # old key immediately gone
+
+    def verify(self, principal: str, key: str) -&gt; bool:
+        return self._keys.get(principal) == key   # timing vulnerable
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Secure dual-key rotation
+# ---------------------------------------------------------------------------
+
+class _PrincipalState:
+    __slots__ = (&quot;active&quot;, &quot;previous&quot;)
+
+    def __init__(self, active: ApiKey, previous: Optional[ApiKey] = None):
+        self.active   = active
+        self.previous = previous
+
+
+class ApiKeyManager:
+    &quot;&quot;&quot;
+    Dual-key rotation system.
+    Never stores raw keys; only SHA-256 hashes.
+    Constant-time comparison via hmac.compare_digest.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        default_ttl_s: float = DEFAULT_KEY_TTL_S,
+        default_grace_s: float = DEFAULT_GRACE_S,
+    ):
+        self._ttl_s   = default_ttl_s
+        self._grace_s = default_grace_s
+        self._state: Dict[str, _PrincipalState] = {}
+        self._version_counter: Dict[str, int] = {}
+
+    # --- Key generation -----------------------------------------------------
+
+    def _generate_key(self) -&gt; tuple[str, str, str]:
+        &quot;&quot;&quot;Returns (raw_key, key_id, key_hash).&quot;&quot;&quot;
+        raw        = KEY_PREFIX + secrets.token_urlsafe(KEY_RANDOM_BYTES)
+        key_id     = raw[:8] + &quot;...&quot;   # first 8 chars safe to log
+        key_hash   = hashlib.sha256(raw.encode()).hexdigest()
+        return raw, key_id, key_hash
+
+    def _next_version(self, principal: str) -&gt; int:
+        v = self._version_counter.get(principal, 0) + 1
+        self._version_counter[principal] = v
+        return v
+
+    # --- Issue first key ----------------------------------------------------
+
+    def issue(self, principal: str) -&gt; tuple[str, RotationResult]:
+        &quot;&quot;&quot;Issue the first API key for a principal.&quot;&quot;&quot;
+        if not principal or len(principal) &gt; MAX_PRINCIPAL_LEN:
+            raise ValueError(&quot;Invalid principal&quot;)
+        if principal in self._state:
+            raise ValueError(f&quot;Principal {principal!r} already has a key; use rotate()&quot;)
+
+        now     = time.monotonic()
+        raw, key_id, key_hash = self._generate_key()
+        version = self._next_version(principal)
+        active  = ApiKey(
+            key_id=key_id,
+            key_hash=key_hash,
+            version=version,
+            principal=principal,
+            created_at=now,
+            expires_at=now + self._ttl_s,
+        )
+        self._state[principal] = _PrincipalState(active=active, previous=None)
+        result = RotationResult(
+            new_key=raw,
+            new_key_id=key_id,
+            new_version=version,
+            previous_key_id=None,
+            grace_expires_at=0.0,
+        )
+        return raw, result
+
+    # --- Rotate key ---------------------------------------------------------
+
+    def rotate(self, principal: str) -&gt; tuple[str, RotationResult]:
+        &quot;&quot;&quot;
+        Rotate key for principal.
+        Current active becomes previous (with grace period).
+        Returns (raw_new_key, RotationResult).
+        &quot;&quot;&quot;
+        if principal not in self._state:
+            raise ValueError(f&quot;Principal {principal!r} not found; use issue()&quot;)
+
+        now                     = time.monotonic()
+        state                   = self._state[principal]
+        old_active              = state.active
+        prev_key_id             = old_active.key_id
+
+        # Demote current active to previous
+        old_active.is_deprecated = True
+        old_active.expires_at    = now + self._grace_s
+
+        # Generate new active key
+        raw, key_id, key_hash = self._generate_key()
+        version = self._next_version(principal)
+        new_active = ApiKey(
+            key_id=key_id,
+            key_hash=key_hash,
+            version=version,
+            principal=principal,
+            created_at=now,
+            expires_at=now + self._ttl_s,
+        )
+        state.active   = new_active
+        state.previous = old_active
+
+        result = RotationResult(
+            new_key=raw,
+            new_key_id=key_id,
+            new_version=version,
+            previous_key_id=prev_key_id,
+            grace_expires_at=now + self._grace_s,
+        )
+        return raw, result
+
+    # --- Verify key ---------------------------------------------------------
+
+    def verify(self, raw_key: str, principal: str) -&gt; VerifyResult:
+        &quot;&quot;&quot;Verify a raw key against stored hashes (constant-time).&quot;&quot;&quot;
+        not_found = VerifyResult(
+            valid=False, principal=principal, key_id=&quot;&quot;,
+            version=0, failure_reason=&quot;invalid_key&quot;,
+        )
+
+        if not raw_key or not principal:
+            return not_found
+
+        state = self._state.get(principal)
+        if state is None:
+            # Dummy work to maintain timing parity
+            _ = hmac.compare_digest(&quot;a&quot;, &quot;b&quot;)
+            return not_found
+
+        submitted_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        now = time.monotonic()
+
+        # Check active key
+        active_match = hmac.compare_digest(state.active.key_hash, submitted_hash)
+        if active_match and not state.active.is_expired:
+            return VerifyResult(
+                valid=True,
+                principal=principal,
+                key_id=state.active.key_id,
+                version=state.active.version,
+            )
+
+        # Check previous key (if exists and within grace period)
+        prev_match = False
+        if state.previous is not None:
+            prev_match = hmac.compare_digest(state.previous.key_hash, submitted_hash)
+
+        if prev_match and state.previous is not None and not state.previous.is_expired:
+            return VerifyResult(
+                valid=True,
+                principal=principal,
+                key_id=state.previous.key_id,
+                version=state.previous.version,
+                is_deprecated=True,
+                deprecation_message=(
+                    f&quot;API key version {state.previous.version} is deprecated. &quot;
+                    f&quot;Please rotate to version {state.active.version}.&quot;
+                ),
+            )
+
+        return VerifyResult(
+            valid=False, principal=principal, key_id=&quot;&quot;,
+            version=0, failure_reason=&quot;invalid_or_expired&quot;,
+        )
+
+    # --- Revoke -------------------------------------------------------------
+
+    def revoke(self, principal: str) -&gt; None:
+        &quot;&quot;&quot;Immediately revoke all keys for a principal.&quot;&quot;&quot;
+        self._state.pop(principal, None)
+        self._version_counter.pop(principal, None)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_issue_and_verify():
+    mgr = ApiKeyManager()
+    raw, result = mgr.issue(&quot;service-a&quot;)
+    assert result.new_version == 1
+    vr = mgr.verify(raw, &quot;service-a&quot;)
+    assert vr.valid
+    assert not vr.is_deprecated
+    print(f&quot;Issue and verify: passed (key_id={result.new_key_id})&quot;)
+
+
+def test_rotation_grace_period():
+    mgr = ApiKeyManager(default_grace_s=3600)
+    raw_v1, _ = mgr.issue(&quot;service-b&quot;)
+    raw_v2, r = mgr.rotate(&quot;service-b&quot;)
+    assert r.new_version == 2
+
+    # Both keys should be valid during grace period
+    vr1 = mgr.verify(raw_v1, &quot;service-b&quot;)
+    vr2 = mgr.verify(raw_v2, &quot;service-b&quot;)
+    assert vr1.valid and vr1.is_deprecated
+    assert vr2.valid and not vr2.is_deprecated
+    print(f&quot;Grace period: passed (v1 deprecated={vr1.is_deprecated})&quot;)
+
+
+def test_old_key_invalid_after_grace():
+    mgr = ApiKeyManager(default_grace_s=-1)  # Already expired
+    raw_v1, _ = mgr.issue(&quot;service-c&quot;)
+    raw_v2, _ = mgr.rotate(&quot;service-c&quot;)
+
+    vr1 = mgr.verify(raw_v1, &quot;service-c&quot;)
+    assert not vr1.valid
+    vr2 = mgr.verify(raw_v2, &quot;service-c&quot;)
+    assert vr2.valid
+    print(f&quot;Old key expired after grace: passed&quot;)
+
+
+def test_revoke():
+    mgr = ApiKeyManager()
+    raw, _ = mgr.issue(&quot;service-d&quot;)
+    mgr.revoke(&quot;service-d&quot;)
+    vr = mgr.verify(raw, &quot;service-d&quot;)
+    assert not vr.valid
+    print(&quot;Revoke: passed&quot;)
+
+
+def test_wrong_principal():
+    mgr = ApiKeyManager()
+    raw, _ = mgr.issue(&quot;svc-x&quot;)
+    mgr.issue(&quot;svc-y&quot;)
+    vr = mgr.verify(raw, &quot;svc-y&quot;)   # key for svc-x used against svc-y
+    assert not vr.valid
+    print(&quot;Wrong principal rejected: passed&quot;)
+
+
+def test_key_uniqueness():
+    mgr = ApiKeyManager()
+    raw1, _ = mgr.issue(&quot;svc-u&quot;)
+    mgr.rotate(&quot;svc-u&quot;)
+    raw2, _ = mgr.rotate(&quot;svc-u&quot;)
+    assert raw1 != raw2
+    print(&quot;Key uniqueness: passed&quot;)
+
+
+def test_constant_time_no_timing_leak():
+    &quot;&quot;&quot;Verify hmac.compare_digest is used (structural test).&quot;&quot;&quot;
+    import inspect
+    src = inspect.getsource(ApiKeyManager.verify)
+    assert &quot;compare_digest&quot; in src
+    print(&quot;Constant-time comparison verified in source: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+API KEY ROTATION — SECURITY RATIONALE
+---------------------------------------
+1. WHY ROTATE?
+   Keys are long-lived credentials. If a key leaks (log exposure, git commit,
+   MITM on non-TLS endpoint), rotation limits the blast radius to the period
+   before rotation was noticed.
+
+2. DUAL-KEY GRACE PERIOD
+   Hard cutover breaks clients that haven&#x27;t updated yet.
+   Grace period (7 days) lets operators update all callers before the old key
+   expires, achieving zero-downtime rotation.
+
+3. NEVER STORE RAW KEYS
+   Store only SHA-256(raw_key). A DB breach exposes only hashes.
+   Attackers can&#x27;t use hashes directly as API keys.
+   Similar to storing password hashes (but bcrypt/Argon2 not needed here
+   since API keys are already 256-bit random, not low-entropy user passwords).
+
+4. KEY SCOPE / PRINCIPAL BINDING
+   Each key is bound to a principal (service name).
+   Prevents key cross-use: a leaked key for service-A can&#x27;t authenticate as B.
+
+5. CONSTANT-TIME COMPARISON
+   Comparing keys with == leaks timing information.
+   hmac.compare_digest compares all bytes in constant time.
+
+6. KEY_ID PREFIX (safe to log)
+   First 8 chars safe to appear in logs (too short to derive full key).
+   Allows correlating audit logs with specific key versions without
+   exposing the secret.
+
+7. AUDIT EVENTS TO LOG
+   key_issued, key_rotated, key_verified, key_deprecated_used, key_revoked.
+   These support forensic investigation after a suspected compromise.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_issue_and_verify()
+    test_rotation_grace_period()
+    test_old_key_invalid_after_grace()
+    test_revoke()
+    test_wrong_principal()
+    test_key_uniqueness()
+    test_constant_time_no_timing_leak()
+</code></pre>
+</body>
+</html>

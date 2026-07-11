@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q54_concurrent_rate_limiter.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q54_concurrent_rate_limiter.py</h1>
+  <p class="file-path">Source: code\practice\hard\q54_concurrent_rate_limiter.py</p>
+  <p class="line-count">443 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q54 [Hard] — Concurrent Rate Limiter
+=============================================================================
+
+PROBLEM
+-------
+Implement a thread-safe rate limiter supporting many concurrent users:
+  1. Fixed window: allow N requests per window period per key.
+  2. Sliding window (token bucket): smoother enforcement.
+  3. Thread-safe: multiple threads may call check() for the same key.
+  4. Memory-bounded: evict idle windows to avoid OOM.
+  5. Support per-key limits (different limits for different API tiers).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Algorithm? → Fixed window + sliding window log (two approaches).
+2. Distributed? → Single-node (in-memory); Redis extension noted.
+3. Keys? → Typically user_id or IP address.
+4. Granularity? → Seconds.
+5. Thread model? → Python threading; per-key locking for throughput.
+
+=============================================================================
+APPROACH 1 — NAIVE (global lock, dict counter)
+=============================================================================
+  Single global dict + global lock. All threads serialize on every call.
+  O(1) per request but contention kills throughput under load.
+
+=============================================================================
+APPROACH 2A — FIXED WINDOW WITH PER-KEY LOCKING (OPTIMAL FOR SIMPLICITY)
+=============================================================================
+  Per-key Lock (lazy-created) + fixed window counter.
+  Only locks the specific key; other keys can proceed concurrently.
+  Memory bounded: prune idle keys periodically.
+
+APPROACH 2B — SLIDING WINDOW LOG
+=============================================================================
+  Sliding window: store timestamps in a deque per key.
+  Evict timestamps older than window.
+  Count remaining to check limit.
+  More accurate (no burst at window boundary); O(N) memory per key.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import threading
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import DefaultDict, Dict, Deque, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_LIMIT      = 100      # requests per window
+DEFAULT_WINDOW_S   = 60       # 1-minute window
+CLEANUP_INTERVAL_S = 300      # clean up idle keys every 5 min
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RateLimit:
+    limit: int           # max requests per window
+    window_s: float      # window duration in seconds
+
+
+@dataclass
+class LimitResult:
+    allowed: bool
+    remaining: int
+    reset_at: float     # unix timestamp when window resets
+    retry_after: float  # seconds to wait if not allowed
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (global lock)
+# ---------------------------------------------------------------------------
+
+class NaiveRateLimiter:
+    &quot;&quot;&quot;Single global lock; all keys serialize. Not suitable for production.&quot;&quot;&quot;
+
+    def __init__(self, limit: int = DEFAULT_LIMIT, window_s: float = DEFAULT_WINDOW_S):
+        self._limit   = limit
+        self._window  = window_s
+        self._lock    = threading.Lock()
+        self._windows: Dict[str, Tuple[int, float]] = {}  # key → (count, window_start)
+
+    def check(self, key: str) -&gt; bool:
+        with self._lock:
+            now = time.monotonic()
+            count, win_start = self._windows.get(key, (0, now))
+            if now - win_start &gt;= self._window:
+                count, win_start = 0, now
+            if count &gt;= self._limit:
+                return False
+            self._windows[key] = (count + 1, win_start)
+            return True
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2A — Fixed Window with per-key locking
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FixedWindow:
+    count: int
+    window_start: float
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class FixedWindowRateLimiter:
+    &quot;&quot;&quot;
+    Per-key lock for high concurrency.
+    A meta-lock only guards the _windows dict itself (brief).
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        default_limit: RateLimit = None,
+        per_key_limits: Optional[Dict[str, RateLimit]] = None,
+    ):
+        self._default   = default_limit or RateLimit(DEFAULT_LIMIT, DEFAULT_WINDOW_S)
+        self._key_limits: Dict[str, RateLimit] = per_key_limits or {}
+        self._meta_lock = threading.Lock()
+        self._windows:   Dict[str, _FixedWindow] = {}
+        self._last_clean = time.monotonic()
+
+    def _get_limit(self, key: str) -&gt; RateLimit:
+        return self._key_limits.get(key, self._default)
+
+    def _get_window(self, key: str) -&gt; _FixedWindow:
+        with self._meta_lock:
+            if key not in self._windows:
+                self._windows[key] = _FixedWindow(
+                    count=0,
+                    window_start=time.monotonic(),
+                )
+            return self._windows[key]
+
+    def check(self, key: str) -&gt; LimitResult:
+        rl  = self._get_limit(key)
+        win = self._get_window(key)
+        now = time.monotonic()
+
+        with win.lock:
+            # Reset window if expired
+            if now - win.window_start &gt;= rl.window_s:
+                win.count        = 0
+                win.window_start = now
+
+            reset_at = win.window_start + rl.window_s
+
+            if win.count &gt;= rl.limit:
+                return LimitResult(
+                    allowed=False,
+                    remaining=0,
+                    reset_at=reset_at,
+                    retry_after=max(0.0, reset_at - now),
+                )
+
+            win.count += 1
+            return LimitResult(
+                allowed=True,
+                remaining=rl.limit - win.count,
+                reset_at=reset_at,
+                retry_after=0.0,
+            )
+
+    def cleanup_idle(self, idle_threshold_s: float = 600.0) -&gt; int:
+        &quot;&quot;&quot;Remove keys with windows older than idle_threshold_s.&quot;&quot;&quot;
+        now    = time.monotonic()
+        purged = 0
+        with self._meta_lock:
+            stale = [
+                k for k, w in self._windows.items()
+                if now - w.window_start &gt; idle_threshold_s
+            ]
+            for k in stale:
+                del self._windows[k]
+                purged += 1
+        return purged
+
+    @property
+    def tracked_keys(self) -&gt; int:
+        with self._meta_lock:
+            return len(self._windows)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2B — Sliding Window Log
+# ---------------------------------------------------------------------------
+
+class SlidingWindowRateLimiter:
+    &quot;&quot;&quot;
+    Sliding window: track individual request timestamps per key.
+    More accurate (no burst at window boundary).
+    Memory: O(limit) per key.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        default_limit: RateLimit = None,
+        per_key_limits: Optional[Dict[str, RateLimit]] = None,
+    ):
+        self._default    = default_limit or RateLimit(DEFAULT_LIMIT, DEFAULT_WINDOW_S)
+        self._key_limits = per_key_limits or {}
+        self._meta_lock  = threading.Lock()
+        self._logs:       Dict[str, Tuple[Deque[float], threading.Lock]] = {}
+
+    def _get_limit(self, key: str) -&gt; RateLimit:
+        return self._key_limits.get(key, self._default)
+
+    def _get_log(self, key: str) -&gt; Tuple[Deque[float], threading.Lock]:
+        with self._meta_lock:
+            if key not in self._logs:
+                self._logs[key] = (deque(), threading.Lock())
+            return self._logs[key]
+
+    def check(self, key: str) -&gt; LimitResult:
+        rl       = self._get_limit(key)
+        log, lk  = self._get_log(key)
+        now      = time.monotonic()
+        cutoff   = now - rl.window_s
+
+        with lk:
+            # Evict timestamps outside the window
+            while log and log[0] &lt;= cutoff:
+                log.popleft()
+
+            count = len(log)
+            if count &gt;= rl.limit:
+                oldest   = log[0] if log else now
+                reset_at = oldest + rl.window_s
+                return LimitResult(
+                    allowed=False,
+                    remaining=0,
+                    reset_at=reset_at,
+                    retry_after=max(0.0, reset_at - now),
+                )
+
+            log.append(now)
+            return LimitResult(
+                allowed=True,
+                remaining=rl.limit - len(log),
+                reset_at=now + rl.window_s,
+                retry_after=0.0,
+            )
+
+    def cleanup_idle(self, idle_threshold_s: float = 600.0) -&gt; int:
+        now    = time.monotonic()
+        purged = 0
+        with self._meta_lock:
+            stale = [
+                k for k, (log, _) in self._logs.items()
+                if not log or (now - log[-1] &gt; idle_threshold_s)
+            ]
+            for k in stale:
+                del self._logs[k]
+                purged += 1
+        return purged
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_fixed_window_allows_within_limit():
+    rl  = FixedWindowRateLimiter(default_limit=RateLimit(5, 60))
+    for i in range(5):
+        r = rl.check(&quot;user1&quot;)
+        assert r.allowed, f&quot;Request {i+1} should be allowed&quot;
+    print(&quot;Fixed window allows within limit: passed&quot;)
+
+
+def test_fixed_window_blocks_over_limit():
+    rl = FixedWindowRateLimiter(default_limit=RateLimit(3, 60))
+    for _ in range(3):
+        rl.check(&quot;user2&quot;)
+    r = rl.check(&quot;user2&quot;)
+    assert not r.allowed
+    assert r.remaining == 0
+    assert r.retry_after &gt; 0
+    print(&quot;Fixed window blocks over limit: passed&quot;)
+
+
+def test_fixed_window_resets():
+    rl = FixedWindowRateLimiter(default_limit=RateLimit(2, 0.05))
+    rl.check(&quot;user3&quot;); rl.check(&quot;user3&quot;)
+    time.sleep(0.1)
+    r = rl.check(&quot;user3&quot;)
+    assert r.allowed
+    print(&quot;Fixed window resets after expiry: passed&quot;)
+
+
+def test_sliding_window_within_limit():
+    rl = SlidingWindowRateLimiter(default_limit=RateLimit(5, 60))
+    for i in range(5):
+        r = rl.check(&quot;ip1&quot;)
+        assert r.allowed, f&quot;Request {i+1} should pass&quot;
+    print(&quot;Sliding window allows within limit: passed&quot;)
+
+
+def test_sliding_window_blocks():
+    rl = SlidingWindowRateLimiter(default_limit=RateLimit(3, 60))
+    for _ in range(3):
+        rl.check(&quot;ip2&quot;)
+    r = rl.check(&quot;ip2&quot;)
+    assert not r.allowed
+    print(&quot;Sliding window blocks over limit: passed&quot;)
+
+
+def test_sliding_window_old_requests_evicted():
+    rl = SlidingWindowRateLimiter(default_limit=RateLimit(3, 0.1))
+    for _ in range(3):
+        rl.check(&quot;ip3&quot;)
+    time.sleep(0.15)
+    r = rl.check(&quot;ip3&quot;)
+    assert r.allowed
+    print(&quot;Sliding window evicts old timestamps: passed&quot;)
+
+
+def test_per_key_limits():
+    per_key = {&quot;premium&quot;: RateLimit(1000, 60), &quot;free&quot;: RateLimit(10, 60)}
+    rl = FixedWindowRateLimiter(per_key_limits=per_key)
+    # Premium: 1000 allowed
+    for _ in range(100):
+        assert rl.check(&quot;premium&quot;).allowed
+    # Free: blocked at 11
+    for _ in range(10):
+        rl.check(&quot;free&quot;)
+    r = rl.check(&quot;free&quot;)
+    assert not r.allowed
+    print(&quot;Per-key limits: passed&quot;)
+
+
+def test_concurrent_requests():
+    &quot;&quot;&quot;Multiple threads hammering the same key.&quot;&quot;&quot;
+    rl      = FixedWindowRateLimiter(default_limit=RateLimit(50, 60))
+    results = []
+    lock    = threading.Lock()
+    errors  = []
+
+    def worker():
+        try:
+            r = rl.check(&quot;shared_key&quot;)
+            with lock:
+                results.append(r.allowed)
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    threads = [threading.Thread(target=worker) for _ in range(100)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f&quot;Errors: {errors}&quot;
+    allowed = results.count(True)
+    denied  = results.count(False)
+    # Should allow exactly 50
+    assert allowed == 50, f&quot;Expected 50 allowed, got {allowed}&quot;
+    assert denied  == 50, f&quot;Expected 50 denied, got {denied}&quot;
+    print(f&quot;Concurrent: allowed={allowed}, denied={denied} — passed&quot;)
+
+
+def test_cleanup_idle_keys():
+    rl = FixedWindowRateLimiter(default_limit=RateLimit(10, 0.01))
+    for i in range(5):
+        rl.check(f&quot;temp_key_{i}&quot;)
+    time.sleep(0.05)
+    purged = rl.cleanup_idle(idle_threshold_s=0.02)
+    assert purged == 5
+    print(f&quot;Cleanup idle keys: purged={purged} — passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+RATE LIMITING AS A SECURITY CONTROL
+--------------------------------------
+Rate limiting defends against:
+  1. Brute force login attacks (credential stuffing, password spray).
+  2. API abuse (scraping, enumeration, DoS).
+  3. SMS/email abuse (OTP flooding, account enumeration via timing).
+
+BURST ATTACK AT WINDOW BOUNDARY (fixed window weakness)
+---------------------------------------------------------
+  Window: 0–60s, limit=100.
+  At t=59s: attacker sends 100 requests → all allowed.
+  At t=60s: new window → attacker sends 100 more → 200 requests in 2 seconds!
+  Fix: sliding window or token bucket eliminates this boundary burst.
+
+TOKEN BUCKET (alternative)
+---------------------------
+  Tokens refill at rate r per second; bucket capacity = burst_limit.
+  Each request consumes 1 token; block if bucket empty.
+  Allows controlled bursting; rate limiting is smooth.
+
+DISTRIBUTED RATE LIMITING
+--------------------------
+  Single-node in-memory won&#x27;t work behind a load balancer.
+  Use Redis with atomic INCR + EXPIRE:
+    val = INCR(key)
+    if val == 1: EXPIRE(key, window_s)
+    if val &gt; limit: reject
+
+  Or Redis sliding window with ZADD + ZREMRANGEBYSCORE + ZCARD.
+
+KEY SELECTION (SECURITY IMPLICATIONS)
+--------------------------------------
+  Rate limit by: IP (bypassed by rotating IPs), user_id (bypassed by
+  creating accounts), API key, fingerprint combo.
+  Best: layer multiple signals (IP + user + device fingerprint).
+
+RATE LIMIT BYPASS ATTACKS
+--------------------------
+  X-Forwarded-For spoofing: if server trusts that header for IP.
+    Fix: use client IP from TCP connection, not headers.
+  IPv6 rotation: /48 prefix = 2^80 addresses; limit by /64 or /48.
+  Tor/VPN: many exit nodes; use CAPTCHA fallback.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_fixed_window_allows_within_limit()
+    test_fixed_window_blocks_over_limit()
+    test_fixed_window_resets()
+    test_sliding_window_within_limit()
+    test_sliding_window_blocks()
+    test_sliding_window_old_requests_evicted()
+    test_per_key_limits()
+    test_concurrent_requests()
+    test_cleanup_idle_keys()
+</code></pre>
+</body>
+</html>

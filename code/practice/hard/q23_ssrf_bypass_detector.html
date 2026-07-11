@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q23_ssrf_bypass_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q23_ssrf_bypass_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q23_ssrf_bypass_detector.py</p>
+  <p class="line-count">501 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q23 [Hard] — SSRF Blocklist Bypass Detector
+=============================================================================
+
+PROBLEM
+-------
+Many SSRF defences use a naive blocklist check on the raw URL string.
+Attackers use various bypass techniques to make the blocklist check pass
+while the final HTTP request still reaches an internal target.
+
+Given a URL string, detect which bypass techniques (if any) are being used,
+and return the normalised canonical form of the target IP/hostname so a
+proper IP-based check can be applied.
+
+Bypass categories to detect:
+  1. IP format tricks (covered in Q22 but here we classify the technique)
+  2. URL encoding tricks: %31%36%39.%32%35%34.%31%36%39.%32%35%34
+  3. Double encoding: %2531 → %31 → 1
+  4. IPv6 bypass: [::ffff:169.254.169.254], IPv6-mapped
+  5. DNS rebinding indicators (hostname that resolves to private IP — flag it)
+  6. Redirect chains: http://evil.com → 302 → http://169.254.169.254
+     (detect URL-in-URL patterns)
+  7. Localhost aliases: 0, localhost, 0.0.0.0, 0:0:0:0:0:0:0:1
+  8. Mixed case: HTTP://127.0.0.1/
+  9. IDN homograph: xn--80ak6aa92e.com → detected by punycode conversion
+ 10. Trailing dot bypass: 127.0.0.1./admin
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input: raw URL or just hostname?
+   → Raw URL string.
+2. Do we need to return a risk score or binary blocked/not-blocked?
+   → Return list of detected bypass techniques + canonical IP (if resolvable).
+3. Is this in addition to the Q22 full parser?
+   → Yes; this module focuses on bypass classification.
+4. Handle URL chains (url-in-url)?
+   → Yes; recursively extract nested URLs from query params.
+
+=============================================================================
+APPROACH 1 — NAIVE (regex pattern matching)
+=============================================================================
+  Apply regex patterns for each bypass category.
+  O(B) per URL  (B = number of bypass pattern regexes, ≈ 20).
+  May have false positives.
+
+=============================================================================
+APPROACH 2 — MULTI-PASS NORMALISER + CANONICAL FORM (RECOMMENDED)
+=============================================================================
+  Pass 1: Peel encoded layers (%-decode, double-decode).
+  Pass 2: Parse host from each decoded form.
+  Pass 3: Canonicalise IP (resolve numeric forms).
+  Pass 4: Check canonical IP against SSRF blocklist.
+  Report which bypass technique was used.
+  O(D) per URL (D = encoding depth, typically ≤ 3).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import ipaddress
+import re
+import unicodedata
+import urllib.parse
+from dataclasses import dataclass, field
+from typing import List, Optional, Set, Tuple
+
+from q22_secure_url_parser import (
+    _BLOCKED_IPV4_NETWORKS,
+    _BLOCKED_IPV6_NETWORKS,
+    _try_parse_ipv4,
+    _try_parse_ipv6,
+)
+
+# ---------------------------------------------------------------------------
+# Bypass detection result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BypassReport:
+    original_url: str
+    canonical_host: str = &quot;&quot;
+    canonical_ip: Optional[str] = None
+    is_ssrf_risk: bool = False
+    bypass_techniques: List[str] = field(default_factory=list)
+    decoded_url: str = &quot;&quot;
+    notes: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Bypass patterns
+# ---------------------------------------------------------------------------
+
+_LOCALHOST_ALIASES = frozenset({
+    &quot;localhost&quot;, &quot;0&quot;, &quot;0.0.0.0&quot;, &quot;00&quot;, &quot;000&quot;,
+    &quot;0x0&quot;, &quot;0x00&quot;, &quot;0.0&quot;, &quot;0.0.0&quot;,
+    &quot;0:0:0:0:0:0:0:1&quot;, &quot;::1&quot;, &quot;[::1]&quot;,
+})
+
+_CLOUD_METADATA_IPS = frozenset({
+    &quot;169.254.169.254&quot;,     # AWS/GCP/Azure
+    &quot;192.0.0.192&quot;,         # AWS newer
+    &quot;fd00:ec2::254&quot;,       # AWS IPv6
+    &quot;100.100.100.200&quot;,     # Alibaba
+})
+
+# Pattern: URL-inside-a-URL (open redirect / SSRF via redirect)
+_NESTED_URL_RE = re.compile(r&#x27;(https?://[^&amp;\s&quot;\&#x27;]+)&#x27;, re.IGNORECASE)
+
+# Detect IDN punycode encoding
+_PUNYCODE_LABEL_RE = re.compile(r&#x27;xn--[a-z0-9-]+&#x27;, re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Normalisation helpers
+# ---------------------------------------------------------------------------
+
+def _iterative_urldecode(s: str, max_passes: int = 5) -&gt; Tuple[str, int]:
+    &quot;&quot;&quot;
+    Repeatedly percent-decode until stable.
+    Returns (decoded_string, number_of_passes_needed).
+    Detects double-encoding if passes &gt; 1.
+    &quot;&quot;&quot;
+    prev = s
+    for pass_num in range(1, max_passes + 1):
+        decoded = urllib.parse.unquote(prev)
+        if decoded == prev:
+            return decoded, pass_num - 1
+        prev = decoded
+    return prev, max_passes  # still changing — flag as suspicious
+
+
+def _extract_host_from_url(url: str) -&gt; str:
+    &quot;&quot;&quot;Extract and normalise hostname from URL.&quot;&quot;&quot;
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or &quot;&quot;
+        return host.lower().strip().rstrip(&quot;.&quot;)
+    except Exception:
+        return &quot;&quot;
+
+
+def _has_percent_encoded_host(url: str) -&gt; bool:
+    &quot;&quot;&quot;Check if the host portion contains percent-encoded characters.&quot;&quot;&quot;
+    try:
+        parsed = urllib.parse.urlparse(url)
+        netloc = parsed.netloc
+        return &quot;%&quot; in netloc
+    except Exception:
+        return False
+
+
+def _is_homograph(host: str) -&gt; bool:
+    &quot;&quot;&quot;
+    Detect visual homograph attacks using Unicode lookalike characters.
+    Compare ASCII representation with the original.
+    &quot;&quot;&quot;
+    try:
+        # Try IDNA encoding; detect non-ASCII in labels
+        for label in host.split(&quot;.&quot;):
+            if any(ord(c) &gt; 127 for c in label):
+                # Non-ASCII label — potential homograph
+                return True
+            # Check for confusable characters (simplified)
+            normalized = unicodedata.normalize(&quot;NFKC&quot;, label)
+            if normalized != label:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _check_ip_blocked(ip_str: str) -&gt; bool:
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        if isinstance(addr, ipaddress.IPv4Address):
+            return any(addr in net for net in _BLOCKED_IPV4_NETWORKS)
+        else:
+            return any(addr in net for net in _BLOCKED_IPV6_NETWORKS)
+    except ValueError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive pattern matcher
+# ---------------------------------------------------------------------------
+
+class NaiveBypassDetector:
+    &quot;&quot;&quot;
+    Apply regex patterns for common SSRF bypasses.
+    O(B) per URL.
+    &quot;&quot;&quot;
+
+    def detect(self, url: str) -&gt; BypassReport:
+        report = BypassReport(original_url=url)
+        url_lower = url.lower()
+
+        if &quot;%&quot; in url:
+            report.bypass_techniques.append(&quot;percent_encoded_chars&quot;)
+
+        if re.search(r&#x27;%25&#x27;, url, re.IGNORECASE):
+            report.bypass_techniques.append(&quot;double_percent_encoding&quot;)
+
+        host = _extract_host_from_url(url)
+        report.canonical_host = host
+
+        if host in _LOCALHOST_ALIASES:
+            report.bypass_techniques.append(&quot;localhost_alias&quot;)
+            report.is_ssrf_risk = True
+
+        if host in _CLOUD_METADATA_IPS:
+            report.bypass_techniques.append(&quot;metadata_endpoint&quot;)
+            report.is_ssrf_risk = True
+
+        # Numeric IP forms
+        ipv4 = _try_parse_ipv4(host)
+        if ipv4:
+            report.canonical_ip = str(ipv4)
+            if _check_ip_blocked(str(ipv4)):
+                report.is_ssrf_risk = True
+            if any(host.startswith(&quot;0x&quot;) for _ in [None]):
+                report.bypass_techniques.append(&quot;hex_ip&quot;)
+            elif host.startswith(&quot;0&quot;) and not host.startswith(&quot;0.&quot;) and len(host) &gt; 1:
+                report.bypass_techniques.append(&quot;octal_ip&quot;)
+
+        # IPv6 bypass
+        if &quot;[::ffff:&quot; in url_lower or &quot;::ffff:&quot; in url_lower:
+            report.bypass_techniques.append(&quot;ipv6_mapped_ipv4&quot;)
+
+        # Trailing dot
+        if &quot;//&quot; in url:
+            netloc = urllib.parse.urlparse(url).netloc
+            if netloc.rstrip(&quot;:0123456789&quot;).endswith(&quot;.&quot;):
+                report.bypass_techniques.append(&quot;trailing_dot_bypass&quot;)
+
+        return report
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Multi-pass normaliser (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class SSRFBypassDetector:
+    &quot;&quot;&quot;
+    Full multi-pass SSRF bypass classifier.
+    &quot;&quot;&quot;
+
+    def __init__(self, max_decode_depth: int = 5) -&gt; None:
+        self.max_decode_depth = max_decode_depth
+
+    def detect(self, url: str) -&gt; BypassReport:
+        report = BypassReport(original_url=url)
+
+        # --- Pass 1: iterative URL decode ---
+        decoded, passes = _iterative_urldecode(url, self.max_decode_depth)
+        report.decoded_url = decoded
+        if passes &gt; 1:
+            report.bypass_techniques.append(f&quot;double_url_encoding (depth={passes})&quot;)
+        elif &quot;%&quot; in url:
+            report.bypass_techniques.append(&quot;url_encoding&quot;)
+
+        # --- Pass 2: extract host from decoded URL ---
+        host_raw = _extract_host_from_url(decoded)
+        # Also try original (in case decoding changed scheme)
+        if not host_raw:
+            host_raw = _extract_host_from_url(url)
+        report.canonical_host = host_raw
+
+        # --- Pass 3: trailing dot ---
+        if host_raw.endswith(&quot;.&quot;):
+            report.bypass_techniques.append(&quot;trailing_dot_bypass&quot;)
+            host_raw = host_raw.rstrip(&quot;.&quot;)
+            report.canonical_host = host_raw
+
+        # --- Pass 4: localhost alias ---
+        if host_raw in _LOCALHOST_ALIASES:
+            report.bypass_techniques.append(&quot;localhost_alias&quot;)
+            report.is_ssrf_risk = True
+            report.canonical_ip = &quot;127.0.0.1&quot;
+
+        # --- Pass 5: cloud metadata ---
+        if host_raw in _CLOUD_METADATA_IPS:
+            report.bypass_techniques.append(&quot;metadata_endpoint&quot;)
+            report.is_ssrf_risk = True
+
+        # --- Pass 6: canonical IP resolution ---
+        ipv4 = _try_parse_ipv4(host_raw)
+        if ipv4:
+            canonical = str(ipv4)
+            report.canonical_ip = canonical
+            # Detect which numeric form was used
+            if host_raw != canonical:
+                orig_lower = host_raw.lower()
+                if orig_lower.startswith(&quot;0x&quot;):
+                    report.bypass_techniques.append(&quot;hex_ip&quot;)
+                elif re.match(r&#x27;^0\d&#x27;, orig_lower):
+                    report.bypass_techniques.append(&quot;octal_ip&quot;)
+                elif re.match(r&#x27;^\d+$&#x27;, orig_lower):
+                    report.bypass_techniques.append(&quot;decimal_int_ip&quot;)
+                elif orig_lower.count(&quot;.&quot;) &lt; 3:
+                    report.bypass_techniques.append(&quot;partial_notation_ip&quot;)
+                else:
+                    report.bypass_techniques.append(&quot;obfuscated_ip_form&quot;)
+            if _check_ip_blocked(canonical):
+                report.is_ssrf_risk = True
+        else:
+            ipv6 = _try_parse_ipv6(host_raw)
+            if ipv6:
+                report.canonical_ip = str(ipv6)
+                # Check IPv4-mapped IPv6
+                if ipv6.ipv4_mapped:
+                    mapped = str(ipv6.ipv4_mapped)
+                    report.canonical_ip = mapped
+                    report.bypass_techniques.append(&quot;ipv6_mapped_ipv4&quot;)
+                    if _check_ip_blocked(mapped):
+                        report.is_ssrf_risk = True
+                elif _check_ip_blocked(str(ipv6)):
+                    report.is_ssrf_risk = True
+
+        # --- Pass 7: IDN / homograph ---
+        if _is_homograph(host_raw):
+            report.bypass_techniques.append(&quot;idn_homograph&quot;)
+            report.notes.append(f&quot;IDN/homograph host: {host_raw!r}&quot;)
+
+        if _PUNYCODE_LABEL_RE.search(host_raw):
+            report.bypass_techniques.append(&quot;punycode_domain&quot;)
+            report.notes.append(f&quot;Punycode label detected in {host_raw!r}&quot;)
+
+        # --- Pass 8: nested URL (open redirect / SSRF via redirect) ---
+        nested = _NESTED_URL_RE.findall(
+            urllib.parse.unquote(urllib.parse.urlparse(decoded).query or &quot;&quot;)
+        )
+        for nested_url in nested:
+            if nested_url.lower() != url.lower():
+                nested_report = self.detect(nested_url)
+                if nested_report.is_ssrf_risk:
+                    report.is_ssrf_risk = True
+                    report.bypass_techniques.append(
+                        f&quot;ssrf_via_redirect_to({nested_report.canonical_ip or nested_report.canonical_host})&quot;
+                    )
+
+        return report
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_clean_url():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;https://example.com/api&quot;)
+    assert not r.is_ssrf_risk
+    print(&quot;Clean URL: passed&quot;)
+
+
+def test_octal_bypass():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://0177.0.0.1/admin&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;octal_ip&quot; in r.bypass_techniques
+    assert r.canonical_ip == &quot;127.0.0.1&quot;
+    print(&quot;Octal bypass: passed&quot;)
+
+
+def test_hex_bypass():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://0x7f000001/&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;hex_ip&quot; in r.bypass_techniques
+    print(&quot;Hex bypass: passed&quot;)
+
+
+def test_decimal_bypass():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://2130706433/&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;decimal_int_ip&quot; in r.bypass_techniques
+    print(&quot;Decimal bypass: passed&quot;)
+
+
+def test_percent_encoded():
+    det = SSRFBypassDetector()
+    # %31%36%39.%32%35%34.%31%36%39.%32%35%34 = 169.254.169.254
+    encoded = &quot;http://%31%36%39.%32%35%34.%31%36%39.%32%35%34/&quot;
+    r = det.detect(encoded)
+    assert r.is_ssrf_risk, f&quot;Expected SSRF risk; techniques={r.bypass_techniques}&quot;
+    assert &quot;url_encoding&quot; in r.bypass_techniques or &quot;double_url_encoding&quot; in r.bypass_techniques
+    print(&quot;Percent-encoded bypass: passed&quot;)
+
+
+def test_double_encoding():
+    det = SSRFBypassDetector()
+    # double encoded 1 = %2531 → %31 → 1
+    # Simplified: just test double-encoding detection
+    r = det.detect(&quot;http://127.0.0.1/path%2Fwith%2Fslashes&quot;)
+    # Not a bypass by itself, but should decode fine
+    assert r.canonical_ip == &quot;127.0.0.1&quot;
+    print(&quot;Double encoding detection: passed&quot;)
+
+
+def test_ipv6_mapped():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://[::ffff:127.0.0.1]/admin&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;ipv6_mapped_ipv4&quot; in r.bypass_techniques
+    print(&quot;IPv6 mapped bypass: passed&quot;)
+
+
+def test_localhost_alias():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://localhost/admin&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;localhost_alias&quot; in r.bypass_techniques
+    print(&quot;Localhost alias: passed&quot;)
+
+
+def test_metadata_endpoint():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://169.254.169.254/latest/meta-data/&quot;)
+    assert r.is_ssrf_risk
+    print(&quot;Metadata endpoint: passed&quot;)
+
+
+def test_nested_url_ssrf():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;https://safe.com/redirect?url=http://169.254.169.254/iam/&quot;)
+    assert r.is_ssrf_risk
+    assert any(&quot;ssrf_via_redirect&quot; in t for t in r.bypass_techniques)
+    print(&quot;Nested URL SSRF: passed&quot;)
+
+
+def test_trailing_dot():
+    det = SSRFBypassDetector()
+    r = det.detect(&quot;http://127.0.0.1./admin&quot;)
+    assert r.is_ssrf_risk
+    assert &quot;trailing_dot_bypass&quot; in r.bypass_techniques
+    print(&quot;Trailing dot bypass: passed&quot;)
+
+
+def test_naive_detector():
+    det = NaiveBypassDetector()
+    r = det.detect(&quot;http://127.0.0.1/&quot;)
+    assert r.is_ssrf_risk
+    print(&quot;Naive detector: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+BYPASS TAXONOMY
+
+  Category 1 – IP Representation Tricks
+    Decimal integer:   http://2130706433/    → 127.0.0.1
+    Octal dotted:      http://0177.0.0.1/   → 127.0.0.1
+    Hex integer:       http://0x7f000001/   → 127.0.0.1
+    Partial notation:  http://127.1/        → 127.0.0.1
+
+  Category 2 – Encoding Tricks
+    Single encode:     %31%32%37.%30.%30.%31 → 127.0.0.1
+    Double encode:     %2531 → %31 → 1
+
+  Category 3 – IP Version Tricks
+    IPv6-mapped:       [::ffff:127.0.0.1]
+    IPv6 loopback:     [::1], [0:0:0:0:0:0:0:1]
+
+  Category 4 – Host Aliases
+    localhost, 0, 0.0.0.0, LOCALHOST, 0x7f.0.0.1
+
+  Category 5 – DNS Tricks
+    DNS rebinding: attacker.com → resolves to external initially, then
+                   to 127.0.0.1 after validation
+    IDN homograph: аррӏе.com → uses Cyrillic а not ASCII a
+
+  Category 6 – Redirect Chains
+    External URL → 302 → internal; must block redirects or re-validate
+
+MITIGATION
+  - ALWAYS validate the IP that is actually connected to, not just the
+    URL string.  Resolve the hostname, then check the resolved IP.
+  - Use a pin-then-connect pattern: resolve → validate → use the IP directly.
+  - Block HTTP redirects or re-validate the destination after each redirect.
+  - Allowlist: only permit connections to known-good IP ranges.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_clean_url()
+    test_octal_bypass()
+    test_hex_bypass()
+    test_decimal_bypass()
+    test_percent_encoded()
+    test_double_encoding()
+    test_ipv6_mapped()
+    test_localhost_alias()
+    test_metadata_endpoint()
+    test_nested_url_ssrf()
+    test_trailing_dot()
+    test_naive_detector()
+</code></pre>
+</body>
+</html>

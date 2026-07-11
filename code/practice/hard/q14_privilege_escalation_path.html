@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q14_privilege_escalation_path.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q14_privilege_escalation_path.py</h1>
+  <p class="file-path">Source: code\practice\hard\q14_privilege_escalation_path.py</p>
+  <p class="line-count">483 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q14 [Hard] — Privilege Escalation Path Detection
+=============================================================================
+
+PROBLEM
+-------
+Given a directed privilege graph where nodes are principals (users, groups,
+roles, service accounts) and edges represent &quot;can escalate to&quot; relationships
+(e.g. user A is member of group G, group G can sudo to root, user B can
+impersonate service account S, etc.), detect:
+
+  1. Any path from an unprivileged user to a high-privilege principal
+     (shortest path = most likely attack route).
+  2. Cycles in the privilege graph (misconfigured mutual escalation).
+  3. Diamond paths (multiple independent escalation routes to the same target).
+  4. Service principals with excessive reach (high out-degree in privilege graph).
+
+CLARIFYING QUESTIONS
+--------------------
+1. What types of edges exist?
+   → member_of, sudo_to, impersonate, assume_role, token_grant, run_as
+2. What defines a &quot;high-privilege&quot; node?
+   → Configurable set: {&quot;root&quot;, &quot;domain_admin&quot;, &quot;cluster-admin&quot;, &quot;aws:iam:admin&quot;}
+3. Are edges weighted?
+   → Optional: edge has a &quot;risk_score&quot; (higher = easier to exploit). Dijkstra for min-risk.
+4. Is the graph static (baseline) or streamed?
+   → Both: load a baseline, then process delta events.
+5. Should we report all paths or just shortest?
+   → Shortest first, then optionally enumerate k-shortest.
+6. Scale?
+   → ~100K principals for a large enterprise — BFS/Dijkstra must be O(V + E log V).
+7. Can edges be revoked?
+   → Yes; support remove_edge() for JIT access scenarios.
+
+=============================================================================
+APPROACH 1 — NAIVE (DFS from every user to every target)
+=============================================================================
+For each unprivileged user, DFS to all high-privilege nodes.
+  Time : O(U × (V + E))  — U = unprivileged users, V/E = graph size
+  Space: O(V + E)
+
+=============================================================================
+APPROACH 2 — REVERSE BFS from high-privilege targets (RECOMMENDED)
+=============================================================================
+Run BFS backwards from each high-privilege node.
+Any node that can reach a high-privilege node = at-risk principal.
+Then extract shortest paths for each at-risk user.
+
+  Time : O(T × (V + E))  — T = target nodes (usually small, e.g. 5-20)
+  Space: O(V) for visited + predecessor map
+
+For weighted edges: reverse Dijkstra from targets.
+  Time : O((V + E) log V) per target
+
+=============================================================================
+APPROACH 3 — INCREMENTAL UPDATE + TOPOLOGICAL SORT for cycle detection
+=============================================================================
+On each edge addition:
+  - DFS for cycles (Kahn&#x27;s algorithm on the affected component).
+  - Update BFS distance from all high-privilege nodes.
+  Amortised O(V + E) over all updates.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import heapq
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Default high-privilege targets
+# ---------------------------------------------------------------------------
+
+DEFAULT_HIGH_PRIV: FrozenSet[str] = frozenset({
+    &quot;root&quot;, &quot;domain_admin&quot;, &quot;enterprise_admin&quot;, &quot;cluster-admin&quot;,
+    &quot;aws:iam:admin&quot;, &quot;gcp:owner&quot;, &quot;azure:owner&quot;, &quot;svc_root&quot;,
+    &quot;SYSTEM&quot;,
+})
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EscalationEdge:
+    src: str
+    dst: str
+    edge_type: str   # member_of | sudo_to | impersonate | assume_role
+    risk_score: float = 1.0  # lower = easier to exploit
+
+
+@dataclass
+class EscalationPath:
+    user: str
+    target: str
+    path: List[str]
+    total_risk: float        # sum of edge risk scores along path
+    edge_types: List[str]
+
+
+@dataclass
+class GraphAlert:
+    alert_type: str   # escalation_path | cycle | excessive_reach
+    subject: str
+    detail: str
+    path: List[str] = field(default_factory=list)
+    severity: str = &quot;high&quot;
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive DFS
+# ---------------------------------------------------------------------------
+
+class NaivePrivEscDetector:
+    &quot;&quot;&quot;
+    DFS from each non-privileged user to find paths to high-privilege nodes.
+    O(U × (V + E)) — fine for small graphs / offline analysis.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        high_priv_nodes: FrozenSet[str] = DEFAULT_HIGH_PRIV,
+    ) -&gt; None:
+        self.high_priv = high_priv_nodes
+        self._adj: Dict[str, List[EscalationEdge]] = defaultdict(list)
+        self._all_nodes: Set[str] = set()
+
+    def add_edge(self, src: str, dst: str, edge_type: str = &quot;member_of&quot;,
+                 risk_score: float = 1.0) -&gt; None:
+        e = EscalationEdge(src, dst, edge_type, risk_score)
+        self._adj[src].append(e)
+        self._all_nodes.update([src, dst])
+
+    def remove_edge(self, src: str, dst: str, edge_type: str) -&gt; None:
+        self._adj[src] = [e for e in self._adj[src]
+                          if not (e.dst == dst and e.edge_type == edge_type)]
+
+    def find_all_paths(self, start: str, target: str) -&gt; List[EscalationPath]:
+        &quot;&quot;&quot;DFS to find all simple paths from start to target.&quot;&quot;&quot;
+        results = []
+
+        def dfs(node, path, types, risk, visited):
+            if node == target:
+                results.append(EscalationPath(
+                    user=start, target=target,
+                    path=list(path), total_risk=risk,
+                    edge_types=list(types),
+                ))
+                return
+            for edge in self._adj.get(node, []):
+                if edge.dst not in visited:
+                    visited.add(edge.dst)
+                    dfs(edge.dst, path + [edge.dst], types + [edge.edge_type],
+                        risk + edge.risk_score, visited)
+                    visited.discard(edge.dst)
+
+        dfs(start, [start], [], 0.0, {start})
+        return results
+
+    def detect_escalations(self) -&gt; List[GraphAlert]:
+        alerts = []
+        unprivileged = self._all_nodes - self.high_priv
+        for user in unprivileged:
+            for target in self.high_priv:
+                paths = self.find_all_paths(user, target)
+                for p in paths:
+                    alerts.append(GraphAlert(
+                        alert_type=&quot;escalation_path&quot;,
+                        subject=user,
+                        detail=f&quot;{user} → {target} via {&#x27; → &#x27;.join(p.path)}&quot;,
+                        path=p.path, severity=&quot;critical&quot;,
+                    ))
+        return alerts
+
+    def find_cycles(self) -&gt; List[List[str]]:
+        &quot;&quot;&quot;Find all cycles using DFS with colour marking.&quot;&quot;&quot;
+        WHITE, GRAY, BLACK = 0, 1, 2
+        colour = defaultdict(int)
+        parent = {}
+        cycles = []
+
+        def dfs(node):
+            colour[node] = GRAY
+            for edge in self._adj.get(node, []):
+                nb = edge.dst
+                if colour[nb] == GRAY:
+                    # Reconstruct cycle
+                    cycle = [nb]
+                    cur = node
+                    while cur != nb:
+                        cycle.append(cur)
+                        cur = parent.get(cur, nb)
+                    cycle.append(nb)
+                    cycles.append(list(reversed(cycle)))
+                elif colour[nb] == WHITE:
+                    parent[nb] = node
+                    dfs(nb)
+            colour[node] = BLACK
+
+        for node in list(self._all_nodes):
+            if colour[node] == WHITE:
+                dfs(node)
+        return cycles
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Reverse BFS / Dijkstra from high-privilege targets
+# ---------------------------------------------------------------------------
+
+class PrivEscDetector:
+    &quot;&quot;&quot;
+    Efficient privilege escalation detector.
+
+    Strategy: reverse BFS/Dijkstra from each high-privilege target.
+    This computes, for every principal in the graph, the minimum-risk
+    path to any high-privilege node.
+
+    Then any unprivileged user with a path is flagged.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        high_priv_nodes: FrozenSet[str] = DEFAULT_HIGH_PRIV,
+    ) -&gt; None:
+        self.high_priv = high_priv_nodes
+        # Forward adjacency
+        self._adj: Dict[str, List[EscalationEdge]] = defaultdict(list)
+        # Reverse adjacency (dst → src edges)
+        self._rev: Dict[str, List[EscalationEdge]] = defaultdict(list)
+        self._all_nodes: Set[str] = set()
+
+    def add_edge(self, src: str, dst: str, edge_type: str = &quot;member_of&quot;,
+                 risk_score: float = 1.0) -&gt; None:
+        e = EscalationEdge(src, dst, edge_type, risk_score)
+        self._adj[src].append(e)
+        self._rev[dst].append(e)
+        self._all_nodes.update([src, dst])
+
+    def remove_edge(self, src: str, dst: str, edge_type: str) -&gt; None:
+        self._adj[src] = [e for e in self._adj[src]
+                          if not (e.dst == dst and e.edge_type == edge_type)]
+        self._rev[dst] = [e for e in self._rev[dst]
+                          if not (e.src == src and e.edge_type == edge_type)]
+
+    def shortest_paths_to_target(self, target: str) -&gt; Dict[str, EscalationPath]:
+        &quot;&quot;&quot;
+        Reverse Dijkstra from target; returns {user: shortest EscalationPath}.
+        dist[node] = min risk score to reach target from node.
+        &quot;&quot;&quot;
+        # dist[node] = (total_risk, predecessor, edge_type)
+        dist: Dict[str, float] = {target: 0.0}
+        pred: Dict[str, Tuple[str, str]] = {}  # node → (prev_node, edge_type)
+        heap: List[Tuple[float, str]] = [(0.0, target)]
+
+        while heap:
+            d, node = heapq.heappop(heap)
+            if d &gt; dist.get(node, float(&quot;inf&quot;)):
+                continue
+            # Walk reverse edges: who has an edge pointing TO this node?
+            for edge in self._rev.get(node, []):
+                new_dist = d + edge.risk_score
+                if new_dist &lt; dist.get(edge.src, float(&quot;inf&quot;)):
+                    dist[edge.src] = new_dist
+                    pred[edge.src] = (node, edge.edge_type)
+                    heapq.heappush(heap, (new_dist, edge.src))
+
+        # Reconstruct paths
+        paths = {}
+        for node, d in dist.items():
+            if node == target:
+                continue
+            path = [node]
+            types = []
+            cur = node
+            while cur != target:
+                nxt, etype = pred.get(cur, (None, None))
+                if nxt is None:
+                    break
+                path.append(nxt)
+                types.append(etype)
+                cur = nxt
+            paths[node] = EscalationPath(
+                user=node, target=target,
+                path=path, total_risk=d, edge_types=types,
+            )
+        return paths
+
+    def detect_escalations(self) -&gt; List[GraphAlert]:
+        &quot;&quot;&quot;Find all unprivileged users with a path to any high-priv node.&quot;&quot;&quot;
+        alerts = []
+        seen: Set[Tuple[str, str]] = set()
+
+        for target in self.high_priv:
+            if target not in self._all_nodes:
+                continue
+            paths = self.shortest_paths_to_target(target)
+            for user, ep in paths.items():
+                if user in self.high_priv:
+                    continue
+                key = (user, target)
+                if key not in seen:
+                    seen.add(key)
+                    alerts.append(GraphAlert(
+                        alert_type=&quot;escalation_path&quot;,
+                        subject=user,
+                        detail=(f&quot;Risk {ep.total_risk:.1f}: &quot;
+                                f&quot;{&#x27; → &#x27;.join(ep.path)}&quot;),
+                        path=ep.path, severity=&quot;critical&quot;,
+                    ))
+        return alerts
+
+    def detect_cycles(self) -&gt; List[GraphAlert]:
+        &quot;&quot;&quot;Kahn&#x27;s algorithm (BFS topological sort) — cycle = remaining nodes.&quot;&quot;&quot;
+        in_degree: Dict[str, int] = defaultdict(int)
+        for src, edges in self._adj.items():
+            for e in edges:
+                in_degree[e.dst] += 1
+        queue = deque(n for n in self._all_nodes if in_degree[n] == 0)
+        processed: Set[str] = set()
+        while queue:
+            node = queue.popleft()
+            processed.add(node)
+            for e in self._adj.get(node, []):
+                in_degree[e.dst] -= 1
+                if in_degree[e.dst] == 0:
+                    queue.append(e.dst)
+        cyclic_nodes = self._all_nodes - processed
+        alerts = []
+        if cyclic_nodes:
+            alerts.append(GraphAlert(
+                alert_type=&quot;cycle&quot;,
+                subject=str(cyclic_nodes),
+                detail=f&quot;Privilege graph cycle involving: {cyclic_nodes}&quot;,
+                severity=&quot;high&quot;,
+            ))
+        return alerts
+
+    def high_reach_principals(self, threshold: int = 10) -&gt; List[GraphAlert]:
+        &quot;&quot;&quot;Find nodes with out-degree (forward or transitive) &gt; threshold.&quot;&quot;&quot;
+        alerts = []
+        for node, edges in self._adj.items():
+            if len(edges) &gt; threshold:
+                alerts.append(GraphAlert(
+                    alert_type=&quot;excessive_reach&quot;,
+                    subject=node,
+                    detail=f&quot;{node} has {len(edges)} direct privilege edges&quot;,
+                ))
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_naive_simple_path():
+    det = NaivePrivEscDetector()
+    det.add_edge(&quot;alice&quot;, &quot;dev-group&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;dev-group&quot;, &quot;sudo_users&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;sudo_users&quot;, &quot;root&quot;, &quot;sudo_to&quot;)
+    alerts = det.detect_escalations()
+    assert any(&quot;alice&quot; in a.subject and &quot;root&quot; in a.path for a in alerts), \
+        f&quot;Expected alice→root path; got {alerts}&quot;
+    print(&quot;Naive simple path: passed&quot;)
+
+
+def test_naive_cycle():
+    det = NaivePrivEscDetector()
+    det.add_edge(&quot;A&quot;, &quot;B&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;B&quot;, &quot;C&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;C&quot;, &quot;A&quot;, &quot;member_of&quot;)
+    cycles = det.find_cycles()
+    assert len(cycles) &gt; 0, &quot;Expected a cycle&quot;
+    print(&quot;Naive cycle detection: passed&quot;)
+
+
+def test_reverse_dijkstra_path():
+    det = PrivEscDetector()
+    det.add_edge(&quot;alice&quot;, &quot;dev-group&quot;, &quot;member_of&quot;, risk_score=1.0)
+    det.add_edge(&quot;dev-group&quot;, &quot;root&quot;, &quot;sudo_to&quot;, risk_score=2.0)
+    det.add_edge(&quot;alice&quot;, &quot;root&quot;, &quot;sudo_to&quot;, risk_score=0.5)  # direct, lower risk
+    alerts = det.detect_escalations()
+    alice_alerts = [a for a in alerts if a.subject == &quot;alice&quot;]
+    assert len(alice_alerts) == 1  # one alert per (user, target)
+    # Shortest path: alice → root directly (risk 0.5)
+    ep = det.shortest_paths_to_target(&quot;root&quot;)[&quot;alice&quot;]
+    assert ep.total_risk == pytest_approx_soft(0.5, ep.total_risk)
+    print(&quot;Reverse Dijkstra path: passed&quot;)
+
+
+def pytest_approx_soft(expected, actual, tol=1e-6):
+    return abs(actual - expected) &lt; tol
+
+
+def test_no_path():
+    det = PrivEscDetector()
+    det.add_edge(&quot;alice&quot;, &quot;dev-group&quot;, &quot;member_of&quot;)
+    # dev-group does not reach any high-priv node → no alerts
+    alerts = det.detect_escalations()
+    assert len(alerts) == 0
+    print(&quot;No path: passed&quot;)
+
+
+def test_cycle_detection():
+    det = PrivEscDetector()
+    det.add_edge(&quot;A&quot;, &quot;B&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;B&quot;, &quot;C&quot;, &quot;member_of&quot;)
+    det.add_edge(&quot;C&quot;, &quot;A&quot;, &quot;member_of&quot;)  # cycle
+    alerts = det.detect_cycles()
+    assert len(alerts) &gt; 0
+    assert alerts[0].alert_type == &quot;cycle&quot;
+    print(&quot;Kahn cycle detection: passed&quot;)
+
+
+def test_remove_edge():
+    det = PrivEscDetector()
+    det.add_edge(&quot;bob&quot;, &quot;root&quot;, &quot;sudo_to&quot;)
+    det.remove_edge(&quot;bob&quot;, &quot;root&quot;, &quot;sudo_to&quot;)
+    alerts = det.detect_escalations()
+    assert all(a.subject != &quot;bob&quot; for a in alerts)
+    print(&quot;Remove edge: passed&quot;)
+
+
+def test_excessive_reach():
+    det = PrivEscDetector()
+    for i in range(15):
+        det.add_edge(&quot;svc_super&quot;, f&quot;target-{i}&quot;, &quot;assume_role&quot;)
+    alerts = det.high_reach_principals(threshold=10)
+    assert any(a.subject == &quot;svc_super&quot; for a in alerts)
+    print(&quot;Excessive reach: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Privilege escalation paths are the map an attacker follows after initial
+  compromise.  Common real-world paths:
+
+  1. developer → dev-group → prod-deploy → AWS IAM admin
+  2. webapp-service-account → K8s RBAC cluster-admin  (wildcard permissions)
+  3. user → sudo NOPASSWD → /bin/bash → root
+  4. lower-priv role → iam:PassRole → high-priv role → full AWS access
+
+  Graph analysis reveals these paths before an attacker does.
+
+PRODUCTION USE CASES
+  - Run this detector after every IAM/RBAC change (CI/CD gate).
+  - Visualise the graph with Cytoscape or Neo4j for analyst review.
+  - Integrate with Terraform plan output: flag new paths created by a PR.
+  - Use k-shortest-paths (Yen&#x27;s algorithm) to find alternative routes an
+    attacker could take if the primary path is blocked.
+
+FAILURE MODES
+  - Incomplete graph: edges from external IdP not modelled → missed paths.
+  - Transitive wildcards: AWS IAM policy with &quot;*&quot; → all resources / all actions;
+    requires policy simulator, not just graph edges.
+  - Temporal access: JIT access grants temporary edges; model as ephemeral edges
+    with expiry, run detection continuously during the JIT window.
+  - Service account impersonation via token projection (Kubernetes): not a
+    traditional &quot;member_of&quot; edge; requires specialised modelling.
+
+TOOLS IN THE WILD
+  - BloodHound (Active Directory privilege graph)
+  - Principal Mapper (AWS IAM graph)
+  - Cartography (multi-cloud asset graph with escalation edges)
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_simple_path()
+    test_naive_cycle()
+    test_reverse_dijkstra_path()
+    test_no_path()
+    test_cycle_detection()
+    test_remove_edge()
+    test_excessive_reach()
+</code></pre>
+</body>
+</html>

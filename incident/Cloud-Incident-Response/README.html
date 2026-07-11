@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud Incident Response — Compromised Credentials, Blast Radius, and Containment in AWS / GCP / Azure</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: incident\Cloud-Incident-Response\README.md</p>
+<h1 id="cloud-incident-response-compromised-credentials-blast-radius-and-containment-in-aws-gcp-azure">Cloud Incident Response — Compromised Credentials, Blast Radius, and Containment in AWS / GCP / Azure</h1>
+<p><strong>Category:</strong> Incident Response, Cloud Security, Detection &amp; Response (defensive)<br />
+<strong>MITRE ATT&amp;CK:</strong> Enterprise Cloud matrix (IaaS + Identity) — T1078.004, T1098, T1552, T1580, T1537, T1530, T1069.003<br />
+<strong>Related notes:</strong> <code>incident/README.md</code> (SANS PICERL / crisis roles) · <code>incident/IR-Lifecycle-NIST/README.md</code> (NIST SP 800-61r2 lifecycle) · <code>cloud/GCP/Operations/Cloud-Audit-Logs/README.md</code> · <code>cloud/GCP/Identity/Service-Accounts/README.md</code> · <code>cloud/GCP/Identity/Cloud-IAM/README.md</code> · <code>cloud/AWS/Operations/CloudTrail/README.md</code> · <code>cloud/AWS/Security/GuardDuty/README.md</code> · <code>cloud/AWS/Security/IAM/README.md</code> · <code>cloud/Azure/Security/Entra-ID/README.md</code> · <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code></p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>Cloud incident response (IR) is the discipline of detecting, containing, eradicating, and recovering from security incidents where the "asset" is not a box in a datacenter but an API-driven control plane. In the cloud, the attacker's primary weapon is almost never a memory-corruption exploit — it is a <strong>valid credential</strong>. A leaked access key, a phished console session, an SSRF-stolen instance token, or an over-permissioned CI/CD service account gives an attacker the same authenticated API surface a legitimate engineer has, and every action they take is (if logging is on) a signed, timestamped audit event. That inverts the classic on-prem IR model: forensics shifts from disk and memory imaging toward <strong>audit-log reconstruction and IAM graph analysis</strong>, and containment shifts from "pull the network cable" toward "revoke the identity."</p>
+<p>The reason this matters at scale is that the cloud control plane collapses the traditional network perimeter. One compromised organization-admin service account can enumerate every project, read every bucket, and mint new persistence across regions in seconds — there is no router between the attacker and your data, only IAM policy evaluation. Speed of containment is therefore measured in the propagation delay of a policy change, and the hardest problems are <strong>ephemerality</strong> (the compromised VM auto-scaled away before you imaged it), <strong>blast-radius scoping</strong> (which of 4,000 roles did this key touch?), and <strong>eviction completeness</strong> (you rotated the key but missed the backdoor IAM binding the attacker created).</p>
+<blockquote>
+<p><strong>TL;DR</strong>:<br />
+- In cloud IR, the credential <em>is</em> the incident; <strong>identity containment (revoke/deny/disable) is faster and higher-leverage than network containment</strong>, but you usually do both.<br />
+- Your primary evidence is the <strong>management-plane audit log</strong> — AWS CloudTrail, GCP Cloud Audit Logs (Admin Activity + Data Access), Azure Activity Log + Entra sign-in/audit logs — and it must be centralized to an account/project the compromised identity cannot delete.<br />
+- <strong>Snapshot before you terminate.</strong> Ephemeral compute (auto-scaling, spot, serverless, containers) is gone the moment you act, so preserve EBS/PD/managed-disk snapshots and memory first.<br />
+- Scope blast radius by walking the IAM graph and the audit trail <em>together</em>: what could the identity do (permissions) vs. what did it do (log events), including any <code>iam:*</code>/<code>setIamPolicy</code> persistence it planted.<br />
+- Rotation without eradication is theater: assume the attacker created new keys, roles, <code>AssumeRole</code> trusts, OAuth grants, or Lambda/Function backdoors before you locked them out.</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works-deep">2. How It Works (deep)</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>Cloud IR runs the same phases as NIST SP 800-61r2 (Preparation → Detection &amp; Analysis → Containment/Eradication/Recovery → Post-Incident) and SANS PICERL, but each phase is re-expressed against the control plane. The pivotal concept is the split between the <strong>management/control plane</strong> (identity and resource-configuration APIs — <code>iam</code>, <code>ec2:RunInstances</code>, <code>storage.buckets.setIamPolicy</code>) and the <strong>data plane</strong> (reads/writes to the data itself — <code>s3:GetObject</code>, <code>storage.objects.get</code>, <code>Microsoft.Storage/.../blobServices/.../read</code>). Attackers touch both; your logging must too.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it means in cloud IR</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Control-plane log</td>
+<td>Records API calls that manage resources/identity</td>
+<td>Primary forensic timeline; shows the "who/what/when" of attacker actions</td>
+</tr>
+<tr>
+<td>Data-plane log</td>
+<td>Records reads/writes to objects/rows</td>
+<td>Only way to prove <em>exfiltration</em> (which objects were read)</td>
+</tr>
+<tr>
+<td>Blast radius</td>
+<td>The set of resources/identities the compromised principal could reach</td>
+<td>Determines scope of containment and notification</td>
+</tr>
+<tr>
+<td>IAM containment</td>
+<td>Deny/revoke/disable the <em>identity</em></td>
+<td>Fastest kill switch; stops the attacker across every network path at once</td>
+</tr>
+<tr>
+<td>Network containment</td>
+<td>Quarantine the <em>compute</em> with SG/firewall/NSG</td>
+<td>Preserves the host for forensics while cutting C2 and lateral traffic</td>
+</tr>
+<tr>
+<td>Ephemerality</td>
+<td>Cloud compute is short-lived and re-created from images</td>
+<td>Evidence disappears unless you snapshot; also frees you to rebuild clean</td>
+</tr>
+<tr>
+<td>Persistence hunt</td>
+<td>Finding attacker-created identities/trusts/functions</td>
+<td>Rotation is worthless if a backdoor binding survives</td>
+</tr>
+<tr>
+<td>Shared responsibility</td>
+<td>Provider owns infra, you own config/identity/data</td>
+<td>You cannot subpoena the hypervisor; the audit log is your ground truth</td>
+</tr>
+</tbody>
+</table>
+<p>The decision logic that governs an authenticated API call is the same logic you exploit for containment. AWS evaluates: explicit <code>Deny</code> in any applicable policy (SCP, resource policy, identity policy, permission boundary, session policy) always wins → otherwise an <code>Allow</code> is required → otherwise implicit deny. GCP evaluates IAM allow bindings plus <strong>deny policies</strong> (<code>iam.googleapis.com/denypolicies</code>, deny wins) plus Org Policy and VPC Service Controls perimeters. Azure evaluates RBAC role assignments plus <strong>deny assignments</strong> (used by Blueprints/Managed Apps) plus Conditional Access at sign-in. In every provider, an <strong>explicit deny at a high scope</strong> (SCP / deny policy / management-group role) is your organization-wide kill switch — it overrides whatever the attacker granted themselves lower in the tree.</p>
+<h3 id="22-concrete-configuration-and-containment-commands">2.2 Concrete configuration and containment commands</h3>
+<p><strong>A. Detect and reconstruct — pull the audit trail for the suspect principal.</strong></p>
+<p>AWS CloudTrail via Athena (assuming a partitioned CloudTrail table). Find everything an access key did in the window:</p>
+<pre><code class="language-sql">SELECT eventtime, eventsource, eventname, sourceipaddress, awsregion,
+       errorcode, useragent
+FROM cloudtrail_logs
+WHERE useridentity.accesskeyid = 'AKIAIOSFODNN7EXAMPLE'
+  AND eventtime BETWEEN '2026-07-01T00:00:00Z' AND '2026-07-07T00:00:00Z'
+ORDER BY eventtime;
+</code></pre>
+<p>Hunt the classic "stolen key" tells — enumeration + persistence + exfil prep:</p>
+<pre><code class="language-sql">SELECT eventtime, eventname, sourceipaddress, requestparameters
+FROM cloudtrail_logs
+WHERE eventname IN ('GetCallerIdentity','ListBuckets','ListUsers',
+                    'CreateAccessKey','CreateUser','AttachUserPolicy',
+                    'PutUserPolicy','CreateLoginProfile','ModifyImageAttribute',
+                    'PutBucketPolicy','GetSecretValue','CreateServiceLinkedRole')
+  AND useridentity.arn LIKE '%compromised-role%'
+ORDER BY eventtime;
+</code></pre>
+<p>GCP Cloud Audit Logs — query the compromised service account's activity (Log Analytics / <code>gcloud logging</code>):</p>
+<pre><code class="language-bash">gcloud logging read '
+  protoPayload.authenticationInfo.principalEmail=&quot;svc-deploy@proj.iam.gserviceaccount.com&quot;
+  AND timestamp&gt;=&quot;2026-07-01T00:00:00Z&quot;
+  AND (logName:&quot;cloudaudit.googleapis.com%2Factivity&quot;
+       OR logName:&quot;cloudaudit.googleapis.com%2Fdata_access&quot;)' \
+  --project=prod-proj --freshness=7d --format=json --order=asc
+</code></pre>
+<p>Azure — the compromised identity's control-plane actions via Activity Log, plus Entra sign-ins via KQL (Sentinel / Log Analytics):</p>
+<pre><code class="language-kql">AzureActivity
+| where Caller == &quot;attacker@contoso.onmicrosoft.com&quot;
+| where TimeGenerated &gt; ago(7d)
+| project TimeGenerated, OperationNameValue, ActivityStatusValue,
+          CallerIpAddress, ResourceGroup, Properties
+| order by TimeGenerated asc
+</code></pre>
+<p><strong>B. Contain the identity — the fast kill switch (do this first, in parallel across providers as applicable).</strong></p>
+<p>AWS — deactivate the leaked access key and attach an explicit deny to freeze the principal without deleting it (preserves it for forensics):</p>
+<pre><code class="language-bash"># 1. Deactivate the leaked long-term key (does not delete — evidence preserved)
+aws iam update-access-key --user-name svc-ci --access-key-id AKIAIOSFODNN7EXAMPLE \
+  --status Inactive
+
+# 2. Attach an inline explicit-deny &quot;quarantine&quot; policy — Deny beats any Allow
+aws iam put-user-policy --user-name svc-ci --policy-name QUARANTINE-IR \
+  --policy-document '{&quot;Version&quot;:&quot;2012-10-17&quot;,&quot;Statement&quot;:[{&quot;Effect&quot;:&quot;Deny&quot;,&quot;Action&quot;:&quot;*&quot;,&quot;Resource&quot;:&quot;*&quot;}]}'
+
+# 3. If a ROLE session (STS temp creds) is compromised, you cannot revoke the token —
+#    invalidate all issued sessions by date with an AssumeRolePolicy condition:
+aws iam put-role-policy --role-name app-role --policy-name REVOKE-OLDER-SESSIONS \
+  --policy-document '{&quot;Version&quot;:&quot;2012-10-17&quot;,&quot;Statement&quot;:[{&quot;Effect&quot;:&quot;Deny&quot;,&quot;Action&quot;:&quot;*&quot;,&quot;Resource&quot;:&quot;*&quot;,
+    &quot;Condition&quot;:{&quot;DateLessThan&quot;:{&quot;aws:TokenIssueTime&quot;:&quot;2026-07-06T18:00:00Z&quot;}}}]}'
+</code></pre>
+<p>The last one is the canonical trick: <strong>you cannot revoke an STS token before its expiry</strong>, so you deny all actions for sessions issued before "now," instantly killing the stolen temporary credentials while letting freshly-minted legitimate ones through. AWS exposes this as the "Revoke sessions" console button, which applies <code>AWSRevokeOlderSessions</code>.</p>
+<p>Organization-wide, apply an SCP that denies the attacker IP or the specific principal ARN across every account:</p>
+<pre><code class="language-json">{ &quot;Version&quot;: &quot;2012-10-17&quot;,
+  &quot;Statement&quot;: [{ &quot;Sid&quot;: &quot;IR-BlockAttacker&quot;, &quot;Effect&quot;: &quot;Deny&quot;, &quot;Action&quot;: &quot;*&quot;, &quot;Resource&quot;: &quot;*&quot;,
+    &quot;Condition&quot;: { &quot;StringEquals&quot;: { &quot;aws:PrincipalArn&quot;: &quot;arn:aws:iam::111122223333:role/app-role&quot; } } }] }
+</code></pre>
+<p>GCP — disable the service account, delete/disable its keys, and (org-wide) apply an IAM <strong>deny policy</strong>:</p>
+<pre><code class="language-bash"># 1. Disable the compromised service account (blocks all new auth immediately)
+gcloud iam service-accounts disable svc-deploy@prod-proj.iam.gserviceaccount.com
+
+# 2. List then delete its user-managed keys (the exfiltrated credential)
+gcloud iam service-accounts keys list \
+  --iam-account=svc-deploy@prod-proj.iam.gserviceaccount.com
+gcloud iam service-accounts keys delete &lt;KEY_ID&gt; \
+  --iam-account=svc-deploy@prod-proj.iam.gserviceaccount.com
+
+# 3. Org-wide deny policy (deny wins over allow) targeting the principal
+gcloud iam policies create ir-quarantine --attachment-point=cloudresourcemanager.googleapis.com/organizations/123456789 \
+  --kind=denypolicies --policy-file=deny.json
+</code></pre>
+<p>Where <code>deny.json</code> denies all permissions for the compromised principal:</p>
+<pre><code class="language-json">{ &quot;rules&quot;: [ { &quot;denyRule&quot;: {
+  &quot;deniedPrincipals&quot;: [ &quot;principal://iam.googleapis.com/projects/-/serviceAccounts/svc-deploy@prod-proj.iam.gserviceaccount.com&quot; ],
+  &quot;deniedPermissions&quot;: [ &quot;*&quot; ] } } ] }
+</code></pre>
+<p>For a compromised OAuth/user session, revoke tokens and force re-auth. Short-lived GCP access tokens can't be individually revoked, so disabling the SA is the equivalent kill switch; for user accounts use <code>gcloud auth revoke</code> on the workstation and admin-console session reset.</p>
+<p>Azure — disable the user/service principal and revoke all refresh tokens (invalidates issued sessions):</p>
+<pre><code class="language-bash"># 1. Disable the account so no new sign-ins succeed
+az ad user update --id attacker@contoso.onmicrosoft.com --account-enabled false
+
+# 2. Revoke all refresh tokens / sessions — forces re-auth everywhere
+az rest --method POST \
+  --url &quot;https://graph.microsoft.com/v1.0/users/attacker@contoso.onmicrosoft.com/revokeSignInSessions&quot;
+
+# 3. For a compromised service principal / app, disable it and roll its secret
+az ad sp update --id &lt;APP_ID&gt; --set accountEnabled=false
+az ad app credential reset --id &lt;APP_ID&gt;   # rotates client secret
+</code></pre>
+<p><strong>C. Contain the compute — network quarantine + snapshot-before-terminate.</strong></p>
+<p>AWS — move the instance to an isolation security group (deny-all), snapshot its volume, then decide:</p>
+<pre><code class="language-bash"># Create an empty quarantine SG (no ingress, no egress) and swap the ENI onto it
+aws ec2 create-security-group --group-name ir-quarantine --description &quot;IR isolate&quot; --vpc-id vpc-abc
+aws ec2 modify-instance-attribute --instance-id i-0abc --groups sg-quarantine
+# Snapshot the root/data volume BEFORE any termination (evidence)
+aws ec2 create-snapshot --volume-id vol-0abc --description &quot;IR-i-0abc-2026-07-07 chain-of-custody&quot;
+# Optional: dump instance memory / take a full image
+aws ec2 create-image --instance-id i-0abc --name &quot;IR-forensic-i-0abc&quot; --no-reboot
+</code></pre>
+<p>GCP — deny-all firewall by tag, then snapshot the persistent disk:</p>
+<pre><code class="language-bash"># Highest-priority deny-all egress/ingress bound to a quarantine network tag
+gcloud compute firewall-rules create ir-quarantine-deny-all \
+  --network=prod-vpc --direction=INGRESS --action=DENY --rules=all \
+  --priority=0 --target-tags=ir-quarantine
+gcloud compute instances add-tags victim-vm --zone=us-central1-a --tags=ir-quarantine
+# Snapshot the boot/data disk before deleting the VM
+gcloud compute disks snapshot victim-vm --zone=us-central1-a \
+  --snapshot-names=ir-victim-2026-07-07
+</code></pre>
+<p>Azure — apply a deny-all NSG and snapshot the managed disk:</p>
+<pre><code class="language-bash">az network nsg create -g rg-ir -n nsg-quarantine
+az network nsg rule create -g rg-ir --nsg-name nsg-quarantine -n deny-all-out \
+  --priority 100 --direction Outbound --access Deny --protocol '*' \
+  --destination-address-prefixes '*' --destination-port-ranges '*'
+az network nic update -g rg-ir -n victim-nic --network-security-group nsg-quarantine
+az snapshot create -g rg-ir -n ir-victim-2026-07-07 \
+  --source $(az vm show -g rg-ir -n victim --query storageProfile.osDisk.managedDisk.id -o tsv)
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Compromised-credential response flow (detect → contain → eradicate → recover):</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Alert: anomalous credential use] --> B[Confirm via audit log]
+    B --> C[Scope blast radius via IAM graph and log trail]
+    C --> D[Identity containment: revoke keys deny disable sessions]
+    C --> E[Compute containment: quarantine SG snapshot before terminate]
+    D --> F[Preserve evidence: export logs snapshot disks memory]
+    E --> F
+    F --> G[Hunt persistence: new keys roles trusts functions grants]
+    G --> H[Eradicate and rotate all reachable secrets]
+    H --> I[Rebuild from clean images redeploy]
+    I --> J[Recover monitor and post incident review]
+</pre>
+<p><strong>Diagram B — Control plane vs data plane evidence sources:</strong></p>
+<pre class="mermaid">
+flowchart LR
+    P[Compromised principal] --> M[Management plane API]
+    P --> N[Data plane API]
+    M --> CT[AWS CloudTrail management events]
+    M --> GA[GCP Admin Activity logs]
+    M --> AZ[Azure Activity and Entra logs]
+    N --> DE[CloudTrail data events S3 objects]
+    N --> GD[GCP Data Access logs]
+    N --> AB[Azure storage diagnostic logs]
+    CT --> SIEM[Central SIEM immutable]
+    GA --> SIEM
+    AZ --> SIEM
+    DE --> SIEM
+    GD --> SIEM
+    AB --> SIEM
+</pre>
+<p><strong>Diagram C — STS temporary-credential containment decision:</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Assess
+    Assess --> LongTermKey: credential is an AKIA key
+    Assess --> TempSession: credential is an ASIA STS token
+    LongTermKey --> Deactivate
+    Deactivate --> QuarantinePolicy
+    TempSession --> RevokeOlderSessions
+    RevokeOlderSessions --> QuarantinePolicy
+    QuarantinePolicy --> Eradicate
+    Eradicate --> [*]
+</pre>
+<p><strong>Diagram D — Ephemerality: snapshot-before-terminate ordering:</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant IR as Responder
+    participant CP as Cloud Control Plane
+    participant EV as Evidence Store
+    IR->>CP: Detach from auto scaling group set desired unchanged
+    IR->>CP: Swap to quarantine security group
+    IR->>CP: Snapshot boot and data disks
+    CP-->>EV: Snapshot written with tags and hash
+    IR->>CP: Capture memory image if agent present
+    CP-->>EV: Memory image stored
+    IR->>CP: Terminate or preserve instance
+</pre>
+<p><strong>Diagram E — Blast-radius scoping: permissions vs actions:</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Compromised identity] --> B[What COULD it do]
+    A --> C[What DID it do]
+    B --> B1[IAM policies attached]
+    B --> B2[Assumable roles and impersonation]
+    B --> B3[Resource policies granting access]
+    C --> C1[Audit log events in window]
+    C --> C2[Data access reads for exfil proof]
+    B1 --> D[Union equals containment scope]
+    B2 --> D
+    B3 --> D
+    C1 --> D
+    C2 --> D
+    D --> E[Notification and eradication plan]
+</pre>
+<hr />
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Capital One (Paige Thompson)</td>
+<td>2019</td>
+<td>SSRF on WAF → stole EC2 instance-role creds → <code>s3:ListBuckets</code>/<code>GetObject</code> on 100M records</td>
+<td>IMDSv1 + over-broad instance role; enforce IMDSv2, scope roles, alert on off-host token use</td>
+</tr>
+<tr>
+<td>Code Spaces</td>
+<td>2014</td>
+<td>Attacker got AWS console creds, held it to ransom, then deleted all resources</td>
+<td>No out-of-band admin / MFA / immutable backups; org-level control-plane destruction is fatal</td>
+</tr>
+<tr>
+<td>Uber (2016)</td>
+<td>2016</td>
+<td>AWS keys hardcoded in a private GitHub repo → S3 access to 57M records</td>
+<td>Secrets in source; use short-lived creds, secret scanning, no static keys</td>
+</tr>
+<tr>
+<td>Imperva</td>
+<td>2019</td>
+<td>AWS API key + snapshot of internal DB exposed; key not rotated</td>
+<td>Rotate keys, restrict snapshot sharing, monitor <code>ModifySnapshotAttribute</code></td>
+</tr>
+<tr>
+<td>SolarWinds / SUNBURST (cloud pivot)</td>
+<td>2020</td>
+<td>Forged SAML tokens ("Golden SAML") + rogue Azure AD app credentials for persistence</td>
+<td>Token-signing key theft bypasses MFA; monitor Entra app credential adds and consent grants</td>
+</tr>
+<tr>
+<td>Microsoft Storm-0558</td>
+<td>2023</td>
+<td>Stolen MSA signing key forged Entra/OWA tokens; consumer key signed enterprise tokens</td>
+<td>Key-management + token validation gap; centralize token-issuance logging, detect anomalous <code>issuer</code></td>
+</tr>
+<tr>
+<td>LastPass</td>
+<td>2022</td>
+<td>DevOps engineer's home machine → keys to AWS S3 backup buckets and KMS</td>
+<td>Endpoint compromise reaches cloud; segment backups, monitor decryption calls</td>
+</tr>
+<tr>
+<td>CVE-2019-2884 / metadata SSRF class</td>
+<td>2019+</td>
+<td>SSRF reaching <code>169.254.169.254</code> to steal instance credentials</td>
+<td>Enforce IMDSv2 (AWS), metadata concealment / hop-limit=1, egress controls</td>
+</tr>
+<tr>
+<td>Tesla Kubernetes crypto-jacking</td>
+<td>2018</td>
+<td>Exposed Kubernetes dashboard → cloud creds in pod → AWS S3 + mining</td>
+<td>Secure orchestrator control plane; pods inherit cloud identity</td>
+</tr>
+<tr>
+<td>CircleCI breach</td>
+<td>2023</td>
+<td>Malware on engineer laptop stole session tokens → customer OAuth/env secrets</td>
+<td>CI/CD holds keys to many clouds; rotate all secrets that flowed through CI</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — Capital One (the canonical cloud-credential incident).</strong> An SSRF vulnerability in a misconfigured ModSecurity WAF running on EC2 let the attacker coax the server into requesting <code>http://169.254.169.254/latest/meta-data/iam/security-credentials/&lt;role&gt;</code>, returning temporary IAM credentials (an <code>ASIA…</code> token). Because IMDSv1 required no session token to fetch this, and the WAF's instance role had <code>s3:ListAllMyBuckets</code> plus read on data buckets, the attacker enumerated and exfiltrated ~100M records. <strong>What would have stopped it:</strong> IMDSv2 (session-oriented, hop-limit-restricted metadata) blocks trivial SSRF token theft; a least-privileged instance role scoped to only the buckets the WAF needs limits blast radius; and a GuardDuty <code>UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS</code> finding fires when instance-role creds are used from an IP outside AWS — an off-host anomaly that is one of the highest-signal cloud detections that exists.</p>
+<p><strong>Case study — Storm-0558 (identity-provider key theft).</strong> Attackers obtained a Microsoft consumer (MSA) token-signing key and, exploiting a token-validation flaw, forged Entra ID access tokens for enterprise Exchange Online, reading mail from ~25 organizations. There was no password to reset and no MFA prompt to trip — the tokens were cryptographically valid. <strong>What would have stopped/limited it:</strong> this is why signing-key custody, key rotation, and issuance-side logging matter more than endpoint MFA for federated identity; detection had to come from anomalous mail-access patterns and MailItemsAccessed audit events, not sign-in logs, because the forged tokens never traversed the normal sign-in path. It reframes cloud IR: sometimes the credential you must "revoke" is a signing key, and containment is key rotation + forced token re-issuance org-wide.</p>
+<p><strong>Case study — Code Spaces (control-plane destruction).</strong> An attacker gained the company's AWS console credentials and, when the company tried to regain control, began deleting EC2 instances, S3 buckets, and backups from the control plane. Within hours the business was destroyed because backups lived in the <em>same</em> account under the <em>same</em> identity. <strong>What would have stopped it:</strong> MFA on the root/admin identity, an organization structure isolating backups in a separate account with an SCP the compromised identity couldn't override, and immutable/object-locked backups. It is the definitive argument that in cloud, <strong>identity is the perimeter and the blast radius is your whole account</strong> unless you deliberately partition it.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK (Cloud)</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Leaked long-term access key (git, CI logs, S3)</td>
+<td>T1552.001 Unsecured Creds</td>
+<td>Static keys in code/config</td>
+<td>Full API access as principal</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Instance/metadata credential theft via SSRF</td>
+<td>T1552.005 Cloud Instance Metadata</td>
+<td>IMDSv1, weak egress</td>
+<td>Steals role token, off-host use</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Phished console session / stolen OAuth token</td>
+<td>T1078.004 Valid Accounts Cloud</td>
+<td>No MFA / token replay</td>
+<td>Interactive attacker access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-permissioned service account abuse</td>
+<td>T1078.004</td>
+<td>Least-privilege not enforced</td>
+<td>Lateral movement across projects</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Persistence via new access key / IAM user</td>
+<td>T1098.001 Additional Cloud Creds</td>
+<td>No detection on <code>CreateAccessKey</code></td>
+<td>Survives password/key rotation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Persistence via role trust / <code>AssumeRole</code> backdoor</td>
+<td>T1098 Account Manipulation</td>
+<td>Unmonitored trust-policy edits</td>
+<td>Re-entry after eviction</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Rogue OAuth app / consent grant persistence</td>
+<td>T1098.003 Add Cloud Roles</td>
+<td>Illicit consent phishing</td>
+<td>Long-lived mailbox/data access</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Data exfil from object storage</td>
+<td>T1530 Data from Cloud Storage</td>
+<td>Public/misconfigured ACL, broad read</td>
+<td>Mass PII/IP loss</td>
+<td>High</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Snapshot / image sharing for exfil</td>
+<td>T1537 Transfer to Cloud Account</td>
+<td><code>ModifySnapshotAttribute</code> to attacker acct</td>
+<td>Copies full DB/disk out</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Audit log tampering / disable</td>
+<td>T1562.008 Disable Cloud Logs</td>
+<td>Logs writable by compromised identity</td>
+<td>Blind IR, no timeline</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Region/service enablement for mining</td>
+<td>T1580 Cloud Infra Discovery + T1496</td>
+<td>Unused regions unmonitored</td>
+<td>Cost + covert compute</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Forged federation token (Golden SAML/OIDC)</td>
+<td>T1606.002 Forge Web Creds</td>
+<td>Stolen signing key / IdP trust</td>
+<td>MFA bypass, undetectable auth</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Ephemeral evidence lost (auto-scale/spot/serverless)</td>
+<td>— (detection gap)</td>
+<td>No snapshot-before-terminate</td>
+<td>No forensics, unknown scope</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Serverless/function backdoor</td>
+<td>T1648 Serverless Execution</td>
+<td>Lambda/Function created or env-var poisoned</td>
+<td>Hidden persistent execution</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Container/K8s workload identity abuse</td>
+<td>T1610 Deploy Container</td>
+<td>Pod inherits node/WI credentials</td>
+<td>Cloud API access from cluster</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Cross-account/cross-tenant escalation</td>
+<td>T1078.004 + T1098</td>
+<td>Trust misconfig, org-admin reach</td>
+<td>Whole-org compromise</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Secrets-manager / KMS mass decryption</td>
+<td>T1555.006 Cloud Secrets Mgmt</td>
+<td>Broad <code>secretsmanager:GetSecretValue</code>/<code>kms:Decrypt</code></td>
+<td>Harvests all downstream creds</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Defense evasion via deleting GuardDuty/detectors</td>
+<td>T1562.001 Impair Defenses</td>
+<td>Detector deletable by principal</td>
+<td>Alerts silenced mid-attack</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Privilege escalation via <code>PassRole</code>/<code>actAs</code></td>
+<td>T1548 Abuse Elevation</td>
+<td>Misconfigured pass-role permission</td>
+<td>Assumes higher-priv identity</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Stale STS token cannot be revoked in time</td>
+<td>T1078.004</td>
+<td>Tokens valid until expiry</td>
+<td>Attacker window post-detection</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Leaked static key</td>
+<td>Eliminate static keys → SSO/OIDC/short-lived creds; secret scanning</td>
+<td>IAM, CI/CD, repo scanning</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Metadata SSRF</td>
+<td>Enforce IMDSv2 / metadata concealment; hop-limit=1; egress deny to 169.254.169.254</td>
+<td>EC2/GCE launch template, VPC</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Phished session</td>
+<td>Phishing-resistant MFA (FIDO2), Conditional Access, short session TTL</td>
+<td>Entra/IAM Identity Center/IAM</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-permissioned SA</td>
+<td>Least privilege, permission boundaries, IAM Access Analyzer/Recommender</td>
+<td>IAM policy, org policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>New-key persistence</td>
+<td>Alert on <code>CreateAccessKey</code>/key creation; deny outside break-glass</td>
+<td>Detection + SCP/deny policy</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Role-trust backdoor</td>
+<td>Alert on <code>UpdateAssumeRolePolicy</code>/<code>setIamPolicy</code>; restrict who can edit trust</td>
+<td>Detection + guardrail</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Rogue OAuth grant</td>
+<td>Admin consent workflow; block user consent; monitor consent audit</td>
+<td>Entra app governance</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Storage exfil</td>
+<td>Block public access, bucket policies, VPC Service Controls/Private Access</td>
+<td>Storage config, perimeter</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Snapshot exfil</td>
+<td>Deny cross-account snapshot share via SCP; alert on <code>ModifySnapshotAttribute</code></td>
+<td>SCP + detection</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Log tampering</td>
+<td>Immutable central log account; deny <code>StopLogging</code>/log deletion; log-file validation</td>
+<td>Org log archive, SCP</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Mining in unused regions</td>
+<td>SCP region restriction; billing anomaly alerts</td>
+<td>SCP, cost monitoring</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Forged federation token</td>
+<td>Protect signing keys (HSM), rotate, monitor issuance; token-binding</td>
+<td>IdP / KMS</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Ephemeral evidence loss</td>
+<td>Automated snapshot-before-terminate; disable termination during IR</td>
+<td>IR automation, ASG hooks</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Serverless backdoor</td>
+<td>Alert on function create/update; code signing; least-priv exec role</td>
+<td>Detection + Lambda/Function config</td>
+</tr>
+<tr>
+<td>15</td>
+<td>K8s workload identity</td>
+<td>Workload Identity (no node keys), restrict metadata from pods, RBAC</td>
+<td>GKE/EKS/AKS config</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Cross-org escalation</td>
+<td>Separate org-admin, SCP guardrails, break-glass isolation</td>
+<td>Org structure</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Mass decryption</td>
+<td>Scope KMS/secret grants; alert on bulk <code>Decrypt</code>/<code>GetSecretValue</code></td>
+<td>KMS policy + detection</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Detector deletion</td>
+<td>Deny GuardDuty/Defender delete via SCP; delegate to security account</td>
+<td>SCP, delegated admin</td>
+</tr>
+<tr>
+<td>19</td>
+<td>PassRole/actAs escalation</td>
+<td>Constrain <code>iam:PassRole</code> with resource conditions; audit <code>actAs</code> bindings</td>
+<td>IAM policy</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Unrevocable STS token</td>
+<td>Revoke-older-sessions deny policy; short role max-session-duration</td>
+<td>IAM role policy</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Eliminate static credentials in favor of short-lived, federated identity.</strong> The single highest-leverage cloud IR control is <em>not having a long-lived secret to steal</em>. Replace <code>AKIA…</code> keys and downloaded service-account JSON with workload identity federation: AWS IAM Roles Anywhere / IRSA (EKS), GCP Workload Identity Federation, Azure Managed Identity, and human access via SSO issuing STS/OIDC tokens minutes-long. Technically, the workload presents a platform-signed OIDC token (from the K8s API server, GitHub Actions OIDC, or the instance metadata service) which the cloud IAM exchanges for a short-lived credential scoped by trust conditions. <em>Implementation:</em> <code>gcloud iam workload-identity-pools create-cred-config</code>, or an EKS <code>ServiceAccount</code> annotated with <code>eks.amazonaws.com/role-arn</code>. <em>Trade-off:</em> it shrinks the "leaked key" and "rotation" problem enormously, but you now depend on the identity-federation trust config being correct — a misconfigured OIDC <code>sub</code>/<code>aud</code> condition is itself an escalation path, and you still must revoke sessions (see control 20) because short-lived tokens remain valid until expiry.</p>
+<p><strong>2. Immutable, centralized, tamper-evident logging the attacker cannot delete.</strong> Your entire IR capability rests on the audit trail existing after the attacker has admin. Ship CloudTrail (all regions, management + data events), GCP Admin Activity (always on) + Data Access (opt-in), and Azure Activity + Entra logs to a <strong>separate, locked security account/project</strong> whose bucket has Object Lock / bucket-lock retention and whose deletion is denied by SCP/deny policy even to org admins. <em>Implementation:</em> AWS Organizations trail delivered to a log-archive account S3 bucket with Object Lock (compliance mode) and CloudTrail log-file validation (<code>--enable-log-file-validation</code>, producing hash-chained digest files); GCP log sink to a locked bucket in a dedicated logging project with bucket retention lock. <em>Trade-off:</em> Data Access logging in GCP and CloudTrail data events cost real money at scale and can be voluminous — you must sample/scope (e.g., only sensitive buckets) or accept the bill, and there is an inherent tension between complete data-plane visibility (needed to prove exfiltration) and cost.</p>
+<p><strong>3. Fast identity containment via explicit deny at high scope.</strong> Because deny always beats allow, an org-scoped explicit deny keyed on the compromised principal (AWS SCP, GCP IAM deny policy, Azure deny assignment / disabled account) is a single-action kill switch that works across every account, region, and network path simultaneously — far faster and more complete than chasing network paths. <em>Implementation:</em> the SCP/deny-policy snippets in §2.2, ideally pre-staged as a break-glass "quarantine" policy the IR on-call can attach in seconds. <em>Trade-off:</em> an over-broad deny can take down production if the principal is shared by legitimate workloads, so you scope it to the specific principal/session and accept that a <em>shared</em> service account is itself a design failure that widens both blast radius and containment collateral.</p>
+<p><strong>4. Snapshot-before-terminate automation for ephemeral compute.</strong> Cloud compute is designed to disappear; auto-scaling, spot reclamation, and serverless cold-stops destroy evidence unless capture is automatic. Build an IR-triggered runbook (EventBridge → Lambda / Cloud Function) that, on a GuardDuty/Defender finding, tags the instance, moves it to the quarantine SG, detaches it from the ASG with an ASG lifecycle hook so it isn't replaced-and-killed, snapshots its disks with chain-of-custody tags, and captures memory if an agent (e.g., AVML, Velociraptor) is present — <em>then</em> terminates. <em>Implementation:</em> ASG <code>PutLifecycleHook</code> to freeze the instance in <code>Terminating:Wait</code>, <code>create-snapshot</code> with a hash tag, then <code>CompleteLifecycleAction</code>. <em>Trade-off:</em> snapshots and images cost storage and take time; automating termination-hold can conflict with self-healing and capacity, so gate it behind an explicit IR mode rather than leaving it always-on.</p>
+<p><strong>5. Least privilege + persistence-hunt guardrails.</strong> Blast radius is a direct function of what the identity was allowed to do, so enforce least privilege with permission boundaries, IAM Access Analyzer / GCP Recommender, and org policies — and pair it with <em>detections on the persistence primitives</em> (<code>CreateAccessKey</code>, <code>UpdateAssumeRolePolicy</code>, <code>setIamPolicy</code>, <code>CreateServiceAccountKey</code>, OAuth consent grants) so that when an identity is compromised you can enumerate and rip out every backdoor it planted. <em>Implementation:</em> permission boundary policies attached to all roles, plus Sigma/GuardDuty rules on the persistence API calls. <em>Trade-off:</em> aggressive least-privilege raises operational friction and can cause outages if scoped wrong, and persistence detections are noisy in environments where engineers legitimately create keys — you must baseline normal admin behavior first, which is why "Preparation" is a formal NIST phase.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>AWS:</strong> CloudTrail management events (all regions, org trail), CloudTrail <strong>data events</strong> for S3/Lambda/DynamoDB, VPC Flow Logs, GuardDuty findings, IAM Access Analyzer, CloudTrail <code>Insights</code> (unusual API-rate anomalies). Key fields: <code>userIdentity.type/arn/accessKeyId</code>, <code>sourceIPAddress</code>, <code>userAgent</code>, <code>eventName</code>, <code>errorCode</code>, <code>sessionContext.attributes.mfaAuthenticated</code>.</li>
+<li><strong>GCP:</strong> Cloud Audit Logs — <strong>Admin Activity</strong> (always on), <strong>Data Access</strong> (opt-in per service), <strong>System Event</strong>, <strong>Policy Denied</strong>. Key fields: <code>protoPayload.authenticationInfo.principalEmail</code>, <code>authorizationInfo</code>, <code>requestMetadata.callerIp</code>, <code>methodName</code>, <code>serviceName</code>. Plus VPC Flow Logs, SCC findings, Access Transparency.</li>
+<li><strong>Azure:</strong> Activity Log (control plane), Entra ID <strong>sign-in logs</strong> + <strong>audit logs</strong> (identity), Microsoft Defender for Cloud alerts, NSG flow logs, resource diagnostic logs (Storage, Key Vault). Key fields: <code>Caller</code>, <code>CallerIpAddress</code>, <code>OperationNameValue</code>, <code>identity.claims</code>, Entra <code>RiskLevelDuringSignIn</code>, <code>ConditionalAccessStatus</code>.</li>
+</ul>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>Sigma — instance-role credentials used from an IP outside the cloud (metadata theft signal), AWS CloudTrail:</strong></p>
+<pre><code class="language-yaml">title: EC2 Instance Credentials Used Outside AWS
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    userIdentity.type: 'AssumedRole'
+    userIdentity.arn|contains: ':assumed-role/'
+    userIdentity.sessionContext.sessionIssuer.type: 'Role'
+  filter_aws_ip:
+    sourceIPAddress|cidr:
+      - '10.0.0.0/8'
+      - '172.16.0.0/12'
+  filter_amazon_ua:
+    userAgent|contains: 'amazonaws.com'
+  condition: selection and not (filter_aws_ip or filter_amazon_ua)
+level: high
+</code></pre>
+<p><strong>KQL — Entra impossible-travel + high-risk sign-in on a privileged principal (Azure/Sentinel):</strong></p>
+<pre><code class="language-kql">SigninLogs
+| where RiskLevelDuringSignIn in (&quot;high&quot;,&quot;medium&quot;)
+| where ConditionalAccessStatus != &quot;success&quot; or MfaDetail == &quot;&quot;
+| join kind=inner (
+    IdentityInfo | where AssignedRoles has_any (&quot;Global Administrator&quot;,&quot;Privileged Role Administrator&quot;)
+  ) on $left.UserPrincipalName == $right.AccountUPN
+| project TimeGenerated, UserPrincipalName, IPAddress, Location,
+          RiskLevelDuringSignIn, AppDisplayName
+| order by TimeGenerated desc
+</code></pre>
+<p><strong>SQL / Log Analytics (GCP) — service account key created or SA impersonated outside CI ranges:</strong></p>
+<pre><code class="language-sql">SELECT timestamp,
+       protoPayload.authenticationInfo.principalEmail AS actor,
+       protoPayload.methodName AS method,
+       protoPayload.requestMetadata.callerIp AS ip
+FROM `prod-proj.logs.cloudaudit_googleapis_com_activity`
+WHERE protoPayload.methodName IN (
+        'google.iam.admin.v1.CreateServiceAccountKey',
+        'google.iam.credentials.v1.GenerateAccessToken',
+        'SetIamPolicy')
+  AND NET.IP_IN_NET(protoPayload.requestMetadata.callerIp, '203.0.113.0/24') = FALSE
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR);
+</code></pre>
+<h3 id="response-playbook-compromised-cloud-credential">Response playbook (compromised cloud credential)</h3>
+<ol>
+<li><strong>Confirm &amp; triage.</strong> Validate the alert against the audit log; confirm the principal, source IP, first-seen time, and whether the credential is a long-term key (<code>AKIA</code>/user-managed SA key), a temp session (<code>ASIA</code>/STS/OIDC), or an interactive console/OAuth session. Declare severity and open the incident channel per <code>incident/README.md</code> roles.</li>
+<li><strong>Scope blast radius.</strong> In parallel, enumerate <em>what it could do</em> (attached IAM policies, assumable roles/impersonation, resource policies) and <em>what it did</em> (audit-log events in the window; data-access reads for exfil proof). Note any regions/services newly touched.</li>
+<li><strong>Contain identity.</strong> Deactivate/delete the leaked key or SA key; disable the principal; revoke sessions (AWS revoke-older-sessions deny, Entra <code>revokeSignInSessions</code>, GCP disable SA). Stage a high-scope explicit deny (SCP / deny policy) on the principal.</li>
+<li><strong>Contain compute.</strong> For any instance/pod the identity ran on or created: quarantine SG/firewall/NSG, detach from auto-scaling (lifecycle hook), and <strong>snapshot disks + memory before terminate</strong>.</li>
+<li><strong>Preserve evidence.</strong> Export the relevant audit-log range to the immutable evidence store; record snapshot IDs, hashes, and timestamps for chain of custody. Do not delete the compromised identity yet — freeze it.</li>
+<li><strong>Hunt persistence.</strong> Search for attacker-created access keys, IAM users, role-trust edits (<code>UpdateAssumeRolePolicy</code>/<code>setIamPolicy</code>), new service accounts/keys, OAuth consent grants, Lambda/Function backdoors, and cross-account snapshot shares. Remove each.</li>
+<li><strong>Eradicate &amp; rotate.</strong> Rotate every secret the identity could read (KMS-wrapped secrets, Secrets Manager, downstream DB creds), fix the entry vector (patch SSRF, enforce IMDSv2, remove hardcoded key), and remove all persistence.</li>
+<li><strong>Recover.</strong> Rebuild affected compute from known-good images, redeploy, re-enable the identity only after rotation or replace it with a fresh least-privileged one, and restore data if integrity is in doubt.</li>
+<li><strong>Monitor &amp; close.</strong> Heighten monitoring on the previously affected principals/resources for re-entry, then run the post-incident review (root cause, detection gaps, containment timing) and feed fixes back into Preparation.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<p><strong>Tier 1 — Fundamentals</strong></p>
+<p><strong>Q1. Why is "revoke the credential" the first move in cloud IR rather than "isolate the host"?</strong><br />
+Because in the cloud the attacker's access is a valid, authenticated credential that works over the public API from anywhere — there is no network path to cut that stops it, only the identity. Revoking or denying the identity (deactivate the key, disable the principal, revoke sessions, attach an explicit deny) instantly kills access across every account, region, and network simultaneously, which is faster and more complete than chasing network isolation. You still quarantine the compute, but primarily to preserve forensic evidence and cut C2/lateral movement, not to stop the primary access.<br />
+<em>Signal:</em> Do they understand identity-as-perimeter and the control-plane model?</p>
+<p><strong>Q2. What are the primary evidence sources in AWS, GCP, and Azure, and what's the control-plane vs data-plane distinction?</strong><br />
+The management/control-plane logs (AWS CloudTrail management events, GCP Admin Activity logs, Azure Activity Log + Entra audit logs) record who did what to resources and identity — your forensic timeline. The data-plane logs (CloudTrail data events, GCP Data Access logs, Azure resource diagnostic logs) record actual reads/writes to objects and are the only way to prove <em>exfiltration</em> — which specific objects were read. Admin Activity/management logging is on by default and free-ish; data-plane logging is opt-in and costly, which is why exfil scope is often the hardest thing to prove.<br />
+<em>Signal:</em> Knows exact log products and why data-plane matters for exfiltration proof.</p>
+<p><strong>Q3. You find a leaked <code>AKIA</code> key in a public GitHub repo. What do you do in the first five minutes?</strong><br />
+Deactivate the key immediately (<code>aws iam update-access-key --status Inactive</code>) rather than deleting it so it's preserved as evidence, attach a quarantine explicit-deny to the user, then pull CloudTrail filtered on that <code>accessKeyId</code> to see everything it did and from where. Check for persistence it created (<code>CreateAccessKey</code>, <code>CreateUser</code>, <code>AttachUserPolicy</code>), rotate any secrets it could reach, and identify/remediate how it leaked (secret scanning, remove from history). Long-term keys are revocable instantly; that's the good case compared to STS tokens.<br />
+<em>Signal:</em> Concrete, ordered, evidence-preserving; not just "delete the key."</p>
+<p><strong>Q4. Why can't you simply "revoke" an AWS STS temporary token, and how do you contain one?</strong><br />
+STS temporary credentials are self-contained, signed, and valid until their expiry — there is no server-side session store to invalidate them individually. To contain them you attach a policy to the role denying all actions for sessions issued before "now" using the <code>aws:TokenIssueTime</code> condition (<code>DateLessThan</code>), which is what the console's "Revoke active sessions" button does; this kills all currently-issued tokens while allowing freshly minted legitimate ones. You should also disable the underlying source (deactivate the key/principal that can assume the role) and shorten role max-session-duration going forward.<br />
+<em>Signal:</em> Understands token semantics and the <code>TokenIssueTime</code> revocation trick.</p>
+<p><strong>Q5. What does "snapshot before terminate" mean and why is ephemerality a cloud-IR-specific problem?</strong><br />
+Cloud compute is designed to be disposable — auto-scaling groups replace instances, spot instances get reclaimed, serverless and containers stop and vanish — so the moment you act (or even before), the host that holds your forensic evidence may be gone. "Snapshot before terminate" means you first capture the disk (EBS/PD/managed-disk snapshot) and memory image, tag them for chain of custody, and only then terminate or let the instance recycle. Ephemerality is also a gift: once evidence is captured, rebuilding clean is trivial, which speeds recovery.<br />
+<em>Signal:</em> Recognizes evidence volatility and the two-edged nature of ephemerality.</p>
+<p><strong>Tier 2 — System design / trade-offs</strong></p>
+<p><strong>Q6. Design the logging architecture so a compromised org-admin cannot destroy your IR evidence.</strong><br />
+Centralize all audit logs into a dedicated, isolated log-archive account/project that is administratively separate from production, and deliver via an organization trail/log sink so member accounts can't disable collection. Store in a bucket with Object Lock / bucket retention lock (compliance mode) so even a root user can't delete within the retention window, enable CloudTrail log-file validation (hash-chained digests) or GCP's log integrity, and use an SCP/deny policy that forbids <code>StopLogging</code>, log-bucket deletion, and trail modification even for admins. The compromised identity in production thus has no path to the evidence, and integrity is cryptographically verifiable. The trade-off is cost and the operational discipline of a separate account with break-glass-only access.<br />
+<em>Signal:</em> Knows immutability, org trails, separation of duties, log-file validation.</p>
+<p><strong>Q7. A compromised service account had broad permissions. How do you scope blast radius and decide who to notify?</strong><br />
+Compute the union of <em>what it could do</em> — its attached IAM policies, roles it can assume/impersonate, and any resource policies that grant it access — and <em>what it actually did</em> — the audit-log events in the exposure window, with data-access logs to prove which objects/rows were read. The "could do" set bounds worst-case notification obligations (e.g., all data in buckets it had read on), while the "did do" set tells you actual exfiltration. Regulatory notification (GDPR 72h, CCPA, etc.) is driven by whether personal data was, or is reasonably believed to have been, accessed — so if data-access logging was off, you may have to assume worst-case over the permission set, which is exactly why data-plane logging on sensitive stores is worth the cost.<br />
+<em>Signal:</em> Distinguishes capability vs. observed action; ties to notification/legal.</p>
+<p><strong>Q8. When would you choose network containment over identity containment, and vice versa?</strong><br />
+Identity containment (revoke/deny/disable) is the default because it's the fastest, most complete kill switch for API-based access and it works regardless of network topology — use it first for any credential compromise. Network containment (quarantine SG/firewall/NSG) is chosen to preserve a live host for memory forensics, to cut command-and-control and lateral movement while you investigate, or when the threat is data-plane traffic (e.g., a compromised app node beaconing) rather than control-plane API abuse. In practice you do both in parallel: deny the identity to stop control-plane actions, quarantine the compute to freeze evidence and stop network-level activity. The nuance is that identity containment on a <em>shared</em> service account causes collateral outage, so sometimes you quarantine the specific compute first.<br />
+<em>Signal:</em> Nuanced "both, in this order, for these reasons" rather than either/or.</p>
+<p><strong>Q9. How does IR differ for serverless (Lambda/Cloud Functions) and containers (EKS/GKE/AKS) vs. VMs?</strong><br />
+For serverless there is no host to image — evidence lives in the function's configuration (code, layers, environment variables, execution-role permissions) and in invocation/audit logs, so containment means disabling triggers, setting reserved concurrency to zero, revoking the execution role, and inspecting the function version and env-var secrets for backdoors. For containers, the pod typically inherits a cloud identity via workload identity or the node role, so a compromised pod = cloud API access; containment means cordoning/deleting the pod, network-policy isolation, revoking the workload identity, and checking whether the attacker reached the node's metadata or created workloads. In both cases you lose the "snapshot the disk" primitive and lean harder on control-plane logs, image/registry provenance, and IaC to rebuild — and the ephemerality is even more extreme, so automated capture and immutable logging matter more.<br />
+<em>Signal:</em> Understands that the forensic surface moves from disk to config+logs+identity.</p>
+<p><strong>Q10. Your GuardDuty detector was deleted mid-incident. What does this tell you and how should you have prevented it?</strong><br />
+It tells you the attacker has defense-evasion capability (T1562) and likely admin-level permissions, and that your detection was single-tenant — a red flag that you should widen scope and assume broader compromise. Prevention is architectural: run GuardDuty/Defender in a delegated security account with the member accounts unable to disable or delete detectors (enforced by SCP), so a compromised production identity can't blind you; findings should also stream out to the immutable log account in real time so deletion of the detector doesn't erase already-emitted findings. This is the same separation-of-duties principle as immutable logging applied to detection tooling.<br />
+<em>Signal:</em> Sees delegated admin + SCP guardrails and treats detector deletion as escalation signal.</p>
+<p><strong>Tier 3 — Expert / deep dive</strong></p>
+<p><strong>Q11. Walk through containing a forged-federation-token attack (Golden SAML / Storm-0558-style). Why do normal containment steps fail?</strong><br />
+Normal steps fail because there is no password to reset, no key to deactivate, and no anomalous sign-in event — the tokens are cryptographically valid, minted with a stolen signing key, and bypass MFA and Conditional Access entirely. Containment requires rotating the token-signing key material (the IdP's SAML token-signing certificate or the Entra/AD FS signing key), which invalidates all outstanding tokens, then forcing re-issuance org-wide; you must also revoke and re-consent OAuth apps and rotate any secrets the forged access reached. Detection has to come from the <em>resource</em> side — anomalous data-access patterns, MailItemsAccessed audit events, token <code>issuer</code>/<code>audience</code> mismatches — not the authentication side, because the forged tokens never traverse the normal login. The lesson is that signing-key custody (HSM, rotation, issuance logging) is the real control, and IR for this class is fundamentally key-management IR.<br />
+<em>Signal:</em> Deep grasp of federation trust, why MFA doesn't help, key rotation as containment.</p>
+<p><strong>Q12. Design an automated snapshot-before-terminate pipeline triggered by a detection, including how you avoid destroying evidence via auto-scaling.</strong><br />
+Wire the finding source (GuardDuty/SCC/Defender) to an EventBridge/Pub-Sub rule that invokes an IR Lambda/Cloud Function. That function first places an ASG lifecycle hook so the instance enters <code>Terminating:Wait</code> (or sets instance protection) — this prevents auto-scaling from replacing-and-killing the host mid-capture. It then tags the instance, swaps it to a deny-all quarantine security group, snapshots root and data volumes with chain-of-custody tags and records the snapshot IDs/hashes to the evidence store, optionally invokes an in-guest agent (AVML/Velociraptor via SSM/Ops Agent) to capture memory, and finally completes the lifecycle action to allow termination or preserves the instance. Key design points: the IR function's role lives in the security account and is <em>not</em> something a compromised production identity can delete; capture is idempotent and time-boxed so a hung agent doesn't block containment forever; and everything is logged to immutable storage. Trade-off: holding instances in <code>Terminating:Wait</code> conflicts with capacity self-healing, so it's gated behind an explicit "IR mode."<br />
+<em>Signal:</em> Real automation design with lifecycle hooks, separation of privilege, idempotency.</p>
+<p><strong>Q13. How do you prove exfiltration actually occurred vs. was merely possible, and what if data-access logging was off?</strong><br />
+Proving exfiltration requires data-plane evidence: CloudTrail S3 data events / GCP Data Access logs / Azure storage diagnostics showing <code>GetObject</code>/<code>objects.get</code>/blob reads by the compromised principal, correlated with egress signals (VPC Flow Logs, bytes-out, cross-account snapshot shares, or transfers to an unknown account via T1537). If data-access logging was off, you cannot prove specific reads, so you fall back to the capability set — you must treat all data the principal could read as potentially exfiltrated for notification purposes, and corroborate with whatever network telemetry exists (flow logs showing large egress to an external IP, or a snapshot <code>ModifySnapshotAttribute</code> sharing event). This asymmetry — cheap-and-always-on management logs prove <em>access to the account</em>, but only expensive data-plane logs prove <em>what left</em> — is the core reason to enable data-access logging on sensitive stores despite the cost, and it directly changes your legal exposure.<br />
+<em>Signal:</em> Understands the evidentiary gap and its regulatory consequence.</p>
+<p><strong>Q14. An attacker with org-admin briefly held your AWS Organization. How do you ensure complete eviction and rebuild trust in the environment?</strong><br />
+Assume total control-plane compromise: enumerate every account for attacker-created persistence — new IAM users/roles, access keys, altered trust policies, cross-account roles, SCP changes, new identity-provider/SAML trusts, KMS key policy grants, and disabled logging/detectors — using the immutable org trail (which survives because it's in a separate locked account). Rotate all root and admin credentials with hardware MFA, rotate KMS/secret material and re-encrypt where feasible, remove every unrecognized principal and trust, and validate SCP/guardrail integrity. Because you cannot fully trust in-place config, prefer rebuilding critical accounts from version-controlled IaC into a clean org structure and re-onboarding, restoring data from object-locked backups whose integrity predates the compromise. Trust is re-established through provenance: known-good IaC, immutable backups, and log continuity — not by inspection alone, since a sufficiently privileged attacker could have altered anything mutable.<br />
+<em>Signal:</em> Grasps worst-case eviction, IaC-driven rebuild, immutable backups, and that inspection alone is insufficient.</p>
+<p><strong>Q15. Contrast the AWS, GCP, and Azure "deny beats allow" primitives and how you'd pre-stage a break-glass containment for each.</strong><br />
+AWS uses SCPs (Organizations) and permission-boundary/identity/resource-policy explicit <code>Deny</code>, where any explicit Deny in the evaluation chain wins — pre-stage a quarantine SCP keyed on <code>aws:PrincipalArn</code> and an IAM quarantine policy, attachable in one action. GCP uses IAM <strong>deny policies</strong> (<code>denypolicies</code>) that override allow bindings and can be attached at org/folder/project scope, plus Org Policy and VPC Service Controls perimeters — pre-stage a deny policy targeting <code>principal://…serviceAccounts/…</code> with <code>deniedPermissions: ["*"]</code>. Azure uses <strong>deny assignments</strong> (created via Blueprints/Managed Apps, since you can't author them directly like RBAC) plus account disable and <code>revokeSignInSessions</code> for identity, and Conditional Access to block at sign-in — pre-stage a disable+revoke runbook and a locked-down break-glass. The common pattern is: a pre-approved, tested, high-scope deny artifact the on-call can apply in seconds, scoped to the specific principal to avoid production collateral, with the authoring permission for these guardrails held only by a separate security identity so the attacker can't remove them.<br />
+<em>Signal:</em> Cross-cloud fluency in the exact deny primitives and break-glass pre-staging.</p>
+<hr />
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>AWS</th>
+<th>GCP</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Control-plane audit log</td>
+<td>CloudTrail (management events)</td>
+<td>Cloud Audit Logs — Admin Activity</td>
+<td>Activity Log</td>
+</tr>
+<tr>
+<td>Data-plane audit log</td>
+<td>CloudTrail data events</td>
+<td>Cloud Audit Logs — Data Access</td>
+<td>Resource diagnostic logs</td>
+</tr>
+<tr>
+<td>Identity sign-in / auth log</td>
+<td>IAM Identity Center / CloudTrail auth</td>
+<td>Cloud Identity / Access Transparency</td>
+<td>Entra ID sign-in + audit logs</td>
+</tr>
+<tr>
+<td>Managed threat detection</td>
+<td>GuardDuty</td>
+<td>Security Command Center (SCC)</td>
+<td>Microsoft Defender for Cloud</td>
+</tr>
+<tr>
+<td>SIEM</td>
+<td>Security Lake + Athena / OpenSearch</td>
+<td>Chronicle / Log Analytics</td>
+<td>Microsoft Sentinel</td>
+</tr>
+<tr>
+<td>Short-lived workload identity</td>
+<td>IAM Roles / IRSA / Roles Anywhere</td>
+<td>Workload Identity Federation</td>
+<td>Managed Identity</td>
+</tr>
+<tr>
+<td>Org-wide explicit deny</td>
+<td>Service Control Policy (SCP)</td>
+<td>IAM deny policy</td>
+<td>Deny assignment</td>
+</tr>
+<tr>
+<td>Disable principal</td>
+<td><code>iam update-access-key</code>, disable user</td>
+<td><code>iam service-accounts disable</code></td>
+<td><code>az ad user/sp update --account-enabled false</code></td>
+</tr>
+<tr>
+<td>Revoke sessions</td>
+<td>Revoke-older-sessions (<code>aws:TokenIssueTime</code>)</td>
+<td>Disable SA (tokens expire)</td>
+<td><code>revokeSignInSessions</code></td>
+</tr>
+<tr>
+<td>Compute quarantine</td>
+<td>Isolation Security Group</td>
+<td>Deny-all firewall rule by tag</td>
+<td>Deny-all NSG</td>
+</tr>
+<tr>
+<td>Disk evidence capture</td>
+<td>EBS snapshot / AMI</td>
+<td>PD snapshot</td>
+<td>Managed disk snapshot</td>
+</tr>
+<tr>
+<td>Data-exfil perimeter</td>
+<td>VPC endpoints + resource policies</td>
+<td>VPC Service Controls</td>
+<td>Private Link + storage firewall</td>
+</tr>
+<tr>
+<td>Immutable log store</td>
+<td>S3 Object Lock + log-file validation</td>
+<td>Bucket retention lock</td>
+<td>Immutable blob (WORM)</td>
+</tr>
+<tr>
+<td>Instance metadata hardening</td>
+<td>IMDSv2, hop-limit</td>
+<td>Metadata concealment / restrict</td>
+<td>IMDS + Managed Identity</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li>In cloud IR the <strong>credential is the incident</strong>; identity containment (revoke/deny/disable) is the fastest, most complete kill switch because it works across every network path at once.</li>
+<li><strong>Deny beats allow everywhere</strong> — an org-scoped explicit deny (SCP / IAM deny policy / deny assignment) keyed on the compromised principal is your single-action break-glass; pre-stage and test it.</li>
+<li>You <strong>cannot revoke a temporary token</strong> before expiry — invalidate STS sessions with the <code>aws:TokenIssueTime</code> deny trick, disable the source SA in GCP, and <code>revokeSignInSessions</code> in Azure.</li>
+<li><strong>Snapshot before terminate</strong>: ephemeral compute (auto-scale, spot, serverless, containers) destroys evidence, so capture disks/memory with chain-of-custody first — then rebuild clean, which cloud makes fast.</li>
+<li>Your forensic timeline is the <strong>management-plane audit log</strong>; only <strong>data-plane logs</strong> prove exfiltration — enable them on sensitive stores despite the cost, or you'll notify worst-case over the whole permission set.</li>
+<li>Keep logs and detectors in a <strong>separate, immutable security account</strong> the compromised identity can't delete; log-file validation and Object Lock make evidence tamper-evident.</li>
+<li><strong>Rotation without eradication is theater</strong> — hunt persistence (new keys, role trusts, <code>setIamPolicy</code>, OAuth grants, function backdoors, shared snapshots) before you declare eviction.</li>
+<li><strong>Blast radius = capability ∪ observed action</strong>: walk the IAM graph and the audit trail together; capability bounds notification, observed action proves impact.</li>
+<li><strong>Serverless/container IR</strong> moves the forensic surface from disk to config + logs + workload identity; a compromised pod usually means cloud API access via inherited identity.</li>
+<li>Prevention compounds IR: <strong>short-lived federated credentials, IMDSv2, least privilege, and immutable logging</strong> turn most "credential compromise" incidents into small, well-scoped, quickly-contained events.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>NIST SP 800-61r2, <em>Computer Security Incident Handling Guide</em> — the lifecycle this note maps to.</li>
+<li>NIST SP 800-86, <em>Guide to Integrating Forensic Techniques into Incident Response</em>.</li>
+<li>MITRE ATT&amp;CK — Cloud (IaaS) and Identity Provider matrices: T1078.004, T1098, T1552.005, T1537, T1530, T1562, T1606.002.</li>
+<li>AWS: <em>Security Incident Response Guide</em> (whitepaper); CloudTrail, GuardDuty, Organizations SCP, and STS "revoke sessions" documentation.</li>
+<li>GCP: <em>Cloud Audit Logs</em> overview, IAM <em>deny policies</em>, VPC Service Controls, and Security Command Center docs.</li>
+<li>Microsoft: Entra ID sign-in/audit logs, <code>revokeSignInSessions</code> Graph API, Defender for Cloud, deny-assignments, and Sentinel KQL references.</li>
+<li>Cloud Security Alliance, <em>Cloud Incident Response Framework</em> (2021).</li>
+<li>CISA/Mandiant post-incident analyses: Storm-0558 (2023), SolarWinds/SUNBURST (2020); Capital One indictment (2019) for the SSRF-metadata chain.</li>
+<li>SANS FOR509, <em>Enterprise Cloud Forensics and Incident Response</em>.</li>
+<li>Repo cross-refs: <code>incident/README.md</code>, <code>incident/IR-Lifecycle-NIST/README.md</code>, <code>cloud/GCP/Operations/Cloud-Audit-Logs/README.md</code>, <code>cloud/GCP/Identity/Service-Accounts/README.md</code>, <code>cloud/AWS/Operations/CloudTrail/README.md</code>, <code>cloud/AWS/Security/GuardDuty/README.md</code>, <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code>.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSRF — Server-Side Request Forgery</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Server-Side-Attacks\SSRF\README.md</p>
+<h1 id="ssrf-server-side-request-forgery">SSRF — Server-Side Request Forgery</h1>
+<p><strong>Category:</strong> Server-Side Attacks — Internal Network Pivoting<br />
+<strong>OWASP:</strong> A10:2021 — SSRF (newly promoted to standalone category)<br />
+<strong>CWE:</strong> CWE-918<br />
+<strong>Applies To:</strong> Any application that fetches URLs or makes outbound HTTP requests based on user input</p>
+<h2 id="overview">Overview</h2>
+<p>Server-Side Request Forgery is an attack where the attacker causes the server to make HTTP requests to arbitrary destinations — including internal network addresses, cloud metadata services, and loopback interfaces — that the attacker could not reach directly. The server acts as an unintentional proxy, forwarding requests from the attacker to targets inside the private network or to cloud metadata APIs that expose credentials.</p>
+<p>SSRF became a critical vulnerability category in cloud environments. The most well-known exploitation of SSRF was the 2019 Capital One breach, where SSRF was used to access the AWS EC2 instance metadata service (<code>169.254.169.254</code>) and retrieve IAM role credentials, ultimately leading to the exfiltration of over 100 million customer records. The attack was so impactful that AWS redesigned their IMDSv2 to require session-oriented authentication specifically to mitigate SSRF-based attacks on the metadata service.</p>
+<p>At Google Cloud scale, SSRF in a GCP application exposes the GCP metadata server (<code>metadata.google.internal</code>), which can return Google service account tokens, project data, and SSH keys — instantly providing full GCP project access.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>SSRF exists when an application:</p>
+<ol>
+<li>Accepts a URL or domain from user input</li>
+<li>Makes an outbound HTTP request to that URL from the server</li>
+<li>Does not validate that the URL is limited to expected external destinations</li>
+</ol>
+<p><strong>Common SSRF Entry Points:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>User Input</th>
+<th>SSRF Vector</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>URL preview / link unfurling</td>
+<td><code>url=http://evil.com</code></td>
+<td>Server fetches the URL</td>
+</tr>
+<tr>
+<td>Image from URL upload</td>
+<td><code>imageUrl=http://internal:8080/admin</code></td>
+<td>Server fetches image URL</td>
+</tr>
+<tr>
+<td>Webhook registration</td>
+<td><code>callback_url=http://169.254.169.254/...</code></td>
+<td>Server calls webhook URL</td>
+</tr>
+<tr>
+<td>PDF generation from URL</td>
+<td><code>pdf_url=http://internal.corp/secrets</code></td>
+<td>Headless browser fetches URL internally</td>
+</tr>
+<tr>
+<td>Import-from-URL feature</td>
+<td><code>import_url=file:///etc/passwd</code></td>
+<td>Server reads local file</td>
+</tr>
+<tr>
+<td>Integrations / API connectors</td>
+<td><code>endpoint=http://attacker.com</code></td>
+<td>Server calls attacker-configured API</td>
+</tr>
+<tr>
+<td>XML/SVG processing</td>
+<td>External entity reference in XML</td>
+<td>XXE-type SSRF via parser</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ssrf-targets-and-what-can-be-accessed">SSRF Targets and What Can Be Accessed</h3>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>URL</th>
+<th>What Is Exposed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AWS EC2 Metadata (IMDSv1)</td>
+<td><code>http://169.254.169.254/latest/meta-data/</code></td>
+<td>IAM role keys, AMI ID, user-data</td>
+</tr>
+<tr>
+<td>AWS IMDSv1 IAM credentials</td>
+<td><code>http://169.254.169.254/latest/meta-data/iam/security-credentials/&lt;role-name&gt;</code></td>
+<td>Temporary AWS <code>AccessKeyId</code>, <code>SecretAccessKey</code>, <code>Token</code></td>
+</tr>
+<tr>
+<td>GCP Metadata</td>
+<td><code>http://metadata.google.internal/computeMetadata/v1/</code></td>
+<td>Service account tokens, project ID</td>
+</tr>
+<tr>
+<td>Azure IMDS</td>
+<td><code>http://169.254.169.254/metadata/instance?api-version=2021-02-01</code></td>
+<td>Instance metadata, managed identity tokens</td>
+</tr>
+<tr>
+<td>Kubernetes API server</td>
+<td><code>https://kubernetes.default.svc</code></td>
+<td>K8s cluster resources (if pod has RBAC rights)</td>
+</tr>
+<tr>
+<td>Internal microservices</td>
+<td><code>http://user-service.internal/admin/users</code></td>
+<td>Unauthenticated internal APIs</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td><code>http://localhost:6379/</code> (using Gopher protocol)</td>
+<td>In-memory cache data; potential RCE</td>
+</tr>
+<tr>
+<td>Elasticsearch</td>
+<td><code>http://localhost:9200/_all/_search</code></td>
+<td>All indexed documents</td>
+</tr>
+<tr>
+<td>Internal admin panels</td>
+<td><code>http://internal-dashboard.corp:8080/</code></td>
+<td>Admin UIs not exposed to internet</td>
+</tr>
+<tr>
+<td>Other application servers</td>
+<td><code>http://192.168.1.x/...</code></td>
+<td>Lateral movement to internal hosts</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cloud-metadata-service-the-critical-target">Cloud Metadata Service — The Critical Target</h3>
+<p>AWS IMDSv1 is the canonical SSRF-to-credential-theft path:</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant Attacker as Attacker
+    participant WebApp as Web Application (EC2)
+    participant IMDS as AWS IMDS 169.254.169.254
+    participant AWS as AWS IAM API
+
+    Attacker->>WebApp: POST /fetch?url=http://169.254.169.254/latest/meta-data/
+    WebApp->>IMDS: GET /latest/meta-data/ (no auth required in IMDSv1)
+    IMDS-->>WebApp: ami-id, hostname, iam/ (list of available paths)
+    WebApp-->>Attacker: AWS metadata visible
+
+    Attacker->>WebApp: POST /fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/app-role
+    WebApp->>IMDS: GET /latest/meta-data/iam/security-credentials/app-role
+    IMDS-->>WebApp: AccessKeyId, SecretAccessKey, Token (full IAM creds)
+    WebApp-->>Attacker: Temporary IAM credentials with app-role permissions
+
+    Attacker->>AWS: Use stolen IAM creds to call S3, RDS, etc.
+    Note over Attacker,AWS: Attacker now has full cloud access of the application role
+</pre>
+<h3 id="ssrf-bypass-techniques">SSRF Bypass Techniques</h3>
+<p>Naive allowlist/blocklist-based SSRF filters are commonly bypassed:</p>
+<table>
+<thead>
+<tr>
+<th>Bypass Technique</th>
+<th>Method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Localhost aliases</td>
+<td><code>http://127.1/</code>, <code>http://127.0.0.1/</code>, <code>http://[::1]/</code>, <code>http://0x7f000001/</code></td>
+</tr>
+<tr>
+<td>DNS to internal</td>
+<td><code>http://attacker.com</code> resolves to <code>192.168.1.x</code> (DNS rebinding)</td>
+</tr>
+<tr>
+<td>Decimal encoding</td>
+<td><code>http://2130706433/</code> (2130706433 decimal = 127.0.0.1)</td>
+</tr>
+<tr>
+<td>URL shorteners</td>
+<td><code>http://short.ly/x</code> → <code>http://internal-host/</code></td>
+</tr>
+<tr>
+<td>Redirect chain</td>
+<td>Attacker server returns 301 redirect to <code>169.254.169.254</code></td>
+</tr>
+<tr>
+<td>IPv6</td>
+<td><code>http://[::ffff:169.254.169.254]/</code></td>
+</tr>
+<tr>
+<td>URL scheme abuse</td>
+<td><code>file:///etc/passwd</code>, <code>gopher://localhost:6379/_FLUSHALL</code></td>
+</tr>
+<tr>
+<td>CNAME to private IP</td>
+<td>Attacker controls DNS; CNAME maps to internal IP</td>
+</tr>
+<tr>
+<td>IMDSv1 header bypass</td>
+<td>Some filters check <code>Host</code> but not <code>X-Forwarded-Host</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="dns-rebinding-attack">DNS Rebinding Attack</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant Attacker as Attacker DNS
+    participant App as Web Server
+    participant Internal as Internal Service
+
+    App->>Attacker: DNS resolve attacker.com?
+    Attacker-->>App: TTL=1, A=1.2.3.4 (external IP to pass filter)
+    App->>App: Filter check: 1.2.3.4 is external, OK
+    Note over App: 1 second passes; TTL expires
+    App->>Attacker: DNS resolve attacker.com? (refetch)
+    Attacker-->>App: TTL=1, A=192.168.1.1 (internal IP)
+    App->>Internal: HTTP request to 192.168.1.1 (SSRF achieved)
+    Internal-->>App: Internal data
+    App-->>Attacker: Returns internal data
+</pre>
+<h3 id="blind-ssrf">Blind SSRF</h3>
+<p>Sometimes the application makes the internal request but does not return the response to the user (blind SSRF). Detection methods:</p>
+<ul>
+<li>Out-of-band DNS/HTTP callback (e.g., Burp Collaborator, interactsh)</li>
+<li>Timing-based detection (internal services respond faster or slower)</li>
+<li>Error message differences when internal vs external hosts are hit</li>
+</ul>
+<pre class="mermaid">
+flowchart TD
+    A[User provides URL] --> B[Server fetches URL internally]
+    B --> C{Response returned to user?}
+    C -- Yes --> D[Regular SSRF - data exfiltrated directly]
+    C -- No --> E[Blind SSRF]
+    E --> F[Use OOB interaction detector]
+    F --> G[Server reaches out-of-band endpoint]
+    G --> H[DNS/HTTP callback received by attacker]
+    H --> I[Confirms SSRF exists; pivot to extract data via side channels]
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Cloud metadata credential theft</td>
+<td>SSRF to 169.254.169.254; IMDSv1 no auth</td>
+<td>Full cloud account compromise</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Internal API access</td>
+<td>SSRF to internal services not internet-accessible</td>
+<td>Unauthorized data access, admin operations</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Kubernetes service account token theft</td>
+<td>SSRF to k8s API server using pod's service account</td>
+<td>K8s cluster compromise</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Redis RCE via Gopher protocol</td>
+<td><code>gopher://localhost:6379/_...</code> sends raw Redis commands</td>
+<td>Cache poisoning, RCE if Redis exposes lua eval</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Internal network enumeration</td>
+<td>SSRF to scan RFC-1918 ranges; port scanning via timing</td>
+<td>Internal topology disclosure</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>SSRF to read local files</td>
+<td><code>file:///etc/passwd</code> scheme</td>
+<td>Same as path traversal via SSRF</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>DNS rebinding bypass filter</td>
+<td>DNS TTL manipulation makes internal IP appear external</td>
+<td>SSRF even behind IP-based filters</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Blind SSRF for exfiltration</td>
+<td>OOB callbacks prove SSRF; pivot exploits internal services</td>
+<td>Same impact as regular SSRF, harder to detect</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>SSRF in PDF / screenshot services</td>
+<td>Headless browser fetches attacker-controlled URL; renders internal pages</td>
+<td>Full internal service access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>XXE as SSRF variant</td>
+<td>XML external entity causes server to fetch attacker URL or file</td>
+<td>Same; often missed when app processes XML</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Cloud metadata theft</td>
+<td><strong>Enforce IMDSv2 (session-oriented tokens required)</strong> on all EC2 instances; assign minimal IAM roles</td>
+<td>AWS/GCP/Azure configuration</td>
+</tr>
+<tr>
+<td>All (root cause)</td>
+<td>Arbitrary URL fetch</td>
+<td>Validate URL destination against an allowlist of approved external domains; reject RFC-1918 and loopback addresses</td>
+<td>Server-side request validation</td>
+</tr>
+<tr>
+<td>7</td>
+<td>DNS rebinding</td>
+<td>Resolve DNS at validation time AND at request time; or use a DNS resolver that blocks RFC-1918 responses</td>
+<td>SSRF protection library</td>
+</tr>
+<tr>
+<td>1-4</td>
+<td>Internal service access</td>
+<td>Use network segmentation; application server should not have direct access to metadata service or internal admin APIs via routing</td>
+<td>Network architecture</td>
+</tr>
+<tr>
+<td>6</td>
+<td>file:// and gopher://</td>
+<td>Allowlist only <code>http://</code> and <code>https://</code> schemes; block all others explicitly</td>
+<td>URL scheme validation</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Blind SSRF</td>
+<td>Monitor for unexpected outbound connections; use egress firewalls to block unexpected destinations</td>
+<td>Network monitoring + egress filtering</td>
+</tr>
+<tr>
+<td>9</td>
+<td>PDF/headless browser SSRF</td>
+<td>Run headless browser in isolated network namespace with no access to internal services</td>
+<td>Container/network isolation</td>
+</tr>
+<tr>
+<td>10</td>
+<td>XXE as SSRF</td>
+<td>Disable external entity processing in all XML parsers; see XXE mitigations</td>
+<td>XML parser configuration</td>
+</tr>
+</tbody>
+</table>
+<h3 id="imdsv2-the-aws-defense">IMDSv2 — The AWS Defense</h3>
+<p>AWS IMDSv2 adds a session token requirement to every metadata request:</p>
+<pre><code class="language-bash"># IMDSv1 - trivially accessible via SSRF with one request
+curl http://169.254.169.254/latest/meta-data/iam/security-credentials/role-name
+
+# IMDSv2 - requires two requests; SSRF must follow redirects AND send PUT first
+TOKEN=$(curl -X PUT &quot;http://169.254.169.254/latest/api/token&quot; -H &quot;X-aws-ec2-metadata-token-ttl-seconds: 21600&quot;)
+curl -H &quot;X-aws-ec2-metadata-token: $TOKEN&quot; http://169.254.169.254/latest/meta-data/
+</code></pre>
+<p>Simple SSRF tools (basic <code>fetch()</code> calls) do not follow this two-step pattern; they fail to get the token, so the metadata API returns 401. The attacker must use a more sophisticated SSRF exploit that sends PUT first and follows redirects — much harder to execute.</p>
+<h3 id="safe-ssrf-mitigation-library-pattern">Safe SSRF Mitigation Library Pattern</h3>
+<pre><code class="language-python">import ipaddress
+import socket
+from urllib.parse import urlparse
+
+ALLOWED_SCHEMES = {'https', 'http'}
+BLOCKED_PREFIXES = ['169.254.', '10.', '192.168.', '172.16.', '172.17.', '172.18.', '172.19.',
+                    '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.',
+                    '172.27.', '172.28.', '172.29.', '172.30.', '172.31.']
+
+def safe_fetch(url):
+    parsed = urlparse(url)
+
+    # 1. Validate scheme
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        raise ValueError(&quot;Blocked scheme&quot;)
+
+    # 2. Resolve DNS
+    try:
+        ip = socket.gethostbyname(parsed.hostname)
+    except socket.gaierror:
+        raise ValueError(&quot;Could not resolve hostname&quot;)
+
+    # 3. Block private IPs
+    addr = ipaddress.ip_address(ip)
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        raise ValueError(&quot;Blocked private IP range&quot;)
+
+    # 4. Re-resolve at fetch time (use a DNS resolver that blocks private IPs)
+    return requests.get(url, timeout=5, allow_redirects=False)
+</code></pre>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Enforce AWS IMDSv2 on all EC2 instances and equivalent on GCP/Azure.</strong> The cloud metadata service is the single highest-impact SSRF target. IMDSv2's session-oriented token requirement breaks simple SSRF exploitation by requiring a state-sensitive two-step interaction. Enable IMDSv2 on all instances; set <code>HttpTokens: required</code> in instance metadata options.</li>
+<li><strong>Validate outbound URL destinations against a strict allowlist; block RFC-1918 and loopback ranges.</strong> Never allow the server to make requests to <code>10.x</code>, <code>172.16-31.x</code>, <code>192.168.x</code>, <code>127.x</code>, <code>0.x</code>, or <code>169.254.x</code> as a result of user input. An allowlist of known external APIs is safer than a blocklist of private ranges. Also block <code>file://</code>, <code>gopher://</code>, and <code>dict://</code> schemes.</li>
+<li><strong>Implement network-level egress filtering.</strong> Deny the application server's outbound access to metadata services and internal admin ports at the network level (VPC security groups, iptables, network policies). Defense-in-depth means that even if SSRF validation is bypassed, the network route is blocked.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What is SSRF and why is it particularly dangerous in cloud environments?</li>
+<li>Walk through the Capital One SSRF → AWS metadata → data exfiltration attack chain.</li>
+<li>How does AWS IMDSv2 mitigate SSRF attacks against the EC2 instance metadata service?</li>
+<li>What is blind SSRF and how would you detect it using out-of-band techniques?</li>
+<li>Why does blocking <code>127.0.0.1</code> not fully prevent SSRF attacks against localhost? Name four bypass techniques.</li>
+<li>What is DNS rebinding and how can it be used to bypass IP-based SSRF filters?</li>
+<li>What schemes other than <code>http://</code> can be used for SSRF attacks, and what do they access?</li>
+<li>How would you protect an internal PDF generation service (which uses a headless browser) from being abused for SSRF?</li>
+<li>Why is XXE (XML External Entity) sometimes described as an SSRF variant?</li>
+<li>Design a comprehensive SSRF protection mechanism for a URL-fetching microservice used by a global SaaS product.</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>SSRF causes the server to make HTTP requests to attacker-controlled destinations, pivoting into internal networks and cloud metadata services.</li>
+<li>The most critical SSRF target in AWS is the EC2 IMDSv1 metadata service — it provides temporary IAM credentials with no authentication.</li>
+<li>IMDSv2 mitigates metadata SSRF by requiring session-oriented token exchange; enable it on all EC2 instances.</li>
+<li>DNS rebinding, localhost aliases, decimal encoding, and URL redirect chains are common SSRF filter bypass techniques.</li>
+<li>Blind SSRF requires out-of-band detection but can have the same impact as regular SSRF.</li>
+<li>Defense layers: URL allowlist + private IP blocklist + DNS resolver validation + network egress filtering + IMDSv2.</li>
+<li><code>file://</code>, <code>gopher://</code>, and <code>dict://</code> schemes extend SSRF beyond HTTP to filesystem access and raw TCP interactions.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

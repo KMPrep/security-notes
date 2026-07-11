@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q7_windows_event_log.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q7_windows_event_log.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q7_windows_event_log.py</p>
+  <p class="line-count">282 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q7. Windows Security Event Log Parser (4624/4625/4648)
+=======================================================
+Parse Windows Security events to detect Pass-the-Hash, lateral movement,
+Over-Pass-the-Hash, and after-hours Kerberos explicit credential use.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Count 4625 events per IP; flag high-failure sources.
+  Problem: Completely misses the sophistication of PtH — which succeeds via
+  NTLM Type 3, so there are NO 4625 events. The attacker&#x27;s activity is
+  entirely in 4624 events.
+
+BETTER: Parse all three event IDs, check AuthenticationPackage field.
+  Problem: Still misses the correlated chain. PtH requires: Type 3 logon
+  + NTLM package + workstation ≠ target server. Lateral movement requires
+  counting Type 3 events from one source to distinct target hosts.
+
+GOOGLE-LEVEL (this file):
+  - Pass-the-Hash: Logon Type 3 + NTLM + WorkstationName ≠ TargetServerName.
+  - Lateral movement: single SubjectIP generating Type 3 to &gt; 5 hosts / 10 min.
+  - Over-Pass-the-Hash: Type 9 from a host followed by Type 3 from same host
+    within 30 seconds (NewCredentials → Kerberos → network logon).
+  - After-hours: Event 4648 outside 09:00–17:00 UTC.
+  - All detectors produce event chains, not just flag booleans.
+
+Complexity: O(N) parse, O(E) space where E = distinct event tuples.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime, timezone, time as dtime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified key=value Windows event format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+TimeCreated=2024-03-12T08:00:00Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=DC01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:00:01Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=FILE01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:00:02Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=PRINT01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:00:03Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=SQL01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:00:04Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=APP01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:00:05Z EventID=4624 SubjectUserName=SYSTEM SubjectDomainName=NT_AUTHORITY LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN01 TargetServerName=MGMT01 IpAddress=10.0.0.50 TargetUserName=alice
+TimeCreated=2024-03-12T08:05:00Z EventID=4624 SubjectUserName=bob SubjectDomainName=CORP LogonType=9 AuthenticationPackageName=Negotiate WorkstationName=WKSTN02 TargetServerName=WKSTN02 IpAddress=- TargetUserName=bob
+TimeCreated=2024-03-12T08:05:20Z EventID=4624 SubjectUserName=bob SubjectDomainName=CORP LogonType=3 AuthenticationPackageName=Kerberos WorkstationName=WKSTN02 TargetServerName=DC01 IpAddress=10.0.0.51 TargetUserName=bob
+TimeCreated=2024-03-12T08:10:00Z EventID=4625 SubjectUserName=carol SubjectDomainName=CORP LogonType=3 AuthenticationPackageName=NTLM WorkstationName=WKSTN03 TargetServerName=DC01 IpAddress=10.0.0.52 TargetUserName=carol FailureReason=WrongPassword
+TimeCreated=2024-03-12T22:30:00Z EventID=4648 SubjectUserName=dave SubjectDomainName=CORP TargetUserName=svc_backup TargetServerName=BACKUP01 IpAddress=10.0.0.53
+TimeCreated=2024-03-12T09:00:00Z EventID=4624 SubjectUserName=eve SubjectDomainName=CORP LogonType=3 AuthenticationPackageName=Kerberos WorkstationName=WKSTN04 TargetServerName=DC01 IpAddress=10.0.0.54 TargetUserName=eve
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+LATERAL_MOVE_HOST_THRESHOLD = 5    # distinct target hosts from one source IP in window
+LATERAL_MOVE_WINDOW_SECS    = 600  # 10 minutes
+OPTH_WINDOW_SECS            = 30   # Type 9 → Type 3 within this window = OverPtH
+BUSINESS_HOURS_START        = dtime(9, 0)
+BUSINESS_HOURS_END          = dtime(17, 0)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_kv(line: str) -&gt; dict:
+    &quot;&quot;&quot;Parse key=value pairs from a log line.&quot;&quot;&quot;
+    result = {}
+    for m in re.finditer(r&#x27;(\w+)=(\S+)&#x27;, line):
+        result[m.group(1)] = m.group(2)
+    return result
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    kv = parse_kv(line)
+    if &quot;EventID&quot; not in kv or &quot;TimeCreated&quot; not in kv:
+        return None
+    try:
+        ts = datetime.strptime(kv[&quot;TimeCreated&quot;], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return {
+        &quot;ts&quot;:          ts,
+        &quot;event_id&quot;:    int(kv[&quot;EventID&quot;]),
+        &quot;user&quot;:        kv.get(&quot;TargetUserName&quot;, kv.get(&quot;SubjectUserName&quot;, &quot;-&quot;)),
+        &quot;subject&quot;:     kv.get(&quot;SubjectUserName&quot;, &quot;-&quot;),
+        &quot;logon_type&quot;:  int(kv.get(&quot;LogonType&quot;, &quot;0&quot;)),
+        &quot;auth_pkg&quot;:    kv.get(&quot;AuthenticationPackageName&quot;, &quot;-&quot;),
+        &quot;workstation&quot;: kv.get(&quot;WorkstationName&quot;, &quot;-&quot;),
+        &quot;target_srv&quot;:  kv.get(&quot;TargetServerName&quot;, &quot;-&quot;),
+        &quot;src_ip&quot;:      kv.get(&quot;IpAddress&quot;, &quot;-&quot;),
+        &quot;domain&quot;:      kv.get(&quot;SubjectDomainName&quot;, &quot;-&quot;),
+        &quot;raw&quot;:         kv,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 1: Pass-the-Hash
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_pth(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    PtH signature: Logon Type 3 + NTLM package + WorkstationName != TargetServerName.
+    The workstation field reflects where the hash was injected; target is the victim server.
+    &quot;&quot;&quot;
+    alerts = []
+    for r in records:
+        if (r[&quot;event_id&quot;] == 4624
+                and r[&quot;logon_type&quot;] == 3
+                and &quot;NTLM&quot; in r[&quot;auth_pkg&quot;].upper()
+                and r[&quot;workstation&quot;] != r[&quot;target_srv&quot;]
+                and r[&quot;workstation&quot;] not in (&quot;-&quot;, &quot;&quot;)
+                and r[&quot;target_srv&quot;] not in (&quot;-&quot;, &quot;&quot;)):
+            alerts.append({
+                &quot;type&quot;:        &quot;PASS_THE_HASH&quot;,
+                &quot;user&quot;:        r[&quot;user&quot;],
+                &quot;src_ip&quot;:      r[&quot;src_ip&quot;],
+                &quot;workstation&quot;: r[&quot;workstation&quot;],
+                &quot;target_srv&quot;:  r[&quot;target_srv&quot;],
+                &quot;ts&quot;:          r[&quot;ts&quot;].isoformat(),
+            })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 2: Lateral Movement (Type 3 to many hosts from one source)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_lateral_movement(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Single src_ip generates Logon Type 3 to &gt; N distinct targets in 10 minutes.&quot;&quot;&quot;
+    # src_ip -&gt; sorted list of (ts_epoch, target_srv)
+    src_events: dict[str, list[tuple]] = defaultdict(list)
+    for r in records:
+        if r[&quot;event_id&quot;] == 4624 and r[&quot;logon_type&quot;] == 3 and r[&quot;src_ip&quot;] not in (&quot;-&quot;, &quot;&quot;):
+            src_events[r[&quot;src_ip&quot;]].append((r[&quot;ts&quot;].timestamp(), r[&quot;target_srv&quot;]))
+
+    alerts = []
+    for src, events in src_events.items():
+        events.sort()
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; LATERAL_MOVE_WINDOW_SECS:
+                left += 1
+            hosts = {events[i][1] for i in range(left, right + 1)}
+            if len(hosts) &gt; LATERAL_MOVE_HOST_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:           &quot;LATERAL_MOVEMENT&quot;,
+                    &quot;src_ip&quot;:         src,
+                    &quot;distinct_hosts&quot;: len(hosts),
+                    &quot;hosts&quot;:          sorted(hosts),
+                    &quot;window_start&quot;:   events[left][0],
+                    &quot;window_end&quot;:     events[right][0],
+                })
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 3: Over-Pass-the-Hash (Type 9 → Type 3 within 30s, same workstation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_opth(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    OverPtH: mimikatz sekurlsa::pth injects a hash and creates a Type 9 logon session,
+    then immediately uses it for a Type 3 network logon to another server.
+    &quot;&quot;&quot;
+    # workstation -&gt; list of (ts, logon_type, user)
+    ws_events: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        if r[&quot;event_id&quot;] == 4624 and r[&quot;logon_type&quot;] in (3, 9):
+            ws_events[r[&quot;workstation&quot;]].append({
+                &quot;ts&quot;:         r[&quot;ts&quot;].timestamp(),
+                &quot;logon_type&quot;: r[&quot;logon_type&quot;],
+                &quot;user&quot;:       r[&quot;user&quot;],
+                &quot;target_srv&quot;: r[&quot;target_srv&quot;],
+            })
+
+    alerts = []
+    for ws, events in ws_events.items():
+        type9_events = [e for e in events if e[&quot;logon_type&quot;] == 9]
+        type3_events = [e for e in events if e[&quot;logon_type&quot;] == 3]
+        for t9 in type9_events:
+            for t3 in type3_events:
+                if 0 &lt;= t3[&quot;ts&quot;] - t9[&quot;ts&quot;] &lt;= OPTH_WINDOW_SECS:
+                    alerts.append({
+                        &quot;type&quot;:        &quot;OVERPASS_THE_HASH&quot;,
+                        &quot;workstation&quot;: ws,
+                        &quot;user&quot;:        t9[&quot;user&quot;],
+                        &quot;type9_ts&quot;:    t9[&quot;ts&quot;],
+                        &quot;type3_ts&quot;:    t3[&quot;ts&quot;],
+                        &quot;target_srv&quot;:  t3[&quot;target_srv&quot;],
+                        &quot;gap_secs&quot;:    round(t3[&quot;ts&quot;] - t9[&quot;ts&quot;], 1),
+                    })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR 4: After-Hours 4648 (Explicit Credential Logon)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_after_hours_4648(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;event_id&quot;] == 4648:
+            t = r[&quot;ts&quot;].timetz().replace(tzinfo=None)
+            if not (BUSINESS_HOURS_START &lt;= t &lt;= BUSINESS_HOURS_END):
+                alerts.append({
+                    &quot;type&quot;:       &quot;AFTER_HOURS_EXPLICIT_CRED&quot;,
+                    &quot;user&quot;:       r[&quot;subject&quot;],
+                    &quot;target&quot;:     r[&quot;target_srv&quot;],
+                    &quot;src_ip&quot;:     r[&quot;src_ip&quot;],
+                    &quot;ts&quot;:         r[&quot;ts&quot;].isoformat(),
+                    &quot;local_time&quot;: r[&quot;ts&quot;].strftime(&quot;%H:%M:%S UTC&quot;),
+                })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(epoch: float) -&gt; str:
+    return datetime.utcfromtimestamp(epoch).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(pth, lat, opth, afh) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;WINDOWS SECURITY EVENT LOG — THREAT DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[PASS_THE_HASH] {len(pth)} alert(s)&quot;)
+    for a in pth:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  src={a[&#x27;src_ip&#x27;]}  &quot;
+              f&quot;{a[&#x27;workstation&#x27;]} → {a[&#x27;target_srv&#x27;]}  ts={a[&#x27;ts&#x27;]}&quot;)
+
+    print(f&quot;\n[LATERAL_MOVEMENT] {len(lat)} alert(s)&quot;)
+    for a in lat:
+        print(f&quot;  src={a[&#x27;src_ip&#x27;]}  hosts={a[&#x27;distinct_hosts&#x27;]}  &quot;
+              f&quot;window={ts_fmt(a[&#x27;window_start&#x27;])} → {ts_fmt(a[&#x27;window_end&#x27;])}&quot;)
+        print(f&quot;  targets={a[&#x27;hosts&#x27;]}&quot;)
+
+    print(f&quot;\n[OVERPASS_THE_HASH] {len(opth)} alert(s)&quot;)
+    for a in opth:
+        print(f&quot;  ws={a[&#x27;workstation&#x27;]}  user={a[&#x27;user&#x27;]}  &quot;
+              f&quot;gap={a[&#x27;gap_secs&#x27;]}s → target={a[&#x27;target_srv&#x27;]}&quot;)
+
+    print(f&quot;\n[AFTER_HOURS_EXPLICIT_CRED] {len(afh)} alert(s)&quot;)
+    for a in afh:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  target={a[&#x27;target&#x27;]}  ts={a[&#x27;ts&#x27;]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} Windows security events.\n&quot;)
+
+    print_report(
+        detect_pth(records),
+        detect_lateral_movement(records),
+        detect_opth(records),
+        detect_after_hours_4648(records),
+    )
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sigstore and Artifact Signing — Keyless Signatures, Transparency, and Attestations</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: supply_chain\Sigstore-And-Signing\README.md</p>
+<h1 id="sigstore-and-artifact-signing-keyless-signatures-transparency-and-attestations">Sigstore and Artifact Signing — Keyless Signatures, Transparency, and Attestations</h1>
+<p><strong>Domain:</strong> Supply-Chain Security<br />
+<strong>Ecosystem:</strong> Sigstore (cosign, Fulcio, Rekor), in-toto, SLSA<br />
+<strong>Related:</strong> SLSA provenance, Kubernetes admission control, OIDC</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Sigstore is a set of open services that make signing and verifying software artifacts practical at scale, without asking every developer or CI system to guard a long-lived private key. The core idea is <em>keyless signing</em>: instead of holding a signing key, a signer proves its identity to an OIDC provider (GitHub Actions, Google, an enterprise IdP), Sigstore's certificate authority binds that identity to a short-lived signing certificate, and the signature plus certificate are recorded in a public, append-only transparency log. The private key exists only for the few seconds it takes to sign, then it is discarded.</p>
+<p>This solves the two hardest problems in signing. First, key management: there is no key to rotate, store in a HSM, or leak in a build log, because the trust anchor becomes the <em>identity</em> (<code>repo:org/app:ref:refs/heads/main</code>) rather than a key fingerprint. Second, non-repudiation and detection: because every signature is written to a tamper-evident log, a compromised identity that signs a malicious artifact leaves a permanent, publicly auditable record. cosign is the CLI that ties this together for container images and arbitrary blobs, and it also carries <em>in-toto attestations</em> — signed statements about how an artifact was built, which is exactly the substrate SLSA provenance rides on. The downstream payoff is enforcement: a Kubernetes admission controller can refuse to run any image that was not signed by an expected identity, turning "we sign our stuff" into a hard runtime gate.</p>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-cosign-fulcio-rekor-mechanics">2.1 cosign / Fulcio / Rekor Mechanics</h3>
+<p>The three moving parts play distinct roles:</p>
+<ul>
+<li>
+<p><strong>Fulcio</strong> is a free certificate authority. It does not issue certificates to whoever asks; it issues a certificate only after validating an OIDC identity token. The resulting X.509 certificate embeds the OIDC identity (the SAN, e.g. an email or a workflow identity) and the issuer, and is valid for roughly ten minutes. This is a <em>code-signing</em> certificate whose subject is a human or workload identity, not a hostname.</p>
+</li>
+<li>
+<p><strong>cosign</strong> orchestrates the flow. To sign, it generates an ephemeral keypair in memory, obtains an OIDC token, sends the token plus the public key to Fulcio, and receives a signing certificate. It signs the artifact digest with the ephemeral private key, uploads the signature, certificate, and digest to Rekor, and then throws the private key away. For container images, the signature is stored as an OCI artifact alongside the image in the registry (a <code>.sig</code> tag derived from the image digest).</p>
+</li>
+<li>
+<p><strong>Rekor</strong> is the transparency log: an append-only, Merkle-tree-backed ledger. Each entry is a signed statement (signature + certificate + hashed payload). Rekor returns a <em>signed entry timestamp</em> (SET) proving the entry was included at a point in time. This inclusion is what makes short-lived certificates usable — at verification time the cert has long expired, but the Rekor entry proves the signature was created <em>while the cert was valid</em>. The Merkle structure means the log cannot be silently rewritten: any tampering breaks the tree's consistency proofs, which monitors continuously check.</p>
+</li>
+<li>
+<p><strong>Trust root</strong>: verifiers must trust Fulcio's CA and Rekor's public key. These are distributed via <strong>The Update Framework (TUF)</strong> — Sigstore's <code>trusted_root.json</code> is served through a TUF repository so the root of trust itself is rotatable and tamper-resistant. Enterprises running their own Sigstore stack pin their private Fulcio/Rekor keys instead of the public "Sigstore Public Good" instance.</p>
+</li>
+</ul>
+<p><strong>Verification</strong> reverses the chain: fetch the signature and certificate, verify the certificate chains to the trusted Fulcio root, check that the certificate's identity (SAN + issuer) matches the <em>expected</em> signer, confirm the Rekor inclusion proof and that the signing time fell inside the certificate's validity window, and finally verify the signature over the artifact digest. Every one of these checks must pass; skipping the identity check in particular reduces "signed" to "signed by anyone," which is worthless.</p>
+<p><strong>Attestations</strong> extend signatures from "this digest is authentic" to "here is a signed claim <em>about</em> this digest." An in-toto attestation wraps a predicate (a build provenance document, an SBOM, a vulnerability scan result) in a DSSE envelope, signed the same keyless way and logged in Rekor. SLSA provenance is delivered as exactly this kind of attestation: a <code>https://slsa.dev/provenance</code> predicate describing the builder, source, and parameters, which a verifier can then evaluate against a policy ("built by our trusted GitHub Actions builder from our repo").</p>
+<h4 id="diagram-a-keyless-signing-sequence">Diagram A — Keyless Signing Sequence</h4>
+<pre class="mermaid">
+sequenceDiagram
+	participant Dev as CI Workload
+	participant OIDC as OIDC Provider
+	participant Fulcio as Fulcio CA
+	participant Rekor as Rekor Log
+	participant Reg as Registry
+	Dev->>Dev: Generate ephemeral keypair
+	Dev->>OIDC: Request identity token
+	OIDC-->>Dev: Signed OIDC token
+	Dev->>Fulcio: Token plus public key
+	Fulcio-->>Dev: Short lived signing cert
+	Dev->>Dev: Sign artifact digest
+	Dev->>Rekor: Upload signature cert and digest
+	Rekor-->>Dev: Inclusion proof and timestamp
+	Dev->>Reg: Push signature next to image
+	Dev->>Dev: Discard private key
+</pre>
+<h4 id="diagram-b-verification-flow">Diagram B — Verification Flow</h4>
+<pre class="mermaid">
+flowchart TD
+	A[Fetch image signature and cert] --> B{Cert chains to trusted Fulcio root}
+	B -->|No| R[Reject]
+	B -->|Yes| C{Identity SAN and issuer match policy}
+	C -->|No| R
+	C -->|Yes| D{Rekor inclusion proof valid}
+	D -->|No| R
+	D -->|Yes| E{Signing time within cert validity}
+	E -->|No| R
+	E -->|Yes| F{Signature valid over digest}
+	F -->|No| R
+	F -->|Yes| G[Accept and admit]
+</pre>
+<h4 id="diagram-c-attestation-and-policy-in-admission-control">Diagram C — Attestation and Policy in Admission Control</h4>
+<pre class="mermaid">
+flowchart LR
+	A[Image pull request] --> B[Admission webhook]
+	B --> C[Verify signature identity]
+	C --> D[Verify SLSA provenance attestation]
+	D --> E{Builder and source match policy}
+	E -->|Yes| F[Admit pod]
+	E -->|No| G[Deny pod]
+</pre>
+<h2 id="3-what-can-go-wrong">3. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Failure</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Signer identity compromise</td>
+<td>OIDC account or CI token stolen or coerced</td>
+<td>Attacker signs malicious artifact</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Verification skipped entirely</td>
+<td>No admission gate or <code>cosign verify</code> not run</td>
+<td>Unsigned or forged images run</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Identity check omitted</td>
+<td>Verifying signature exists but not <em>who</em> signed</td>
+<td>Any valid Sigstore signer accepted</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Trust-root confusion</td>
+<td>Wrong or public trust root used for private stack</td>
+<td>Wrong CA and log trusted</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Transparency log tampering</td>
+<td>Attempt to rewrite or drop Rekor entries</td>
+<td>Loss of non-repudiation if undetected</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Rekor unavailable at verify</td>
+<td>Hard dependency on log during admission</td>
+<td>Deploys blocked or checks bypassed</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Confused OIDC issuer</td>
+<td>Accepting tokens from untrusted issuer</td>
+<td>Identity spoofing via foreign IdP</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Ephemeral key exfiltration</td>
+<td>Malicious build step reads key before discard</td>
+<td>Signature under legitimate identity</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Stale or pinned bad root</td>
+<td>TUF updates not applied or metadata compromised</td>
+<td>Trust in rotated-out or evil keys</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Attestation not evaluated</td>
+<td>Signature verified but SLSA predicate ignored</td>
+<td>Built by wrong builder still admitted</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Tag mutability</td>
+<td>Verifying tag not digest</td>
+<td>Signed digest swapped after check</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Dependency confusion upstream</td>
+<td>Signed image built from poisoned base or deps</td>
+<td>Valid signature over malicious content</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-mitigation-controls">4. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Identity compromise</td>
+<td>Scope CI OIDC identities tightly, protected branches, monitor</td>
+<td>CI and IdP</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Verification skipped</td>
+<td>Enforce at admission, fail closed, no manual override</td>
+<td>Kubernetes cluster</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Identity check omitted</td>
+<td>Always assert <code>--certificate-identity</code> and <code>--oidc-issuer</code></td>
+<td>Verification policy</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Trust-root confusion</td>
+<td>Pin explicit <code>trusted_root.json</code> for private instances</td>
+<td>Verifier config</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Log tampering</td>
+<td>Run Rekor monitors and consistency-proof checks</td>
+<td>Monitoring layer</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Rekor unavailability</td>
+<td>Cache SETs offline, bundle inclusion proofs with artifact</td>
+<td>CI and verifier</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Confused issuer</td>
+<td>Allowlist exact OIDC issuers</td>
+<td>Verification policy</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Key exfiltration</td>
+<td>Isolated ephemeral signing, hardened runners</td>
+<td>Build environment</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Stale bad root</td>
+<td>Keep TUF client current, automated root refresh</td>
+<td>Verifier tooling</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Attestation not evaluated</td>
+<td>Require and evaluate SLSA provenance predicate</td>
+<td>Policy engine</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Tag mutability</td>
+<td>Sign and verify by digest, never by tag</td>
+<td>CI and admission</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Upstream poisoning</td>
+<td>Verify base images and pin dependency digests</td>
+<td>Build pipeline</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<h4 id="1-pin-the-identity-not-just-the-signature">1. Pin the Identity, Not Just the Signature</h4>
+<p>The single most common failure is verifying that <em>a</em> Sigstore signature exists without checking <em>whose</em> identity signed it. Because Fulcio will issue a certificate to any valid OIDC identity, "is this signed via Sigstore?" is almost always true and almost always meaningless. Verification must assert the exact expected identity and issuer — for example, that the certificate SAN is <code>https://github.com/org/app/.github/workflows/release.yml@refs/heads/main</code> and the issuer is GitHub's OIDC endpoint. Only then does the signature mean "built and released by our own trusted pipeline." The trade-off is that identities must be enumerated and kept in sync as workflows change, but that maintenance cost is the whole point of the control.</p>
+<h4 id="2-enforce-at-admission-and-fail-closed">2. Enforce at Admission and Fail Closed</h4>
+<p>Signing has no security value until something refuses to run what is not properly signed. In Kubernetes this belongs at admission control — a policy controller (Sigstore's policy-controller, Kyverno, or Connaisseur) that intercepts every pod, verifies signature and identity by <em>digest</em>, and denies the pod if verification fails. The controller should fail closed: if it cannot verify, it rejects rather than admits, so an outage or a missing signature never becomes an open door. The cost is operational risk — a broken verifier can block all deploys — which is why the mitigation pairs with cached inclusion proofs and tested break-glass procedures rather than a permissive fallback.</p>
+<h4 id="3-verify-provenance-not-just-authenticity">3. Verify Provenance, Not Just Authenticity</h4>
+<p>A valid signature proves an artifact is authentic and untampered; it says nothing about whether it was built safely. An attacker who compromises a build can produce a genuinely signed but malicious image. This is where SLSA provenance attestations close the gap: the policy should require an in-toto provenance predicate and evaluate it — the artifact must have been produced by the expected builder, from the expected source repository, on the expected trigger. Verifying signature <em>and</em> provenance together answers "is this the real thing, and was it made the right way?" The trade-off is a more complex policy and a mature build platform that emits trustworthy provenance, but it is what raises the assurance level from "signed" to genuinely tamper-resistant.</p>
+<h2 id="5-practice-questions">5. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li><strong>What problem does keyless signing solve?</strong> It removes long-lived signing keys, which are hard to store, rotate, and protect from leakage; trust shifts to a verifiable OIDC identity plus a transparency log. This is asked to confirm you understand <em>why</em> Sigstore exists, not just how to run the CLI.</li>
+<li><strong>What do Fulcio and Rekor each do?</strong> Fulcio issues short-lived certificates that bind an OIDC identity, and Rekor is the append-only transparency log that records signatures. This is asked to check you can separate the CA from the log.</li>
+<li><strong>Why are Sigstore signing certificates short-lived?</strong> The private key exists only briefly, so a short validity window limits misuse; the Rekor entry proves the signature was made while the cert was valid. This is asked to test the interplay between certs and the log.</li>
+<li><strong>What is a transparency log and why does it matter here?</strong> A tamper-evident append-only ledger that gives non-repudiation and lets anyone detect a malicious signature after the fact. This is asked to test the detection-versus-prevention distinction.</li>
+<li><strong>What is an in-toto attestation?</strong> A signed statement about an artifact — such as build provenance or an SBOM — wrapped in a DSSE envelope and logged like a signature. This is asked to see if you know signing extends beyond "this blob is authentic."</li>
+</ol>
+<h3 id="tier-2-system-design-and-trade-offs">Tier 2 — System Design and Trade-offs</h3>
+<ol>
+<li><strong>How would you enforce image signing in Kubernetes?</strong> Deploy an admission controller (policy-controller, Kyverno, or Connaisseur) that verifies signature and identity by digest and fails closed. This is asked to connect signing to runtime enforcement.</li>
+<li><strong>A team says "our images are Sigstore-signed, so we are safe." What is wrong?</strong> Signed by whom? Without asserting the expected identity and issuer, any Fulcio-issued signature passes, which is nearly meaningless. This is asked to catch the most common real-world mistake.</li>
+<li><strong>How does verification work when the signing certificate has already expired?</strong> The Rekor inclusion proof and timestamp establish that the signature was created during the certificate's validity window. This is asked to test deep understanding of the trust model.</li>
+<li><strong>How do you handle Rekor being unavailable during deployment?</strong> Bundle inclusion proofs with the artifact and cache signed entry timestamps so verification does not hard-depend on the live log. This is asked to test availability and failure-mode thinking.</li>
+<li><strong>How do signing and SLSA provenance relate?</strong> Provenance is delivered as a signed in-toto attestation; the signature proves authenticity while the provenance predicate proves how it was built. This is asked to connect Sigstore to the broader supply-chain framework.</li>
+</ol>
+<h3 id="tier-3-expert-and-deep-dive">Tier 3 — Expert and Deep-Dive</h3>
+<ol>
+<li><strong>How is Sigstore's own trust root managed and rotated?</strong> Through TUF-distributed metadata (<code>trusted_root.json</code>), so the Fulcio and Rekor keys can be rotated and are themselves tamper-resistant. This is asked to test whether you understand the root of trust, not just the leaves.</li>
+<li><strong>What does keyless signing <em>not</em> protect against?</strong> A compromised build or a poisoned dependency still yields a genuinely signed but malicious artifact; the identity is real, the content is bad. This is asked to test the limits of authenticity versus integrity of the build.</li>
+<li><strong>How would you run Sigstore for an enterprise that cannot use the public-good instance?</strong> Stand up a private Fulcio and Rekor, wire them to the corporate IdP, and pin the private trust root in all verifiers. This is asked to test operational maturity and trust-boundary design.</li>
+<li><strong>Why must verification be done by digest rather than tag?</strong> Tags are mutable, so a signed digest can be verified and then the tag repointed to an unsigned image before it is pulled. This is asked to test attention to a subtle but exploitable gap.</li>
+<li><strong>How would you detect that a signer identity was compromised and abused?</strong> Continuously monitor Rekor for entries under your identities that do not correspond to legitimate releases, since the log makes every misuse permanently visible. This is asked to test how the transparency property turns into an actual detection.</li>
+</ol>
+<h2 id="6-key-takeaways">6. Key Takeaways</h2>
+<ul>
+<li>Keyless signing replaces long-lived keys with short-lived certificates bound to an OIDC identity.</li>
+<li>Fulcio issues the certificate, Rekor logs the signature, cosign ties it together, and TUF anchors the trust root.</li>
+<li>The transparency log gives non-repudiation and after-the-fact detection, not prevention.</li>
+<li>Verification is worthless unless it asserts the expected identity and issuer, not merely that a signature exists.</li>
+<li>Enforce at Kubernetes admission control, fail closed, and always verify by digest.</li>
+<li>Signatures prove authenticity; SLSA provenance attestations prove the artifact was built the right way — require both.</li>
+<li>A real identity can still sign a malicious artifact, so build integrity and dependency hygiene remain essential.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

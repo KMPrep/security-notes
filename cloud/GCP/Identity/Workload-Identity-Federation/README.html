@@ -1,0 +1,1370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Workload Identity Federation (WIF) and GKE Workload Identity — Keyless Authentication for External and In-Cluster Workloads</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Identity\Workload-Identity-Federation\README.md</p>
+<h1 id="gcp-workload-identity-federation-wif-and-gke-workload-identity-keyless-authentication-for-external-and-in-cluster-workloads">GCP Workload Identity Federation (WIF) and GKE Workload Identity — Keyless Authentication for External and In-Cluster Workloads</h1>
+<p><strong>Category:</strong> Cloud Security — Identity and Access Management (GCP)<br />
+<strong>Applies To:</strong> Workload Identity Federation (external identities), GKE Workload Identity (in-cluster), Cloud IAM, STS token exchange<br />
+<strong>Primary Standards / Docs:</strong> OpenID Connect Core 1.0, RFC 8693 (OAuth 2.0 Token Exchange), RFC 7519 (JWT), Google Cloud IAM WIF docs, GitHub Actions OIDC spec<br />
+<strong>Cross-refs:</strong> <code>auth_authz/Federation/OpenID-Connect/README.md</code> · <code>auth_authz/Infrastructure/Workload-Identity/README.md</code> · <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code> · <code>ai_security/AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes/README.md</code></p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Workload Identity Federation (WIF) lets an <strong>external</strong> identity — a GitHub Actions job, an AWS EC2 role, an Azure VM managed identity, an on-prem OIDC/SAML workload — obtain <strong>short-lived Google Cloud credentials without ever holding a Google service account key</strong>. Instead of exporting a <code>key.json</code> and pasting it into a CI secret (a long-lived, exfiltratable, rarely-rotated bearer credential), the workload presents an OIDC ID token (or SAML assertion / AWS <code>GetCallerIdentity</code> signature) that it <em>already</em> holds from its home identity provider, and Google's Security Token Service (STS) exchanges it for a federated access token scoped by IAM policy. <strong>GKE Workload Identity</strong> is the sibling mechanism for <em>in-cluster</em> workloads: it binds a Kubernetes ServiceAccount (KSA) to a Google service account (GSA) so pods authenticate to Google APIs through the GKE metadata server with no key mounted.</p>
+<p>This matters at scale because service account keys are the single most abused credential in cloud breaches — they leak into Git history, container layers, CI logs, and Slack, and they never expire on their own. WIF eliminates the key entirely. But it moves the entire trust decision into two configuration surfaces — the <strong>provider's attribute mapping + attribute condition (CEL)</strong> and the <strong>IAM <code>principalSet</code> binding</strong> — and a permissive setting on either one silently converts "keyless and safe" into "anyone on the public internet who can mint an OIDC token from the same issuer can impersonate your production deployer." Missing repository/branch pinning on a GitHub provider is a live, mass-exploited misconfiguration class, not a theoretical one.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- WIF trades a <em>stored static key</em> for a <em>federated trust relationship</em>: an external OIDC/SAML/AWS identity → STS token exchange → short-lived GCP token, gated by an <strong>attribute condition</strong> and an <strong>IAM binding</strong>.<br />
+- The <strong>attribute condition (CEL)</strong> is the critical security control. A GitHub provider with <em>no</em> condition trusts the entire <code>token.actions.githubusercontent.com</code> issuer — i.e., <strong>every repository on GitHub</strong>. You must pin <code>repository_owner</code> + <code>repository</code> (+ <code>ref</code>/environment for prod).<br />
+- Two independent gates must both be tight: (1) the <strong>provider</strong> decides <em>which tokens are accepted</em>; (2) the <strong>IAM <code>principalSet://</code> binding</strong> decides <em>which accepted identity may impersonate which GSA</em>. A wildcard on either is game over.<br />
+- <strong>GKE Workload Identity</strong> binds <code>KSA</code> → <code>GSA</code> via <code>roles/iam.workloadIdentityUser</code> on the member <code>serviceAccount:PROJECT.svc.id.goog[namespace/ksa]</code>; the GKE metadata server issues per-pod tokens, no key file.<br />
+- Threats to name cold: over-broad attribute conditions (missing repo/branch pin), audience confusion, forgeable subject mapping (<code>google.subject=assertion.actor</code>), and <code>principalSet://.../*</code> wildcards.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>WIF replaces "prove you hold Google's secret" with "prove you already hold a token from an issuer Google trusts, and that the <em>claims</em> in that token match a condition I defined." The building blocks:</p>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Resource / Identifier</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Workload Identity Pool</td>
+<td><code>projects/PROJECT_NUM/locations/global/workloadIdentityPools/POOL_ID</code></td>
+<td>Namespace/container for external identities; isolates one trust domain from another</td>
+</tr>
+<tr>
+<td>Workload Identity Provider</td>
+<td><code>.../workloadIdentityPools/POOL_ID/providers/PROVIDER_ID</code></td>
+<td>Configures the trusted issuer (OIDC issuer URI + JWKS, AWS account, or SAML metadata)</td>
+</tr>
+<tr>
+<td>Attribute mapping</td>
+<td><code>google.subject=assertion.sub, attribute.repository=assertion.repository, ...</code></td>
+<td>Copies claims from the external token into Google attributes usable in IAM and conditions</td>
+</tr>
+<tr>
+<td>Attribute condition</td>
+<td>CEL expression, e.g. <code>assertion.repository_owner == 'my-org'</code></td>
+<td><strong>Gate</strong>: token is rejected unless the CEL evaluates true. The provider's security boundary</td>
+</tr>
+<tr>
+<td>Allowed audiences</td>
+<td><code>--allowed-audiences</code> (defaults to provider full resource name)</td>
+<td>The <code>aud</code> value the external token must carry; defends against token replay/confusion</td>
+</tr>
+<tr>
+<td>Federated principal</td>
+<td><code>principal://iam.googleapis.com/.../subject/SUBJECT</code></td>
+<td>The identity Google assigns after a successful exchange (one subject)</td>
+</tr>
+<tr>
+<td>Federated principalSet</td>
+<td><code>principalSet://iam.googleapis.com/.../attribute.repository/my-org/my-app</code></td>
+<td>A <em>set</em> of identities sharing an attribute value; used in IAM bindings</td>
+</tr>
+<tr>
+<td>Google service account (GSA)</td>
+<td><code>deployer@PROJECT.iam.gserviceaccount.com</code></td>
+<td>Optional impersonation target; the federated identity assumes its permissions</td>
+</tr>
+<tr>
+<td><code>roles/iam.workloadIdentityUser</code></td>
+<td>IAM role on the GSA</td>
+<td>Grants the WIF <code>principal</code>/<code>principalSet</code> the right to impersonate that GSA</td>
+</tr>
+<tr>
+<td>STS</td>
+<td><code>sts.googleapis.com/v1/token</code></td>
+<td>Performs the RFC 8693 token exchange (subject token → federated access token)</td>
+</tr>
+<tr>
+<td>IAM Credentials API</td>
+<td><code>iamcredentials.googleapis.com</code> <code>generateAccessToken</code></td>
+<td>Exchanges the federated token for a GSA access token (the impersonation step)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Decision logic during an exchange</strong> (STS side):</p>
+<ol>
+<li>Verify the subject token's <strong>signature</strong> against the provider's issuer keys (JWKS fetched from the OIDC discovery document for OIDC; AWS SigV4 verification for AWS; XML signature for SAML).</li>
+<li>Verify the <strong>issuer</strong> matches the provider's configured <code>issuer-uri</code>, and the token is unexpired (<code>exp</code>/<code>iat</code>/<code>nbf</code>).</li>
+<li>Verify the <strong>audience</strong> (<code>aud</code>) is in the provider's allowed audiences (default: the provider's full resource name <code>//iam.googleapis.com/projects/.../providers/PROVIDER_ID</code>).</li>
+<li>Apply the <strong>attribute mapping</strong> to produce <code>google.subject</code> and <code>attribute.*</code>.</li>
+<li>Evaluate the <strong>attribute condition (CEL)</strong> against the mapped attributes / raw <code>assertion</code>. If false → <strong>deny</strong>.</li>
+<li>Mint a <strong>federated access token</strong> whose principal is <code>principal://.../subject/&lt;google.subject&gt;</code> and which also carries the mapped <code>attribute.*</code> values.</li>
+<li>That token can (a) access resources on which the <code>principal</code>/<code>principalSet</code> was granted IAM <em>directly</em>, or (b) be exchanged via <code>generateAccessToken</code> to impersonate a GSA on which it holds <code>roles/iam.workloadIdentityUser</code>.</li>
+</ol>
+<p>The two independent gates are the recurring theme: <strong>the provider (steps 1–5) decides which tokens exist at all; IAM (step 7) decides what those tokens can touch.</strong> A weakness in either is sufficient for compromise.</p>
+<p><strong>GKE Workload Identity</strong> is a specialization. The cluster is created with a <strong>workload pool</strong> <code>PROJECT_ID.svc.id.goog</code>. Each namespace/KSA pair becomes a first-class member <code>serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/KSA]</code>. A pod running under that KSA calls the GKE <strong>metadata server</strong> (a per-node DaemonSet, <code>gke-metadata-server</code>, intercepting <code>169.254.169.254</code>), which brokers a token for the bound GSA. There is no key, no node-wide credential, and pods that are <em>not</em> bound get no Google access — this closes the old "every pod inherits the node's GCE service account" lateral-movement path (see <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code>).</p>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<h4 id="a-worked-github-actions-gcp-wif-setup-the-canonical-case">A worked GitHub Actions → GCP WIF setup (the canonical case)</h4>
+<pre><code class="language-bash"># ---- Variables ---------------------------------------------------------
+export PROJECT_ID=&quot;acme-prod&quot;
+export PROJECT_NUMBER=&quot;$(gcloud projects describe &quot;$PROJECT_ID&quot; --format='value(projectNumber)')&quot;
+export POOL_ID=&quot;github-pool&quot;
+export PROVIDER_ID=&quot;github-provider&quot;
+export SA_EMAIL=&quot;gh-deployer@${PROJECT_ID}.iam.gserviceaccount.com&quot;
+export REPO=&quot;acme/payments-service&quot;      # owner/repo we intend to trust
+
+# ---- 1. Create the identity pool (a trust namespace) -------------------
+gcloud iam workload-identity-pools create &quot;$POOL_ID&quot; \
+  --project=&quot;$PROJECT_ID&quot; --location=&quot;global&quot; \
+  --display-name=&quot;GitHub Actions pool&quot;
+
+# ---- 2. Create the OIDC provider WITH mapping AND a strict condition ----
+# The issuer-uri is GitHub's shared, multi-tenant OIDC issuer. Every repo
+# on GitHub is signed by the same keys, so the attribute-condition is the
+# ONLY thing standing between &quot;our repo&quot; and &quot;the entire internet&quot;.
+gcloud iam workload-identity-pools providers create-oidc &quot;$PROVIDER_ID&quot; \
+  --project=&quot;$PROJECT_ID&quot; --location=&quot;global&quot; \
+  --workload-identity-pool=&quot;$POOL_ID&quot; \
+  --display-name=&quot;GitHub provider&quot; \
+  --issuer-uri=&quot;https://token.actions.githubusercontent.com&quot; \
+  --attribute-mapping=&quot;google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref,attribute.workflow=assertion.workflow&quot; \
+  --attribute-condition=&quot;assertion.repository_owner == 'acme' &amp;&amp; assertion.repository == 'acme/payments-service' &amp;&amp; assertion.ref == 'refs/heads/main'&quot;
+
+# ---- 3. Grant impersonation to ONLY that repo (scoped principalSet) -----
+# Bind the workloadIdentityUser role to the repository attribute, not the
+# whole pool. Combined with the ref pin above, only main of this one repo
+# can impersonate the deployer SA.
+gcloud iam service-accounts add-iam-policy-binding &quot;$SA_EMAIL&quot; \
+  --project=&quot;$PROJECT_ID&quot; \
+  --role=&quot;roles/iam.workloadIdentityUser&quot; \
+  --member=&quot;principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/${REPO}&quot;
+
+# ---- 4. Grant the deployer SA only what it needs (least privilege) ------
+gcloud storage buckets add-iam-policy-binding gs://acme-prod-artifacts \
+  --member=&quot;serviceAccount:${SA_EMAIL}&quot; --role=&quot;roles/storage.objectAdmin&quot;
+</code></pre>
+<p>The GitHub Actions workflow that consumes it — note <code>id-token: write</code> is what lets the job mint an OIDC token at all:</p>
+<pre><code class="language-yaml">name: deploy
+on:
+  push:
+    branches: [ main ]
+permissions:
+  id-token: write        # REQUIRED: grants the job an OIDC token
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: acme-prod
+          # Full provider resource name — this becomes the STS audience.
+          workload_identity_provider: &quot;projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-provider&quot;
+          service_account: &quot;gh-deployer@acme-prod.iam.gserviceaccount.com&quot;
+      - run: gcloud storage cp ./build/app.tar gs://acme-prod-artifacts/
+</code></pre>
+<h4 id="the-raw-token-exchange-flow-what-google-github-actionsauth-does-under-the-hood">The raw token-exchange flow (what <code>google-github-actions/auth</code> does under the hood)</h4>
+<pre><code class="language-bash"># (a) Inside the runner, request an OIDC ID token from GitHub. The audience
+#     is set to the provider resource name so Google will accept it.
+AUD=&quot;//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-provider&quot;
+GH_JWT=&quot;$(curl -s -H &quot;Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN&quot; \
+  &quot;$ACTIONS_ID_TOKEN_REQUEST_URL&amp;audience=$AUD&quot; | jq -r '.value')&quot;
+
+# (b) Exchange the GitHub JWT for a Google FEDERATED access token (RFC 8693).
+FED_TOKEN=&quot;$(curl -s -X POST &quot;https://sts.googleapis.com/v1/token&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -d &quot;{
+    \&quot;audience\&quot;: \&quot;$AUD\&quot;,
+    \&quot;grantType\&quot;: \&quot;urn:ietf:params:oauth:grant-type:token-exchange\&quot;,
+    \&quot;requestedTokenType\&quot;: \&quot;urn:ietf:params:oauth:token-type:access_token\&quot;,
+    \&quot;scope\&quot;: \&quot;https://www.googleapis.com/auth/cloud-platform\&quot;,
+    \&quot;subjectTokenType\&quot;: \&quot;urn:ietf:params:oauth:token-type:jwt\&quot;,
+    \&quot;subjectToken\&quot;: \&quot;$GH_JWT\&quot;
+  }&quot; | jq -r '.access_token')&quot;
+
+# (c) Impersonate the deployer GSA (needs roles/iam.workloadIdentityUser).
+gcloud auth print-access-token &gt;/dev/null   # illustrative
+curl -s -X POST \
+  &quot;https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/gh-deployer@acme-prod.iam.gserviceaccount.com:generateAccessToken&quot; \
+  -H &quot;Authorization: Bearer $FED_TOKEN&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -d '{&quot;scope&quot;:[&quot;https://www.googleapis.com/auth/cloud-platform&quot;],&quot;lifetime&quot;:&quot;900s&quot;}'
+# -&gt; { &quot;accessToken&quot;: &quot;ya29....&quot;, &quot;expireTime&quot;: &quot;...&quot; }  (max 1h, here 15m)
+</code></pre>
+<p>The decoded GitHub OIDC token (<code>GH_JWT</code>) carries the claims that your condition and mapping rely on:</p>
+<pre><code class="language-json">{
+  &quot;iss&quot;: &quot;https://token.actions.githubusercontent.com&quot;,
+  &quot;aud&quot;: &quot;//iam.googleapis.com/projects/123456789012/.../providers/github-provider&quot;,
+  &quot;sub&quot;: &quot;repo:acme/payments-service:ref:refs/heads/main&quot;,
+  &quot;repository&quot;: &quot;acme/payments-service&quot;,
+  &quot;repository_owner&quot;: &quot;acme&quot;,
+  &quot;ref&quot;: &quot;refs/heads/main&quot;,
+  &quot;ref_type&quot;: &quot;branch&quot;,
+  &quot;environment&quot;: &quot;production&quot;,
+  &quot;workflow&quot;: &quot;deploy&quot;,
+  &quot;actor&quot;: &quot;octocat&quot;,
+  &quot;job_workflow_ref&quot;: &quot;acme/payments-service/.github/workflows/deploy.yml@refs/heads/main&quot;,
+  &quot;exp&quot;: 1751000000, &quot;iat&quot;: 1750999000
+}
+</code></pre>
+<h4 id="gke-workload-identity-setup-in-cluster">GKE Workload Identity setup (in-cluster)</h4>
+<pre><code class="language-bash"># 1. Enable Workload Identity on the cluster and node pool.
+gcloud container clusters update prod-cluster --region=us-central1 \
+  --workload-pool=&quot;acme-prod.svc.id.goog&quot;
+gcloud container node-pools update default-pool --cluster=prod-cluster \
+  --region=us-central1 --workload-metadata=GKE_METADATA
+
+# 2. Create the GSA the pods should act as, and grant it least privilege.
+gcloud iam service-accounts create ledger-reader --project=acme-prod
+gcloud projects add-iam-policy-binding acme-prod \
+  --member=&quot;serviceAccount:ledger-reader@acme-prod.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/spanner.databaseReader&quot;
+
+# 3. Bind the KSA -&gt; GSA (the member string is the magic identifier).
+gcloud iam service-accounts add-iam-policy-binding \
+  ledger-reader@acme-prod.iam.gserviceaccount.com \
+  --role=&quot;roles/iam.workloadIdentityUser&quot; \
+  --member=&quot;serviceAccount:acme-prod.svc.id.goog[ledger/ledger-ksa]&quot;
+</code></pre>
+<pre><code class="language-yaml"># 4. Annotate the KSA so the metadata server maps it to the GSA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ledger-ksa
+  namespace: ledger
+  annotations:
+    iam.gke.io/gcp-service-account: ledger-reader@acme-prod.iam.gserviceaccount.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ledger, namespace: ledger }
+spec:
+  template:
+    spec:
+      serviceAccountName: ledger-ksa   # pods now get GSA tokens, no key file
+      containers:
+        - name: app
+          image: gcr.io/acme-prod/ledger:1.4.2
+</code></pre>
+<p>Inside any pod under <code>ledger-ksa</code>, a call to the metadata server returns a token for <code>ledger-reader</code> — and <em>only</em> the Spanner read scope it was granted:</p>
+<pre><code class="language-bash">curl -s -H &quot;Metadata-Flavor: Google&quot; \
+  &quot;http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token&quot;
+# {&quot;access_token&quot;:&quot;ya29...&quot;,&quot;expires_in&quot;:3599,&quot;token_type&quot;:&quot;Bearer&quot;}
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<h4 id="diagram-a-wif-architecture-and-the-two-gates">Diagram A — WIF architecture and the two gates</h4>
+<pre class="mermaid">
+flowchart TD
+    Ext[External workload GitHub Actions] --> Idp[Home OIDC issuer]
+    Idp --> Jwt[Signed OIDC token with claims]
+    Jwt --> Sts[Google STS token exchange]
+    Sts --> Prov[Provider validates issuer aud signature]
+    Prov --> Cond[Attribute condition CEL gate]
+    Cond -->|pass| Fed[Federated principal token]
+    Cond -->|fail| Deny[Request denied]
+    Fed --> Iam[IAM principalSet binding gate]
+    Iam -->|workloadIdentityUser| Gsa[Impersonate service account]
+    Gsa --> Res[Access GCP resources]
+</pre>
+<h4 id="diagram-b-github-actions-token-exchange-sequence">Diagram B — GitHub Actions token exchange sequence</h4>
+<pre class="mermaid">
+sequenceDiagram
+    participant R as GitHub runner
+    participant G as GitHub OIDC issuer
+    participant S as Google STS
+    participant C as IAM Credentials API
+    participant A as GCP API
+    R->>G: Request ID token with audience
+    G-->>R: Signed JWT sub repo ref
+    R->>S: ExchangeToken subjectToken JWT
+    S->>S: Verify signature issuer audience condition
+    S-->>R: Federated access token
+    R->>C: generateAccessToken for deployer SA
+    C-->>R: Short lived SA token
+    R->>A: Call API with SA token
+    A-->>R: Response
+</pre>
+<h4 id="diagram-c-attribute-condition-decision">Diagram C — Attribute condition decision</h4>
+<pre class="mermaid">
+flowchart LR
+    T[Incoming OIDC token] --> M[Apply attribute mapping]
+    M --> O{repository_owner is acme}
+    O -->|no| X[Reject]
+    O -->|yes| P{repository is acme payments}
+    P -->|no| X
+    P -->|yes| B{ref is refs heads main}
+    B -->|no| X
+    B -->|yes| Y[Mint federated token]
+</pre>
+<h4 id="diagram-d-gke-workload-identity-binding">Diagram D — GKE Workload Identity binding</h4>
+<pre class="mermaid">
+flowchart TD
+    Pod[Pod running as KSA] --> Meta[GKE metadata server]
+    Meta --> Check[Lookup KSA annotation]
+    Check --> Bind[Verify workloadIdentityUser binding]
+    Bind -->|allowed| Token[Issue GSA access token]
+    Bind -->|missing| Fail[No Google access]
+    Token --> Api[Call Google API with GSA scope]
+</pre>
+<h4 id="diagram-e-attack-missing-attribute-condition">Diagram E — Attack: missing attribute condition</h4>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> ProviderNoCondition
+    ProviderNoCondition --> TrustsWholeIssuer
+    TrustsWholeIssuer --> AttackerRepo
+    AttackerRepo --> MintsOidcToken
+    MintsOidcToken --> StsAcceptsToken
+    StsAcceptsToken --> ImpersonateDeployer
+    ImpersonateDeployer --> [*]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Storm-0558 (Microsoft)</td>
+<td>2023</td>
+<td>Stolen MSA consumer signing key + <strong>audience/scope validation gap</strong> let forged tokens hit Exchange Online</td>
+<td>Federated trust collapses if you don't validate <code>iss</code>/<code>aud</code> rigorously and protect signing keys; token forgery is a first-class threat</td>
+</tr>
+<tr>
+<td>GitHub OIDC → AWS wildcard <code>sub</code></td>
+<td>2021–2023</td>
+<td>Trust policies with <code>StringLike sub repo:*</code> (missing repo/branch pin) — same class as a WIF condition-less provider</td>
+<td><em>Any</em> GitHub repo could assume the role; <strong>pin <code>repository</code> and <code>ref</code>/environment</strong></td>
+</tr>
+<tr>
+<td>CircleCI breach</td>
+<td>2023</td>
+<td>Malware on an engineer's laptop stole session token → exfiltrated customer <strong>secrets and OIDC tokens</strong> from CI env</td>
+<td>Static secrets in CI are the crown jewels; short-lived federated tokens shrink blast radius but tokens in flight are still stealable</td>
+</tr>
+<tr>
+<td><code>torchtriton</code> / PyTorch dependency confusion</td>
+<td>2022</td>
+<td>Malicious PyPI package ran on import, <strong>exfiltrated env vars including cloud creds</strong> from build hosts</td>
+<td>CI credential theft is the delivery vehicle; see <code>ai_security/AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes/README.md</code></td>
+</tr>
+<tr>
+<td>Codecov bash uploader</td>
+<td>2021</td>
+<td>Tampered uploader script harvested CI env secrets across thousands of orgs</td>
+<td>Anything running in CI can read your tokens; least-privilege + keyless limits what a poisoned step can do</td>
+</tr>
+<tr>
+<td><code>pull_request_target</code> PPE</td>
+<td>ongoing</td>
+<td>Poisoned Pipeline Execution: untrusted PR code runs in a privileged workflow context</td>
+<td>Branch/event pinning in the attribute condition prevents PR-triggered impersonation of prod SAs</td>
+</tr>
+<tr>
+<td>Golden SAML (SolarWinds era)</td>
+<td>2020</td>
+<td>Stolen SAML token-signing key let attackers <strong>forge assertions</strong> for any user</td>
+<td>SAML/OIDC federation is only as strong as the IdP's signing key custody</td>
+</tr>
+<tr>
+<td>Shai-Hulud npm worm</td>
+<td>2025</td>
+<td>Self-propagating npm packages stole cloud/CI credentials and planted malicious GitHub Actions workflows</td>
+<td>Supply-chain worms weaponize CI identity; keyless + tight conditions reduce what a hijacked workflow can reach</td>
+</tr>
+<tr>
+<td>CVE-2020-8555 (K8s SSRF)</td>
+<td>2020</td>
+<td>SSRF in kube-controller could reach cloud metadata <code>169.254.169.254</code></td>
+<td>Node-level metadata exposure is why GKE Workload Identity + metadata concealment matters</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — the condition-less GitHub provider.</strong> A team wires up <code>google-github-actions/auth</code> following a blog post, creates an OIDC provider with <code>--issuer-uri=https://token.actions.githubusercontent.com</code> but <em>omits</em> <code>--attribute-condition</code>, and binds <code>roles/iam.workloadIdentityUser</code> on their prod deployer SA to <code>principalSet://.../*</code> (the whole pool). Because GitHub's issuer is shared across every repository on the planet and all tokens are signed by the same keys, <strong>any GitHub user</strong> can create a public repo, add a workflow with <code>id-token: write</code>, request an OIDC token with the victim's provider audience, and exchange it for the deployer SA. There is no repository check anywhere in the path. The fix is two lines: an attribute condition pinning <code>repository_owner</code>/<code>repository</code>, and a <code>principalSet</code> scoped to <code>attribute.repository/acme/payments-service</code>. Google now <em>requires</em> an attribute condition when creating a provider for a recognized shared issuer like GitHub precisely because this mistake was so common.</p>
+<p><strong>Case study 2 — audience confusion.</strong> A provider is created with <code>--allowed-audiences</code> widened to accept a generic value (or the workflow requests a default audience like <code>https://github.com/acme</code> that other unrelated tooling also uses). An OIDC token minted for a <em>different</em> purpose — say, an internal service that also trusts <code>https://github.com/acme</code> as an audience — becomes replayable against the WIF provider. The token's <code>sub</code>/<code>repository</code> claims are legitimate, so if the IAM binding is only scoped by <code>repository_owner</code>, a low-trust repo's token now impersonates a high-trust SA. The mitigation is to keep the audience equal to the provider's full resource name (the default) so a token is only ever valid for exactly one provider, and to pin the specific repository, not just the owner.</p>
+<p><strong>Case study 3 — GKE node-SA inheritance (pre-WIF).</strong> Before GKE Workload Identity, every pod on a node could reach <code>169.254.169.254</code> and pull the node's GCE default service account token. A single compromised pod (SSRF, RCE, or a malicious sidecar image) inherited the node SA's broad permissions and moved laterally across the project — the exact pattern in <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code>. Enabling Workload Identity (<code>--workload-metadata=GKE_METADATA</code>) makes the metadata server hand out only the <em>bound</em> GSA per KSA, and unbound pods get nothing. The control that would have stopped the lateral movement is precisely this per-pod identity plus metadata concealment.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Condition-less provider trusts entire issuer</td>
+<td>T1199 Trusted Relationship</td>
+<td>No <code>--attribute-condition</code> on a shared issuer (GitHub)</td>
+<td>Any repo/user on the issuer impersonates prod SA</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Missing branch/ref pin</td>
+<td>T1078.004 Cloud Accounts</td>
+<td>Condition pins repo but not <code>ref</code>/<code>environment</code></td>
+<td>PR or feature branch deploys to prod</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Wildcard <code>principalSet://.../*</code> binding</td>
+<td>T1078.004</td>
+<td>IAM bound to whole pool, not a scoped attribute</td>
+<td>Every federated identity gets the SA</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Forgeable subject mapping</td>
+<td>T1134 Token Manipulation</td>
+<td><code>google.subject=assertion.actor</code> (mutable, spoofable)</td>
+<td>Identity keyed on an attacker-controllable claim</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Audience confusion / replay</td>
+<td>T1550.001 App Access Token</td>
+<td>Broad <code>--allowed-audiences</code>; token reused across systems</td>
+<td>Cross-purpose token replayed to impersonate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Over-privileged impersonated GSA</td>
+<td>T1078 Valid Accounts</td>
+<td>Deployer SA has Owner/Editor</td>
+<td>Full-project compromise on any exchange</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Stale/orphaned pool or provider</td>
+<td>T1078.004</td>
+<td>Decommissioned repo/provider left bound</td>
+<td>Dangling trust an attacker can reclaim (repo name reuse)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Repository name reuse hijack</td>
+<td>T1584 Compromise Infrastructure</td>
+<td>Condition pins repo name; org deletes repo; attacker recreates</td>
+<td>Attacker-owned repo of same name impersonates</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Leaked federated/SA token in CI logs</td>
+<td>T1552.001 Credentials in Files</td>
+<td>Token echoed to logs or artifacts</td>
+<td>1h window of full SA access</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>id-token: write</code> on untrusted workflow</td>
+<td>T1195.002 Supply Chain</td>
+<td>Broad workflow permissions on fork/PR pipelines</td>
+<td>Untrusted code mints OIDC token</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>GKE metadata server not enforced</td>
+<td>T1552.005 Cloud Metadata API</td>
+<td>Node pool without <code>GKE_METADATA</code></td>
+<td>Pods read node SA token, lateral movement</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>KSA→GSA binding too broad</td>
+<td>T1078.004</td>
+<td>One GSA bound to many namespaces/KSAs</td>
+<td>Any pod in scope reaches sensitive GSA</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Impersonation chaining</td>
+<td>T1548 Privilege Escalation</td>
+<td>Deployer SA can <code>actAs</code> other higher SAs</td>
+<td>Escalate from CI SA to admin SA</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Provider issuer/JWKS spoofing</td>
+<td>T1557 Adversary-in-the-Middle</td>
+<td>Custom issuer without pinned/verified JWKS</td>
+<td>Forged tokens accepted</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Missing Data Access audit logs</td>
+<td>Detection gap</td>
+<td>STS/IAM Credentials logs not enabled</td>
+<td>Exchanges invisible; no forensics</td>
+<td>High</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Disabled SA still bound in WIF</td>
+<td>T1078</td>
+<td>GSA disabled but binding retained; re-enable path</td>
+<td>Reactivation grants access silently</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Cross-project / cross-org trust sprawl</td>
+<td>T1199</td>
+<td>Providers trust identities in other orgs</td>
+<td>Blast radius spans trust domains</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td>CEL condition logic error</td>
+<td>Misconfiguration</td>
+<td><code>||</code> vs <code>&amp;&amp;</code>, wrong claim name, typo</td>
+<td>Condition passes when it should fail</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>19</td>
+<td>AWS provider trusting whole account/role wildcard</td>
+<td>T1078.004</td>
+<td>AWS provider maps <code>assertion.arn</code> loosely</td>
+<td>Any principal in the AWS account federates</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Long token lifetime / no downscoping</td>
+<td>T1550.001</td>
+<td><code>lifetime</code> set high; no credential access boundary</td>
+<td>Larger window and scope if token stolen</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>1, 2</td>
+<td>Strict attribute condition pinning <code>repository_owner</code> + <code>repository</code> + <code>ref</code>/<code>environment</code></td>
+<td>Provider (<code>--attribute-condition</code>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>3</td>
+<td>Scope IAM to <code>attribute.repository/&lt;owner&gt;/&lt;repo&gt;</code>, never <code>/*</code></td>
+<td>GSA IAM binding</td>
+</tr>
+<tr>
+<td>3</td>
+<td>4</td>
+<td>Map <code>google.subject=assertion.sub</code>; use immutable claims only</td>
+<td>Provider (<code>--attribute-mapping</code>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>5</td>
+<td>Keep audience = provider full resource name (default); avoid broad <code>--allowed-audiences</code></td>
+<td>Provider</td>
+</tr>
+<tr>
+<td>5</td>
+<td>6, 13</td>
+<td>Least-privilege deployer SA; deny <code>roles/owner</code>; restrict <code>iam.serviceAccounts.actAs</code></td>
+<td>GSA IAM + org policy</td>
+</tr>
+<tr>
+<td>6</td>
+<td>7, 8, 16</td>
+<td>Lifecycle hygiene: delete pools/providers/bindings on repo decommission; alert on recreated repos</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>7</td>
+<td>9</td>
+<td><code>::add-mask::</code> secrets; forbid token echo; scan CI logs; short <code>lifetime</code></td>
+<td>Workflow + DLP</td>
+</tr>
+<tr>
+<td>8</td>
+<td>10</td>
+<td>Set <code>permissions: id-token: write</code> only on the specific job; restrict on PR/fork triggers</td>
+<td>Workflow YAML</td>
+</tr>
+<tr>
+<td>9</td>
+<td>11</td>
+<td>Enforce <code>--workload-metadata=GKE_METADATA</code> on all node pools; block <code>169.254.169.254</code> egress</td>
+<td>GKE node pool + NetworkPolicy</td>
+</tr>
+<tr>
+<td>10</td>
+<td>12</td>
+<td>One GSA per KSA per namespace; bind narrowly <code>PROJECT.svc.id.goog[ns/ksa]</code></td>
+<td>GKE IAM binding</td>
+</tr>
+<tr>
+<td>11</td>
+<td>13</td>
+<td>Constrain <code>iam.serviceAccounts.getAccessToken</code> / <code>actAs</code> via org policy + IAM Conditions</td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>12</td>
+<td>14, 19</td>
+<td>Prefer well-known issuers; for custom OIDC pin <code>--jwks-json</code>; scope AWS <code>arn</code> tightly</td>
+<td>Provider</td>
+</tr>
+<tr>
+<td>13</td>
+<td>15</td>
+<td>Enable Data Access audit logs for <code>sts.googleapis.com</code> + <code>iamcredentials.googleapis.com</code></td>
+<td>Audit config</td>
+</tr>
+<tr>
+<td>14</td>
+<td>17</td>
+<td><code>constraints/iam.workloadIdentityPoolProviders</code> allowlist of trusted issuers</td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>15</td>
+<td>18</td>
+<td>Code-review + <code>gcloud ... describe</code> CEL; unit-test conditions with sample tokens</td>
+<td>CI/CD review</td>
+</tr>
+<tr>
+<td>16</td>
+<td>6</td>
+<td>Credential Access Boundary / downscoped tokens to limit resource scope</td>
+<td>STS downscoping</td>
+</tr>
+<tr>
+<td>17</td>
+<td>20</td>
+<td>Set <code>lifetime</code> to minimum needed (e.g. 900s); prefer direct resource access over impersonation</td>
+<td>IAM Credentials API</td>
+</tr>
+<tr>
+<td>18</td>
+<td>all</td>
+<td>Continuous config scanning (SCC, <code>gcloud iam workload-identity-pools ... describe</code>) for wildcard bindings</td>
+<td>Security Command Center</td>
+</tr>
+<tr>
+<td>19</td>
+<td>3, 6</td>
+<td>IAM Recommender / Policy Analyzer to prune unused permissions on deployer SAs</td>
+<td>IAM Recommender</td>
+</tr>
+<tr>
+<td>20</td>
+<td>1</td>
+<td>Disable SA key creation org-wide (<code>constraints/iam.disableServiceAccountKeyCreation</code>) to force WIF</td>
+<td>Org policy</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-controls-in-depth">Top 5 controls in depth</h3>
+<p><strong>1. The attribute condition (CEL) — pin owner, repo, and ref.</strong> This is the provider's security boundary and the single most important control. Because a shared issuer signs tokens for everyone, the condition is the only place you assert "I trust <em>this</em> repository on <em>this</em> branch." Implement it as a conjunction of immutable claims:</p>
+<pre><code class="language-bash">--attribute-condition=&quot;assertion.repository_owner == 'acme' &amp;&amp; \
+  assertion.repository == 'acme/payments-service' &amp;&amp; \
+  assertion.ref == 'refs/heads/main'&quot;
+</code></pre>
+<p>For production deploys prefer pinning <code>assertion.environment == 'production'</code> (a GitHub <em>Environment</em> with required reviewers) over a branch, because environments add human approval and cannot be reached from arbitrary PRs. Trade-off: conditions are brittle — a repo rename, a monorepo split, or a switch from branch to tag deploys breaks auth, and a logic slip (<code>||</code> where you meant <code>&amp;&amp;</code>, or a typo in a claim name) silently <em>widens</em> trust with no error. Mitigate by code-reviewing the CEL and testing it against sample tokens before rollout. Limit: the condition can only reference claims the issuer actually sets and signs; you cannot invent a trust attribute GitHub doesn't emit.</p>
+<p><strong>2. Scoped <code>principalSet</code> IAM binding — never bind the whole pool.</strong> The second gate. Bind <code>roles/iam.workloadIdentityUser</code> to <code>attribute.repository/&lt;owner&gt;/&lt;repo&gt;</code>, not <code>principalSet://.../*</code> and not merely <code>attribute.repository_owner/&lt;org&gt;</code> (which admits every repo in the org, including low-trust ones). This gives defense in depth: even if a condition regresses, the IAM binding still limits <em>which</em> SA a token can assume. Trade-off: per-repo bindings multiply as you scale, so many teams template them in Terraform. Limit: it governs impersonation, not the token's existence — a broad provider still lets an attacker <em>authenticate</em>, they just can't reach a well-scoped SA.</p>
+<p><strong>3. Least-privilege on the impersonated GSA + <code>actAs</code> restriction.</strong> WIF is only as safe as the SA it fronts. A deployer SA with <code>roles/owner</code> turns any successful exchange into project takeover, and if it holds <code>iam.serviceAccounts.actAs</code> on higher SAs it enables impersonation chaining (threat 13). Grant the narrowest roles (<code>roles/storage.objectAdmin</code> on one bucket, <code>roles/run.developer</code> on one service), and constrain <code>actAs</code> with IAM Conditions or org policy. Use IAM Recommender to strip unused permissions. Trade-off: tight scoping causes deploy failures when pipelines grow; solve with additive, reviewed role grants rather than a blanket Editor. Limit: least privilege reduces blast radius but doesn't stop the <em>authentication</em> — pair it with controls 1 and 2.</p>
+<p><strong>4. GKE Workload Identity + metadata concealment.</strong> Enforce <code>--workload-metadata=GKE_METADATA</code> on every node pool so pods can only obtain the GSA bound to their KSA, and use NetworkPolicy/host firewall to block direct pod egress to <code>169.254.169.254</code>. This eliminates the "every pod inherits the node SA" lateral-movement path and defeats SSRF-to-metadata (CVE-2020-8555 class). Implement one GSA per KSA per namespace and bind <code>serviceAccount:PROJECT.svc.id.goog[ns/ksa]</code> narrowly. Trade-off: legacy workloads that expected the node SA break and must be migrated to bound KSAs; the metadata server adds a small per-node component to operate. Limit: it protects Google-API access, not in-cluster secrets — combine with RBAC and Pod Security Standards.</p>
+<p><strong>5. Enable Data Access audit logs and disable SA keys org-wide.</strong> You cannot detect WIF abuse if the exchanges are invisible: turn on Data Access audit logs for <code>sts.googleapis.com</code> and <code>iamcredentials.googleapis.com</code> so every <code>ExchangeToken</code> and <code>GenerateAccessToken</code> is captured with its <code>principalSubject</code> and source IP. Simultaneously apply <code>constraints/iam.disableServiceAccountKeyCreation</code> to <em>force</em> teams onto WIF and eliminate the static-key attack surface entirely. Trade-off: Data Access logs add volume/cost (scope them to the relevant services), and the key-creation ban breaks any tool still expecting <code>key.json</code> until migrated. Limit: logging is detective, not preventive — it shortens dwell time but must be wired to alerting to matter.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>Cloud Audit Logs — Data Access</strong>, service <code>sts.googleapis.com</code>, method <code>google.identity.sts.v1.SecurityTokenService.ExchangeToken</code>. Key fields: <code>protoPayload.authenticationInfo.principalSubject</code> (e.g. <code>principal://.../subject/repo:acme/...</code>), <code>protoPayload.requestMetadata.callerIp</code>, <code>protoPayload.requestMetadata.callerSuppliedUserAgent</code>, and the mapped attributes.</li>
+<li><strong>Cloud Audit Logs</strong>, service <code>iamcredentials.googleapis.com</code>, method <code>GenerateAccessToken</code> / <code>GenerateIdToken</code> — shows <em>which GSA</em> a federated principal impersonated.</li>
+<li><strong>Admin Activity logs</strong> for <code>SetIamPolicy</code> on service accounts and <code>workloadIdentityPools</code>/providers create/update — detect a condition being loosened or a <code>/*</code> binding appearing.</li>
+<li><strong>GKE</strong>: <code>gke-metadata-server</code> and node logs; Kubernetes audit logs for KSA usage.</li>
+<li><strong>Security Command Center</strong> findings for public/over-broad IAM and WIF misconfigurations.</li>
+</ul>
+<p>Ensure Data Access logs are enabled (they are off by default):</p>
+<pre><code class="language-yaml"># gcloud projects get-iam-policy / setIamPolicy auditConfigs snippet
+auditConfigs:
+  - service: sts.googleapis.com
+    auditLogConfigs:
+      - logType: DATA_READ
+      - logType: DATA_WRITE
+  - service: iamcredentials.googleapis.com
+    auditLogConfigs:
+      - logType: DATA_READ
+</code></pre>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>Detection 1 — token exchange with an unexpected repository attribute (Cloud Logging / Log Analytics SQL).</strong> Flags any STS exchange whose mapped <code>repository</code> is not in an allowlist, or from an unusual IP:</p>
+<pre><code class="language-sql">SELECT
+  timestamp,
+  proto_payload.audit_log.authentication_info.principal_subject AS principal,
+  proto_payload.audit_log.request_metadata.caller_ip AS src_ip,
+  proto_payload.audit_log.request_metadata.caller_supplied_user_agent AS ua
+FROM `acme-prod.global._AllLogs`
+WHERE proto_payload.audit_log.service_name = 'sts.googleapis.com'
+  AND proto_payload.audit_log.method_name LIKE '%ExchangeToken%'
+  AND NOT REGEXP_CONTAINS(
+        proto_payload.audit_log.authentication_info.principal_subject,
+        r'subject/repo:acme/(payments-service|billing-service):')
+ORDER BY timestamp DESC
+</code></pre>
+<p><strong>Detection 2 — Sigma rule: WIF provider or binding loosened.</strong> Alerts when a provider is created/updated without a condition or an SA is bound to a wildcard principalSet:</p>
+<pre><code class="language-yaml">title: GCP WIF Trust Relationship Weakened
+id: 8f2a1c74-wif-loosened
+status: experimental
+logsource:
+  product: gcp
+  service: audit
+detection:
+  update_provider:
+    protoPayload.methodName|contains:
+      - 'workloadIdentityPools.providers.create'
+      - 'workloadIdentityPools.providers.update'
+      - 'workloadIdentityPools.providers.patch'
+  wildcard_binding:
+    protoPayload.methodName|endswith: '.setIamPolicy'
+    protoPayload.request.policy.bindings|contains:
+      - 'principalSet://iam.googleapis.com'
+      - '/attribute.repository_owner/'   # owner-wide, no repo pin
+  condition: update_provider or wildcard_binding
+fields:
+  - protoPayload.authenticationInfo.principalEmail
+  - protoPayload.resourceName
+level: high
+</code></pre>
+<p>(Operationally, pair the Sigma <code>update_provider</code> match with a follow-up <code>gcloud iam workload-identity-pools providers describe</code> check that the resulting <code>attributeCondition</code> is non-empty and references <code>repository</code>.)</p>
+<h3 id="response-playbook">Response playbook</h3>
+<ol>
+<li><strong>Contain — cut the trust.</strong> Disable the offending provider immediately: <code>gcloud iam workload-identity-pools providers update-oidc PROVIDER_ID --workload-identity-pool=POOL_ID --location=global --disabled</code>. If a specific SA is being impersonated maliciously, remove the <code>workloadIdentityUser</code> binding for the abused <code>principalSet</code>.</li>
+<li><strong>Contain — revoke live tokens.</strong> Federated/SA tokens are short-lived (≤1h) but active ones persist; disable the impersonated GSA (<code>gcloud iam service-accounts disable SA_EMAIL</code>) to stop in-flight token use, accepting the outage.</li>
+<li><strong>Scope the blast radius.</strong> From the <code>principalSubject</code> and <code>GenerateAccessToken</code> logs, enumerate which GSAs were assumed and what APIs those tokens touched (Data Access logs on the target services). Identify created/modified resources.</li>
+<li><strong>Eradicate the entry.</strong> Determine how the trust was abused: condition-less provider, wildcard binding, forgeable subject, or a compromised legitimate repo (poisoned workflow / PPE). Fix the <em>root</em> — add/tighten the attribute condition, scope the <code>principalSet</code>, correct the subject mapping.</li>
+<li><strong>Rotate downstream.</strong> Rotate any secrets, keys, or data the impersonated SA could reach; re-issue anything the attacker may have exfiltrated.</li>
+<li><strong>Recover.</strong> Re-enable the provider/SA only after the condition and binding are corrected and reviewed. Confirm the fix with a negative test (a token from a non-allowlisted repo must be rejected).</li>
+<li><strong>Harden &amp; watch.</strong> Apply <code>disableServiceAccountKeyCreation</code>, add the SCC/Sigma detections, and add a config-scanning gate in Terraform CI that fails any provider lacking a <code>repository</code>-scoped condition or any <code>/*</code> binding.</li>
+</ol>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What problem does Workload Identity Federation solve, and what does it replace?</strong><br />
+It removes long-lived Google service account keys (<code>key.json</code>) — the most-leaked, rarely-rotated cloud credential — from external and CI workloads. Instead of storing a static Google secret, the workload presents an OIDC/SAML/AWS identity it <em>already</em> holds, and Google's STS exchanges it for a short-lived (≤1h) access token gated by IAM. This shrinks the attack surface (nothing to leak), makes credentials ephemeral, and centralizes the trust decision in provider conditions and IAM bindings.<br />
+<em>Signal: does the candidate frame it as eliminating static keys, not just "a login method"?</em></p>
+<p><strong>Q2. Walk through the GitHub Actions → GCP token exchange end to end.</strong><br />
+The job requests an OIDC ID token from <code>token.actions.githubusercontent.com</code> with the provider's resource name as the audience (<code>id-token: write</code> grants this). It POSTs that JWT to <code>sts.googleapis.com/v1/token</code> with <code>grant_type=token-exchange</code>. STS verifies the signature (issuer JWKS), issuer, and audience, applies the attribute mapping, and evaluates the attribute-condition CEL; on pass it returns a federated access token. Optionally the runner calls <code>iamcredentials.generateAccessToken</code> to impersonate a GSA (needs <code>roles/iam.workloadIdentityUser</code>), then calls Google APIs with that short-lived token.<br />
+<em>Signal: mentions audience, condition, and the impersonation step — not a hand-wave.</em></p>
+<p><strong>Q3. What is the difference between an attribute <em>mapping</em> and an attribute <em>condition</em>?</strong><br />
+The mapping copies claims from the external token into Google attributes (<code>google.subject=assertion.sub</code>, <code>attribute.repository=assertion.repository</code>) so they can be referenced in IAM and conditions. The condition is a CEL boolean that must evaluate true for the token to be accepted at all (<code>assertion.repository == 'acme/payments-service'</code>). Mapping decides <em>what you can reference</em>; the condition decides <em>whether to trust the token</em>. The condition is the security gate.<br />
+<em>Signal: recognizes the condition — not the mapping — as the boundary.</em></p>
+<p><strong>Q4. How does GKE Workload Identity differ from WIF, and how is a KSA bound to a GSA?</strong><br />
+GKE Workload Identity is for <em>in-cluster</em> pods rather than external identities. The cluster gets a workload pool <code>PROJECT.svc.id.goog</code>; you annotate a KSA with <code>iam.gke.io/gcp-service-account</code> and bind the GSA's <code>roles/iam.workloadIdentityUser</code> to the member <code>serviceAccount:PROJECT.svc.id.goog[namespace/ksa]</code>. The GKE metadata server then issues per-pod GSA tokens, so no key is mounted and unbound pods get no Google access.<br />
+<em>Signal: knows the <code>PROJECT.svc.id.goog[ns/ksa]</code> member format and the metadata server's role.</em></p>
+<p><strong>Q5. Why is a service account key more dangerous than a WIF-issued token?</strong><br />
+A key is a long-lived bearer secret: it works from anywhere, never expires on its own, and if it leaks into Git, a container layer, or CI logs it grants full SA access until someone notices and rotates it. A WIF token is short-lived (≤1h), scoped, and bound to a verified identity + condition, so a leak is time-boxed and the trust can be revoked centrally by disabling the provider.<br />
+<em>Signal: articulates lifetime, portability, and revocation differences.</em></p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design keyless CI/CD auth for 500 repos deploying to 30 GCP projects. How do you avoid trust sprawl?</strong><br />
+Use one pool per environment (prod/staging) rather than per repo, with a single GitHub provider carrying an org-pinned condition (<code>repository_owner == 'acme'</code>) as a coarse gate. Per-repo trust lives in the IAM layer: template <code>principalSet://.../attribute.repository/&lt;repo&gt;</code> bindings on each project's deployer SA via Terraform, and require <code>ref</code>/<code>environment</code> pinning for prod. Enforce <code>disableServiceAccountKeyCreation</code> org-wide and <code>constraints/iam.workloadIdentityPoolProviders</code> to allowlist issuers. Continuously scan for <code>/*</code> bindings and condition-less providers. This keeps the provider count small while making each repo's reach explicit, reviewable, and least-privilege. The trade-off is binding volume — solved with IaC and policy-as-code gates.<br />
+<em>Signal: separates coarse provider gate from fine-grained IAM; thinks about governance at scale.</em></p>
+<p><strong>Q7. GitHub is a shared OIDC issuer. What are the security implications and how do you contain them?</strong><br />
+Every repository's token is signed by the same GitHub keys, so the issuer/signature check proves "some GitHub repo," not "<em>my</em> repo." Without an attribute condition the provider trusts all of GitHub. Contain it by pinning <code>repository_owner</code> + <code>repository</code> (+ <code>ref</code>/<code>environment</code>) in the condition and scoping the IAM <code>principalSet</code> to the exact repo. Also keep the audience equal to the provider resource name to prevent cross-purpose token replay, and set <code>id-token: write</code> only on the specific job. Defense in depth means both gates must fail before an attacker wins.<br />
+<em>Signal: understands shared-issuer risk and the two-gate containment.</em></p>
+<p><strong>Q8. Compare WIF impersonating a GSA vs. granting IAM directly to the federated principal. When would you choose each?</strong><br />
+Direct grants (<code>principalSet://...</code> on a resource/role) remove the impersonation hop, so there's no intermediary SA to over-permission and one fewer credential exchange — cleaner blast radius and simpler audit. Impersonation is still needed when a tool or library only speaks "service account," when you want a stable identity decoupled from the changing external subject, or when you must chain to permissions only a GSA holds. Prefer direct grants for new designs; use impersonation for compatibility. Either way, keep the target least-privileged.<br />
+<em>Signal: knows direct federation exists and reasons about when the SA hop is justified.</em></p>
+<p><strong>Q9. How do you prevent a pull request from a fork or a feature branch from deploying to production?</strong><br />
+Don't pin only the repository — pin the trigger context. Require <code>assertion.ref == 'refs/heads/main'</code> or, better, <code>assertion.environment == 'production'</code> in the attribute condition, and gate the GitHub Environment with required reviewers so prod is unreachable from arbitrary branches/PRs. Set <code>permissions: id-token: write</code> only on the deploy job, and avoid <code>pull_request_target</code> in privileged workflows (PPE risk). Fork PRs already receive restricted tokens, but branch/environment pinning is what stops an insider or a poisoned feature branch.<br />
+<em>Signal: cites <code>ref</code>/<code>environment</code> pinning and PPE, not just "restrict the repo."</em></p>
+<p><strong>Q10. Your team wants a 12-hour token lifetime for a long batch job. What are the trade-offs and alternatives?</strong><br />
+Longer lifetime widens the window during which a stolen token is usable and increases the value of intercepting CI logs. <code>generateAccessToken</code> caps at 1h anyway, so a 12h job should re-mint tokens periodically from the still-valid federated identity (the auth library handles refresh) rather than hold one long token. If truly long-lived credentials are unavoidable, minimize scope with a Credential Access Boundary (downscoped token) so even a stolen token touches only the specific bucket/prefix. Prefer refresh + downscoping over a single long token.<br />
+<em>Signal: knows the 1h cap, refresh pattern, and downscoping.</em></p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. Explain the audience-confusion attack against a WIF provider and how the default configuration prevents it.</strong><br />
+STS checks the token's <code>aud</code> against the provider's allowed audiences. By default that audience is the provider's <em>full resource name</em> (<code>//iam.googleapis.com/projects/.../providers/PROVIDER_ID</code>), which is unique — so a token minted for provider A is useless against provider B or any non-Google system. Confusion arises when an operator widens <code>--allowed-audiences</code> to a generic value (e.g. <code>https://github.com/acme</code>) that other systems also accept; then a token issued for a <em>different</em> consumer, but carrying legitimate <code>repository</code> claims, becomes replayable against WIF. If the IAM binding is only owner-scoped, a low-trust repo's cross-purpose token now impersonates a high-trust SA. The defense is to leave the audience at the default and pin the exact repository, so a token is valid for exactly one provider and one trust.<br />
+<em>Signal: connects <code>aud</code> semantics to replay and to why the default resource-name audience is safe.</em></p>
+<p><strong>Q12. Storm-0558 forged tokens after a signing key was stolen. What does that teach about WIF's trust model, and what residual risk exists?</strong><br />
+It shows federation collapses if the <em>issuer's signing key</em> is compromised or if <code>aud</code>/<code>iss</code> validation is sloppy — attackers forged tokens that validated because of a scope/audience gap. For WIF the residual risks are: (a) a compromised external IdP (GitHub, your OIDC provider) could mint tokens with any claims, so your condition can't distinguish forged from real; (b) a custom OIDC issuer with an unpinned or attacker-reachable JWKS lets forged tokens in. Mitigate by trusting only well-run issuers, pinning <code>--jwks-json</code> for custom providers, keeping conditions tight so even a forged token needs specific claims, and — crucially — enabling audit logs so anomalous exchanges are detectable even when prevention fails.<br />
+<em>Signal: understands that WIF inherits the IdP's key custody risk and reasons about detection as backstop.</em></p>
+<p><strong>Q13. Contrast GCP WIF, AWS <code>sts:AssumeRoleWithWebIdentity</code>, and Azure Workload Identity Federation at the mechanism level.</strong><br />
+All three exchange an external OIDC token for cloud credentials, but the trust surface differs. AWS ties trust to an IAM role's <em>trust policy</em> (a JSON <code>Condition</code> on <code>token.actions.githubusercontent.com:sub</code>/<code>aud</code>) and returns temporary STS creds for that role. GCP separates concerns into a <em>provider</em> (issuer + attribute condition CEL) and an <em>IAM binding</em> (<code>principalSet</code> → <code>workloadIdentityUser</code> on a GSA), giving two gates. Azure federates an <em>external identity</em> onto an App Registration / User-Assigned Managed Identity via a federated credential matching <code>issuer</code> + <code>subject</code> + <code>audience</code>, then issues an AAD token. Practically: AWS's condition is <code>StringLike</code> on <code>sub</code> (wildcards are the classic footgun); GCP's is a CEL expression (richer but easy to widen); Azure matches exact subject/issuer/audience tuples. The universal failure is not pinning the repo/branch subject.<br />
+<em>Signal: names the exact primitives per cloud and the shared <code>sub</code>-pinning failure.</em></p>
+<p><strong>Q14. A poisoned CI dependency runs in a job that has WIF configured. Trace the blast radius and the layered controls that cap it.</strong><br />
+On import/install the malicious package (dependency-confusion / typosquat, see <code>ai_security/AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes/README.md</code>) runs with the job's identity. If the job holds <code>id-token: write</code>, the attacker can mint the OIDC token and complete the exchange, obtaining whatever the deployer SA can do — so blast radius = the deployer SA's permissions for up to 1h. Layered caps: least-privilege on the deployer SA (control 5) bounds what the token reaches; scoped <code>principalSet</code> + condition ensure only the intended repo/branch even authenticates (so the poison must run in <em>your</em> trusted pipeline, e.g. via PPE, not any repo); <code>id-token: write</code> only on the deploy job denies the token to build/test jobs where untrusted deps run; and Data Access logs on STS/target services give detection. The strongest structural fix is separating untrusted build steps (no <code>id-token</code>) from a minimal, reviewed deploy step.<br />
+<em>Signal: connects supply-chain execution to identity abuse and enumerates the cap at each layer.</em></p>
+<p><strong>Q15. How would you detect and respond to abuse of a condition-less WIF provider that's already in production?</strong><br />
+Detect: query STS Data Access logs for <code>ExchangeToken</code> events whose <code>principalSubject</code> repository attribute is outside the allowlist, and alert on <code>GenerateAccessToken</code> for sensitive GSAs from unusual IPs/geos or unusual user agents; add a config-scan (SCC or a nightly <code>gcloud ... providers describe</code>) that fails any provider with an empty <code>attributeCondition</code>. Respond: disable the provider (<code>--disabled</code>) to cut trust immediately, disable the impersonated GSA to kill in-flight tokens, enumerate assumed SAs and touched APIs from logs, rotate anything reachable, then remediate by adding a <code>repository</code>/<code>ref</code>-scoped condition and a scoped <code>principalSet</code>, and re-enable only after a negative test proves non-allowlisted tokens are rejected. Finally, prevent recurrence with a Terraform policy gate that rejects condition-less providers and <code>/*</code> bindings.<br />
+<em>Signal: gives concrete log fields, an immediate containment lever, and a preventive control — full IR loop.</em></p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mechanism</td>
+<td>Workload Identity Federation (STS token exchange)</td>
+<td><code>sts:AssumeRoleWithWebIdentity</code></td>
+<td>Workload Identity Federation (federated credential)</td>
+</tr>
+<tr>
+<td>Trust container</td>
+<td>Workload Identity Pool</td>
+<td>IAM OIDC Identity Provider</td>
+<td>App Registration / User-Assigned Managed Identity</td>
+</tr>
+<tr>
+<td>Trusted issuer config</td>
+<td>Provider <code>--issuer-uri</code> + JWKS</td>
+<td>OIDC provider (thumbprint / URL)</td>
+<td>Federated credential <code>issuer</code></td>
+</tr>
+<tr>
+<td>Trust gate</td>
+<td>Attribute condition (CEL)</td>
+<td>Role trust policy <code>Condition</code> (<code>StringLike sub</code>)</td>
+<td>Exact <code>subject</code> + <code>issuer</code> + <code>audience</code> match</td>
+</tr>
+<tr>
+<td>Identity granted</td>
+<td><code>principal://</code> / <code>principalSet://</code></td>
+<td>The assumed IAM role</td>
+<td>The managed identity / app</td>
+</tr>
+<tr>
+<td>Impersonation target</td>
+<td>GSA via <code>roles/iam.workloadIdentityUser</code></td>
+<td>IAM role permissions</td>
+<td>Managed identity permissions</td>
+</tr>
+<tr>
+<td>Token endpoint</td>
+<td><code>sts.googleapis.com</code> + <code>iamcredentials</code></td>
+<td><code>sts.amazonaws.com</code></td>
+<td>Entra ID token endpoint</td>
+</tr>
+<tr>
+<td>In-cluster variant</td>
+<td>GKE Workload Identity (<code>PROJECT.svc.id.goog[ns/ksa]</code>)</td>
+<td>EKS IRSA / EKS Pod Identity</td>
+<td>AKS Workload Identity (<code>azwi</code>)</td>
+</tr>
+<tr>
+<td>Classic footgun</td>
+<td>Missing/loose CEL condition; <code>/*</code> binding</td>
+<td>Wildcard <code>sub</code> (<code>repo:*</code>) in trust policy</td>
+<td>Wrong/broad <code>subject</code> match</td>
+</tr>
+<tr>
+<td>Force-keyless org control</td>
+<td><code>disableServiceAccountKeyCreation</code></td>
+<td>SCP denying <code>iam:CreateAccessKey</code></td>
+<td>Disable AAD app secrets / enforce FIC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li>WIF replaces exfiltratable static SA keys with short-lived federated tokens — but relocates the entire trust decision into the <strong>provider condition</strong> and the <strong>IAM binding</strong>, both of which must be tight.</li>
+<li><strong>Two gates, both mandatory:</strong> the provider decides <em>which tokens are accepted</em> (issuer + audience + CEL condition); IAM decides <em>what an accepted identity can reach</em> (<code>principalSet</code> scope + GSA permissions).</li>
+<li>On a <strong>shared issuer</strong> like GitHub, a condition-less provider trusts <em>every repository on the internet</em>. Always pin <code>repository_owner</code> + <code>repository</code> + <code>ref</code>/<code>environment</code>.</li>
+<li>Keep the <strong>audience at the default</strong> (provider resource name) to prevent cross-purpose token replay; map <code>google.subject</code> from an immutable claim (<code>assertion.sub</code>), never a mutable one like <code>actor</code>.</li>
+<li>Scope the <code>principalSet</code> to the exact repo (<code>attribute.repository/&lt;owner&gt;/&lt;repo&gt;</code>), never <code>/*</code> or owner-wide; and keep the impersonated GSA least-privileged so a successful exchange isn't project takeover.</li>
+<li><strong>GKE Workload Identity</strong> binds KSA→GSA and, with <code>GKE_METADATA</code> enforced, kills the "every pod inherits the node SA" lateral-movement path — a major hardening win over the metadata-server default.</li>
+<li>Enable <strong>Data Access audit logs</strong> for <code>sts.googleapis.com</code> and <code>iamcredentials.googleapis.com</code> — exchanges are invisible otherwise — and alert on unexpected repository attributes and wildcard binding changes.</li>
+<li>Prefer <strong>direct IAM grants to the federated principal</strong> over the SA impersonation hop when possible; it removes an over-permissionable intermediary.</li>
+<li>Force adoption org-wide with <code>disableServiceAccountKeyCreation</code>, and gate WIF config in Terraform CI to reject condition-less providers and <code>/*</code> bindings.</li>
+<li>WIF inherits the <strong>external IdP's key-custody and validation risk</strong> (Storm-0558 lesson): trust only well-run issuers, pin JWKS for custom OIDC, and treat detection as the backstop when prevention fails.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — <em>Workload Identity Federation</em> (concepts, providers, attribute mappings &amp; conditions): cloud.google.com/iam/docs/workload-identity-federation</li>
+<li>Google Cloud — <em>Configure Workload Identity Federation with deployment pipelines</em> (GitHub Actions): cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines</li>
+<li>Google Cloud — <em>GKE Workload Identity</em> (<code>workload-pool</code>, metadata server): cloud.google.com/kubernetes-engine/docs/how-to/workload-identity</li>
+<li>Google Cloud — <em>Best practices for using Workload Identity Federation</em> (attribute conditions, audience): cloud.google.com/iam/docs/best-practices-for-using-workload-identity-federation</li>
+<li>RFC 8693 — <em>OAuth 2.0 Token Exchange</em>; RFC 7519 — <em>JSON Web Token (JWT)</em></li>
+<li>OpenID Connect Core 1.0 — id_token, claims, discovery</li>
+<li>GitHub Docs — <em>About security hardening with OpenID Connect</em> (OIDC claims, <code>sub</code> format, audiences)</li>
+<li><code>google-github-actions/auth</code> — action docs (audience handling, direct vs impersonation)</li>
+<li>AWS — <em>Create a role for web identity / OIDC</em> (<code>AssumeRoleWithWebIdentity</code>, trust policy conditions)</li>
+<li>Microsoft — <em>Workload identity federation</em> (federated credentials, subject/issuer/audience)</li>
+<li>MITRE ATT&amp;CK — T1078.004 (Cloud Accounts), T1550.001 (Application Access Token), T1199 (Trusted Relationship), T1552.005 (Cloud Metadata API)</li>
+<li>Microsoft MSRC / CISA — <em>Storm-0558</em> analysis (token forgery, audience validation)</li>
+<li>Repo cross-refs: <code>auth_authz/Federation/OpenID-Connect/README.md</code>, <code>auth_authz/Infrastructure/Workload-Identity/README.md</code>, <code>infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code>, <code>ai_security/AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

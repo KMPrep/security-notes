@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Binary Authorization — Deploy-Time Supply-Chain Admission Control</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Security\Binary-Authorization\README.md</p>
+<h1 id="gcp-binary-authorization-deploy-time-supply-chain-admission-control">GCP Binary Authorization — Deploy-Time Supply-Chain Admission Control</h1>
+<p><strong>Domain:</strong> Cloud / Software Supply-Chain Security — Deploy-Time Enforcement<br />
+<strong>Platforms:</strong> GKE, Cloud Run, Anthos / GKE Enterprise, Cloud Service Mesh<br />
+<strong>Frameworks:</strong> SLSA v1.0, in-toto Attestation Framework, NIST SP 800-204D, CIS GKE Benchmark, MITRE ATT&amp;CK for Containers (T1610, T1525)<br />
+<strong>Related notes:</strong> <code>supply_chain/SLSA</code>, <code>supply_chain/Sigstore-And-Signing</code>, <code>supply_chain/SBOM</code>, <code>cloud/Kubernetes-Security</code>, <code>cloud/AWS/Security/KMS</code>, <code>cloud/AWS/DevOps/ECR</code></p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Binary Authorization (BinAuthz) is a Google Cloud service that enforces, <strong>at deploy time</strong>, that only container images meeting an organization's policy may run on GKE, Cloud Run, and GKE-on-prem/Anthos. It is a policy decision point wired into the Kubernetes admission chain (and Cloud Run's equivalent gate) that answers one question for every pod that tries to start: <em>"Is this exact image digest permitted by our policy right now?"</em> If the answer is no, the deployment is blocked (enforce mode) or logged (dry-run mode). Its purpose is to close the gap between "we built and signed this image in our hardened pipeline" and "only images that passed that pipeline are actually running in production."</p>
+<p>The mechanism is deliberately simple and therefore hard to bypass: policy is expressed as an <strong>admission rule</strong> (a default rule plus optional per-cluster overrides), and the two enforcement modes that matter are <em>allowlist by image digest</em> (a static exception list) and <em>require attestations</em> (proof, in the form of cryptographically signed statements, that named quality gates were satisfied). Attestations are produced by <strong>attestors</strong> — named policy objects that hold a public key (PKIX or Cloud KMS-backed) — and each attestation is a signed claim bound to a specific image digest. Because the gate keys on the immutable SHA-256 digest, not a mutable tag like <code>:latest</code>, an attacker cannot swap a poisoned image behind a trusted tag and have it silently admitted.</p>
+<p>At scale BinAuthz matters because it converts supply-chain hygiene from <em>advisory</em> (a scan report in a dashboard nobody reads) into a <em>hard runtime control</em> that fails closed. It is the deploy-time terminus of a chain that starts with SLSA provenance in the build system (<code>supply_chain/SLSA</code>) and Sigstore/cosign signatures (<code>supply_chain/Sigstore-And-Signing</code>): the build proves <em>how</em> an artifact was made, signing proves <em>who</em> vouched for it, and Binary Authorization is where that proof is <em>checked before the workload runs</em>.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- BinAuthz is a <strong>deploy-time admission gate</strong> for GKE/Cloud Run: it evaluates a <strong>policy</strong> (default admission rule + per-cluster rules) against every image and blocks or allows.<br />
+- The two enforcement primitives are <strong>allowlist by image digest</strong> and <strong>require attestations</strong>; attestations are signed statements bound to a digest, verified against an <strong>attestor's public key</strong> (PKIX or Cloud KMS).<br />
+- Always roll out in <strong>dry-run</strong> first (audit-only, <code>enforcementMode: DRYRUN_AUDIT_LOG_ONLY</code>) then flip to <strong>enforce</strong> (<code>ENFORCED_BLOCK_AND_AUDIT_LOG</code>); the #1 misconfig is a policy left at <code>ALWAYS_ALLOW</code>.<br />
+- <strong>Break-glass</strong> lets an operator bypass the gate with an annotation, but it is <strong>logged</strong> — abuse is detectable; <strong>Continuous Validation (CV)</strong> re-checks <em>already-running</em> pods against policy so drift is caught after admission.<br />
+- It composes with <strong>SLSA provenance</strong> and <strong>Sigstore</strong>: the attestor verifies "built by our trusted builder AND signed by our attestor," turning supply-chain claims into an enforceable boundary.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>Binary Authorization has three planes worth separating in your head. The <strong>policy plane</strong> is a single project-level (or org-level, via GKE Enterprise) <code>policy</code> resource plus a set of <code>attestor</code> resources. The <strong>enforcement plane</strong> is an admission webhook baked into GKE's control plane (and Cloud Run's deploy path) that GKE runs as a managed component — you don't deploy the webhook yourself, you enable the feature. The <strong>attestation plane</strong> is Container Analysis / Artifact Analysis, where attestations are stored as <code>Occurrence</code> objects attached to a <code>Note</code> that represents the attestor.</p>
+<p>The policy is evaluated per image. The evaluation logic is: (1) if the image digest matches an entry in <code>admissionWhitelistPatterns</code>, admit it unconditionally (this is the global allowlist for system/infra images); (2) otherwise find the most specific rule — a <code>clusterAdmissionRule</code> keyed by cluster, an <code>istioServiceIdentityAdmissionRule</code>, or the <code>defaultAdmissionRule</code>; (3) apply that rule's <code>evaluationMode</code> (<code>ALWAYS_ALLOW</code>, <code>ALWAYS_DENY</code>, or <code>REQUIRE_ATTESTATION</code>); (4) if attestations are required, verify that a valid attestation exists for the digest, signed by <em>every</em> attestor listed in <code>requireAttestationsBy</code>, and that each signature validates against that attestor's public key.</p>
+<table>
+<thead>
+<tr>
+<th>Object / Concept</th>
+<th>What it is</th>
+<th>Security-relevant detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Policy</td>
+<td>Singleton per project (<code>projects/PROJECT/policy</code>)</td>
+<td>Holds default rule, per-cluster rules, allowlist, global evaluation mode</td>
+</tr>
+<tr>
+<td><code>defaultAdmissionRule</code></td>
+<td>Fallback rule for any cluster without an override</td>
+<td>If this is <code>ALWAYS_ALLOW</code> the whole gate is a no-op</td>
+</tr>
+<tr>
+<td><code>clusterAdmissionRules</code></td>
+<td>Map keyed by <code>LOCATION.CLUSTER_NAME</code></td>
+<td>Lets prod require attestation while a sandbox cluster allows all</td>
+</tr>
+<tr>
+<td><code>admissionWhitelistPatterns</code></td>
+<td>Glob list of exempt image paths</td>
+<td>Needed for GKE system images; over-broad globs are a bypass</td>
+</tr>
+<tr>
+<td>Attestor</td>
+<td>Named verifier holding a public key + a Container Analysis Note</td>
+<td>The trust anchor; compromise = forged approvals</td>
+</tr>
+<tr>
+<td>Attestation</td>
+<td>Signed statement bound to an image <strong>digest</strong></td>
+<td>Stored as an <code>Occurrence</code>; the digest binding is what stops tag swaps</td>
+</tr>
+<tr>
+<td>Note (Container Analysis)</td>
+<td>The "authority" an attestor references</td>
+<td>IAM on the Note controls who can attach attestations</td>
+</tr>
+<tr>
+<td><code>evaluationMode</code></td>
+<td><code>ALWAYS_ALLOW</code> / <code>ALWAYS_DENY</code> / <code>REQUIRE_ATTESTATION</code></td>
+<td>The core decision knob per rule</td>
+</tr>
+<tr>
+<td><code>enforcementMode</code></td>
+<td><code>ENFORCED_BLOCK_AND_AUDIT_LOG</code> / <code>DRYRUN_AUDIT_LOG_ONLY</code></td>
+<td>Enforce vs. dry-run; per policy in v1</td>
+</tr>
+<tr>
+<td>Break-glass</td>
+<td><code>alpha.image-policy.k8s.io/break-glass</code> pod annotation</td>
+<td>Bypasses gate but emits an audit log entry</td>
+</tr>
+<tr>
+<td>Continuous Validation</td>
+<td>Background re-evaluation of running pods</td>
+<td>Catches images that drifted out of policy after admission</td>
+</tr>
+<tr>
+<td>PKIX attestor</td>
+<td>Attestor with an externally managed asymmetric key</td>
+<td>You hold the private key (offline HSM, etc.)</td>
+</tr>
+<tr>
+<td>Cloud KMS attestor</td>
+<td>Attestor whose key lives in Cloud KMS</td>
+<td>Signing is an IAM-gated <code>AsymmetricSign</code> call</td>
+</tr>
+<tr>
+<td>Signer</td>
+<td>The identity/pipeline that creates attestations</td>
+<td>Usually Cloud Build via a dedicated service account</td>
+</tr>
+</tbody>
+</table>
+<p>A subtle but exam-worthy point: an attestation says nothing about <em>what</em> was checked — it only proves <em>that the holder of the attestor's private key vouched for this digest</em>. The semantics ("this image passed vuln scan," "this image has SLSA L3 provenance") live entirely in <em>when and why your pipeline chooses to sign</em>. BinAuthz enforces the signature; your pipeline enforces the meaning.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete Configuration</h3>
+<p><strong>Enable the API and inspect the default policy.</strong> A fresh project ships with a wide-open default (<code>ALWAYS_ALLOW</code>), which is why "enable BinAuthz" alone secures nothing.</p>
+<pre><code class="language-bash">gcloud services enable binaryauthorization.googleapis.com \
+  containeranalysis.googleapis.com cloudkms.googleapis.com
+
+# Export the live policy so you can diff and version it in Git
+gcloud container binauthz policy export &gt; /tmp/binauthz-policy.yaml
+cat /tmp/binauthz-policy.yaml   # note: defaultAdmissionRule.evaluationMode: ALWAYS_ALLOW  &lt;-- insecure default
+</code></pre>
+<p><strong>Create a Cloud KMS asymmetric signing key for the attestor.</strong> Use an asymmetric-sign key (EC P-256 or RSA); the private key never leaves KMS and every signature is an IAM-authorized API call, which gives you a CloudTrail-equivalent audit trail of who signed what.</p>
+<pre><code class="language-bash">gcloud kms keyrings create binauthz --location global
+
+gcloud kms keys create prod-attestor-key \
+  --location global --keyring binauthz \
+  --purpose asymmetric-signing \
+  --default-algorithm ec-sign-p256-sha256
+</code></pre>
+<p><strong>Create the Container Analysis Note and the attestor.</strong> The Note is the "authority"; IAM on it governs who may write attestations. The attestor references the Note and the KMS key version.</p>
+<pre><code class="language-bash"># 1. Create the Note (JSON body) via the Container Analysis API
+cat &gt; /tmp/note.json &lt;&lt;'EOF'
+{ &quot;attestation&quot;: { &quot;hint&quot;: { &quot;human_readable_name&quot;: &quot;prod-quality-gate&quot; } } }
+EOF
+curl -s -X POST \
+  &quot;https://containeranalysis.googleapis.com/v1/projects/${PROJECT}/notes/?noteId=prod-quality-gate&quot; \
+  -H &quot;Authorization: Bearer $(gcloud auth print-access-token)&quot; \
+  -H &quot;Content-Type: application/json&quot; -d @/tmp/note.json
+
+# 2. Create the attestor pointing at that Note
+gcloud container binauthz attestors create prod-attestor \
+  --attestation-authority-note=prod-quality-gate \
+  --attestation-authority-note-project=${PROJECT}
+
+# 3. Bind the KMS public key to the attestor
+gcloud container binauthz attestors public-keys add \
+  --attestor=prod-attestor \
+  --keyversion-project=${PROJECT} \
+  --keyversion-location=global --keyversion-keyring=binauthz \
+  --keyversion-key=prod-attestor-key --keyversion=1
+</code></pre>
+<p><strong>Write and import an enforcing policy.</strong> This policy requires a <code>prod-attestor</code> attestation on the production cluster, allows a sandbox cluster to run anything, and allowlists only the GKE system image path. Note <code>globalPolicyEvaluationMode: ENABLE</code>, which additionally trusts Google-signed system images so you don't have to enumerate them all.</p>
+<pre><code class="language-yaml"># binauthz-policy.yaml  (gcloud container binauthz policy import binauthz-policy.yaml)
+globalPolicyEvaluationMode: ENABLE
+admissionWhitelistPatterns:
+- namePattern: gcr.io/google-containers/*
+- namePattern: gke.gcr.io/*
+defaultAdmissionRule:
+  evaluationMode: REQUIRE_ATTESTATION
+  enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG
+  requireAttestationsBy:
+  - projects/PROJECT/attestors/prod-attestor
+clusterAdmissionRules:
+  us-central1-a.prod-cluster:
+    evaluationMode: REQUIRE_ATTESTATION
+    enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG
+    requireAttestationsBy:
+    - projects/PROJECT/attestors/prod-attestor
+  us-central1-a.sandbox-cluster:
+    evaluationMode: ALWAYS_ALLOW
+    enforcementMode: DRYRUN_AUDIT_LOG_ONLY
+</code></pre>
+<p><strong>Create an attestation for a specific digest.</strong> This is what a pipeline step does after all gates pass. Always resolve the digest first — never attest a tag.</p>
+<pre><code class="language-bash"># Resolve the immutable digest (BinAuthz only ever trusts digests)
+DIGEST=$(gcloud container images describe \
+  us-central1-docker.pkg.dev/${PROJECT}/apps/checkout:v1.4.2 \
+  --format='get(image_summary.digest)')
+IMAGE=&quot;us-central1-docker.pkg.dev/${PROJECT}/apps/checkout@${DIGEST}&quot;
+
+# Sign+attest in one step using the KMS-backed attestor
+gcloud container binauthz attestations sign-and-create \
+  --project=${PROJECT} \
+  --artifact-url=&quot;${IMAGE}&quot; \
+  --attestor=prod-attestor \
+  --attestor-project=${PROJECT} \
+  --keyversion-project=${PROJECT} \
+  --keyversion-location=global --keyversion-keyring=binauthz \
+  --keyversion-key=prod-attestor-key --keyversion=1
+</code></pre>
+<p><strong>Verify what BinAuthz would decide, before deploying.</strong> <code>gcloud beta container binauthz</code> and the dry-run logs let you test policy without shipping.</p>
+<pre><code class="language-bash"># List attestations already present for an image
+gcloud container binauthz attestations list \
+  --attestor=prod-attestor --attestor-project=${PROJECT}
+</code></pre>
+<p><strong>Enforce it on the cluster.</strong> BinAuthz must be enabled at cluster-create (or via update on newer GKE), and the workload attempt is what triggers the webhook.</p>
+<pre><code class="language-bash">gcloud container clusters create prod-cluster \
+  --zone us-central1-a --binauthz-evaluation-mode=PROJECT_SINGLETON_POLICY_ENFORCE
+</code></pre>
+<p><strong>Cloud Build integration.</strong> A canonical pipeline builds, scans, checks provenance, then attests only if every gate passes. The critical property: the <em>attestation service account is different from the build/deploy service account</em>, so a compromised build step cannot both build a bad image and sign it (separation of duties — see 5, "Top 5").</p>
+<pre><code class="language-yaml"># cloudbuild.yaml (excerpt)
+steps:
+- id: build
+  name: gcr.io/cloud-builders/docker
+  args: ['build','-t','us-central1-docker.pkg.dev/$PROJECT_ID/apps/checkout:$SHORT_SHA','.']
+- id: push
+  name: gcr.io/cloud-builders/docker
+  args: ['push','us-central1-docker.pkg.dev/$PROJECT_ID/apps/checkout:$SHORT_SHA']
+- id: scan-gate           # fail the build if CRITICAL vulns exist
+  name: gcr.io/cloud-builders/gcloud
+  entrypoint: bash
+  args: ['-c','gcloud artifacts docker images scan ... &amp;&amp; ./check_no_critical.sh']
+- id: attest              # only runs if all prior steps succeeded
+  name: gcr.io/cloud-builders/gcloud
+  entrypoint: bash
+  args:
+  - -c
+  - |
+    DIGEST=$(gcloud container images describe us-central1-docker.pkg.dev/$PROJECT_ID/apps/checkout:$SHORT_SHA --format='get(image_summary.digest)')
+    gcloud container binauthz attestations sign-and-create \
+      --artifact-url=&quot;us-central1-docker.pkg.dev/$PROJECT_ID/apps/checkout@${DIGEST}&quot; \
+      --attestor=prod-attestor --attestor-project=$PROJECT_ID \
+      --keyversion-project=$PROJECT_ID --keyversion-location=global \
+      --keyversion-keyring=binauthz --keyversion-key=prod-attestor-key --keyversion=1
+</code></pre>
+<p><strong>Break-glass.</strong> In a genuine incident where the gate itself is the blocker (e.g., attestor outage), an operator can annotate the pod to bypass — and that bypass is logged for later review.</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: hotfix-checkout
+  annotations:
+    alpha.image-policy.k8s.io/break-glass: &quot;true&quot;
+spec:
+  containers:
+  - name: app
+    image: us-central1-docker.pkg.dev/PROJECT/apps/checkout@sha256:abc...
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Architecture: policy, attestor, admission.</strong></p>
+<pre class="mermaid">
+flowchart LR
+    Build[Cloud Build pipeline] --> Registry[Artifact Registry]
+    Build --> Attest[Create attestation]
+    KMS[Cloud KMS signing key] --> Attest
+    Attest --> CA[Container Analysis Occurrence]
+    Policy[BinAuthz policy] --> Admission[GKE admission webhook]
+    Attestor[Attestor public key] --> Admission
+    CA --> Admission
+    Registry --> Admission
+    Admission --> Pod[Pod runs or is blocked]
+</pre>
+<p><strong>Diagram B — Admission decision flow (the core logic).</strong></p>
+<pre class="mermaid">
+flowchart TD
+    Start[Pod create request] --> WL{Digest in allowlist}
+    WL -->|Yes| Admit[Admit]
+    WL -->|No| Rule{Cluster rule exists}
+    Rule -->|Yes| Mode[Use cluster rule mode]
+    Rule -->|No| Def[Use default rule mode]
+    Mode --> Eval{Evaluation mode}
+    Def --> Eval
+    Eval -->|Always allow| Admit
+    Eval -->|Always deny| Deny[Deny]
+    Eval -->|Require attestation| Verify{Valid attestation for digest}
+    Verify -->|Yes| Admit
+    Verify -->|No| Enforce{Enforcement mode}
+    Enforce -->|Enforced block| Deny
+    Enforce -->|Dry run| AdmitLog[Admit and audit log]
+</pre>
+<p><strong>Diagram C — Sign and verify sequence.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant CB as Cloud Build
+    participant KMS as Cloud KMS
+    participant CA as Container Analysis
+    participant K8s as GKE API server
+    participant BA as BinAuthz webhook
+    CB->>KMS: AsymmetricSign digest payload
+    KMS-->>CB: Signature
+    CB->>CA: Create attestation occurrence
+    K8s->>BA: Admission review for pod
+    BA->>CA: Fetch attestations for digest
+    CA-->>BA: Attestation and signature
+    BA->>BA: Verify signature against attestor key
+    BA-->>K8s: Allow or deny
+</pre>
+<p><strong>Diagram D — Enforcement mode rollout lifecycle.</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> AlwaysAllow
+    AlwaysAllow --> DryRun: Add require attestation dry run
+    DryRun --> Tuning: Review audit logs for would block
+    Tuning --> DryRun: Fix pipeline and allowlist
+    Tuning --> Enforced: No unexpected would block events
+    Enforced --> BreakGlass: Incident bypass with annotation
+    BreakGlass --> Enforced: Post incident review
+    Enforced --> ContinuousValidation: Re-check running pods
+</pre>
+<p><strong>Diagram E — SLSA / Sigstore composition into BinAuthz.</strong></p>
+<pre class="mermaid">
+flowchart LR
+    Source[Source repo commit] --> Builder[SLSA L3 builder]
+    Builder --> Prov[SLSA provenance attestation]
+    Builder --> Sign[Cosign keyless signature]
+    Prov --> Verifier[Policy check builder and source]
+    Sign --> Verifier
+    Verifier --> BAAttest[BinAuthz attestation created]
+    BAAttest --> Gate[BinAuthz admission gate]
+    Gate --> Run[Workload admitted]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name / ID</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson for BinAuthz</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SolarWinds SUNBURST</td>
+<td>2020</td>
+<td>Build system compromised; malicious code shipped in a <em>signed</em> update</td>
+<td>Signing the wrong thing is worthless; you must attest a <em>hardened</em> build (SLSA L3) and verify provenance, not just presence of a signature</td>
+</tr>
+<tr>
+<td>Codecov Bash Uploader</td>
+<td>2021</td>
+<td>Attacker modified a CI script to exfiltrate CI secrets</td>
+<td>Separation of duties: the signer identity must be isolated from mutable build steps</td>
+</tr>
+<tr>
+<td>XZ Utils backdoor (CVE-2024-3094)</td>
+<td>2024</td>
+<td>Malicious maintainer planted a backdoor in a dependency</td>
+<td>Provenance/attestation of <em>what source</em> was built lets you detect an unexpected input, though social-engineering of a maintainer is a source-track problem</td>
+</tr>
+<tr>
+<td>CVE-2022-36055 (<code>sigstore/policy-controller</code>)</td>
+<td>2022</td>
+<td>Policy-controller admission webhook could be bypassed under certain configs</td>
+<td>Admission-controller correctness is itself attack surface; fail-closed webhook config matters</td>
+</tr>
+<tr>
+<td>CVE-2020-8554 (Kubernetes MITM via ExternalIP)</td>
+<td>2020</td>
+<td>Not BinAuthz-specific but shows admission gaps</td>
+<td>Admission control must cover <em>every</em> create path, or attackers use the uncovered one</td>
+</tr>
+<tr>
+<td>Tesla Kubernetes cryptojacking</td>
+<td>2018</td>
+<td>Exposed K8s dashboard let attackers deploy mining pods</td>
+<td>A deploy-time image gate (<code>REQUIRE_ATTESTATION</code>) blocks unknown attacker images even when RBAC/dashboard is breached</td>
+</tr>
+<tr>
+<td>Docker Hub <code>docker123321</code> cryptomining images</td>
+<td>2018</td>
+<td>17 backdoored public images pulled ~5M times</td>
+<td>Allowlisting/attestation stops pulling arbitrary registry images into prod</td>
+</tr>
+<tr>
+<td>PyTorch <code>torchtriton</code> dependency confusion</td>
+<td>2022</td>
+<td>Malicious package on public index shadowed an internal one</td>
+<td>Provenance + attestation of the <em>exact built artifact</em> catches substituted inputs</td>
+</tr>
+<tr>
+<td>CVE-2023-2727/2728 (K8s image-policy webhook bypass)</td>
+<td>2023</td>
+<td>Ephemeral containers / <code>imagePolicyWebhook</code> bypass via mutation ordering</td>
+<td>Confirms BinAuthz must evaluate at the API-server admission stage, not a bolt-on webhook that mutation can dodge</td>
+</tr>
+<tr>
+<td>Kinsing / Kubernetes malware campaigns</td>
+<td>2020-2023</td>
+<td>Deployed miner/backdoor images to misconfigured clusters</td>
+<td>Enforced attestation renders the attacker's un-attested image un-runnable</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — SolarWinds and why "signed" is not "trustworthy."</strong> In SUNBURST, attackers compromised the SolarWinds Orion <em>build environment</em> and injected the backdoor during compilation. The resulting DLL was then signed with SolarWinds' legitimate code-signing certificate and distributed through the official update channel. Every downstream verification of the signature passed, because the signature was genuine — the <em>build</em> was subverted. The BinAuthz lesson is that an attestation is only as strong as the pipeline that decides to emit it. A BinAuthz attestor that signs any image the build produced would have "approved" a SUNBURST-equivalent artifact. The defense is to raise the bar for <em>when</em> you attest: require SLSA L3 provenance (hermetic, isolated, ephemeral builders where user build steps cannot reach the signing key), verify that provenance in a policy step, and only then create the BinAuthz attestation. BinAuthz is the enforcement muscle; SLSA is the assurance that the thing being enforced is meaningful.</p>
+<p><strong>Case study — Tesla cryptojacking and deploy-time gates.</strong> Attackers found a Kubernetes dashboard exposed without authentication in Tesla's AWS environment, obtained cloud credentials, and ran a Monero miner inside a pod. The initial access was an infrastructure misconfiguration, but the <em>payload</em> was an arbitrary attacker-chosen container image pulled from the internet. Had an enforced deploy-time image policy been present — the AWS analog would be OPA/Kyverno or ECR + admission; the GCP analog is exactly <code>REQUIRE_ATTESTATION</code> — the attacker's miner image would have carried no valid attestation from the org's attestor and would have been blocked at admission, converting a full compromise into a blocked deploy plus a high-signal audit event.</p>
+<p><strong>Case study — Codecov and separation of duties.</strong> Codecov's Bash Uploader script was modified by an attacker who exfiltrated environment variables (including CI secrets) from thousands of customer pipelines. This is the canonical argument for <em>isolating the signing identity from the build steps</em>. In a BinAuthz design, the service account that can call <code>attestations sign-and-create</code> (or <code>kms AsymmetricSign</code> on the attestor key) must not be the same identity that runs arbitrary, potentially-attacker-controlled build commands. If they are unified, a Codecov-style step that leaks or abuses the build identity can also mint attestations for malicious digests, and the gate becomes theater.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Default rule left at <code>ALWAYS_ALLOW</code></td>
+<td>Misconfiguration</td>
+<td>Insecure default never changed</td>
+<td>Gate is a no-op; any image runs</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Policy in dry-run forever, never enforced</td>
+<td>Misconfiguration</td>
+<td>Fear of breaking deploys</td>
+<td>Findings logged but nothing blocked</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Unsigned / un-attested image admitted</td>
+<td>T1610 Deploy Container</td>
+<td>Rule not <code>REQUIRE_ATTESTATION</code> on that cluster</td>
+<td>Malicious image runs</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-broad allowlist glob (<code>*</code> or <code>gcr.io/*</code>)</td>
+<td>Misconfiguration</td>
+<td>Convenience exemption</td>
+<td>Whole registries bypass the gate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Attestor private key compromise</td>
+<td>T1552 / Credential Access</td>
+<td>Key not in KMS/HSM, over-broad IAM</td>
+<td>Attacker forges valid attestations</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Signer service account too broadly scoped</td>
+<td>T1078 Valid Accounts</td>
+<td>No separation of duties</td>
+<td>Compromised build step self-attests malware</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Break-glass abuse to bypass gate</td>
+<td>Defense Evasion T1562</td>
+<td>Annotation permission too broad</td>
+<td>Un-attested image deployed</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Attesting a tag not a digest</td>
+<td>Design misuse</td>
+<td>Human error / bad tooling</td>
+<td>Tag re-point swaps image behind approval</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Time-of-check to time-of-use drift</td>
+<td>Logic gap</td>
+<td>Policy tightened after admission</td>
+<td>Old non-compliant pods keep running</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Cluster created without BinAuthz enabled</td>
+<td>Misconfiguration</td>
+<td>Enforcement not org-mandated</td>
+<td>Shadow cluster with no gate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Deploy path not covered (Cloud Run, jobs, ephemeral containers)</td>
+<td>Detection/coverage gap</td>
+<td>Partial enablement</td>
+<td>Attacker uses the ungated path</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Container Analysis Note IAM too permissive</td>
+<td>T1098 Account Manipulation</td>
+<td><code>containeranalysis.notes.attachOccurrence</code> granted widely</td>
+<td>Anyone can write attestations</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Global allowlist trusts a compromised base image</td>
+<td>Supply chain</td>
+<td>Trusting <code>google-containers/*</code> blindly plus typo-squat</td>
+<td>Poisoned but allowlisted image runs</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Attestation of a build with weak provenance (SLSA L0/L1)</td>
+<td>Assurance gap</td>
+<td>Signing presence not build integrity</td>
+<td>SolarWinds-style subverted build approved</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td>KMS key IAM allows <code>AsymmetricSign</code> to CI broadly</td>
+<td>Privilege</td>
+<td>Least privilege not applied to key</td>
+<td>CI compromise mints attestations</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Policy changes not peer-reviewed / no IaC</td>
+<td>Governance</td>
+<td>Manual <code>policy import</code> by one admin</td>
+<td>Silent weakening of the gate</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Admission webhook fail-open on outage</td>
+<td>Availability vs security</td>
+<td>Choosing availability</td>
+<td>Images admitted unchecked during outage</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>18</td>
+<td>No monitoring of <code>binauthz.googleapis.com</code> audit logs</td>
+<td>Detection gap</td>
+<td>Logs not routed/alerted</td>
+<td>Bypasses and denies invisible</td>
+<td>High</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Org policy not enforcing enablement across projects</td>
+<td>Governance</td>
+<td>No <code>constraints/</code> org policy</td>
+<td>Teams disable BinAuthz per project</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Continuous Validation not enabled</td>
+<td>Detection gap</td>
+<td>Feature not turned on</td>
+<td>Post-admission drift undetected</td>
+<td>Medium</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Concrete control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Default <code>ALWAYS_ALLOW</code></td>
+<td>Set <code>defaultAdmissionRule.evaluationMode: REQUIRE_ATTESTATION</code></td>
+<td>Policy resource</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Perma dry-run</td>
+<td>Time-boxed rollout to <code>ENFORCED_BLOCK_AND_AUDIT_LOG</code></td>
+<td>Policy resource</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Un-attested image</td>
+<td>Require attestation on all prod clusters + Cloud Run</td>
+<td>Policy / cluster rules</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Broad allowlist</td>
+<td>Restrict <code>admissionWhitelistPatterns</code> to exact system paths</td>
+<td>Policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Key compromise</td>
+<td>Use Cloud KMS/HSM asymmetric keys; rotate; least-priv IAM</td>
+<td>KMS + attestor</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Broad signer SA</td>
+<td>Separate attestor SA from build SA (separation of duties)</td>
+<td>IAM</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Break-glass abuse</td>
+<td>Restrict who can set the annotation; alert on every use</td>
+<td>RBAC + logging</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Tag not digest</td>
+<td>Resolve digest in pipeline; forbid tag attestation</td>
+<td>Cloud Build step</td>
+</tr>
+<tr>
+<td>9</td>
+<td>TOCTOU drift</td>
+<td>Enable Continuous Validation</td>
+<td>BinAuthz CV</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Cluster without gate</td>
+<td>Org policy mandating BinAuthz enablement</td>
+<td>Org policy constraint</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Uncovered deploy path</td>
+<td>Enable BinAuthz for Cloud Run + GKE + Anthos uniformly</td>
+<td>Multi-surface enablement</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Note IAM broad</td>
+<td>Least-priv on <code>containeranalysis.notes.attachOccurrence</code></td>
+<td>Container Analysis IAM</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Compromised allowlisted base</td>
+<td>Attest and pin base images; minimal/distroless</td>
+<td>Build + policy</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Weak provenance</td>
+<td>Require SLSA L3 provenance before attesting</td>
+<td>Pipeline gate</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Broad KMS sign IAM</td>
+<td>Grant <code>cloudkms.signerVerifier</code> only to attestor SA</td>
+<td>KMS IAM</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Unreviewed policy change</td>
+<td>Manage policy as IaC with PR review</td>
+<td>Terraform + CODEOWNERS</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Webhook fail-open</td>
+<td>Prefer fail-closed; use break-glass for genuine outages</td>
+<td>Design choice</td>
+</tr>
+<tr>
+<td>18</td>
+<td>No log monitoring</td>
+<td>Alert on BinAuthz deny + break-glass audit logs</td>
+<td>Cloud Logging + SCC</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Per-project disable</td>
+<td>Org policy + Security Command Center detectors</td>
+<td>Org governance</td>
+</tr>
+<tr>
+<td>20</td>
+<td>No CV</td>
+<td>Turn on Continuous Validation, route CV logs</td>
+<td>BinAuthz CV</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Enforce <code>REQUIRE_ATTESTATION</code> with a hardened default rule.</strong> The single most important control is that the <em>default</em> admission rule — the one that applies to any cluster without an explicit override — requires attestation and blocks. Attackers and mistakes gravitate to the fallback path, so if the default is <code>ALWAYS_ALLOW</code>, a team that spins up a new cluster without a per-cluster rule silently has no gate. Concretely, set <code>defaultAdmissionRule.evaluationMode: REQUIRE_ATTESTATION</code> and <code>enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG</code>, keep <code>admissionWhitelistPatterns</code> minimal, and set <code>globalPolicyEvaluationMode: ENABLE</code> so Google's own system images are trusted without you enumerating them. The trade-off: fail-closed enforcement can block legitimate emergency deploys, which is exactly what break-glass and a well-run dry-run rollout are for. The limit: BinAuthz only checks the <em>digest is attested</em>; it does not inspect the image contents, so pair it with vulnerability scanning as an attestation gate.</p>
+<p><strong>2. Cloud KMS-backed attestor keys with least-privilege IAM.</strong> Never hold the attestor private key as a raw file in CI. Create an asymmetric-signing key in Cloud KMS (<code>ec-sign-p256-sha256</code>), bind its public key version to the attestor, and grant only the pipeline's dedicated attestation service account the <code>roles/cloudkms.signerVerifier</code> role <em>on that specific key</em>. Every signature then becomes an IAM-authorized <code>AsymmetricSign</code> call logged in Cloud Audit Logs — you get non-repudiable evidence of who signed which digest and when. Rotate the key version and add the new public key to the attestor (BinAuthz supports multiple keys per attestor, so you can rotate without a flag day). The trade-off is latency and a hard dependency on KMS availability during signing; the limit is that KMS protects the key, not the <em>decision</em> to sign — a compromised pipeline with sign permission can still request signatures, which is why control #3 matters.</p>
+<p><strong>3. Separation of duties between build and signer identities.</strong> The Codecov and SolarWinds lessons converge here: the identity that runs arbitrary, potentially-attacker-influenced build steps must not be the identity that can create attestations. In practice, run the build under <code>build-sa@</code> (no KMS sign, no <code>attachOccurrence</code>) and perform attestation in an isolated step or a separate pipeline under <code>attestor-sa@</code> that <em>only</em> has <code>cloudkms.signerVerifier</code> on the attestor key and <code>containeranalysis.occurrences.create</code> on the Note. Ideally the attestation decision is gated by verifying independently-produced evidence (a SLSA provenance attestation, a scan result) rather than "the build said it's fine." The trade-off is pipeline complexity; the limit is that within a single Cloud Build execution, step isolation is weaker than a fully separate builder, so the strongest form uses a separate, hardened attestation service.</p>
+<p><strong>4. Dry-run-first rollout with audit-log tuning.</strong> Flipping straight to enforce in a large environment guarantees an outage: legacy images, third-party charts, and system pods will lack attestations. The disciplined path is to set the rule to <code>REQUIRE_ATTESTATION</code> but <code>enforcementMode: DRYRUN_AUDIT_LOG_ONLY</code>, then mine Cloud Logging for <code>dry-run</code> "would have blocked" entries over a representative window (a full release cycle), fix the pipeline and allowlist for each legitimate gap, and only flip to <code>ENFORCED_BLOCK_AND_AUDIT_LOG</code> once the would-block set is empty or fully understood. The trade-off is time-to-enforcement; the risk is a dry-run that never gets flipped (threat #2), so bind the rollout to a deadline and track "% images with valid attestation" as the exit metric.</p>
+<p><strong>5. Continuous Validation plus audit-log alerting.</strong> BinAuthz's admission check is a point-in-time decision; an image that was compliant at admission can later fall out of policy (its attestation revoked, a new CVE, policy tightened). Continuous Validation re-evaluates <em>running</em> pods against current policy on a schedule and emits log entries for violations, closing the time-of-check/time-of-use gap without killing the pod (so you decide the response). Wire this together with alerting on the BinAuthz audit logs: any <code>ENFORCED_BLOCK</code> deny and any break-glass annotation should page or ticket. The trade-off is CV is detective, not preventive — it tells you a non-compliant pod is running, it does not evict it — so pair CV findings with an automated or runbook-driven remediation.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<p><strong>What to log / telemetry sources.</strong><br />
+- <strong>Cloud Audit Logs — <code>binaryauthorization.googleapis.com</code></strong>: policy read/update (<code>UpdatePolicy</code>), attestor create/update, and admission decisions surfaced as GKE events.<br />
+- <strong>GKE control-plane / admission events</strong>: <code>imagepolicywebhook</code>/BinAuthz deny messages in <code>k8s.io</code> audit and pod events (<code>FailedCreate</code> with a BinAuthz reason).<br />
+- <strong>Break-glass</strong>: pod events and audit entries carrying the <code>alpha.image-policy.k8s.io/break-glass</code> annotation.<br />
+- <strong>Continuous Validation</strong>: CV log entries (<code>continuousValidation.googleapis.com</code> / <code>k8s_cluster</code> resource) listing images that violate current policy.<br />
+- <strong>Cloud KMS audit logs</strong>: <code>AsymmetricSign</code> calls on the attestor key — the ground truth of who signed what.<br />
+- <strong>Container Analysis</strong>: <code>Occurrence</code> creation on the attestor Note — who wrote attestations.<br />
+- <strong>Security Command Center</strong>: <code>BINARY_AUTHORIZATION_DISABLED</code> / policy findings and <code>Container Threat Detection</code>.</p>
+<p><strong>Sample detections.</strong></p>
+<p>Detect a policy weakened to <code>ALWAYS_ALLOW</code> or a broadened allowlist (Cloud Logging / log-based metric query):</p>
+<pre><code>resource.type=&quot;audited_resource&quot;
+protoPayload.serviceName=&quot;binaryauthorization.googleapis.com&quot;
+protoPayload.methodName:&quot;UpdatePolicy&quot;
+(protoPayload.request.policy.defaultAdmissionRule.evaluationMode=&quot;ALWAYS_ALLOW&quot;
+ OR protoPayload.request.policy.admissionWhitelistPatterns.namePattern=&quot;*&quot;)
+</code></pre>
+<p>Sigma rule — break-glass bypass usage:</p>
+<pre><code class="language-yaml">title: Binary Authorization Break-Glass Bypass Used
+id: 6b0f2a11-binauthz-breakglass
+status: experimental
+logsource:
+  product: gcp
+  service: gke.audit
+detection:
+  selection:
+    objectRef.resource: 'pods'
+    verb: 'create'
+    requestObject.metadata.annotations|contains: 'alpha.image-policy.k8s.io/break-glass'
+  condition: selection
+level: high
+falsepositives:
+  - Approved incident hotfix with a change ticket
+</code></pre>
+<p>BigQuery / SQL over exported audit logs — attestation signed by an identity outside the approved signer SA (indicates key or IAM abuse):</p>
+<pre><code class="language-sql">SELECT timestamp, protopayload_auditlog.authenticationInfo.principalEmail AS signer,
+       protopayload_auditlog.resourceName AS attestor
+FROM `PROJECT.logs.cloudaudit_googleapis_com_data_access`
+WHERE protopayload_auditlog.serviceName = 'cloudkms.googleapis.com'
+  AND protopayload_auditlog.methodName = 'AsymmetricSign'
+  AND protopayload_auditlog.resourceName LIKE '%binauthz/cryptoKeys/prod-attestor-key%'
+  AND protopayload_auditlog.authenticationInfo.principalEmail != 'attestor-sa@PROJECT.iam.gserviceaccount.com'
+</code></pre>
+<p>KQL-style detection (if logs are shipped to a SIEM) — enforced deny spike suggesting an active push of un-attested images:</p>
+<pre><code>GcpAuditLogs
+| where ServiceName == &quot;binaryauthorization.googleapis.com&quot;
+| where ResultDescription has &quot;denied by Binary Authorization&quot;
+| summarize denies = count() by bin(TimeGenerated, 5m), ClusterName
+| where denies &gt; 10
+</code></pre>
+<p><strong>Response playbook (containment → eradication → recovery).</strong><br />
+1. <strong>Triage</strong>: identify whether the event is a policy-weakening change, a break-glass use, an un-attested deploy attempt, or a KMS-signing anomaly. Pull the actor principal and source IP from the audit log.<br />
+2. <strong>Contain</strong>: if the attestor key or signer SA is implicated, immediately disable the KMS key version and revoke <code>cloudkms.signerVerifier</code> from the suspect identity; if a policy was weakened, re-import the known-good policy from IaC (<code>gcloud container binauthz policy import known-good.yaml</code>).<br />
+3. <strong>Contain (workload)</strong>: for un-attested/break-glass pods that ran, cordon and delete the workload; snapshot the node/pod for forensics before deletion.<br />
+4. <strong>Eradicate</strong>: rotate the attestor key (add a new KMS key version + attestor public key, remove the old), invalidate attestations created during the compromise window (delete the malicious <code>Occurrence</code>s), and rebuild affected images from a trusted commit through the hardened pipeline.<br />
+5. <strong>Recover</strong>: re-enable enforcement, re-attest clean images, confirm Continuous Validation reports zero violations, and verify no shadow clusters bypass the policy (org-policy audit).<br />
+6. <strong>Post-incident</strong>: add or tune detections for the exploited path, enforce policy-as-IaC review, and confirm separation-of-duties held (or fix it if it didn't).</p>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<p><strong>Tier 1 — Fundamentals</strong></p>
+<p><strong>Q1. What problem does Binary Authorization solve, and at what point in the lifecycle?</strong><br />
+It enforces, at <em>deploy time</em>, that only container images meeting policy may run on GKE/Cloud Run/Anthos. It closes the gap between building/signing an image in a trusted pipeline and actually running only those images in production. The gate lives in the Kubernetes admission chain (and Cloud Run's deploy path) and evaluates every pod's image against a policy, blocking or logging. It complements build-time controls (SLSA) and registry controls; it is the runtime <em>enforcement</em> terminus of the supply chain.<br />
+<em>Why asked / signal:</em> Confirms the candidate places controls correctly in the lifecycle (build vs deploy vs runtime).</p>
+<p><strong>Q2. Explain the policy model: default rule, cluster rules, and allowlist.</strong><br />
+A project has one policy with a <code>defaultAdmissionRule</code> (fallback for any cluster), optional <code>clusterAdmissionRules</code> keyed by <code>location.cluster</code>, and <code>admissionWhitelistPatterns</code> (globs of exempt image paths). Evaluation checks the allowlist first (unconditional admit), then the most specific matching rule, then applies its <code>evaluationMode</code> (<code>ALWAYS_ALLOW</code>/<code>ALWAYS_DENY</code>/<code>REQUIRE_ATTESTATION</code>). The default rule is the security-critical one because new clusters inherit it. Over-broad allowlist globs are a common bypass.<br />
+<em>Why asked / signal:</em> Tests precise understanding of how a decision is reached, not just that a gate exists.</p>
+<p><strong>Q3. What is an attestor and what is an attestation?</strong><br />
+An attestor is a named policy object holding a public key (PKIX or Cloud KMS-backed) and referencing a Container Analysis Note; it is the trust anchor for verification. An attestation is a signed statement bound to a specific image <em>digest</em>, stored as an <code>Occurrence</code>, proving the holder of the attestor's private key vouched for that digest. At admission, BinAuthz verifies a valid attestation exists for the digest signed by every required attestor. The signature proves <em>who approved</em>, not <em>what was checked</em> — the semantics live in when your pipeline chooses to sign.<br />
+<em>Why asked / signal:</em> Distinguishes the crypto/trust primitive from its business meaning.</p>
+<p><strong>Q4. Why does BinAuthz key on image digest instead of tag?</strong><br />
+Tags are mutable — <code>:latest</code> or <code>:v1</code> can be re-pointed to a different image after approval. A SHA-256 digest is immutable and content-addressed, so an attestation bound to a digest cannot be transferred to a swapped image. If you attested a tag, an attacker (or a routine re-push) could move the tag to a malicious image and inherit the approval. Always resolve and attest the digest in the pipeline.<br />
+<em>Why asked / signal:</em> Catches the classic tag-vs-digest supply-chain trap.</p>
+<p><strong>Q5. What's the difference between dry-run and enforced mode, and how do you roll out?</strong><br />
+Dry-run (<code>DRYRUN_AUDIT_LOG_ONLY</code>) evaluates policy and logs "would have blocked" without stopping deploys; enforced (<code>ENFORCED_BLOCK_AND_AUDIT_LOG</code>) actually blocks. You roll out by first enabling <code>REQUIRE_ATTESTATION</code> in dry-run, mining audit logs for would-block events across a full release cycle, fixing pipeline/allowlist gaps, then flipping to enforce once the would-block set is understood. This avoids the outage of a hard cutover and de-risks legacy/third-party images.<br />
+<em>Why asked / signal:</em> Operational maturity — can they ship a control without breaking prod.</p>
+<p><strong>Tier 2 — System Design / Trade-offs</strong></p>
+<p><strong>Q6. Design a supply-chain control that guarantees "only images built by our pipeline and signed by our attestor run in prod." Walk the components.</strong><br />
+Build in Cloud Build under a scoped <code>build-sa</code>, push to Artifact Registry, and generate SLSA provenance. In a <em>separate</em> attestation step (or pipeline) under an isolated <code>attestor-sa</code>, verify the provenance and scan results, resolve the image digest, and call <code>sign-and-create</code> against a Cloud KMS-backed attestor. The BinAuthz policy sets <code>defaultAdmissionRule</code> and all prod <code>clusterAdmissionRules</code> to <code>REQUIRE_ATTESTATION</code>/<code>ENFORCED</code>, with a minimal allowlist and <code>globalPolicyEvaluationMode: ENABLE</code>. Grant <code>cloudkms.signerVerifier</code> on the attestor key only to <code>attestor-sa</code>, keep the Note's <code>attachOccurrence</code> least-privilege, enable Continuous Validation, and alert on denies and break-glass. The key design property is separation of duties: the identity that runs build commands cannot mint attestations. Manage the policy as IaC with PR review so it can't be silently weakened.<br />
+<em>Why asked / signal:</em> End-to-end design with SoD, least privilege, and enforcement — the core senior competency.</p>
+<p><strong>Q7. BinAuthz vs. an OPA/Gatekeeper or Kyverno admission policy for image control — when would you use which?</strong><br />
+BinAuthz is a managed, purpose-built gate tightly integrated with GKE/Cloud Run, Container Analysis, and KMS; it excels at attestation-based "is this digest approved" decisions and is hard to misconfigure into being bypassable because Google runs the webhook. OPA/Gatekeeper or Kyverno are general policy engines: more flexible (arbitrary constraints on any resource field, cosign verification via Kyverno's <code>verifyImages</code>) but you own webhook availability, fail-open/closed behavior, and correctness. In practice many orgs run both: BinAuthz for the digest/attestation gate, and Kyverno/Gatekeeper for broader policy (no privileged pods, required labels, cosign keyless verification against a specific OIDC identity). The trade-off is managed simplicity vs. flexibility and operational burden.<br />
+<em>Why asked / signal:</em> Tests knowledge of the broader admission-control ecosystem and honest trade-offs.</p>
+<p><strong>Q8. How do you integrate Sigstore/cosign and SLSA provenance with BinAuthz? Do they overlap?</strong><br />
+They compose. SLSA provenance (from the builder) proves <em>how/from-what</em> an image was built; cosign/Sigstore keyless signing proves <em>who</em> signed it with a transparency-logged, short-lived cert tied to an OIDC identity. BinAuthz is the <em>enforcement</em> point that checks an attestation exists before admission. You can wire cosign verification into the attestation decision (verify the image was cosign-signed by <code>repo:org/app:ref:refs/heads/main</code> and carries valid SLSA L3 provenance), and only then create the BinAuthz attestation — or use Kyverno <code>verifyImages</code> for cosign and BinAuthz for the KMS-attestation path. The overlap is that both are "signed statements about a digest"; the division of labor is SLSA=assurance of build integrity, Sigstore=identity-bound signing infra, BinAuthz=GCP-native deploy gate. (See <code>supply_chain/SLSA</code> and <code>supply_chain/Sigstore-And-Signing</code>.)<br />
+<em>Why asked / signal:</em> Whether the candidate sees the supply chain as one composed system, not disconnected tools.</p>
+<p><strong>Q9. How do you handle third-party / vendor images and Helm charts that you can't sign in your pipeline?</strong><br />
+Options in order of preference: (1) <em>re-attest</em> — pull the vendor image, run it through your own verification (scan, provenance check where available, manual review for a base), and create your own attestation for its digest, so your gate approves it on your terms; (2) <em>allowlist by exact digest</em> for a small, reviewed set, never by broad glob; (3) mirror into your Artifact Registry and treat mirrored images as first-class pipeline inputs. Avoid open-ended <code>namePattern</code> globs that exempt whole registries. For Helm charts, template them and attest the resulting image digests; the chart itself is config, the images are what BinAuthz gates. Track exceptions with expiry and review.<br />
+<em>Why asked / signal:</em> Real-world messiness — most prod runs images you didn't build.</p>
+<p><strong>Q10. Fail-open vs fail-closed for the admission gate during a BinAuthz/KMS outage — what do you choose and why?</strong><br />
+For a security control the default should be fail-closed: if the gate can't verify, don't admit. But a hard dependency on KMS/BinAuthz availability means an outage can halt all deploys, including emergency fixes. The reconciliation is: keep enforcement fail-closed, but provide a <em>governed, logged</em> break-glass path (the pod annotation) that a small set of operators can use during a genuine outage, with mandatory post-incident review and alerting on every use. This preserves the security invariant in steady state while giving a controlled escape hatch. Choosing fail-open globally would mean an attacker who can induce or await an outage runs arbitrary images unchecked.<br />
+<em>Why asked / signal:</em> The classic security-vs-availability trade-off with a concrete, defensible answer.</p>
+<p><strong>Tier 3 — Expert / Deep-dive</strong></p>
+<p><strong>Q11. Walk through exactly how a signature is verified at admission, and what stops a replayed or transferred attestation.</strong><br />
+The attestation payload is a canonical statement over the image <em>digest</em> (for the BinAuthz signing flow, a specific serialized structure), signed by the attestor's private key. At admission, BinAuthz fetches attestations (Occurrences) for the requested digest, and for each required attestor verifies the signature against the attestor's registered public key(s) and confirms the payload binds to <em>this</em> digest. Because the signature covers the digest, an attestation cannot be transferred to a different image (the digest wouldn't match) nor replayed onto another artifact. With Cloud KMS keys, verification uses the public key version bound to the attestor; supporting multiple keys enables rotation. What this does <em>not</em> prove is freshness or that the underlying build was hardened — those are handled by revocation/Continuous Validation and by your attestation policy, respectively.<br />
+<em>Why asked / signal:</em> Deep grasp of what the crypto binding does and does not guarantee.</p>
+<p><strong>Q12. Your attestor's KMS key is suspected compromised. Detail the blast radius and full response.</strong><br />
+Blast radius: anyone with the private key (or <code>AsymmetricSign</code> on it) can mint attestations for <em>any</em> digest, so every prod cluster requiring that attestor would admit attacker images — this is a total bypass of the gate for the compromise window. Response: (1) disable the affected KMS key version immediately and revoke <code>cloudkms.signerVerifier</code> from all but essential identities; (2) enumerate attestations created in the window via Container Analysis + KMS <code>AsymmetricSign</code> audit logs, and identify any digests attested by an unexpected principal; (3) delete malicious Occurrences; (4) rotate — create a new KMS key version, add its public key to the attestor, remove the compromised one (BinAuthz's multi-key support avoids a flag day); (5) run Continuous Validation to find currently-running pods whose only approval came from the bad key; (6) cordon/delete and rebuild those from trusted source; (7) confirm separation of duties and IAM least-privilege on the key to prevent recurrence. The audit-log trail of <code>AsymmetricSign</code> calls is your ground truth for scoping.<br />
+<em>Why asked / signal:</em> Incident depth — key compromise is the highest-severity BinAuthz failure.</p>
+<p><strong>Q13. How does Continuous Validation differ from admission-time enforcement, and what gap does it close?</strong><br />
+Admission enforcement is a point-in-time gate: it decides at pod-create and never re-checks. Continuous Validation periodically re-evaluates <em>running</em> pods against the <em>current</em> policy and emits log findings for violations. It closes the time-of-check/time-of-use gap: an image compliant at admission can later violate policy (attestation revoked, policy tightened, attestor removed, a newly-required attestor added), and without CV those pods keep running unnoticed until they restart. CV is <em>detective</em>, not preventive — it logs, it does not evict — so you wire its findings into alerting/remediation. It's essential for long-lived workloads that rarely reschedule, where admission-time approval could be months stale.<br />
+<em>Why asked / signal:</em> Understanding that admission control alone leaves a drift window.</p>
+<p><strong>Q14. An attacker has cluster-admin on a GKE cluster via a compromised RBAC binding. Does BinAuthz still help? What are its limits?</strong><br />
+Yes, partially. BinAuthz's image gate is enforced by GKE's managed admission path, so even a cluster-admin cannot deploy an arbitrary un-attested image without either a valid attestation or a break-glass annotation — and break-glass is logged, producing high-signal detection. This is exactly the Tesla-cryptojacking mitigation: infra compromise no longer trivially yields arbitrary payload execution. Limits: (1) if the attacker can also reach the attestor key or signer SA, they can mint attestations; (2) they could use break-glass if they hold that permission (so restrict it); (3) BinAuthz gates <em>images</em>, not what an already-admitted, attested image does at runtime, nor exec-into-pod or host escape (see <code>cloud/Kubernetes-Security</code>); (4) if a cluster rule is <code>ALWAYS_ALLOW</code>, no help. So BinAuthz is one layer of defense-in-depth: it raises the cost of turning cluster compromise into malicious code execution, but must be paired with RBAC hardening, runtime detection, and node isolation.<br />
+<em>Why asked / signal:</em> Tests whether the candidate over-claims a single control; senior signal is knowing the boundary.</p>
+<p><strong>Q15. Design org-wide enforcement so no team can spin up an ungated cluster or weaken the policy, and prove it.</strong><br />
+Use GCP Organization Policy to mandate BinAuthz enablement (and constrain cluster creation) across all projects, so a new GKE/Cloud Run resource inherits enforcement by default rather than opt-in. Manage the BinAuthz policy and attestors as Terraform, gated by CODEOWNERS/PR review, so any change is peer-reviewed and diffable — no manual <code>policy import</code>. Wire Security Command Center to surface <code>BINARY_AUTHORIZATION_DISABLED</code> and policy findings, and add log-based detections on <code>UpdatePolicy</code> events that weaken <code>evaluationMode</code> or broaden <code>admissionWhitelistPatterns</code>. Prove it continuously: a scheduled audit enumerates all clusters/Cloud Run services and asserts each maps to an enforcing rule (not <code>ALWAYS_ALLOW</code>, not covered only by a broad allowlist), and Continuous Validation confirms running workloads are attested. The combination — org policy (prevent), IaC review (govern), SCC + log detections (detect), CV + audit (verify) — gives both prevention and provable coverage.<br />
+<em>Why asked / signal:</em> Governance at scale — turning a per-project feature into an org invariant with evidence.</p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>GCP</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deploy-time image gate</td>
+<td>Binary Authorization (GKE/Cloud Run/Anthos)</td>
+<td>Admission via OPA/Kyverno on EKS; ECR + policy</td>
+<td>Azure Policy + Ratify/Notation admission on AKS; Defender for Containers</td>
+</tr>
+<tr>
+<td>Signing infra</td>
+<td>Cloud KMS attestor / cosign</td>
+<td>AWS Signer (Notation) + KMS</td>
+<td>Notation + Azure Key Vault; Notary Project</td>
+</tr>
+<tr>
+<td>Signature format</td>
+<td>BinAuthz attestation / in-toto / cosign</td>
+<td>Notation (OCI signatures), cosign</td>
+<td>Notation (Notary v2), cosign</td>
+</tr>
+<tr>
+<td>Registry</td>
+<td>Artifact Registry</td>
+<td>ECR (image scanning, signing)</td>
+<td>Azure Container Registry (content trust deprecated → Notation)</td>
+</tr>
+<tr>
+<td>Provenance / SLSA</td>
+<td>Cloud Build + SLSA provenance</td>
+<td>CodeBuild + SLSA; Amazon Inspector</td>
+<td>Azure Pipelines + SLSA; Defender</td>
+</tr>
+<tr>
+<td>Admission verifier</td>
+<td>Managed BinAuthz webhook</td>
+<td>Kyverno <code>verifyImages</code> / Gatekeeper / Ratify</td>
+<td>Ratify + Gatekeeper (Azure Policy add-on)</td>
+</tr>
+<tr>
+<td>Vulnerability scan gate</td>
+<td>Artifact Analysis / Container Scanning</td>
+<td>ECR scan / Inspector</td>
+<td>Defender for Containers / MDVM</td>
+</tr>
+<tr>
+<td>Transparency log</td>
+<td>Rekor (if using Sigstore)</td>
+<td>Rekor (if using Sigstore)</td>
+<td>Rekor (if using Sigstore)</td>
+</tr>
+<tr>
+<td>Continuous re-check</td>
+<td>Continuous Validation</td>
+<td>Custom (Inspector + admission re-scan)</td>
+<td>Defender runtime + Azure Policy audit</td>
+</tr>
+<tr>
+<td>Org-wide enforcement</td>
+<td>Org Policy constraints</td>
+<td>SCPs + Config rules</td>
+<td>Azure Policy (built-in initiatives)</td>
+</tr>
+</tbody>
+</table>
+<p>The mental model to carry across clouds: all three converge on <em>sign at build → store signature/attestation with the artifact → verify at an admission controller before run → re-check continuously</em>. GCP's differentiator is that BinAuthz is a managed, first-party admission gate; AWS and Azure lean more on the open Notation/Ratify/Kyverno stack plus their scanners (Inspector, Defender), so you own more of the admission-webhook operability.</p>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li>BinAuthz is a <strong>deploy-time admission gate</strong>: it evaluates a policy against every image and blocks (enforce) or logs (dry-run) — it is enforcement, not assurance.</li>
+<li>The policy model is <strong>default rule + per-cluster rules + digest allowlist</strong>; the <em>default rule</em> is the security-critical fallback because new clusters inherit it, and <code>ALWAYS_ALLOW</code> there nullifies everything.</li>
+<li>Attestations are <strong>signatures bound to an image digest</strong>, verified against an <strong>attestor's public key</strong> (prefer Cloud KMS/HSM); they prove <em>who approved</em>, not <em>what was checked</em> — the meaning lives in your pipeline's signing decision.</li>
+<li><strong>Always key on digest, never tag</strong> — a tag can be re-pointed to swap an approved image.</li>
+<li>Roll out <strong>dry-run first</strong>, tune from audit logs, then flip to enforce; a perma-dry-run gate is theater.</li>
+<li><strong>Separation of duties</strong> between build and signer identities is the core defense against Codecov/SolarWinds-style pipeline compromise; scope KMS <code>signerVerifier</code> narrowly.</li>
+<li><strong>Break-glass</strong> is a governed, logged bypass — restrict who can use it and alert on every use.</li>
+<li><strong>Continuous Validation</strong> closes the time-of-check/time-of-use gap by re-checking running pods; it is detective, so wire it to remediation.</li>
+<li>Compose with <strong>SLSA provenance</strong> (build integrity) and <strong>Sigstore/cosign</strong> (identity-bound signing) so the attestation you enforce is actually meaningful; enforce enablement <strong>org-wide</strong> via Org Policy + IaC review.</li>
+<li>BinAuthz is <strong>one layer of defense-in-depth</strong> — it raises the cost of turning cluster or registry compromise into arbitrary code execution, but does not replace RBAC, runtime detection, or node isolation.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — Binary Authorization documentation (overview, policy model, attestors, Continuous Validation): https://cloud.google.com/binary-authorization/docs</li>
+<li>Google Cloud — Binary Authorization for Cloud Run: https://cloud.google.com/binary-authorization/docs/cloud-run</li>
+<li>Container Analysis / Artifact Analysis (Notes and Occurrences): https://cloud.google.com/container-analysis/docs</li>
+<li>SLSA v1.0 Specification — Build track and provenance: https://slsa.dev/spec/v1.0/</li>
+<li>in-toto Attestation Framework: https://github.com/in-toto/attestation</li>
+<li>Sigstore (cosign, Fulcio, Rekor) documentation: https://docs.sigstore.dev/</li>
+<li>NIST SP 800-204D — Strategies for Integrating Software Supply Chain Security in DevSecOps CI/CD</li>
+<li>NIST SP 800-218 — Secure Software Development Framework (SSDF)</li>
+<li>Executive Order 14028 — Improving the Nation's Cybersecurity</li>
+<li>CIS Google Kubernetes Engine (GKE) Benchmark</li>
+<li>MITRE ATT&amp;CK for Containers — T1610 (Deploy Container), T1525 (Implant Internal Image)</li>
+<li>Notary Project / Ratify (cross-cloud admission verification): https://notaryproject.dev/ , https://ratify.dev/</li>
+<li>Cross-references in this repo: <code>supply_chain/SLSA</code>, <code>supply_chain/Sigstore-And-Signing</code>, <code>supply_chain/SBOM</code>, <code>cloud/Kubernetes-Security</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

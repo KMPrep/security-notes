@@ -1,0 +1,1436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Passwordless Authentication - Login Without Shared Secrets</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: auth_authz\Authentication\Passwordless\README.md</p>
+<h1 id="passwordless-authentication-login-without-shared-secrets">Passwordless Authentication - Login Without Shared Secrets</h1>
+<p><strong>Category:</strong> Authentication<br />
+<strong>Common Approaches:</strong> Passkeys, magic links, one-time codes, device-bound keys, federated sign-in</p>
+<h2 id="overview">Overview</h2>
+<p>Passwordless authentication is a design approach that removes passwords from the primary login path and relies on stronger or more usable alternatives. Implementations range from highly secure phishing-resistant passkeys to weaker email magic links or one-time codes. The main goals are reducing password theft, reuse, reset burden, and user friction. The security quality of a passwordless system depends entirely on what replaces the password and how recovery is handled.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>Passwordless systems usually rely on one of these models:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public-key auth</td>
+<td>Passkeys or security keys</td>
+</tr>
+<tr>
+<td>Possession-only flow</td>
+<td>Email magic link or SMS code</td>
+</tr>
+<tr>
+<td>Federated auth</td>
+<td>Enterprise IdP or social sign-in</td>
+</tr>
+<tr>
+<td>Device-bound auth</td>
+<td>Managed device certificate or secure hardware credential</td>
+</tr>
+</tbody>
+</table>
+<p>Core decision points:</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Enrollment</td>
+<td>Determines initial assurance and account binding</td>
+</tr>
+<tr>
+<td>Channel trust</td>
+<td>Email or SMS may be weaker than platform authenticators</td>
+</tr>
+<tr>
+<td>Recovery</td>
+<td>Often becomes the effective authentication system</td>
+</tr>
+<tr>
+<td>Session creation</td>
+<td>Strong initial auth can still be undermined by weak session policy</td>
+</tr>
+</tbody>
+</table>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant A as App
+    participant I as Identity Service
+    U->>A: Start login
+    A->>I: Request passwordless challenge
+    I-->>U: Send link, code, or authenticator challenge
+    U->>I: Complete passwordless proof
+    I-->>A: Authentication success
+    A-->>U: Create session
+</pre>
+<pre class="mermaid">
+flowchart TD
+    A[User requests passwordless sign-in] --> B[Select enrolled authenticator or channel]
+    B --> C[Issue challenge or link]
+    C --> D[User proves control of device or channel]
+    D --> E[Verifier checks freshness and binding]
+    E --> F[Allow session or require stronger proof]
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Weak passwordless factor</td>
+<td>Magic links or SMS replace password with another phishable method</td>
+<td>Account takeover</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Channel compromise</td>
+<td>Email inbox or phone number becomes the real secret</td>
+<td>Broad account loss</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Replay or reuse</td>
+<td>Links or codes are too long-lived or not one-time</td>
+<td>Unauthorized sign-in</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Recovery bypass</td>
+<td>Recovery path is weaker than primary passwordless flow</td>
+<td>Strong auth bypass</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Device theft without strong local binding</td>
+<td>Possession factor is not gated by PIN or biometric</td>
+<td>Easy account access</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Session overextension</td>
+<td>Long-lived or weakly bound sessions undo strong login</td>
+<td>Post-auth compromise</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Enrollment fraud</td>
+<td>Attacker links their own device or email during setup</td>
+<td>Persistent takeover</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Delivery failure</td>
+<td>Users cannot receive the factor reliably</td>
+<td>Unsafe support workarounds</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Weak passwordless factor</td>
+<td>Prefer passkeys or hardware-backed authenticators</td>
+<td>Auth design</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Channel compromise</td>
+<td>Treat email and phone channels as medium assurance only</td>
+<td>Risk policy</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Replay or reuse</td>
+<td>Make links and codes short-lived and one-time use</td>
+<td>Verifier logic</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Recovery bypass</td>
+<td>Secure recovery with high-assurance identity proofing</td>
+<td>Recovery operations</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Device theft without strong local binding</td>
+<td>Require local unlock and secure storage on device</td>
+<td>Device and authenticator policy</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Session overextension</td>
+<td>Use secure session rotation and step-up for sensitive actions</td>
+<td>App security</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Enrollment fraud</td>
+<td>Add alerts and verification at enrollment time</td>
+<td>Identity operations</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Delivery failure</td>
+<td>Offer more than one strong factor path</td>
+<td>Product and support design</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Prefer phishing-resistant passwordless methods:</strong> Passwordless is only a security gain if the replacement method is stronger than the password it replaces. Passkeys and hardware-backed authenticators are the strongest mainstream choice.</li>
+<li><strong>Treat recovery as part of authentication:</strong> Recovery determines the real assurance floor of the system. It must not silently collapse to low-assurance email-only or helpdesk-only proof.</li>
+<li><strong>Constrain session lifetime and reuse:</strong> Strong login can be undone by weak session design. Session rotation, re-auth for sensitive actions, and good token hygiene remain necessary.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>Why is passwordless not automatically phishing-resistant?</li>
+<li>How would you compare magic links, passkeys, and device certificates for security and usability?</li>
+<li>What trust assumptions change when email becomes the primary login factor?</li>
+<li>Why does recovery define the real assurance level of a passwordless system?</li>
+<li>How would you roll out passwordless to a large mixed-device workforce?</li>
+<li>What are the risks of possession-only authentication without local device verification?</li>
+<li>How should passwordless interact with step-up authentication?</li>
+<li>What telemetry is most useful for detecting passwordless abuse?</li>
+<li>When is federated sign-in effectively passwordless for the relying app but not for the ecosystem?</li>
+<li>What would you review after a large-scale magic-link replay incident?</li>
+</ol>
+<h1 id="passwordless-authentication-model-answers">Passwordless Authentication — Model Answers</h1>
+<h2 id="1-why-is-passwordless-not-automatically-phishing-resistant">1. Why is passwordless not automatically phishing-resistant?</h2>
+<p>Passwordless simply means:</p>
+<pre><code class="language-text">The user does not type a password.
+</code></pre>
+<p>It does <strong>not</strong> automatically mean the method is phishing-resistant.</p>
+<p>Some passwordless methods still produce a credential that can be stolen, replayed, or abused.</p>
+<p>Examples:</p>
+<table>
+<thead>
+<tr>
+<th>Passwordless Method</th>
+<th style="text-align: right;">Phishing-Resistant?</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Magic link by email</td>
+<td style="text-align: right;">No / weak</td>
+<td>Link can be forwarded, stolen, or replayed</td>
+</tr>
+<tr>
+<td>Email OTP</td>
+<td style="text-align: right;">No / weak</td>
+<td>User can type OTP into phishing site</td>
+</tr>
+<tr>
+<td>SMS OTP</td>
+<td style="text-align: right;">No / weak</td>
+<td>Phishable and SIM-swap prone</td>
+</tr>
+<tr>
+<td>Push approval</td>
+<td style="text-align: right;">Medium</td>
+<td>Vulnerable to push fatigue</td>
+</tr>
+<tr>
+<td>Passkeys / FIDO2</td>
+<td style="text-align: right;">Yes</td>
+<td>Origin-bound public-key challenge</td>
+</tr>
+<tr>
+<td>Smart card / device certificate</td>
+<td style="text-align: right;">Strong if well configured</td>
+<td>Device-bound cryptographic proof</td>
+</tr>
+</tbody>
+</table>
+<h2 id="example">Example</h2>
+<p>A magic link login flow:</p>
+<pre><code class="language-text">User enters email
+System sends login link
+User clicks link
+User is logged in
+</code></pre>
+<p>An attacker can phish this:</p>
+<pre><code class="language-text">Attacker tricks user into entering email on fake site
+Fake site triggers real magic link
+User forwards or exposes link
+Attacker uses link
+</code></pre>
+<p>So the user did not use a password, but the system is still vulnerable.</p>
+<h2 id="model-answer">Model answer</h2>
+<p>Passwordless is not automatically phishing-resistant because “no password” only removes one secret. If the replacement factor is a magic link, email OTP, SMS OTP, or simple push approval, it may still be phishable, replayable, or socially engineered. Phishing resistance usually requires origin-bound cryptographic authentication, such as passkeys, FIDO2 hardware keys, smart cards, or properly designed device certificates.</p>
+<hr />
+<h1 id="2-how-would-you-compare-magic-links-passkeys-and-device-certificates-for-security-and-usability">2. How would you compare magic links, passkeys, and device certificates for security and usability?</h1>
+<h2 id="high-level-comparison">High-level comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th style="text-align: right;">Security</th>
+<th style="text-align: right;">Usability</th>
+<th>Main Risk</th>
+<th>Best Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Magic links</td>
+<td style="text-align: right;">Low to medium</td>
+<td style="text-align: right;">High</td>
+<td>Email compromise, link replay</td>
+<td>Low-risk consumer apps</td>
+</tr>
+<tr>
+<td>Passkeys</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Recovery/account sync assurance</td>
+<td>Consumer and enterprise login</td>
+</tr>
+<tr>
+<td>Device certificates</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">Medium</td>
+<td>Device lifecycle and key protection</td>
+<td>Managed enterprise devices</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="magic-links">Magic links</h2>
+<p>Magic links are simple.</p>
+<pre><code class="language-text">User enters email
+System sends login link
+User clicks link
+Session starts
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Easy to use
+No password to remember
+Low support burden
+Good for low-risk apps
+</code></pre>
+<p>Risks:</p>
+<pre><code class="language-text">Email account becomes primary authenticator
+Links can be forwarded
+Links can be stolen from inbox
+Links can be replayed if poorly designed
+Malware/browser extensions can steal links
+Weak if email recovery is weak
+</code></pre>
+<p>Magic links are convenient but not strong authentication unless combined with strong email security, device binding, short expiration, replay protection, and risk checks.</p>
+<hr />
+<h2 id="passkeys">Passkeys</h2>
+<p>Passkeys use public-key cryptography.</p>
+<pre><code class="language-text">Private key stays on device/authenticator
+Public key is stored by service
+Login challenge is signed
+Credential is bound to website origin
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Phishing-resistant
+No password reuse
+No shared secret sent to server
+Good user experience with Face ID/fingerprint/PIN
+Works well for both consumer and enterprise
+</code></pre>
+<p>Risks:</p>
+<pre><code class="language-text">Recovery depends on platform account or backup authenticators
+Synced passkeys depend partly on cloud keychain security
+Some legacy devices/browsers may not support them well
+User education needed
+</code></pre>
+<hr />
+<h2 id="device-certificates">Device certificates</h2>
+<p>Device certificates prove possession of a managed device or private key.</p>
+<p>Example:</p>
+<pre><code class="language-text">Corporate laptop has certificate
+Application requires mTLS or certificate-based auth
+Only managed device can connect
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Strong for managed enterprise fleets
+Can bind access to compliant devices
+Harder to phish than OTP/magic links
+Good for zero-trust access
+Useful for service-to-service and device identity
+</code></pre>
+<p>Risks:</p>
+<pre><code class="language-text">Operational complexity
+Certificate lifecycle management
+Lost/stolen device risk
+Private key storage quality matters
+Less convenient for unmanaged/BYOD users
+Not always enough to prove the human user
+</code></pre>
+<h2 id="model-answer_1">Model answer</h2>
+<p>Magic links are very usable but weaker because email becomes the primary factor and links can be stolen or replayed. Passkeys provide strong phishing resistance through origin-bound public-key authentication and good usability through biometrics or device PINs. Device certificates are strong in managed enterprise environments because they bind access to trusted devices, but they require certificate lifecycle management and usually need to be paired with user verification.</p>
+<hr />
+<h1 id="3-what-trust-assumptions-change-when-email-becomes-the-primary-login-factor">3. What trust assumptions change when email becomes the primary login factor?</h1>
+<p>When email becomes the primary login factor, the security of the application depends heavily on the security of the user’s email account.</p>
+<p>The email account becomes the de facto identity provider.</p>
+<h2 id="new-trust-assumptions">New trust assumptions</h2>
+<p>You are assuming:</p>
+<pre><code class="language-text">The user’s email inbox is secure
+Only the real user can access email
+Email recovery is strong
+Email forwarding rules are not malicious
+Mailbox sessions are not stolen
+Email provider blocks phishing and malware
+Magic links cannot be intercepted or replayed
+</code></pre>
+<p>That is a lot of trust.</p>
+<h2 id="risks">Risks</h2>
+<p>If email is compromised, attacker can:</p>
+<pre><code class="language-text">Receive login links
+Search old magic links
+Reset passwords for other services
+Add forwarding rules
+Hide security notifications
+Use inbox access for account takeover
+</code></pre>
+<p>Example:</p>
+<pre><code class="language-text">Attacker compromises Gmail
+        ↓
+Requests magic link for SaaS app
+        ↓
+Receives link
+        ↓
+Logs into SaaS app without knowing app password
+</code></pre>
+<h2 id="enterprise-concern">Enterprise concern</h2>
+<p>For workforce apps, email-based passwordless can be risky if:</p>
+<pre><code class="language-text">Mailbox sessions are long-lived
+Email access does not require phishing-resistant MFA
+Helpdesk can reset mailbox MFA weakly
+Forwarding rules are not monitored
+Legacy protocols are enabled
+</code></pre>
+<h2 id="model-answer_2">Model answer</h2>
+<p>When email becomes the primary login factor, the application shifts trust to the user’s mailbox, email provider, email session security, and email recovery process. If the email account is compromised, the attacker can receive login links and recover dependent accounts. Therefore, magic-link systems must treat email as a high-value authenticator and protect against link replay, forwarding abuse, mailbox compromise, and weak email recovery.</p>
+<hr />
+<h1 id="4-why-does-recovery-define-the-real-assurance-level-of-a-passwordless-system">4. Why does recovery define the real assurance level of a passwordless system?</h1>
+<p>Passwordless login may be strong, but recovery can bypass it.</p>
+<p>Example:</p>
+<pre><code class="language-text">Login requires passkey
+Recovery allows email-only reset
+</code></pre>
+<p>Then the real assurance is closer to email-only recovery, not passkey authentication.</p>
+<h2 id="strong-login-weak-recovery">Strong login, weak recovery</h2>
+<pre><code class="language-text">Normal login:
+Passkey + device verification
+
+Recovery:
+Call helpdesk + answer date of birth
+</code></pre>
+<p>An attacker attacks the recovery path.</p>
+<pre><code class="language-text">Attacker social-engineers helpdesk
+        ↓
+Passkey removed
+        ↓
+Attacker registers new authenticator
+        ↓
+Account takeover
+</code></pre>
+<h2 id="recovery-must-match-account-risk">Recovery must match account risk</h2>
+<p>For standard accounts:</p>
+<pre><code class="language-text">Trusted device
+Backup code
+Email + risk checks
+Passkey re-registration
+</code></pre>
+<p>For high-value accounts:</p>
+<pre><code class="language-text">Hardware key backup
+Manager/security approval
+High-assurance proofing
+Cooling-off period
+Session revocation
+Manual review
+</code></pre>
+<h2 id="model-answer_3">Model answer</h2>
+<p>Recovery defines the real assurance level because it is an alternate path into the account. If a passwordless system uses passkeys for login but weak email, SMS, or helpdesk recovery, attackers will bypass passkeys and attack recovery. Recovery must be designed with assurance equal to the risk of the account and should revoke old sessions and authenticators after completion.</p>
+<hr />
+<h1 id="5-how-would-you-roll-out-passwordless-to-a-large-mixed-device-workforce">5. How would you roll out passwordless to a large mixed-device workforce?</h1>
+<p>I would use a phased migration with segmentation, compatibility planning, and strong recovery design.</p>
+<h2 id="phase-1-inventory">Phase 1: Inventory</h2>
+<p>Understand the environment:</p>
+<pre><code class="language-text">Device types: Windows, macOS, iOS, Android, Linux
+Managed vs unmanaged devices
+Browser support
+Legacy applications
+Current MFA methods
+Privileged users
+Contractors/BYOD users
+Remote users
+Accessibility requirements
+Helpdesk volume
+</code></pre>
+<h2 id="phase-2-choose-target-methods-by-user-group">Phase 2: Choose target methods by user group</h2>
+<table>
+<thead>
+<tr>
+<th>User Group</th>
+<th>Recommended Passwordless Method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Privileged admins</td>
+<td>FIDO2 hardware keys / smart cards</td>
+</tr>
+<tr>
+<td>Developers</td>
+<td>Passkeys or hardware keys</td>
+</tr>
+<tr>
+<td>Standard employees</td>
+<td>Platform passkeys / Windows Hello / device-bound credentials</td>
+</tr>
+<tr>
+<td>Mobile-heavy users</td>
+<td>Platform passkeys</td>
+</tr>
+<tr>
+<td>Contractors/BYOD</td>
+<td>Passkeys + conditional access</td>
+</tr>
+<tr>
+<td>Shared workstation users</td>
+<td>Smart card/FIDO2 key</td>
+</tr>
+<tr>
+<td>Break-glass accounts</td>
+<td>Hardware-backed, offline-controlled credentials</td>
+</tr>
+</tbody>
+</table>
+<h2 id="phase-3-pilot">Phase 3: Pilot</h2>
+<p>Start with:</p>
+<pre><code class="language-text">Identity team
+Security team
+IT support
+Small business unit
+Privileged users
+</code></pre>
+<p>Measure:</p>
+<pre><code class="language-text">Enrollment success
+Login success
+Device compatibility
+Helpdesk tickets
+Recovery failures
+User feedback
+Phishing resistance improvements
+</code></pre>
+<h2 id="phase-4-integrate-with-conditional-access">Phase 4: Integrate with conditional access</h2>
+<p>Policies:</p>
+<pre><code class="language-text">Require passwordless for high-risk apps
+Require managed/compliant device for sensitive apps
+Require phishing-resistant factors for admin portals
+Allow fallback only for approved exceptions
+Block SMS for privileged accounts
+</code></pre>
+<h2 id="phase-5-recovery-and-fallback">Phase 5: Recovery and fallback</h2>
+<p>Before mass rollout, design recovery:</p>
+<pre><code class="language-text">Backup authenticator registration
+Temporary access pass
+Helpdesk playbooks
+Manager/security approval for high-risk accounts
+Lost device process
+Session revocation after recovery
+</code></pre>
+<h2 id="phase-6-gradual-enforcement">Phase 6: Gradual enforcement</h2>
+<p>Rollout pattern:</p>
+<pre><code class="language-text">Enable optional passwordless
+Encourage enrollment
+Require for admins
+Require for high-risk users
+Require for all users
+Remove weak fallback methods
+</code></pre>
+<h2 id="model-answer_4">Model answer</h2>
+<p>I would roll out passwordless in phases: inventory devices and apps, segment users by risk, pilot with IT/security, choose appropriate methods per population, integrate conditional access, prepare recovery workflows, train users/helpdesk, then gradually enforce. Privileged users should move first to phishing-resistant hardware-backed methods, while standard users can use platform passkeys or device-bound credentials. Weak fallbacks like SMS should be removed after adoption.</p>
+<hr />
+<h1 id="6-what-are-the-risks-of-possession-only-authentication-without-local-device-verification">6. What are the risks of possession-only authentication without local device verification?</h1>
+<p>Possession-only means the system verifies that the user has a device or token, but does not verify that the correct human is using it.</p>
+<p>Examples:</p>
+<pre><code class="language-text">Clicking a magic link on a device
+Possessing a phone with an unlocked email session
+Using a security key that requires touch but no PIN
+Device certificate without user login verification
+</code></pre>
+<h2 id="risks_1">Risks</h2>
+<p>If the device is stolen or already unlocked:</p>
+<pre><code class="language-text">Attacker has device
+        ↓
+Authentication succeeds
+</code></pre>
+<p>If malware is running on the device:</p>
+<pre><code class="language-text">Malware uses existing device credential
+        ↓
+No local user verification is required
+</code></pre>
+<p>If a hardware key requires only touch:</p>
+<pre><code class="language-text">Attacker with physical key may use it if no PIN/user verification is required
+</code></pre>
+<h2 id="why-local-verification-matters">Why local verification matters</h2>
+<p>Local verification adds proof that the legitimate user is present.</p>
+<p>Examples:</p>
+<pre><code class="language-text">Device PIN
+Fingerprint
+Face ID
+Windows Hello
+Security key PIN
+Biometric verification
+</code></pre>
+<p>Better flow:</p>
+<pre><code class="language-text">Possess device/key
+        +
+Unlock locally with PIN/biometric
+        ↓
+Authentication succeeds
+</code></pre>
+<h2 id="model-answer_5">Model answer</h2>
+<p>Possession-only authentication is risky because possession of the device or token may not prove the legitimate user is present. A stolen unlocked phone, compromised endpoint, or security key without PIN/user verification can be abused. For sensitive actions and privileged accounts, possession should be combined with local user verification such as PIN, biometric, or hardware-key PIN.</p>
+<hr />
+<h1 id="7-how-should-passwordless-interact-with-step-up-authentication">7. How should passwordless interact with step-up authentication?</h1>
+<p>Passwordless should not mean “authenticate once and trust forever.”</p>
+<p>Step-up authentication is still needed when risk increases or the action is sensitive.</p>
+<h2 id="when-to-require-step-up">When to require step-up</h2>
+<pre><code class="language-text">Registering new authenticator
+Removing authenticator
+Changing recovery email/phone
+Creating API token
+Viewing secrets
+Changing payout account
+Approving high-value transaction
+Accessing admin console
+Disabling security controls
+Exporting sensitive data
+Logging in from new device or risky location
+</code></pre>
+<h2 id="step-up-strength-should-depend-on-risk">Step-up strength should depend on risk</h2>
+<table>
+<thead>
+<tr>
+<th>Current Login</th>
+<th>Sensitive Action</th>
+<th>Step-Up Needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Magic link</td>
+<td>Change MFA</td>
+<td>Passkey/FIDO2 or stronger proof</td>
+</tr>
+<tr>
+<td>Synced passkey</td>
+<td>Admin role</td>
+<td>Hardware key or device-bound credential</td>
+</tr>
+<tr>
+<td>Device certificate</td>
+<td>Payment approval</td>
+<td>User verification + transaction confirmation</td>
+</tr>
+<tr>
+<td>Hardware key</td>
+<td>Delete production resource</td>
+<td>Fresh hardware key touch/PIN</td>
+</tr>
+</tbody>
+</table>
+<h2 id="important-concept">Important concept</h2>
+<p>Step-up should verify:</p>
+<pre><code class="language-text">Fresh user presence
+Fresh user verification
+Correct device
+Correct authorization
+Risk context
+</code></pre>
+<h2 id="example_1">Example</h2>
+<p>A user logs in with a passkey at 9 AM.</p>
+<p>At 4 PM, they try to add a new bank account.</p>
+<p>Good policy:</p>
+<pre><code class="language-text">Require fresh passkey verification
+Notify user
+Delay payout use for high-risk cases
+</code></pre>
+<h2 id="model-answer_6">Model answer</h2>
+<p>Passwordless should be integrated with step-up authentication for sensitive actions and risky contexts. Even if login is passwordless, actions like changing authenticators, creating API tokens, accessing admin consoles, or changing payout details should require fresh authentication with a strong factor. Step-up should match risk; privileged actions should require phishing-resistant and locally verified authentication.</p>
+<hr />
+<h1 id="8-what-telemetry-is-most-useful-for-detecting-passwordless-abuse">8. What telemetry is most useful for detecting passwordless abuse?</h1>
+<p>The most useful telemetry connects login method, device, recovery, session, and post-login behavior.</p>
+<h2 id="magic-link-telemetry">Magic link telemetry</h2>
+<pre><code class="language-text">Magic link requested
+Magic link delivered
+Magic link clicked
+Time between request and click
+Requester IP vs clicker IP
+Device/browser mismatch
+Multiple clicks on same link
+Replay attempts
+Links clicked from email security scanners
+Forwarded-link indicators
+</code></pre>
+<p>Important detection:</p>
+<pre><code class="language-text">Magic link requested from IP A
+Magic link clicked from IP B in different country
+</code></pre>
+<p>That can indicate phishing or forwarding.</p>
+<hr />
+<h2 id="passkey-telemetry">Passkey telemetry</h2>
+<pre><code class="language-text">Passkey registration
+Passkey authentication success/failure
+Authenticator type
+User verification used or not
+New authenticator added
+Authenticator removed
+Failed origin/RP ID attempts
+Login from new device after new passkey
+</code></pre>
+<hr />
+<h2 id="device-certificate-telemetry">Device certificate telemetry</h2>
+<pre><code class="language-text">Certificate used
+Device ID
+Certificate issuance time
+Certificate revocation status
+Managed device compliance
+Impossible travel with same certificate
+Certificate used from unexpected network
+</code></pre>
+<hr />
+<h2 id="recovery-telemetry">Recovery telemetry</h2>
+<pre><code class="language-text">Recovery started
+Recovery completed
+Recovery method used
+Authenticator reset
+New authenticator added
+Old factors removed
+Helpdesk agent involved
+Recovery followed by sensitive action
+</code></pre>
+<hr />
+<h2 id="post-login-telemetry">Post-login telemetry</h2>
+<pre><code class="language-text">Session created
+Refresh token issued
+OAuth grant added
+API token created
+Email/recovery changed
+Sensitive data export
+Privilege change
+Admin action
+</code></pre>
+<h2 id="detection-examples">Detection examples</h2>
+<pre><code class="language-text">Magic link clicked from different ASN than requested
+New passkey added after suspicious recovery
+Recovery followed by all sessions not revoked
+Device certificate used after device marked non-compliant
+Passwordless login followed by mass data export
+Many magic links requested for many users from same IP
+</code></pre>
+<h2 id="model-answer_7">Model answer</h2>
+<p>For passwordless abuse, I would collect magic-link request and click telemetry, passkey registration and authenticator metadata, device certificate usage, recovery events, device/IP reputation, session creation, and post-login sensitive actions. The most valuable detections correlate events, such as magic link requested from one IP and redeemed from another, new authenticator added after recovery, or passwordless login followed by token creation or data export.</p>
+<hr />
+<h1 id="9-when-is-federated-sign-in-effectively-passwordless-for-the-relying-app-but-not-for-the-ecosystem">9. When is federated sign-in effectively passwordless for the relying app but not for the ecosystem?</h1>
+<p>Federated sign-in can be passwordless from the relying application’s perspective because the app never sees or verifies a password.</p>
+<p>Example:</p>
+<pre><code class="language-text">User opens SaaS app
+SaaS redirects to corporate IdP
+User authenticates at IdP
+IdP sends SAML/OIDC assertion
+SaaS grants access
+</code></pre>
+<p>The relying app sees:</p>
+<pre><code class="language-text">Signed assertion/token from trusted IdP
+</code></pre>
+<p>It does not know whether the user used:</p>
+<pre><code class="language-text">Password
+Password + SMS
+Passkey
+Hardware key
+Smart card
+Existing IdP session
+</code></pre>
+<p>So for the app, it feels passwordless.</p>
+<p>But for the ecosystem, it is only truly passwordless if the IdP authentication is passwordless.</p>
+<h2 id="example_2">Example</h2>
+<p>SaaS app:</p>
+<pre><code class="language-text">No password stored
+Only SSO login
+</code></pre>
+<p>Corporate IdP:</p>
+<pre><code class="language-text">User signs in with password + SMS OTP
+</code></pre>
+<p>This is not truly passwordless for the ecosystem.</p>
+<h2 id="why-this-matters">Why this matters</h2>
+<p>The relying app inherits the IdP’s assurance.</p>
+<p>If the IdP has weak authentication or recovery, the app is affected.</p>
+<h2 id="what-to-review">What to review</h2>
+<p>For federated passwordless claims, check:</p>
+<pre><code class="language-text">Authentication method reference
+MFA strength
+IdP session lifetime
+Step-up support
+Token audience and lifetime
+Recovery policy
+Admin MFA policy
+Conditional access
+Phishing resistance
+</code></pre>
+<p>In OIDC/SAML environments, the relying party can sometimes request or inspect assurance signals such as authentication context.</p>
+<h2 id="model-answer_8">Model answer</h2>
+<p>Federated sign-in is effectively passwordless for the relying application when the app delegates authentication to an IdP and never handles user passwords. But the broader ecosystem is only passwordless if the IdP itself uses passwordless authentication. If the IdP still uses passwords, SMS, or weak recovery, then passwordless is only true at the app boundary, not at the identity ecosystem level.</p>
+<hr />
+<h1 id="10-what-would-you-review-after-a-large-scale-magic-link-replay-incident">10. What would you review after a large-scale magic-link replay incident?</h1>
+<p>A magic-link replay incident means login links were reused, stolen, forwarded, scanned, or redeemed by attackers.</p>
+<p>I would review the full lifecycle:</p>
+<pre><code class="language-text">Request → delivery → click → redemption → session creation → post-login actions
+</code></pre>
+<hr />
+<h2 id="a-link-design">A. Link design</h2>
+<p>Review:</p>
+<pre><code class="language-text">Was the link single-use?
+Was it short-lived?
+Was it bound to the requesting browser/session?
+Was it bound to device/IP risk context?
+Was token stored hashed server-side?
+Was token invalidated after redemption?
+Could the same link be clicked multiple times?
+Could email security scanners accidentally activate it?
+</code></pre>
+<p>Strong design:</p>
+<pre><code class="language-text">Single-use
+Short expiration
+Server-side hashed token
+Redeem requires same browser/session or secondary challenge
+Replay attempt invalidates token
+</code></pre>
+<hr />
+<h2 id="b-request-and-redemption-mismatch">B. Request and redemption mismatch</h2>
+<p>Check:</p>
+<pre><code class="language-text">Requester IP vs redeemer IP
+Requester user agent vs redeemer user agent
+Geography mismatch
+ASN mismatch
+Time-to-click anomaly
+Multiple clicks
+Multiple accounts from same redeemer IP
+</code></pre>
+<p>Example suspicious pattern:</p>
+<pre><code class="language-text">Magic link requested from Singapore
+Redeemed 20 seconds later from another country
+</code></pre>
+<hr />
+<h2 id="c-email-channel-compromise">C. Email channel compromise</h2>
+<p>Review:</p>
+<pre><code class="language-text">Mailbox compromise indicators
+Forwarding rules
+OAuth grants to mailbox
+Legacy email protocols
+Email session theft
+Email security gateway behavior
+Links exposed in logs
+Links visible in notification previews
+</code></pre>
+<hr />
+<h2 id="d-application-logging-leaks">D. Application logging leaks</h2>
+<p>Search for magic links in:</p>
+<pre><code class="language-text">Application logs
+Reverse proxy logs
+Email provider logs
+Analytics tools
+Crash reports
+Browser referrer headers
+Support tickets
+SIEM events
+</code></pre>
+<p>Magic links should not appear in logs.</p>
+<hr />
+<h2 id="e-session-handling-after-redemption">E. Session handling after redemption</h2>
+<p>Review:</p>
+<pre><code class="language-text">Were sessions created immediately?
+Was step-up required for risky redemption?
+Were old sessions revoked after recovery-style login?
+Were session cookies secure, HttpOnly, SameSite?
+Were refresh tokens rotated?
+</code></pre>
+<hr />
+<h2 id="f-post-login-abuse">F. Post-login abuse</h2>
+<p>Look for:</p>
+<pre><code class="language-text">Passwordless login followed by email change
+New MFA/passkey added
+API token created
+OAuth app authorized
+Data exported
+Payment details changed
+Admin actions
+</code></pre>
+<hr />
+<h2 id="g-immediate-remediation">G. Immediate remediation</h2>
+<p>Actions:</p>
+<pre><code class="language-text">Invalidate outstanding magic links
+Revoke suspicious sessions
+Force re-authentication for affected users
+Disable magic links temporarily if needed
+Shorten link TTL
+Make links single-use
+Bind link redemption to original browser/session
+Add risk-based step-up
+Notify affected users
+Hunt for mailbox compromise
+</code></pre>
+<hr />
+<h2 id="h-longer-term-redesign">H. Longer-term redesign</h2>
+<p>Consider moving from magic links to:</p>
+<pre><code class="language-text">Passkeys
+Device-bound passwordless
+Email link + trusted device confirmation
+Email link + step-up for high-risk accounts
+Federated login with phishing-resistant MFA
+</code></pre>
+<h2 id="model-answer_9">Model answer</h2>
+<p>After a magic-link replay incident, I would review whether links were single-use, short-lived, hashed server-side, invalidated after redemption, and bound to the requesting session or device. I would compare request and redemption IP/device, look for multiple clicks, email compromise, forwarding rules, logging leaks, and scanner behavior. I would revoke suspicious sessions, invalidate outstanding links, add risk-based step-up, and redesign toward passkeys or device-bound passwordless for higher-risk users.</p>
+<hr />
+<h1 id="final-summary-table">Final Summary Table</h1>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Strong Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Passwordless vs phishing-resistant</td>
+<td>No password does not mean no phishing; magic links and OTPs can still be stolen or replayed.</td>
+</tr>
+<tr>
+<td>Magic links vs passkeys vs certs</td>
+<td>Magic links are easiest but weakest; passkeys are strong and usable; device certs are strong for managed devices.</td>
+</tr>
+<tr>
+<td>Email as primary factor</td>
+<td>The app now trusts mailbox security, email recovery, sessions, and forwarding behavior.</td>
+</tr>
+<tr>
+<td>Recovery assurance</td>
+<td>Weak recovery bypasses strong passwordless login.</td>
+</tr>
+<tr>
+<td>Large rollout</td>
+<td>Segment users/devices, pilot, support mixed devices, strengthen recovery, phase enforcement.</td>
+</tr>
+<tr>
+<td>Possession-only risk</td>
+<td>Stolen/unlocked device or token may authenticate without proving the real user is present.</td>
+</tr>
+<tr>
+<td>Step-up</td>
+<td>Require fresh stronger proof for sensitive actions and risky contexts.</td>
+</tr>
+<tr>
+<td>Telemetry</td>
+<td>Track link request/redeem, device mismatch, authenticator changes, recovery, sessions, and post-login activity.</td>
+</tr>
+<tr>
+<td>Federated sign-in</td>
+<td>Passwordless for app only if app delegates auth; ecosystem may still rely on passwords at IdP.</td>
+</tr>
+<tr>
+<td>Magic-link replay review</td>
+<td>Check token design, replay protection, email compromise, logging leaks, session creation, and post-login abuse.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Passwordless is a category of login designs, not a single security level.</li>
+<li>Replacing passwords with weak channels such as email links can improve UX more than security.</li>
+<li>Passkeys and strong device-bound authenticators are the highest-value passwordless options.</li>
+<li>Recovery, enrollment, and session controls remain central.</li>
+<li>The best passwordless systems reduce both phishing exposure and operational reset burden.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

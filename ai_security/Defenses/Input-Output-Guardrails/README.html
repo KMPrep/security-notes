@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Input / Output Guardrails — The Runtime Defense Layer</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: ai_security\Defenses\Input-Output-Guardrails\README.md</p>
+<h1 id="input-output-guardrails-the-runtime-defense-layer">Input / Output Guardrails — The Runtime Defense Layer</h1>
+<p><strong>Domain:</strong> LLM application security · runtime request-mediation controls<br />
+<strong>Anchor frameworks:</strong> OWASP LLM01 (Prompt Injection) · OWASP LLM05 (Improper Output Handling) · OWASP LLM02 (Sensitive Information Disclosure) · Google SAIF · NIST AI RMF (MEASURE / MANAGE)<br />
+<strong>Related notes:</strong> <code>LLM-Attacks/Prompt-Injection-*</code>, <code>LLM-Attacks/Insecure-Output-Handling</code>, <code>Agentic-AI/Excessive-Agency</code>, <code>RAG-Security/</code></p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Input/output guardrails are the <strong>runtime filtering layer</strong> that wraps an LLM: an <em>input guard</em> inspects everything flowing toward the model (user prompt, retrieved documents, tool results) and an <em>output guard</em> inspects everything the model emits before it reaches a user, a tool, or a downstream system. They sit at the inference boundary — not in the weights, not in the app logic — and their job is to catch prompt injection and jailbreaks on the way in (OWASP <strong>LLM01</strong>) and toxicity, PII, secrets, and malformed/unsafe output on the way out (OWASP <strong>LLM05</strong> Improper Output Handling, <strong>LLM02</strong> Sensitive Information Disclosure). They matter because they are the one control you can add <em>without retraining the model</em>, deploy centrally, and update in minutes when a new jailbreak appears. The critical caveat a senior engineer must state up front: <strong>guardrails are probabilistic classifiers, not sound proofs</strong> — they reduce the rate of bad inputs/outputs but cannot guarantee absence of them, so under SAIF and NIST AI RMF they belong in a defense-in-depth stack alongside least-privilege tool scoping and human-in-the-loop, never as the sole control.</p>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>A guardrail is a <strong>policy enforcement point (PEP)</strong> inserted into the request pipeline. Conceptually it is the same pattern as a WAF in front of a web app, or an egress proxy in front of a network: intercept, classify, decide (allow / block / redact / rewrite / escalate), log. The difference is that the thing being classified is natural language, so the classifiers are themselves imperfect — regexes, small fine-tuned models, or a second LLM acting as judge.</p>
+<p><strong>Input-side controls</strong> (before the model sees the text):<br />
+- <strong>Injection/jailbreak detection</strong> — pattern heuristics ("ignore previous instructions", DAN-style role-play, base64/leetspeak obfuscation) plus a trained classifier (e.g., Llama Guard, Rebuff, Prompt Guard) that scores the prompt as benign vs. adversarial.<br />
+- <strong>PII detection</strong> — NER/regex (Microsoft Presidio, cloud DLP) to catch SSNs, card numbers, emails before they are logged or sent to a third-party model API.<br />
+- <strong>Topic / relevance rails</strong> — restrict the assistant to its allowed domain (NeMo Guardrails "dialog rails" that refuse off-topic or disallowed requests).<br />
+- <strong>Canary / signature checks</strong> — Rebuff plants a canary token in the system prompt; if the model output leaks it, an injection succeeded and the request is flagged.</p>
+<p><strong>Output-side controls</strong> (after the model responds, before delivery/execution):<br />
+- <strong>Toxicity / safety classification</strong> — Llama Guard, OpenAI Moderation, Perspective API score the response against a harm taxonomy (hate, self-harm, violence, sexual, weapons).<br />
+- <strong>PII / secrets scanning</strong> — DLP and secret-scanners (entropy + known key formats) prevent the model from echoing training-data PII or leaking API keys.<br />
+- <strong>Format / schema validation</strong> — for tool-calling and structured output, validate against a JSON Schema / grammar (Guardrails-AI, Pydantic, constrained decoding) so downstream code never parses malformed or injected arguments.<br />
+- <strong>Insecure-output handling (LLM05)</strong> — treat model output as <em>untrusted</em>: encode/escape before rendering (XSS), parameterize before SQL, and never <code>eval()</code> a model-generated string. This is the control that stops the model becoming a confused-deputy injection vector into downstream systems.</p>
+<p><strong>Trust boundaries.</strong> The guardrail marks a boundary where text changes trust level. On the input side, <em>all</em> sources are untrusted — including retrieved RAG documents and tool outputs, which are the vector for <strong>indirect</strong> prompt injection. On the output side, the boundary is between the model (untrusted generator) and whatever consumes its output. A common design error is to guard only the direct user prompt and forget that retrieved content and tool results also cross into the model.</p>
+<h3 id="22-step-by-step-flow">2.2 Step-by-Step Flow</h3>
+<h4 id="diagram-a-guarded-request-pipeline">Diagram A — Guarded Request Pipeline</h4>
+<pre class="mermaid">
+flowchart LR
+    U[User input] --> IG[Input guard]
+    R[Retrieved docs and tool output] --> IG
+    IG -->|block| RJ[Reject or safe fallback]
+    IG -->|pass or redact| M[Model]
+    M --> OG[Output guard]
+    OG -->|block| RJ
+    OG -->|pass or redact| DS[User or tool or downstream]
+</pre>
+<h4 id="diagram-b-guardrail-decision-logic">Diagram B — Guardrail Decision Logic</h4>
+<pre class="mermaid">
+flowchart TD
+    A[Incoming text] --> B{Injection or jailbreak score high}
+    B -->|Yes| R[Block and log]
+    B -->|No| C{Contains PII or secrets}
+    C -->|Yes| D[Redact then continue]
+    C -->|No| E{Policy or topic allowed}
+    E -->|No| R
+    E -->|Yes| F[Forward to next stage]
+    D --> F
+</pre>
+<h4 id="diagram-c-agent-loop-with-guards-at-each-hop">Diagram C — Agent Loop With Guards at Each Hop</h4>
+<pre class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant IG as Input guard
+    participant M as Model
+    participant OG as Output guard
+    participant T as Tool
+    U->>IG: Prompt
+    IG->>M: Sanitized prompt
+    M->>OG: Proposed tool call
+    OG->>T: Validated call within scope
+    T-->>IG: Tool result untrusted
+    IG->>M: Sanitized result
+    M->>OG: Draft answer
+    OG-->>U: Filtered answer
+</pre>
+<h2 id="3-what-can-go-wrong">3. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>Framework ID</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Jailbreak bypasses input filter (obfuscation, translation, role-play, encoding)</td>
+<td>LLM01</td>
+<td>Classifier is probabilistic; adversary iterates until under threshold</td>
+<td>Harmful/policy-violating output</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Indirect injection via retrieved doc or tool output not guarded</td>
+<td>LLM01</td>
+<td>Only direct user prompt inspected; RAG/tool text treated as trusted</td>
+<td>Agent hijack, exfiltration</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>False negative — novel attack the classifier never saw</td>
+<td>LLM01</td>
+<td>Guard trained on known attack distribution</td>
+<td>Silent bypass</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>False positive / over-blocking</td>
+<td>—</td>
+<td>Aggressive rules refuse benign requests</td>
+<td>Utility loss, users route around control</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Output guard misses PII/secret leak</td>
+<td>LLM02</td>
+<td>Detector coverage gaps, novel formats</td>
+<td>Data disclosure, compliance breach</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Insecure output handling downstream</td>
+<td>LLM05</td>
+<td>Model output rendered/executed without encoding</td>
+<td>XSS, SQLi, RCE via confused deputy</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Schema/format validation absent on tool args</td>
+<td>LLM05</td>
+<td>Structured output not validated</td>
+<td>Injected/malformed tool calls</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Guard model itself prompt-injected (LLM-as-judge)</td>
+<td>LLM01</td>
+<td>Judge LLM reads attacker text and is manipulated</td>
+<td>Guard says "safe" on malicious input</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Latency/cost pressure disables or thins guards</td>
+<td>—</td>
+<td>Extra model calls double latency and spend</td>
+<td>Controls silently degraded</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Multilingual / low-resource-language bypass</td>
+<td>LLM01</td>
+<td>Guard trained mostly on English</td>
+<td>Filter blind spot</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Split/staged payload across turns or chunks</td>
+<td>LLM01</td>
+<td>Guard inspects per-request, not cross-turn state</td>
+<td>Assembled attack evades per-message check</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Canary/signature evasion (paraphrase leak)</td>
+<td>LLM02</td>
+<td>Model leaks secret without echoing exact token</td>
+<td>Detection miss</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Guardrail treated as the only control</td>
+<td>SAIF</td>
+<td>Over-reliance on one probabilistic layer</td>
+<td>Single point of failure</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-mitigation-controls">4. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Control Point / Where Applied</th>
+<th>Framework</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Jailbreak/injection</td>
+<td>Layered detection: heuristics + trained classifier (Llama Guard, Prompt Guard, Rebuff)</td>
+<td>Input guard</td>
+<td>SAIF input validation; NIST MEASURE</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Indirect injection</td>
+<td>Guard <em>all</em> sources: RAG chunks, tool outputs, memory — not just user prompt</td>
+<td>Input guard on every source</td>
+<td>SAIF; LLM01</td>
+</tr>
+<tr>
+<td>3</td>
+<td>False negatives</td>
+<td>Assume bypass; combine with least-privilege + HITL; red-team continuously</td>
+<td>Architecture</td>
+<td>NIST MANAGE; SAIF</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-blocking</td>
+<td>Tune thresholds, allowlist known-good, redact-don't-block where safe</td>
+<td>Policy config</td>
+<td>NIST MEASURE</td>
+</tr>
+<tr>
+<td>5</td>
+<td>PII/secret leak</td>
+<td>DLP + secret scanning on output (Presidio, cloud DLP) with redaction</td>
+<td>Output guard</td>
+<td>LLM02; SAIF data protection</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Insecure output handling</td>
+<td>Treat output as untrusted: encode, parameterize, never eval; sandbox</td>
+<td>Downstream boundary</td>
+<td>LLM05; SAIF</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Bad tool args</td>
+<td>Schema/grammar validation, constrained decoding (Guardrails-AI, Pydantic)</td>
+<td>Output guard before tool</td>
+<td>LLM05</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Judge manipulation</td>
+<td>Isolate judge context, structured (non-free-text) verdicts, defense-in-depth</td>
+<td>Guard design</td>
+<td>SAIF</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Latency/cost</td>
+<td>Small fast classifiers first, escalate to LLM judge only on ambiguity</td>
+<td>Pipeline design</td>
+<td>—</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Multilingual bypass</td>
+<td>Multilingual guard models; normalize/translate before scoring</td>
+<td>Input guard</td>
+<td>NIST MEASURE</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Least privilege</td>
+<td>Scope tool permissions so a bypassed guard has small blast radius</td>
+<td>Tool/authz layer</td>
+<td>LLM06; SAIF</td>
+</tr>
+<tr>
+<td>12</td>
+<td>HITL</td>
+<td>Human approval for high-impact / irreversible actions</td>
+<td>Agent action gate</td>
+<td>SAIF; NIST MANAGE</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Observability</td>
+<td>Log every guard decision, alert on block-rate shifts, feed red-team</td>
+<td>SOC/monitoring</td>
+<td>NIST MEASURE</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<h4 id="1-defense-in-depth-guardrails-are-a-layer-not-the-wall">1. Defense-in-Depth — Guardrails Are a Layer, Not the Wall</h4>
+<p>The single most important framing: an input/output guardrail is a probabilistic classifier with a nonzero false-negative rate, so its security value is <strong>risk reduction, not risk elimination</strong>. Design as if the guard <em>will</em> be bypassed, and make that bypass cheap in blast radius. Concretely, pair the guardrail with <strong>least-privilege tool scopes</strong> (a hijacked agent can only call read-only, narrowly-scoped APIs) and <strong>human-in-the-loop approval</strong> for any irreversible or high-impact action (payments, deletes, external sends). This is exactly SAIF's "defense in depth" and NIST AI RMF's MANAGE function: the guard lowers likelihood, the privilege/HITL layers cap impact. The trade-off is friction — HITL adds latency and human cost — so reserve it for the small set of genuinely dangerous actions rather than every response.</p>
+<h4 id="2-layered-continuously-updated-detection-at-every-input-source">2. Layered, Continuously-Updated Detection at Every Input Source</h4>
+<p>No single detector is enough. Stack <strong>cheap deterministic checks</strong> (regex for known signatures, encoding/normalization to defeat base64/leetspeak/homoglyph obfuscation) in front of a <strong>trained classifier</strong> (Llama Guard for a safety-taxonomy verdict, Meta Prompt Guard / Rebuff for injection scoring, OpenAI Moderation for content categories). Critically, apply this to <strong>every untrusted source</strong>, not just the user's typed prompt — retrieved RAG documents and tool outputs are the primary vector for <em>indirect</em> injection and are the source teams most often forget to guard. Because attackers iterate against a fixed model, the classifier must be <strong>continuously retrained and red-teamed</strong>; treat the guardrail like a WAF ruleset that ages. Trade-offs: each extra classifier adds latency and cost, and tighter thresholds raise false positives, so measure block-rate and utility together.</p>
+<h4 id="3-treat-model-output-as-untrusted-output-handling-and-schema-validation-llm05">3. Treat Model Output as Untrusted — Output Handling and Schema Validation (LLM05)</h4>
+<p>The output guard's most under-appreciated job is not toxicity filtering — it is stopping the model from becoming an <strong>injection vector into downstream systems</strong>. Model output must be handled with the same distrust as user input: HTML-encode before rendering (prevents XSS), parameterize before it touches a database (prevents SQLi), never pass it to <code>eval</code>/shell (prevents RCE), and <strong>validate structured output against a strict JSON Schema or grammar</strong> before any tool consumes it (Guardrails-AI, Pydantic, or constrained/grammar-based decoding). This is OWASP LLM05 Improper Output Handling, and it is a <em>deterministic</em> control — unlike the probabilistic input classifiers, schema validation and output encoding are sound within their scope, which is why they are the highest-assurance part of the guardrail stack. Trade-off: strict schemas can reject valid-but-unexpected model output, so pair validation with a retry/repair loop.</p>
+<h2 id="5-practice-questions">5. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li><strong>What is the difference between an input guardrail and an output guardrail?</strong> The input guard inspects text flowing <em>toward</em> the model (user prompt, retrieved docs, tool results) for injection, jailbreaks, and PII; the output guard inspects what the model <em>emits</em> for toxicity, PII/secrets, and unsafe or malformed content before it reaches a user or downstream system. <em>Asked to confirm you understand guardrails as a bidirectional PEP, not a single filter.</em></li>
+<li><strong>Why are guardrails described as "probabilistic, not sound"?</strong> They are classifiers (heuristics or ML models) that score text and can be wrong in both directions, so they have real false-negative and false-positive rates and cannot <em>prove</em> a prompt is safe. <em>Asked to see if you'll overtrust a control — the honest answer is the senior answer.</em></li>
+<li><strong>Name two input-side and two output-side checks.</strong> Input: injection/jailbreak detection and PII detection. Output: toxicity classification and PII/secret scanning (plus schema validation). <em>Screens for hands-on familiarity with the actual controls.</em></li>
+<li><strong>What OWASP LLM risks do guardrails primarily address?</strong> LLM01 Prompt Injection on the input side, LLM05 Improper Output Handling and LLM02 Sensitive Information Disclosure on the output side. <em>Checks framework literacy.</em></li>
+<li><strong>Name common guardrail tools and what each does.</strong> Llama Guard (safety-taxonomy classifier, in/out), NeMo Guardrails (programmable dialog/topic rails), Rebuff (injection detection + canary tokens), OpenAI Moderation (content-category classifier), Presidio (PII detection/redaction). <em>Confirms tool-landscape awareness.</em></li>
+</ol>
+<h3 id="tier-2-system-design-and-trade-offs">Tier 2 — System Design and Trade-offs</h3>
+<ol>
+<li><strong>Design guardrails for a customer-facing agent that can issue refunds via a tool.</strong> Input guard on the user prompt <em>and</em> on any retrieved policy docs/tool outputs (injection, PII); output guard that validates the refund tool-call against a schema and bounds the amount; least-privilege scope so the refund tool can only act on the authenticated user's own orders; and HITL approval above a dollar threshold. The guardrail lowers likelihood of a malicious call; the scope and HITL cap the blast radius when it's bypassed. <em>Tests whether you combine probabilistic and deterministic controls and layer them.</em></li>
+<li><strong>You added an input classifier but injections still succeed. Where do you look first?</strong> Almost always an <em>unguarded source</em>: retrieved RAG chunks and tool outputs feed the model but weren't passed through the guard, enabling indirect injection. Also check obfuscation (base64/translation) slipping under the classifier and multi-turn split payloads. <em>Tests understanding that the user prompt is not the only input.</em></li>
+<li><strong>How do you tune the block threshold, and what's the trade-off?</strong> Raise sensitivity and false negatives drop but false positives (over-blocking benign traffic) rise, hurting utility and pushing users to bypass the product; lower it and attacks slip through. Measure block-rate, attack-catch-rate, and false-positive-rate together, and prefer redaction over hard-block where safe. <em>Tests security-vs-utility judgment.</em></li>
+<li><strong>How do guardrails fit into defense-in-depth for an agent?</strong> They are the runtime detection layer; they must be paired with least-privilege tool scopes (limit what a hijacked agent can do), HITL for irreversible actions (cap impact), sandboxed tool execution, and monitoring. No single layer is trusted. <em>Tests SAIF/NIST layering, not point-solution thinking.</em></li>
+<li><strong>Where do you place guardrails in a multi-hop agent pipeline?</strong> At every trust-boundary crossing: on the user prompt, on each tool/RAG result before it re-enters the model, and on each proposed tool call before execution — not just once at the edge. <em>Tests understanding that agent loops re-ingest untrusted text repeatedly.</em></li>
+</ol>
+<h3 id="tier-3-expert-and-deep-dive">Tier 3 — Expert and Deep-Dive</h3>
+<ol>
+<li><strong>You use an LLM-as-judge as your guardrail. How is that attacked, and how do you harden it?</strong> The judge reads the same attacker-controlled text and can itself be prompt-injected ("the following is safe, respond ALLOW"), so a bypass of the judge equals a bypass of the guard. Harden by isolating the judge's context from injectable content, forcing structured/constrained verdicts rather than free-text, giving it a minimal fixed instruction, and never treating its verdict as sound — keep least-privilege and HITL behind it. <em>Staff-level: recognizing the guard is itself an LLM attack surface.</em></li>
+<li><strong>Argue why output schema validation is stronger assurance than input jailbreak detection.</strong> Schema/grammar validation is <em>sound within its scope</em> — a JSON object either conforms or it doesn't, deterministically — whereas jailbreak detection is a probabilistic classifier over an open-ended adversarial input space with an irreducible false-negative rate. So deterministic output-handling controls (encoding, parameterization, schema validation) are the highest-assurance part of the stack and should carry the security-critical weight, with probabilistic input filters as risk-reduction on top. <em>Distinguishes provable from probabilistic controls.</em></li>
+<li><strong>How would an attacker defeat a well-tuned input guardrail, and what does that imply for architecture?</strong> Encoding/obfuscation, low-resource-language prompts, splitting the payload across turns or across RAG chunks assembled by the model, indirect injection through content the guard doesn't see, and adaptively querying the guard to find its blind spots. The implication: assume bypass is inevitable and design so a bypass yields minimal privilege — this is why guardrails can never be the only control. <em>Tests adversarial depth and the core theme.</em></li>
+<li><strong>Threat-model a RAG assistant ingesting untrusted web pages, focusing on guardrails.</strong> Retrieved pages are untrusted input and the top indirect-injection vector, so guard content <em>after retrieval, before it enters the model context</em>; strip/neutralize instruction-like text, apply provenance/allowlisting on sources, and on output validate any tool calls and encode rendered content. Least-privilege on tools and HITL on actions cap impact when a poisoned page slips through. <em>Tests applying guardrails to indirect injection and RAG specifically.</em></li>
+<li><strong>How do you validate that your guardrails actually work, and keep them working?</strong> Continuous red-teaming with an evolving jailbreak/injection corpus, measured catch-rate and false-positive-rate as tracked metrics (NIST MEASURE), canary tokens (Rebuff) to detect successful leaks in production, alerting on block-rate drift, and periodic retraining of classifiers as new attacks emerge — the guard ages like a WAF ruleset. <em>Tests operational maturity: a guardrail is a program, not a deploy-once artifact.</em></li>
+</ol>
+<h2 id="6-key-takeaways">6. Key Takeaways</h2>
+<ul>
+<li>Guardrails are a <strong>bidirectional runtime PEP</strong>: input guard catches injection/jailbreaks/PII (LLM01), output guard catches toxicity/PII/secrets and unsafe output handling (LLM05, LLM02).</li>
+<li>They are <strong>probabilistic, not sound</strong> — nonzero false-negatives mean they reduce risk but never eliminate it; design as if they <em>will</em> be bypassed.</li>
+<li><strong>Defense-in-depth is mandatory</strong>: pair guardrails with least-privilege tool scopes and human-in-the-loop so a bypass has minimal blast radius (SAIF, NIST MANAGE).</li>
+<li><strong>Guard every untrusted source</strong>, not just the user prompt — retrieved RAG documents and tool outputs are the primary indirect-injection vector teams forget.</li>
+<li><strong>Output handling is the high-assurance part</strong>: encode/parameterize/never-eval model output and validate structured output against a schema — these deterministic controls (LLM05) beat probabilistic input filters.</li>
+<li>Know the tools cold: <strong>Llama Guard, NeMo Guardrails, Rebuff, OpenAI Moderation, Presidio, Guardrails-AI</strong> — and that the LLM-as-judge is itself injectable.</li>
+<li><strong>Production one-liner:</strong> "Layered probabilistic input/output classifiers on every trust boundary, backed by least-privilege tool scopes, HITL on irreversible actions, deterministic output-schema validation, and continuous red-teaming — guardrails reduce likelihood, the layers behind them cap impact."</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

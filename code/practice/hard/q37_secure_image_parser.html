@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q37_secure_image_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q37_secure_image_parser.py</h1>
+  <p class="file-path">Source: code\practice\hard\q37_secure_image_parser.py</p>
+  <p class="line-count">408 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q37 [Hard] — Secure Image Parser Design
+=============================================================================
+
+PROBLEM
+-------
+Implement safe parsing for a simplified image format with:
+  - Magic bytes header (4 bytes)
+  - Width and height fields (2 bytes each, unsigned)
+  - Bit-depth field (1 byte)
+  - Payload length field (4 bytes, unsigned)
+  - Pixel payload (payload_length bytes)
+
+Security requirements:
+  1. Validate magic bytes before any allocation.
+  2. Reject images exceeding MAX_DIMENSION or MAX_PIXELS.
+  3. Verify payload_length == width * height * bytes_per_pixel.
+  4. Reject if declared payload_length does not match actual remaining bytes.
+  5. Never use eval() or exec() for parsing.
+  6. Reject negative or zero dimensions.
+
+CLARIFYING QUESTIONS
+--------------------
+1. What is the format specification?
+   → Simplified: MAGIC(4) | W(2) | H(2) | BIT_DEPTH(1) | PAYLOAD_LEN(4) | DATA
+2. Supported bit depths?
+   → 8 (grayscale), 24 (RGB), 32 (RGBA).
+3. Maximum allowed image size?
+   → Configurable; default 16384x16384.
+4. What happens on malformed input?
+   → Raise ImageParseError with specific reason.
+5. Streaming or in-memory?
+   → In-memory bytes for simplicity; streaming discussed as extension.
+
+=============================================================================
+APPROACH 1 — NAIVE (index slicing without bounds checks)
+=============================================================================
+  Direct slicing: width = data[4:6].  No length checks; IndexError possible.
+  Trusted payload_length from header without cross-validation.
+  Allocates width*height array before verifying data is present.
+
+=============================================================================
+APPROACH 2 — SAFE BOUNDED PARSER WITH _Buf WRAPPER (OPTIMAL)
+=============================================================================
+  1. _Buf class tracks position; raises on any over-read.
+  2. Validate magic first; fail fast.
+  3. Cross-validate: payload_length == W * H * (bit_depth // 8).
+  4. Verify remaining bytes match declared length before allocating.
+  5. Unpack struct fields with explicit format strings.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import struct
+from dataclasses import dataclass
+from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAGIC           = b&quot;\x89IMG&quot;
+MAX_DIMENSION   = 16_384          # max width or height
+MAX_PIXELS      = 64_000_000      # max width * height
+VALID_BIT_DEPTH = frozenset([8, 24, 32])
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+class ImageParseError(Exception):
+    pass
+
+
+@dataclass
+class ImageHeader:
+    width: int
+    height: int
+    bit_depth: int
+    bytes_per_pixel: int
+    payload_length: int
+
+
+@dataclass
+class ParsedImage:
+    header: ImageHeader
+    pixels: bytes    # raw pixel bytes
+
+
+# ---------------------------------------------------------------------------
+# Safe buffer wrapper (reused pattern from Q32/Q33)
+# ---------------------------------------------------------------------------
+
+class _Buf:
+    __slots__ = (&quot;_data&quot;, &quot;_pos&quot;, &quot;_size&quot;)
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos  = 0
+        self._size = len(data)
+
+    @property
+    def remaining(self) -&gt; int:
+        return self._size - self._pos
+
+    def read(self, n: int) -&gt; bytes:
+        if n &lt; 0:
+            raise ImageParseError(&quot;Cannot read negative bytes&quot;)
+        if n &gt; self.remaining:
+            raise ImageParseError(
+                f&quot;Buffer overread: need {n} bytes at offset {self._pos}, &quot;
+                f&quot;have {self.remaining}&quot;
+            )
+        chunk = self._data[self._pos : self._pos + n]
+        self._pos += n
+        return chunk
+
+    def unpack(self, fmt: str) -&gt; tuple:
+        size = struct.calcsize(fmt)
+        raw  = self.read(size)
+        return struct.unpack(fmt, raw)
+
+    def peek(self, n: int) -&gt; bytes:
+        if n &gt; self.remaining:
+            raise ImageParseError(f&quot;Buffer peek overread: need {n}, have {self.remaining}&quot;)
+        return self._data[self._pos : self._pos + n]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (unsafe)
+# ---------------------------------------------------------------------------
+
+class NaiveImageParser:
+    &quot;&quot;&quot;Vulnerable to buffer over-read, integer overflow, and allocation bombs.&quot;&quot;&quot;
+
+    def parse(self, data: bytes) -&gt; ParsedImage:
+        # No magic check
+        width   = struct.unpack_from(&quot;&gt;H&quot;, data, 4)[0]
+        height  = struct.unpack_from(&quot;&gt;H&quot;, data, 6)[0]
+        bdepth  = data[8]
+        paylen  = struct.unpack_from(&quot;&gt;I&quot;, data, 9)[0]
+        # Trusts paylen; could allocate huge buffer
+        pixels  = data[13 : 13 + paylen]
+        header  = ImageHeader(width, height, bdepth, bdepth // 8, paylen)
+        return ParsedImage(header=header, pixels=pixels)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Safe image parser
+# ---------------------------------------------------------------------------
+
+class ImageParser:
+    &quot;&quot;&quot;
+    Secure image parser.
+    Validates before any allocation; raises ImageParseError on all anomalies.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        max_dimension: int = MAX_DIMENSION,
+        max_pixels: int = MAX_PIXELS,
+    ):
+        self._max_dim    = max_dimension
+        self._max_pixels = max_pixels
+
+    def parse(self, data: bytes) -&gt; ParsedImage:
+        if not isinstance(data, (bytes, bytearray)):
+            raise ImageParseError(&quot;Input must be bytes&quot;)
+
+        buf = _Buf(data)
+
+        # 1. Magic check (fast fail)
+        magic = buf.read(4)
+        if magic != MAGIC:
+            raise ImageParseError(
+                f&quot;Bad magic: expected {MAGIC!r}, got {magic!r}&quot;
+            )
+
+        # 2. Dimensions
+        (width,)  = buf.unpack(&quot;&gt;H&quot;)   # 2 bytes unsigned
+        (height,) = buf.unpack(&quot;&gt;H&quot;)   # 2 bytes unsigned
+
+        if width == 0 or height == 0:
+            raise ImageParseError(
+                f&quot;Zero dimension: width={width}, height={height}&quot;
+            )
+        if width &gt; self._max_dim or height &gt; self._max_dim:
+            raise ImageParseError(
+                f&quot;Dimension exceeds limit: {width}x{height} &gt; {self._max_dim}&quot;
+            )
+        pixel_count = width * height
+        if pixel_count &gt; self._max_pixels:
+            raise ImageParseError(
+                f&quot;Pixel count {pixel_count:,} exceeds max {self._max_pixels:,}&quot;
+            )
+
+        # 3. Bit depth
+        (bit_depth,) = buf.unpack(&quot;B&quot;)  # 1 byte
+        if bit_depth not in VALID_BIT_DEPTH:
+            raise ImageParseError(
+                f&quot;Invalid bit depth: {bit_depth}. Expected one of {sorted(VALID_BIT_DEPTH)}&quot;
+            )
+        bytes_per_pixel = bit_depth // 8
+
+        # 4. Declared payload length
+        (declared_len,) = buf.unpack(&quot;&gt;I&quot;)   # 4 bytes unsigned
+        expected_len    = pixel_count * bytes_per_pixel
+
+        if declared_len != expected_len:
+            raise ImageParseError(
+                f&quot;Payload length mismatch: declared={declared_len}, &quot;
+                f&quot;expected={expected_len} ({width}x{height}x{bytes_per_pixel})&quot;
+            )
+
+        # 5. Verify actual bytes available before allocating
+        if buf.remaining &lt; declared_len:
+            raise ImageParseError(
+                f&quot;Truncated payload: have {buf.remaining} bytes, &quot;
+                f&quot;need {declared_len}&quot;
+            )
+        if buf.remaining &gt; declared_len:
+            raise ImageParseError(
+                f&quot;Trailing garbage: {buf.remaining - declared_len} extra bytes &quot;
+                f&quot;after payload&quot;
+            )
+
+        # 6. Read pixel data
+        pixels = buf.read(declared_len)
+
+        header = ImageHeader(
+            width=width,
+            height=height,
+            bit_depth=bit_depth,
+            bytes_per_pixel=bytes_per_pixel,
+            payload_length=declared_len,
+        )
+        return ParsedImage(header=header, pixels=pixels)
+
+
+# ---------------------------------------------------------------------------
+# Builder helper for tests
+# ---------------------------------------------------------------------------
+
+def _build_image(
+    width: int,
+    height: int,
+    bit_depth: int = 24,
+    payload_override: Optional[bytes] = None,
+    magic_override: Optional[bytes] = None,
+    paylen_override: Optional[int] = None,
+) -&gt; bytes:
+    magic   = magic_override if magic_override is not None else MAGIC
+    bpp     = bit_depth // 8
+    payload = payload_override if payload_override is not None else (
+        bytes(range(256)) * ((width * height * bpp + 255) // 256)
+    )[:width * height * bpp]
+    paylen  = paylen_override if paylen_override is not None else len(payload)
+    return (
+        magic
+        + struct.pack(&quot;&gt;HHB&quot;, width, height, bit_depth)
+        + struct.pack(&quot;&gt;I&quot;, paylen)
+        + payload
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_valid_image():
+    parser = ImageParser()
+    data = _build_image(4, 3, bit_depth=24)
+    img = parser.parse(data)
+    assert img.header.width == 4
+    assert img.header.height == 3
+    assert img.header.bit_depth == 24
+    assert len(img.pixels) == 4 * 3 * 3
+    print(&quot;Valid 24-bit image: passed&quot;)
+
+
+def test_bad_magic():
+    parser = ImageParser()
+    data = _build_image(4, 4)
+    bad  = b&quot;\x00BAD&quot; + data[4:]
+    try:
+        parser.parse(bad)
+        assert False
+    except ImageParseError as e:
+        assert &quot;magic&quot; in str(e).lower()
+        print(f&quot;Bad magic rejected: passed ({e})&quot;)
+
+
+def test_zero_dimension():
+    parser = ImageParser()
+    data = _build_image(0, 100)
+    try:
+        parser.parse(data)
+        assert False
+    except ImageParseError as e:
+        assert &quot;dimension&quot; in str(e).lower() or &quot;zero&quot; in str(e).lower()
+        print(f&quot;Zero dimension rejected: passed ({e})&quot;)
+
+
+def test_payload_mismatch():
+    parser = ImageParser()
+    # Claim paylen of 100 but actual = 4*4*3 = 48
+    data = _build_image(4, 4, paylen_override=100)
+    try:
+        parser.parse(data)
+        assert False
+    except ImageParseError as e:
+        assert &quot;mismatch&quot; in str(e).lower() or &quot;payload&quot; in str(e).lower()
+        print(f&quot;Payload length mismatch: passed ({e})&quot;)
+
+
+def test_truncated_payload():
+    parser = ImageParser()
+    data = _build_image(10, 10, bit_depth=24)
+    # Cut off last 50 bytes
+    truncated = data[:-50]
+    try:
+        parser.parse(truncated)
+        assert False
+    except ImageParseError as e:
+        assert &quot;truncated&quot; in str(e).lower() or &quot;mismatch&quot; in str(e).lower() or &quot;payload&quot; in str(e).lower()
+        print(f&quot;Truncated payload rejected: passed ({e})&quot;)
+
+
+def test_invalid_bit_depth():
+    parser = ImageParser()
+    data = _build_image(4, 4, bit_depth=16)  # 16-bit not supported
+    try:
+        parser.parse(data)
+        assert False
+    except ImageParseError as e:
+        assert &quot;bit depth&quot; in str(e).lower()
+        print(f&quot;Invalid bit depth rejected: passed ({e})&quot;)
+
+
+def test_oversized_image():
+    parser = ImageParser(max_dimension=100)
+    data = _build_image(200, 200)
+    try:
+        parser.parse(data)
+        assert False
+    except ImageParseError as e:
+        assert &quot;dimension&quot; in str(e).lower() or &quot;exceeds&quot; in str(e).lower()
+        print(f&quot;Oversized image rejected: passed ({e})&quot;)
+
+
+def test_empty_input():
+    parser = ImageParser()
+    try:
+        parser.parse(b&quot;&quot;)
+        assert False
+    except ImageParseError as e:
+        print(f&quot;Empty input rejected: passed ({e})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+PARSER VULNERABILITIES IN IMAGE FORMATS
+----------------------------------------
+Real-world CVEs in image parsers:
+  • libpng heap overflow (CVE-2011-2501): bad chunk length caused malloc of
+    wrong size, then over-write.
+  • libjpeg-turbo integer overflow (CVE-2021-46822): width*height overflow
+    when both are near UINT16_MAX.
+  • WebP/ImageIO heap buffer overflow (CVE-2023-4863): exploited via crafted
+    WebP file; critical severity; used in 0-day campaigns.
+
+KEY DEFENCES ILLUSTRATED HERE
+------------------------------
+1. Magic bytes first: fail before any parsing, avoid wasted work.
+2. Integer cross-validation: declared_len vs computed expected_len.
+   Prevents allocation bombs and TOCTOU between length field and data.
+3. Bounds-checked buffer (_Buf): every read asserts availability,
+   preventing any buffer overread.
+4. Dimension limits: prevent pixel_count integer overflow and huge allocations.
+5. Exact length check: trailing garbage could indicate zip-in-image polyglot
+   or parser confusion attacks.
+6. No eval/exec: all parsing via struct.unpack with typed format strings.
+
+INTEGER OVERFLOW NOTE
+---------------------
+  width=65535, height=65535 → pixel_count = 4,294,836,225 &gt; UINT32_MAX
+  Python ints are arbitrary precision so no overflow, but max_pixels guards
+  against absurd allocation.  In C/C++ you must use checked multiplication.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_image()
+    test_bad_magic()
+    test_zero_dimension()
+    test_payload_mismatch()
+    test_truncated_payload()
+    test_invalid_bit_depth()
+    test_oversized_image()
+    test_empty_input()
+</code></pre>
+</body>
+</html>

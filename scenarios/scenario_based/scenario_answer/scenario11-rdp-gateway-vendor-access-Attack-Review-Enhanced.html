@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remote Desktop Gateway for Third-Party Vendor Access — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario11-rdp-gateway-vendor-access-Attack-Review-Enhanced.md</p>
+<h1 id="remote-desktop-gateway-for-third-party-vendor-access-threat-exploitation-and-blue-team-control-review">Remote Desktop Gateway for Third-Party Vendor Access — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario11-rdp-gateway-vendor-access.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario11-rdp-gateway-vendor-access-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> 500 third-party vendors need time-limited access to internal systems for maintenance, but the current solution is a shared-credential jump server with no individual attribution, time-window enforcement, or session recording.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This document reviews the threat model from two lenses:</p>
+<ol>
+<li><strong>Attacker lens:</strong> How an attacker would realistically exploit each identified threat, including prerequisites, reconnaissance steps, tool usage, and escalation path.</li>
+<li><strong>Blue-team lens:</strong> What controls must stop or detect the attack, where each control is enforced, and what telemetry proves the control is firing.</li>
+</ol>
+<p>The review focuses on third-party vendor access, shared-credential jump servers, PAM replacement architectures, session enforcement, and vendor endpoint compromise detection. Commands use placeholders and are intended for an owned lab or approved internal purple-team exercise only.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p><strong>The single most consequential design decision is whether vendor access is brokered through a PAM gateway with unique, time-limited identities and scoped target access, or whether it flows through a shared credential jump server that grants broad, unattributable internal reach.</strong></p>
+<p>The shared-credential jump server is dangerous because it removes attribution, prevents selective revocation, and means the jump server’s entire network adjacency becomes a single blast radius. The safe design is to use a PAM platform like CyberArk or BeyondTrust to provision per-vendor per-session access, enforce maintenance-window TTLs, record every session, and dynamically bind network access to the approved target systems defined in an ITSM change ticket. The dangerous alternative is to treat the jump server as a simple shared gateway and rely on vendor process discipline instead of technical enforcement.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<p>Every attack tree uses this convention:</p>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Shared jump server credential leak or reuse</td>
+<td>Critical likelihood, Critical impact</td>
+<td>PAM/Jump server access logs: same credential used by multiple vendor identities</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Compromised vendor endpoint used in authorized session</td>
+<td>Critical likelihood, Critical impact</td>
+<td>ZTNA logs: vendor device posture passed from unusual source or device ID</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>No session recording or lost audit evidence</td>
+<td>Critical likelihood, Critical impact</td>
+<td>SIEM: missing session recording asset for vendor session ID</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Vendor access outside maintenance window</td>
+<td>High likelihood, High impact</td>
+<td>PAM audit: session started or continued beyond approved ticket window</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Broad lateral movement from jump server on flat adjacency</td>
+<td>Critical likelihood, Critical impact</td>
+<td>Network flow logs: jump server connects to unauthorized internal systems</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Over-privileged vendor session with admin-level access</td>
+<td>High likelihood, High impact</td>
+<td>PAM session audit: target account has more privileges than task requires</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Former vendor employee with unrevoked access</td>
+<td>High likelihood, High impact</td>
+<td>Identity governance report: vendor account active after contract end</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Credential harvesting during vendor session</td>
+<td>High likelihood, High impact</td>
+<td>Windows Event 4663: sensitive credential file read during vendor session</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Backdoor persistence installed during maintenance</td>
+<td>High likelihood, High impact</td>
+<td>Windows Event 4698/4688: scheduled task or suspicious process created during vendor session</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Vendor data exfiltration via outbound jump-server egress</td>
+<td>High likelihood, High impact</td>
+<td>Netflow logs: jump server outbound to external storage IPs &gt; threshold</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Malicious software delivered via file transfer during session</td>
+<td>High likelihood, High impact</td>
+<td>PAM file transfer log shows executable upload to target system</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>No technical enforcement of time window</td>
+<td>High likelihood, High impact</td>
+<td>PAM/Ticket reconciliation: account active with no automatic expiry</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>PAM vendor admin or SaaS provider insider access</td>
+<td>Low likelihood, Critical impact</td>
+<td>PAM provider access audit logs: tenant admin accesses recordings</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Change ticket manipulation to authorize broader access</td>
+<td>Medium likelihood, High impact</td>
+<td>ITSM audit: ticket scope changed after session start</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker obtains shared jump server credential from vendor leak]:::attack
+    A0 --> A1[Attacker authenticates to jump server and enters internal adjacency]:::attack
+    A1 --> C1{PAM or ZTNA enforces unique vendor identity and MFA?}:::control
+    C1 -->|Stops| B1[Vendor login blocked; shared credential not accepted]:::blocked
+    C1 -->|Misses| A2[Attacker reaches jump server with broad network access]:::attack
+    A2 --> C2{Network micro-segmentation restricts target reach?}:::control
+    C2 -->|Stops| B2[Attacker limited to approved target only, cannot pivot broadly]:::blocked
+    C2 -->|Misses| A3[Attacker pivots to unauthorized systems and harvests credentials]:::attack
+    A3 --> C3{Session recording and anomaly detection flag suspicious activity?}:::control
+    C3 -->|Stops| B3[Session terminated before major damage]:::blocked
+    C3 -->|Misses| A4[Attacker installs persistence or exfiltrates sensitive data]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-shared-jump-server-credential-leak-or-reuse">T1 — Shared Jump Server Credential Leak or Reuse</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use a leaked shared jump server password to access the corporate jump host and gain broad internal system access with no attribution and no selective revocation.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker obtains the shared credential from a vendor email, ticket system, dark web listing, or compromised vendor employee.</li>
+<li>Step 1: attacker connects to the jump server via RDP/SSH using the shared account.</li>
+<li>Step 2: the jump server accepts the credential because it is active and widely shared.</li>
+<li>Step 3: the attacker uses the jump server’s network adjacency to connect to internal target systems.</li>
+<li>Step 4: attacker performs reconnaissance and credential harvesting on internal systems.</li>
+<li>Step 5: impact: attacker can move laterally or exfiltrate data while the organization cannot determine the identity of the active session.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: individual vendor identities provisioned through PAM; no shared accounts allowed.</li>
+<li>Control 2: vendor access only through a managed PAM gateway that enforces authentication and session proxying.</li>
+<li>Control 3: MFA for every vendor login; shared passwords alone are insufficient.</li>
+<li>Control 4: automatic deprovisioning of vendor accounts after the maintenance window.</li>
+<li>Control 5: SIEM alerts on concurrent sessions using the same vendor account or shared account pattern.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM audit log: <code>login_failure</code> or <code>login_success</code> for shared account usage; unique vendor account required.</li>
+<li>ZTNA logs: vendor endpoint identity and MFA status for each session.</li>
+<li>SIEM: detection of same credential use from multiple vendor devices.</li>
+<li>ITSM reconciliation: no active shared account should exist for vendor access.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate shared jump server credentials are rejected in lab
+# Attempt to authenticate using the old shared account after PAM rollout
+echo &quot;test&quot; | ssh -i /dev/null jumpserver.example.com -l sharedvendor
+# Expected: authentication denied or account not found
+</code></pre>
+<pre><code class="language-kql">// Detect old shared credential reuse if a legacy account remains
+PAMAuditLog
+| where AccountName == &quot;sharedvendor&quot;
+| where TimeGenerated &gt; ago(7d)
+| project TimeGenerated, SourceIP, UserAgent, SessionID
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker obtains shared jump server credential]:::attack
+    A1 --> C1{PAM gateway rejects shared credential - only individual vendor IDs allowed?}:::control
+    C1 -->|Yes| B1[Login denied; shared credential no longer valid]:::blocked
+    C1 -->|No| A2[Attacker authenticates to jump server using shared credential]:::attack
+    A2 --> C2{MFA required for vendor login?}:::control
+    C2 -->|Yes| B2[Attacker fails MFA without stolen second factor]:::blocked
+    C2 -->|No| A3[Attacker reaches jump server and begins internal reconnaissance]:::attack
+    A3 --> C3{Network micro-segmentation restricts target access?}:::control
+    C3 -->|Yes| B3[Attacker confined to approved target scope]:::blocked
+    C3 -->|No| A4[Attacker pivots broadly to internal systems]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-compromised-vendor-endpoint-used-in-authorized-session">T2 — Compromised Vendor Endpoint Used in Authorized Session</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Elevation of Privilege<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise a vendor laptop and use its valid PAM credentials/session context to perform malicious activity during an otherwise authorized vendor maintenance session.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker infects the vendor device with malware or steals the device after vendor authentication.</li>
+<li>Step 1: vendor authenticates to PAM using valid credentials and MFA from the compromised device.</li>
+<li>Step 2: attacker either hijacks the active session or waits for the vendor to initiate a new session.</li>
+<li>Step 3: attacker uses the authenticated session to connect to approved target systems.</li>
+<li>Step 4: attacker performs malicious actions while the session appears legitimate.</li>
+<li>Step 5: impact: the attacker gains access to internal systems with valid vendor identity, making detection harder.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: ZTNA endpoint posture checks before session initiation, including AV status, patch level, disk encryption, and known bad processes.</li>
+<li>Control 2: device identity binding; vendor device must be registered and approved for vendor access.</li>
+<li>Control 3: session recording and command analytics to detect anomalous behavior even in authorized sessions.</li>
+<li>Control 4: target-system process and file access monitoring during vendor sessions.</li>
+<li>Control 5: automatic session termination on suspicious behavior such as unexpected process execution or file transfer.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>ZTNA logs: device posture pass/fail and device ID metadata.</li>
+<li>PAM logs: device identifier associated with vendor account and session.</li>
+<li>SIEM: unusual commands executed during the session compared to baseline vendor activity.</li>
+<li>Endpoint logs on target systems: flagged process execution during a vendor session.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate ZTNA posture enforcement for vendor device (authorized lab)
+# Simulate a failed posture condition and ensure access is blocked
+</code></pre>
+<pre><code class="language-kql">// Detect vendor session from unregistered or unexpected device
+ZTNAAccessLog
+| where UserType == &quot;Vendor&quot;
+| where DeviceId !in (&lt;approved_vendor_device_ids&gt;)
+| project TimeGenerated, User, DeviceId, PostureStatus
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor laptop is compromised by malware]:::attack
+    A1 --> C1{ZTNA posture check blocks compromised device?}:::control
+    C1 -->|Yes| B1[Access blocked before session establishment]:::blocked
+    C1 -->|No| A2[Vendor authenticates and session starts from compromised device]:::attack
+    A2 --> C2{Anomalous command detection in active session?}:::control
+    C2 -->|Yes| B2[Session terminated and SOC alerted]:::blocked
+    C2 -->|No| A3[Attacker uses authenticated session to access target systems]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-no-session-recording-or-lost-audit-evidence">T3 — No Session Recording or Lost Audit Evidence</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Conduct malicious activity during a vendor session and destroy or avoid session recording/audit evidence so forensic investigation cannot determine the exact actions taken.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor access is allowed and session recording is not enforced or recording storage fails silently.</li>
+<li>Step 1: attacker performs sensitive actions during the session, such as credential harvesting or backdoor installation.</li>
+<li>Step 2: attacker may also tamper with the recording configuration or storage if they can access PAM logs.</li>
+<li>Step 3: no meaningful evidence exists after the session completes.</li>
+<li>Step 4: the SOC is forced to rely on less granular system logs, making root cause analysis slower.</li>
+<li>Step 5: impact: incident response is delayed and detection of the misuse is much harder.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: mandatory session recording for all vendor sessions; no bypass allowed.</li>
+<li>Control 2: immutable storage for recordings with Object Lock or equivalent.</li>
+<li>Control 3: health monitoring for recording delivery and storage.</li>
+<li>Control 4: backup recording path and periodic recovery tests.</li>
+<li>Control 5: alert on any session with no recording or incomplete recording data.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM audit: session recording present and complete for each session ID.</li>
+<li>Storage logs: recording object creation and retention metadata.</li>
+<li>SIEM alert: session recording failures.</li>
+<li>Periodic audit: sample sessions reviewed and recordings verified.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate PAM session recordings are stored immutably
+aws s3api get-object-lock-configuration --bucket &lt;session-recording-bucket&gt;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session starts without mandatory recording]:::attack
+    A1 --> C1{PAM enforces mandatory recording for every session?}:::control
+    C1 -->|Yes| B1[Session recording starts successfully; evidence preserved]:::blocked
+    C1 -->|No| A2[Session proceeds with no recording]:::attack
+    A2 --> C2{Recording health monitored and failure alerted?}:::control
+    C2 -->|Yes| B2[SOC detects missing recording and investigates session]:::blocked
+    C2 -->|No| A3[Attack occurs with no forensic evidence]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-vendor-access-outside-maintenance-window">T4 — Vendor Access Outside Maintenance Window</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use vendor credentials or an active session outside the approved maintenance window to access internal systems when no one is expecting it.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor credentials remain active beyond the approved maintenance window, or the vendor session is not forcibly terminated.</li>
+<li>Step 1: attacker logs in or continues an existing session after the window end time.</li>
+<li>Step 2: attacker takes advantage of reduced monitoring during off-hours.</li>
+<li>Step 3: attacker performs malicious actions such as credential theft or data staging.</li>
+<li>Step 4: attacker may maintain persistence by installing backdoors while fewer analysts are available.</li>
+<li>Step 5: impact: attacker bypasses the control that limits vendor access to explicitly approved windows.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: PAM auto-terminates sessions at window end; requires no human action.</li>
+<li>Control 2: service account TTLs are hard-coded to the approved maintenance window.</li>
+<li>Control 3: SIEM alerts on any session after the ticket end time.</li>
+<li>Control 4: time-based firewall rules or ZTNA policies enforce session access only during approved windows.</li>
+<li>Control 5: ticket reconciliation engine automatically flags active sessions with expired or missing tickets.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM log: session end time &gt; ticket window end.</li>
+<li>Change ticket log: approved window start/end values.</li>
+<li>SIEM alert on out-of-window session start or continuation.</li>
+<li>Firewall log: session terminated due to time-based rule.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate PAM session auto-termination at window end
+# Create a lab session with a short TTL and verify it ends automatically
+</code></pre>
+<pre><code class="language-kql">// Detect vendor sessions outside maintenance window
+PAMAuditLog
+| where UserType == &quot;Vendor&quot;
+| where SessionEndTime &gt; TicketWindowEndTime
+| project SessionID, VendorAccount, SessionStartTime, SessionEndTime, TicketID
+| order by SessionEndTime desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session continues after approved window end]:::attack
+    A1 --> C1{PAM auto-terminates session at window expiry?}:::control
+    C1 -->|Yes| B1[Session ends at window end; attack path stops]:::blocked
+    C1 -->|No| A2[Attacker remains active in session outside window]:::attack
+    A2 --> C2{SIEM alerts on out-of-window access?}:::control
+    C2 -->|Yes| B2[SOC terminates session and investigates]:::blocked
+    C2 -->|No| A3[Attacker completes malicious activity during low monitoring period]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-broad-lateral-movement-from-jump-server-on-flat-adjacency">T5 — Broad Lateral Movement from Jump Server on Flat Adjacency</h3>
+<p><strong>STRIDE category:</strong> Lateral Movement, Elevation of Privilege<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use the jump server’s broad internal network adjacency to reach multiple internal systems beyond the vendor’s approved target scope.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: jump server is placed on a network segment with access to multiple internal systems and lacks per-session target restrictions.</li>
+<li>Step 1: attacker logs into the jump server and scans internal IP ranges reachable from it.</li>
+<li>Step 2: attacker uses RDP, SSH, SMB, or remote management tools to connect to adjacent systems.</li>
+<li>Step 3: attacker steals credentials, dumps AD data, or compromises other servers.</li>
+<li>Step 4: attacker may use the jump server as a persistence platform.</li>
+<li>Step 5: impact: multiple internal systems are compromised from a single vendor access point.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: network micro-segmentation so each vendor session can only reach approved target IPs.</li>
+<li>Control 2: dynamic firewall rules applied for each session based on the change ticket scope.</li>
+<li>Control 3: jump server network placed in a dedicated DMZ with minimal adjacency.</li>
+<li>Control 4: host-based firewalls on target systems only allow connections from the jump server for specific vendor service accounts.</li>
+<li>Control 5: internal network flow monitoring detects unauthorized lateral connections from the jump server.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Network flow logs: jump server connecting to target systems not in the approved target list.</li>
+<li>Firewall logs: session-specific dynamic rules allowing only approved IPs.</li>
+<li>PAM audit: session target list for the approved ticket.</li>
+<li>Intrusion detection alerts on jump server lateral activity.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate network micro-segmentation for a lab vendor session
+# Attempt to connect from the jump server to a non-approved internal host; expect network deny
+</code></pre>
+<pre><code class="language-kql">// Detect jump server lateral movement beyond approved targets
+Netflow
+| where SourceIP == &quot;&lt;jump-server-ip&gt;&quot;
+| where DestinationIP notin (&lt;approved_target_ips&gt;)
+| summarize TotalBytes = sum(Bytes), Count = count() by DestinationIP, DestinationPort
+| order by TotalBytes desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker logs into jump server from vendor session]:::attack
+    A1 --> C1{Dynamic firewall rules restrict session to approved target IPs?}:::control
+    C1 -->|Yes| B1[Only approved targets reachable; lateral movement blocked]:::blocked
+    C1 -->|No| A2[Attacker scans and connects to multiple adjacent systems]:::attack
+    A2 --> C2{Network flow monitoring alerts on unauthorized targets?}:::control
+    C2 -->|Yes| B2[Alert fires; session terminated before extensive pivoting]:::blocked
+    C2 -->|No| A3[Attacker pivots broadly across internal network]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-over-privileged-vendor-session-with-admin-level-access">T6 — Over-Privileged Vendor Session with Admin-Level Access</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use vendor session privileges that are broader than required for the maintenance task to install backdoors, harvest credentials, or modify sensitive configurations.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor is granted an account on the target system with administrative or broad permissions.</li>
+<li>Step 1: attacker uses those permissions to enumerate local service accounts and credentials.</li>
+<li>Step 2: attacker may create new privileged accounts or dump password hashes.</li>
+<li>Step 3: attacker persists by modifying scheduled tasks, services, or startup scripts.</li>
+<li>Step 4: attacker may also install monitoring or exfiltration agents.</li>
+<li>Step 5: impact: internal systems are compromised beyond the approved maintenance action, and the attacker has a foothold for later campaigns.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: least-privilege target accounts; vendor accounts have only the permissions needed for the specific maintenance task.</li>
+<li>Control 2: just-in-time escalation if higher privileges are temporarily required; elevated rights are automatically revoked after the task.</li>
+<li>Control 3: command filtering and application control on target systems for vendor accounts.</li>
+<li>Control 4: audit of privileged actions during vendor sessions; suspicious privilege-changing commands generate alerts.</li>
+<li>Control 5: post-session review of target system account and ACL changes.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM logs: target account privilege level and allowed commands.</li>
+<li>Target system event logs: changes to local user accounts, service installs, and group membership.</li>
+<li>SIEM: privilege escalation commands detected during vendor session.</li>
+<li>Change ticket vs. actual actions comparison.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate least-privilege vendor account on target system in lab
+# Check permissions for vendor service account and ensure it cannot create new local admins
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session uses a broad privilege target account]:::attack
+    A1 --> C1{Target account has only required permissions?}:::control
+    C1 -->|Yes| B1[Vendor cannot perform admin-level actions beyond task scope]:::blocked
+    C1 -->|No| A2[Attacker uses vendor session to enumerate credentials and accounts]:::attack
+    A2 --> C2{Command filtering detects suspicious privilege commands?}:::control
+    C2 -->|Yes| B2[Alert fires; session paused or terminated]:::blocked
+    C2 -->|No| A3[Attacker installs persistence or escalates privileges]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-former-vendor-employee-with-unrevoked-access">T7 — Former Vendor Employee with Unrevoked Access</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use residual vendor credentials after a contract has ended to access the jump server and internal systems.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor account provisioning and deprovisioning are not tightly integrated with contract lifecycle.</li>
+<li>Step 1: former vendor employee retains credentials and uses them to log into the PAM or jump server.</li>
+<li>Step 2: attacker may pass any MFA if tokens are still valid or if the account still has an active device registration.</li>
+<li>Step 3: attacker uses the account to connect to internal systems.</li>
+<li>Step 4: attacker performs unauthorized maintenance or data theft under the guise of a valid vendor account.</li>
+<li>Step 5: impact: the attacker capitalizes on an access control gap created by poor offboarding.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: automated vendor account deprovisioning tied to contract end dates in ITSM.</li>
+<li>Control 2: daily reconciliation of active vendor accounts against vendor contracts.</li>
+<li>Control 3: revalidation of vendor device registrations and access certificates upon contract termination.</li>
+<li>Control 4: SIEM alerts for vendor accounts used after contract end.</li>
+<li>Control 5: mandatory short-lived vendor account lifetimes, requiring new access requests for each engagement.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Identity governance report: vendor account active beyond contract end date.</li>
+<li>PAM account audit: account last used after contract termination.</li>
+<li>ITSM reconciliation results: orphan vendor accounts.</li>
+<li>SIEM alert on stale vendor account usage.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate vendor accounts are deprovisioned after contract end in lab
+# Compare active vendor accounts with contract end dates and ensure none remain active
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Former vendor still has active credentials after contract end]:::attack
+    A1 --> C1{Automated off-boarding via ITSM contract lifecycle?}:::control
+    C1 -->|Yes| B1[Account deactivated automatically at contract end]:::blocked
+    C1 -->|No| A2[Attacker uses stale account to access vendor PAM]:::attack
+    A2 --> C2{SIEM alerts on stale vendor account usage?}:::control
+    C2 -->|Yes| B2[Security revokes account and investigates]:::blocked
+    C2 -->|No| A3[Attacker accesses internal systems under old vendor identity]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-credential-harvesting-during-vendor-session">T8 — Credential Harvesting During Vendor Session</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use an authorized vendor session to retrieve internal credentials from target systems, then use those credentials for follow-on access outside the vendor session.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor target account has access to sensitive configuration files, service account stores, or local credential caches.</li>
+<li>Step 1: attacker searches for credential files on the target system (e.g., <code>appsettings.json</code>, <code>web.config</code>, <code>credentials.xml</code>).</li>
+<li>Step 2: attacker copies or types those credentials into an external location.</li>
+<li>Step 3: attacker uses the harvested credentials to authenticate directly to other internal systems.</li>
+<li>Step 4: the vendor session may remain legitimate while the attacker pivots with internal creds.</li>
+<li>Step 5: impact: the attacker escalates beyond the vendor session and can maintain persistence with broader internal access.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: target system accounts for vendor sessions should not have access to sensitive credential stores unless necessary.</li>
+<li>Control 2: file integrity and sensitive file access monitoring on target systems.</li>
+<li>Control 3: command filtering for vendor sessions to prevent <code>cat</code>, <code>type</code>, or registry read operations on credential files.</li>
+<li>Control 4: alert on vendor session actions touching high-value paths such as <code>C:\ProgramData\Secrets</code> or <code>/etc/credentials</code>.</li>
+<li>Control 5: post-session credential rotation if sensitive data was accessed.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Windows Event 4663 or Linux auditd logs on sensitive file reads during vendor session.</li>
+<li>PAM command audit showing file access or copy commands.</li>
+<li>SIEM alert on high-risk file access patterns during vendor sessions.</li>
+<li>Credential vault access logs showing unusual target system access patterns.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate target system sensitive file access alerts for vendor account
+# Simulate a vendor session and access a protected credential file; verify SIEM alert triggers
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session has access to target system with credential files]:::attack
+    A1 --> C1{Sensitive file access policy blocks credential file reads?}:::control
+    C1 -->|Yes| B1[Credential file access denied or audited heavily]:::blocked
+    C1 -->|No| A2[Attacker reads or copies internal credentials during session]:::attack
+    A2 --> C2{SIEM alerts on sensitive path access during vendor session?}:::control
+    C2 -->|Yes| B2[Incident response investigates and rotates exposed creds]:::blocked
+    C2 -->|No| A3[Attacker uses harvested creds for lateral movement]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-backdoor-persistence-installed-during-maintenance">T9 — Backdoor Persistence Installed During Maintenance</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use vendor maintenance access to install a persistent backdoor on the target system, ensuring continued access after the vendor session ends.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor has sufficient permissions to create scheduled tasks, services, or startup items on the target system.</li>
+<li>Step 1: attacker creates a new scheduled task, service, or <code>rc.local</code> entry during the session.</li>
+<li>Step 2: attacker may also install a web shell or reverse shell payload.</li>
+<li>Step 3: attacker uses the backdoor after the vendor session ends to regain access.</li>
+<li>Step 4: attacker may cover tracks by deleting the task or cleaning logs.</li>
+<li>Step 5: impact: persistence is established in the environment from an otherwise authorized maintenance session.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: only allow vendor commands required for the task; block creation of new services or scheduled tasks unless explicitly approved.</li>
+<li>Control 2: host-based IDS on target systems detects new service or scheduled task creation.</li>
+<li>Control 3: post-session integrity scan for new persistence mechanisms.</li>
+<li>Control 4: SIEM correlation between vendor session activity and persistence creation events.</li>
+<li>Control 5: periodic baseline and verification of allowed software on target systems.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Windows Event 4698/4702: scheduled task created or changed during vendor session.</li>
+<li>Windows Event 7045: new service installed.</li>
+<li>PAM audit: vendor commands that created persistence objects.</li>
+<li>SIEM alert on unexpected persistence mechanism creation.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate persistence creation detection during vendor session
+# Simulate creation of a scheduled task in a lab vendor session and ensure alert triggers
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session creates a new persistence mechanism on target]:::attack
+    A1 --> C1{Command filtering blocks new scheduled task/service creation?}:::control
+    C1 -->|Yes| B1[Command denied; persistence not created]:::blocked
+    C1 -->|No| A2[Persistence object created during session]:::attack
+    A2 --> C2{Host IDS detects persistence creation?}:::control
+    C2 -->|Yes| B2[Alert fires; session terminated and persistence removed]:::blocked
+    C2 -->|No| A3[Backdoor persists after session end]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-vendor-data-exfiltration-via-outbound-jump-server-egress">T10 — Vendor Data Exfiltration via Outbound Jump-Server Egress</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Transfer internal data from the target systems through the jump server to an external storage or command-and-control destination.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: jump server or target systems have outbound egress to the internet.</li>
+<li>Step 1: attacker uses the vendor session to copy data to the jump server.</li>
+<li>Step 2: attacker initiates outbound transfer via HTTPS, SFTP, or DNS tunneling.</li>
+<li>Step 3: attacker may use legitimate tools such as <code>curl</code>, <code>scp</code>, or cloud storage uploads.</li>
+<li>Step 4: attacker completes data exfiltration while the session appears to originate from an authorized vendor.</li>
+<li>Step 5: impact: sensitive data leaves the internal network via a vendor access channel.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: block outbound internet egress from the jump server VLAN except approved management traffic.</li>
+<li>Control 2: monitor outbound connections from the jump server for abnormal destinations and volumes.</li>
+<li>Control 3: file transfer whitelisting in PAM; only approved files and destinations allowed.</li>
+<li>Control 4: data loss prevention on the jump server for sensitive file transfers.</li>
+<li>Control 5: audit of all file transfers performed during vendor sessions.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Netflow logs: jump server outbound to internet hosts with large bytes transferred.</li>
+<li>PAM file transfer logs: upload/download events, file names, destination hosts.</li>
+<li>DLP logs: sensitive file transfer attempt blocked or flagged.</li>
+<li>Firewall logs: outbound deny/allow from the jump server.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate outbound internet blocked from jump server VLAN in lab
+curl -I https://example.com
+# Expected: connection times out or is blocked by firewall
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker transfers data to jump server during vendor session]:::attack
+    A1 --> C1{Outbound internet blocked from jump server VLAN?}:::control
+    C1 -->|Yes| B1[Exfiltration blocked at network perimeter]:::blocked
+    C1 -->|No| A2[Attacker initiates outbound upload from jump server]:::attack
+    A2 --> C2{DLP detects sensitive file transfer?}:::control
+    C2 -->|Yes| B2[Transfer blocked and alert generated]:::blocked
+    C2 -->|No| A3[Data exfiltrated to external destination]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-malicious-software-delivered-via-file-transfer-during-session">T11 — Malicious Software Delivered via File Transfer During Session</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Deliver malware, shell scripts, or unauthorized binaries to a target system through a vendor session using file transfer or clipboard operations.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor session allows file transfer or clipboard use.</li>
+<li>Step 1: attacker transfers a malicious executable or script to the target system.</li>
+<li>Step 2: attacker executes the transferred file during the session.</li>
+<li>Step 3: malicious software establishes persistence or connects out.</li>
+<li>Step 4: attacker hides the payload as legitimate maintenance tooling.</li>
+<li>Step 5: impact: malware is introduced via an authorized vendor session, bypassing some endpoint defenses.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: restrict file transfer in vendor sessions to approved paths and file types.</li>
+<li>Control 2: scan transferred files with AV/EDR before execution.</li>
+<li>Control 3: block clipboard-to-file transfer for vendor sessions unless explicitly allowed.</li>
+<li>Control 4: inspect file transfer logs and alert on executable uploads.</li>
+<li>Control 5: enforce application allowlisting on target systems so only approved binaries run.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM file transfer logs: uploaded files, source path, destination path.</li>
+<li>EDR logs: blocked or detected executable launch from vendor-owned path.</li>
+<li>SIEM alert: executable upload during vendor session.</li>
+<li>Host logs: process creation for newly transferred binaries.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate PAM file transfer restrictions in lab session
+# Attempt to upload an executable file and ensure it is blocked or audited
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor session uploads executable file to target system]:::attack
+    A1 --> C1{File transfer restrictions allow only approved file types?}:::control
+    C1 -->|Yes| B1[Executable upload blocked before reaching target]:::blocked
+    C1 -->|No| A2[Malicious file reaches target system]:::attack
+    A2 --> C2{EDR scans and blocks unknown executable?}:::control
+    C2 -->|Yes| B2[Malicious executable prevented from running]:::blocked
+    C2 -->|No| A3[Malicious software executes and persists]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-no-technical-enforcement-of-time-window">T12 — No Technical Enforcement of Time Window</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit the fact that vendor access is controlled only by policy and not by an enforced TTL, allowing an attacker to use credentials anytime.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: vendor account remains active and is not automatically disabled at window end.</li>
+<li>Step 1: attacker uses the vendor credentials or an existing session outside the approved window.</li>
+<li>Step 2: because there is no enforced TTL, the session continues.</li>
+<li>Step 3: attacker acts in a time when monitoring is reduced.</li>
+<li>Step 4: impact: unauthorized access occurs with a valid vendor identity.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: enforce hard TTLs on PAM accounts tied to the approved window.</li>
+<li>Control 2: integrate ITSM change ticket window with PAM provisioning to generate access only for the approved duration.</li>
+<li>Control 3: automatic account expiry and session termination at the window end.</li>
+<li>Control 4: periodic scan for active vendor accounts outside current windows.</li>
+<li>Control 5: alert on any vendor access attempt when no active ticket exists.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM account TTL settings and expiry events.</li>
+<li>SIEM alert on session start when no active window exists.</li>
+<li>Ticket reconciliation: active session without open ticket.</li>
+<li>Access logs showing vendor account valid beyond planned period.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate vendor access TTL enforcement in lab
+# Issue a PAM account with a 1-minute window and ensure it expires automatically
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor credentials remain active beyond maintenance window]:::attack
+    A1 --> C1{PAM account TTL expires automatically at window end?}:::control
+    C1 -->|Yes| B1[Access revoked automatically; attacker cannot continue]:::blocked
+    C1 -->|No| A2[Attacker continues session outside approved window]:::attack
+    A2 --> C2{SIEM alerts on ticket-less session?}:::control
+    C2 -->|Yes| B2[Session terminated and investigated]:::blocked
+    C2 -->|No| A3[Unauthorized vendor access persists]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t13-pam-vendor-admin-or-saas-provider-insider-access">T13 — PAM Vendor Admin or SaaS Provider Insider Access</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Abuse privileged access of a PAM vendor administrator or a compromised SaaS provider employee to view vendor session recordings, target credentials, or configuration data.</p>
+<h4 id="how-the-attacker-would-exploit-it_12">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker is a privileged insider at the PAM vendor or compromises a vendor admin account.</li>
+<li>Step 1: attacker accesses the customer tenant through provider administrative tooling.</li>
+<li>Step 2: attacker views or exports session recordings and audit logs for the enterprise.</li>
+<li>Step 3: attacker may extract target system credentials from session playback or logs.</li>
+<li>Step 4: attacker uses that intelligence to launch follow-on attacks against the customer.</li>
+<li>Step 5: impact: the provider itself becomes a supply chain risk, and the attacker bypasses the customer’s own security controls.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_12">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: contractual controls with the PAM vendor, including SOC 2 Type II, confidential computing, and privileged access audits.</li>
+<li>Control 2: encryption of session recordings and logs with customer-managed keys.</li>
+<li>Control 3: provider privileged access workflow with recorded and reviewed sessions.</li>
+<li>Control 4: minimal provider admin access to session data; all sensitive recordings are protected by an additional encryption layer.</li>
+<li>Control 5: periodic third-party audits and penetration tests of the PAM provider.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_12">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM provider privileged access logs showing who accessed the tenant and when.</li>
+<li>Key management logs for customer-managed encryption keys used by the provider.</li>
+<li>Contractual attestations and audit reports from the provider.</li>
+<li>Service account activity logs for provider admin accounts.</li>
+</ul>
+<h4 id="purple-team-validation-commands_12">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate PAM provider tenant admin access is auditable and limited (customer audit)
+# Review provider audit logs for access to sensitive tenant session data
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_12">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[PAM vendor admin or insider accesses customer tenant recordings]:::attack
+    A1 --> C1{Session recordings encrypted with customer-managed keys?}:::control
+    C1 -->|Yes| B1[Provider cannot decrypt recordings without customer key]:::blocked
+    C1 -->|No| A2[Provider insider reads session recordings and audit logs]:::attack
+    A2 --> C2{Provider admin access audited and reviewed?}:::control
+    C2 -->|Yes| B2[Unauthorized access detected and revoked]:::blocked
+    C2 -->|No| A3[Insider exfiltrates session data and credentials]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t14-change-ticket-manipulation-to-authorize-broader-access">T14 — Change Ticket Manipulation to Authorize Broader Access</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Modify or create a fraudulent change ticket that expands vendor access scope, then use that ticket to justify a broader PAM session.</p>
+<h4 id="how-the-attacker-would-exploit-it_13">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has access to the ITSM system or can social-engineer an approver.</li>
+<li>Step 1: attacker submits a ticket with overbroad targets or requests out-of-scope access.</li>
+<li>Step 2: attacker obtains approval from an unwitting manager or creates a fraudulent ticket.</li>
+<li>Step 3: PAM provisions access based on the ticket scope.</li>
+<li>Step 4: attacker performs malicious activity using the expanded scope.</li>
+<li>Step 5: impact: the attack looks approved and may evade detection if ticket reconciliation is weak.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_13">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: dual approval for vendor change tickets affecting high-sensitivity systems.</li>
+<li>Control 2: automated ticket scope validation against a whitelist of approved target systems for vendor type.</li>
+<li>Control 3: SIEM correlation of ticket approval and session activity; mismatches flagged immediately.</li>
+<li>Control 4: periodic audit of change tickets with scope versus actual session targets.</li>
+<li>Control 5: vendor manager sign-off plus security review for any request outside standard maintenance templates.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_13">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>ITSM audit logs: change ticket edits, approvals, approver identities.</li>
+<li>PAM provisioning logs: target list sourced from ticket fields.</li>
+<li>SIEM correlation: session target IPs not matching ticket-approved targets.</li>
+<li>Manual audit: ticket scope vs. session activity comparison.</li>
+</ul>
+<h4 id="purple-team-validation-commands_13">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate dual approval and ticket scope enforcement in lab
+# Create a vendor access request for a high-sensitivity system and ensure it requires two approvers
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_13">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker submits fraudulent vendor change ticket with broad scope]:::attack
+    A1 --> C1{Dual approval required for high-sensitivity systems?}:::control
+    C1 -->|Yes| B1[Fraudulent ticket blocked unless second approver validates it]:::blocked
+    C1 -->|No| A2[PAM provisions access based on overbroad ticket]:::attack
+    A2 --> C2{Ticket scope validation against approved system types?}:::control
+    C2 -->|Yes| B2[Scope mismatch alerts; session denied]:::blocked
+    C2 -->|No| A3[Attacker uses approved-but-malicious vendor session for unauthorized actions]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Attempt to log in with the old shared jump server credential after PAM rollout</td>
+<td>Access denied or account not found</td>
+<td>Shared credential still accepted</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Authenticate from a non-approved vendor device in lab; verify ZTNA posture blocks access</td>
+<td>Access denied due to posture failure</td>
+<td>Session allowed despite failed posture</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Verify PAM session recording exists and is stored with Object Lock</td>
+<td>Recording present and immutable</td>
+<td>Recording missing or mutable</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Run a lab vendor session and allow the ticket window to expire</td>
+<td>Session terminates automatically at window end</td>
+<td>Session remains active after expiry</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Attempt to connect from jump server to a non-approved target IP</td>
+<td>Network deny or blocked by dynamic policy</td>
+<td>Connection succeeds</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Validate vendor target account has least privilege in lab</td>
+<td>Vendor account cannot create new local admins</td>
+<td>Account has admin rights beyond task need</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Reconcile active vendor accounts against contract end dates</td>
+<td>No active accounts after contract end</td>
+<td>Stale vendor account remains active</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Access a sensitive credential file during vendor session; verify alert</td>
+<td>Sensitive file read alert fires</td>
+<td>No alert or audit event</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Create a scheduled task during vendor session in lab; verify detection</td>
+<td>SIEM or host IDS alerts on persistence creation</td>
+<td>No alert on persistence creation</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Attempt outbound internet transfer from jump server VLAN</td>
+<td>Firewall blocks or DLP alerts</td>
+<td>Outbound transfer succeeds</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Upload executable file during vendor session; verify PAM blocks or alerts</td>
+<td>File transfer blocked or logged and AV detects execution</td>
+<td>Executable uploaded and run without detection</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Start a session with a vendor account outside any active change ticket</td>
+<td>Session denied or alert fired</td>
+<td>Session allowed with no ticket</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>Review PAM provider admin access audit logs for tenant access</td>
+<td>Access logged and authorized</td>
+<td>Unauthorized provider access not logged</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Create a vendor change ticket with overbroad scope and test approval workflow</td>
+<td>Dual approval or security review required</td>
+<td>Overbroad ticket accepted automatically</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity and authentication</td>
+<td>T1, T2, T7, T12</td>
+<td>Vendor endpoint posture and device identity remain a gap</td>
+</tr>
+<tr>
+<td>Network segmentation and access control</td>
+<td>T5, T10</td>
+<td>Jump server VLAN egress and target reach still require strong dynamic policy integration</td>
+</tr>
+<tr>
+<td>Endpoint and workload protection</td>
+<td>T2, T8, T11</td>
+<td>Vendor-managed endpoints may not meet modern EDR standards</td>
+</tr>
+<tr>
+<td>Logging, detection, and SIEM</td>
+<td>T3, T4, T9, T14</td>
+<td>Session recording health and ticket reconciliation depend on integrated monitoring</td>
+</tr>
+<tr>
+<td>Incident response and containment</td>
+<td>T3, T4, T10</td>
+<td>Response depends on automated session termination and SOC review of vendor activity</td>
+</tr>
+<tr>
+<td>Secrets and cryptographic material protection</td>
+<td>T1, T8, T13</td>
+<td>PAM provider insider access remains a supply-chain residual risk</td>
+</tr>
+<tr>
+<td>Supply chain and third-party risk</td>
+<td>T2, T7, T13, T14</td>
+<td>Vendor contractual and provisioning processes are residual risks</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<blockquote>
+<p>Ordered by risk reduction per implementation effort.</p>
+</blockquote>
+<ol>
+<li><strong>Replace the shared jump server credential with per-vendor per-session PAM access</strong> — closes T1, T7, T12. Implementation: onboard all vendors to CyberArk or BeyondTrust; provision unique, time-limited accounts tied to ServiceNow tickets; disable legacy shared accounts immediately.</li>
+<li><strong>Enforce vendor session recording to immutable storage with health monitoring</strong> — closes T3, T13. Implementation: configure session recording to S3/GCS with Object Lock; alert on any session without complete recording.</li>
+<li><strong>Integrate PAM access scope with network micro-segmentation</strong> — closes T5, T10. Implementation: dynamically apply firewall/ ZTNA policies based on approved target list; restrict jump server adjacency to only ticketed systems.</li>
+<li><strong>Require ZTNA posture and device registration for vendor devices</strong> — closes T2. Implementation: only allow vendor sessions from approved devices that pass patch, AV, and encryption checks; block unmanaged devices.</li>
+<li><strong>Implement ticket-session reconciliation and dual approval for high-risk vendor access</strong> — closes T4, T14. Implementation: run hourly reconciliation between open ServiceNow tickets and active PAM sessions; require dual approval for any access to high-sensitivity systems.</li>
+</ol>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

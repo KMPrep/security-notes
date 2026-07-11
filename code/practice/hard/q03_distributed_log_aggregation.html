@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q03_distributed_log_aggregation.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q03_distributed_log_aggregation.py</h1>
+  <p class="file-path">Source: code\practice\hard\q03_distributed_log_aggregation.py</p>
+  <p class="line-count">376 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q03 [Hard] — Distributed Log Aggregation with Clock Skew
+=============================================================================
+
+PROBLEM
+-------
+Logs arrive from many machines.  Each machine has its own wall clock that may
+drift up to S seconds from true time.  Design and implement a merge strategy
+that produces a globally ordered event sequence that is *approximately*
+correct given the clock skew.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input format — list-of-lists (one list per machine) or a single stream
+   with a &quot;machine_id&quot; field?
+   → Support both; show list-of-lists as primary, streaming as secondary.
+2. What is the known or estimated maximum clock skew S?
+   → Configurable; default 5 seconds.
+3. Are timestamps ISO-8601 strings or epoch floats?
+   → ISO-8601; parse to float internally.
+4. Can a single machine produce out-of-order events relative to itself?
+   → Assume each machine&#x27;s local log is monotonically increasing.
+5. Should we drop events that are too old (outside the watermark)?
+   → Expose a drop_late parameter; default False (buffer late events).
+6. What should happen for malformed timestamps?
+   → Skip and count as malformed.
+7. Distributed / streaming or offline batch?
+   → Show offline K-way merge first; then sketch a streaming watermark design.
+
+=============================================================================
+APPROACH 1 — NAIVE  (collect-all then sort)
+=============================================================================
+Collect every event from every machine into one list, then sort by timestamp.
+  Time : O(N log N)   N = total events
+  Space: O(N)  — must hold all events in memory simultaneously ← problem for
+                 large N
+
+=============================================================================
+APPROACH 2 — K-WAY MERGE WITH MIN-HEAP  (optimal for offline batch)
+=============================================================================
+Use a min-heap of size K (one entry per machine).  Each heap entry is
+(timestamp, machine_id, event).  At each step, pop the minimum, emit it,
+and push the next event from that machine.
+
+  Time : O(N log K)   — far better than O(N log N) when K &lt;&lt; N
+  Space: O(K + output buffer)  — only one event per machine in memory at once
+
+=============================================================================
+APPROACH 3 — WATERMARK-BASED STREAMING  (optimal for real-time)
+=============================================================================
+Maintain a per-machine &quot;latest timestamp seen&quot; cursor.
+Global watermark W = min(cursor_i) − S  (account for clock skew S).
+Events with ts ≤ W are safe to emit in order.
+Events with ts &gt; W are buffered per machine.
+When watermark advances, flush buffered events up to the new W using a heap.
+
+  Time : O(log K) per event emit
+  Space: O(K + events within the skew window S) — bounded by event rate × S
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import heapq
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Dict, Generator, Iterator, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts_str: str) -&gt; Optional[float]:
+    &quot;&quot;&quot;Parse ISO-8601 timestamp to epoch float.  Returns None if malformed.&quot;&quot;&quot;
+    if not ts_str:
+        return None
+    try:
+        # Handle both &#x27;Z&#x27; suffix and +00:00
+        ts_str = ts_str.replace(&quot;Z&quot;, &quot;+00:00&quot;)
+        dt = datetime.fromisoformat(ts_str)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive collect-all sort
+# ---------------------------------------------------------------------------
+
+class NaiveLogMerger:
+    &quot;&quot;&quot;Collect all events into one list then sort.  O(N log N) time, O(N) space.&quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._events: List[Tuple[float, str, dict]] = []
+        self.malformed_count = 0
+
+    def add_machine_log(self, machine_id: str, events: List[dict]) -&gt; None:
+        for event in events:
+            ts = _parse_ts(event.get(&quot;ts&quot;, &quot;&quot;))
+            if ts is None:
+                self.malformed_count += 1
+                continue
+            self._events.append((ts, machine_id, event))
+
+    def merged(self) -&gt; List[dict]:
+        self._events.sort(key=lambda x: x[0])
+        return [dict(e, _machine=m) for ts, m, e in self._events]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — K-Way Merge with Min-Heap (offline batch, optimal)
+# ---------------------------------------------------------------------------
+
+class KWayLogMerger:
+    &quot;&quot;&quot;
+    K-way merge using a min-heap.  Each machine contributes an iterator.
+    Memory at any time: O(K) heap entries + the output list.
+    Time: O(N log K).
+
+    Clock-skew tolerance: after popping an event from machine M, we
+    immediately push M&#x27;s next event.  We do NOT re-order across machines
+    beyond the natural heap ordering — the caller must ensure each machine&#x27;s
+    log is locally sorted.  For cross-machine skew, see WatermarkLogMerger.
+    &quot;&quot;&quot;
+
+    def merge(
+        self,
+        machine_logs: Dict[str, List[dict]],
+        ts_field: str = &quot;ts&quot;,
+    ) -&gt; List[dict]:
+        &quot;&quot;&quot;
+        machine_logs: {machine_id: [event, ...]}
+        Returns merged list in approximately-ascending timestamp order.
+        &quot;&quot;&quot;
+        malformed = 0
+        # Build iterators and seed the heap
+        heap: List[Tuple[float, str, Iterator]] = []
+        iters: Dict[str, Iterator] = {}
+        for machine_id, events in machine_logs.items():
+            iters[machine_id] = iter(events)
+
+        for machine_id, it in iters.items():
+            event = next(it, None)
+            while event is not None:
+                ts = _parse_ts(event.get(ts_field, &quot;&quot;))
+                if ts is not None:
+                    heapq.heappush(heap, (ts, machine_id, event, it))
+                    break
+                malformed += 1
+                event = next(it, None)
+
+        result = []
+        while heap:
+            ts, machine_id, event, it = heapq.heappop(heap)
+            result.append(dict(event, _machine=machine_id))
+            # Advance this machine&#x27;s iterator
+            while True:
+                next_event = next(it, None)
+                if next_event is None:
+                    break  # Machine exhausted
+                next_ts = _parse_ts(next_event.get(ts_field, &quot;&quot;))
+                if next_ts is not None:
+                    heapq.heappush(heap, (next_ts, machine_id, next_event, it))
+                    break
+                malformed += 1
+
+        self.malformed_count = malformed
+        return result
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 3 — Watermark-Based Streaming Merger (optimal for real-time)
+# ---------------------------------------------------------------------------
+
+class WatermarkLogMerger:
+    &quot;&quot;&quot;
+    Streaming merge with watermark-based out-of-order handling.
+
+    Each machine reports events in real-time (possibly out of order by at most
+    skew_seconds relative to true time).  Events are buffered until the global
+    watermark advances past their timestamp.
+
+    Design:
+      - per-machine latest_ts cursor
+      - global watermark = min(latest_ts per machine) - skew_seconds
+      - output buffer: sorted list of (ts, machine_id, event)
+      - A real production system would use a priority queue for the buffer.
+    &quot;&quot;&quot;
+
+    def __init__(self, machine_ids: List[str], skew_seconds: float = 5.0) -&gt; None:
+        self.skew = skew_seconds
+        # Initialise each machine&#x27;s cursor to -inf (no events seen yet)
+        self._latest: Dict[str, float] = {m: float(&quot;-inf&quot;) for m in machine_ids}
+        # Per-machine event buffer: sorted by ts within each machine
+        self._buffer: List[Tuple[float, str, dict]] = []  # heap
+        heapq.heapify(self._buffer)
+        self._emitted: List[dict] = []
+        self.malformed_count = 0
+
+    @property
+    def watermark(self) -&gt; float:
+        &quot;&quot;&quot;Current safe-to-emit boundary.&quot;&quot;&quot;
+        min_cursor = min(self._latest.values())
+        if min_cursor == float(&quot;-inf&quot;):
+            return float(&quot;-inf&quot;)
+        return min_cursor - self.skew
+
+    def ingest(self, machine_id: str, event: dict) -&gt; List[dict]:
+        &quot;&quot;&quot;
+        Ingest one event from machine_id.
+        Returns a (possibly empty) list of events now safe to emit.
+        &quot;&quot;&quot;
+        if machine_id not in self._latest:
+            raise ValueError(f&quot;Unknown machine: {machine_id}&quot;)
+        ts = _parse_ts(event.get(&quot;ts&quot;, &quot;&quot;))
+        if ts is None:
+            self.malformed_count += 1
+            return []
+
+        # Advance this machine&#x27;s cursor (machines are locally monotonic)
+        if ts &gt; self._latest[machine_id]:
+            self._latest[machine_id] = ts
+
+        heapq.heappush(self._buffer, (ts, machine_id, event))
+        return self._flush()
+
+    def _flush(self) -&gt; List[dict]:
+        &quot;&quot;&quot;Emit all buffered events with ts ≤ current watermark.&quot;&quot;&quot;
+        w = self.watermark
+        emitted = []
+        while self._buffer and self._buffer[0][0] &lt;= w:
+            ts, machine_id, event = heapq.heappop(self._buffer)
+            emitted.append(dict(event, _machine=machine_id))
+        self._emitted.extend(emitted)
+        return emitted
+
+    def flush_all(self) -&gt; List[dict]:
+        &quot;&quot;&quot;Force-flush remaining buffer at end of stream.&quot;&quot;&quot;
+        emitted = []
+        while self._buffer:
+            ts, machine_id, event = heapq.heappop(self._buffer)
+            emitted.append(dict(event, _machine=machine_id))
+        self._emitted.extend(emitted)
+        return emitted
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_log(machine: str, ts_event_pairs: List[Tuple[str, str]]) -&gt; List[dict]:
+    return [{&quot;ts&quot;: ts, &quot;machine&quot;: machine, &quot;msg&quot;: msg} for ts, msg in ts_event_pairs]
+
+
+def test_naive_merge():
+    merger = NaiveLogMerger()
+    merger.add_machine_log(&quot;m1&quot;, _make_log(&quot;m1&quot;, [
+        (&quot;2026-05-29T08:00:01Z&quot;, &quot;login&quot;),
+        (&quot;2026-05-29T08:00:05Z&quot;, &quot;file_open&quot;),
+    ]))
+    merger.add_machine_log(&quot;m2&quot;, _make_log(&quot;m2&quot;, [
+        (&quot;2026-05-29T08:00:00Z&quot;, &quot;ssh_connect&quot;),
+        (&quot;2026-05-29T08:00:03Z&quot;, &quot;command_exec&quot;),
+    ]))
+    # Malformed
+    merger.add_machine_log(&quot;m3&quot;, [{&quot;ts&quot;: &quot;not-a-date&quot;, &quot;msg&quot;: &quot;bad&quot;}])
+
+    result = merger.merged()
+    assert result[0][&quot;msg&quot;] == &quot;ssh_connect&quot;
+    assert result[1][&quot;msg&quot;] == &quot;login&quot;
+    assert result[2][&quot;msg&quot;] == &quot;command_exec&quot;
+    assert result[3][&quot;msg&quot;] == &quot;file_open&quot;
+    assert merger.malformed_count == 1
+    print(&quot;NaiveLogMerger: passed&quot;)
+
+
+def test_kway_merge():
+    merger = KWayLogMerger()
+    logs = {
+        &quot;m1&quot;: _make_log(&quot;m1&quot;, [
+            (&quot;2026-05-29T08:00:01Z&quot;, &quot;login&quot;),
+            (&quot;2026-05-29T08:00:10Z&quot;, &quot;file_open&quot;),
+        ]),
+        &quot;m2&quot;: _make_log(&quot;m2&quot;, [
+            (&quot;2026-05-29T08:00:00Z&quot;, &quot;ssh_connect&quot;),
+            (&quot;2026-05-29T08:00:03Z&quot;, &quot;command_exec&quot;),
+            (&quot;2026-05-29T08:00:15Z&quot;, &quot;exfil&quot;),
+        ]),
+        &quot;m3&quot;: [],  # empty machine
+    }
+    result = merger.merge(logs)
+    msgs = [e[&quot;msg&quot;] for e in result]
+    assert msgs == [&quot;ssh_connect&quot;, &quot;login&quot;, &quot;command_exec&quot;, &quot;file_open&quot;, &quot;exfil&quot;], msgs
+    print(&quot;KWayLogMerger: passed&quot;)
+
+
+def test_watermark_merge():
+    merger = WatermarkLogMerger([&quot;m1&quot;, &quot;m2&quot;], skew_seconds=2.0)
+
+    # m1 at T=3, m2 at T=1 → watermark = min(3,1) - 2 = -1 → nothing flushed yet
+    out = merger.ingest(&quot;m1&quot;, {&quot;ts&quot;: &quot;2026-05-29T08:00:03Z&quot;, &quot;msg&quot;: &quot;m1_event&quot;})
+    assert out == []
+
+    out = merger.ingest(&quot;m2&quot;, {&quot;ts&quot;: &quot;2026-05-29T08:00:01Z&quot;, &quot;msg&quot;: &quot;m2_event&quot;})
+    assert out == []  # watermark = min(3,1)-2 = -1 still
+
+    # Advance m2 to T=10 → watermark = min(3,10)-2 = 1; flush events at ts ≤ 1
+    out = merger.ingest(&quot;m2&quot;, {&quot;ts&quot;: &quot;2026-05-29T08:00:10Z&quot;, &quot;msg&quot;: &quot;m2_late&quot;})
+    # m2_event (ts=1) should be flushed; m1_event (ts=3) not yet
+    assert any(e[&quot;msg&quot;] == &quot;m2_event&quot; for e in out), f&quot;Expected m2_event in {out}&quot;
+
+    # Advance m1 to T=20 → watermark = min(20,10)-2 = 8; flush up to ts=8
+    out = merger.ingest(&quot;m1&quot;, {&quot;ts&quot;: &quot;2026-05-29T08:00:20Z&quot;, &quot;msg&quot;: &quot;m1_later&quot;})
+    assert any(e[&quot;msg&quot;] == &quot;m1_event&quot; for e in out), f&quot;Expected m1_event in {out}&quot;
+
+    # Malformed
+    out2 = merger.ingest(&quot;m1&quot;, {&quot;ts&quot;: &quot;bad&quot;, &quot;msg&quot;: &quot;x&quot;})
+    assert merger.malformed_count == 1
+
+    print(&quot;WatermarkLogMerger: passed&quot;)
+
+
+def test_empty_inputs():
+    merger = KWayLogMerger()
+    assert merger.merge({}) == []
+    assert merger.merge({&quot;m1&quot;: []}) == []
+    print(&quot;Empty input: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT CONTEXT
+  SOC analysts correlate events from dozens of machines to reconstruct attack
+  timelines.  Incorrect ordering caused by clock skew can:
+  - Hide causality (lateral movement appears before the initial foothold)
+  - Create false time gaps (attacker appears idle when they weren&#x27;t)
+  - Break sequence-based detection rules (e.g. &quot;process spawn within 5s of login&quot;)
+
+CLOCK SKEW SOURCES
+  - NTP drift: typically ±0.5s on well-configured Linux; up to ±30s on neglected hosts
+  - Offline hosts: clock may be minutes or hours off after reconnection
+  - Containerised workloads: container clock inherits host; orchestrator introduces skew
+  - Attacker manipulation: an adversary with host access can set the clock backward
+    to hide events from time-based detection rules ← critical threat
+
+TAMPER DETECTION
+  - Cross-check machine timestamps against authoritative log-forwarding receipt timestamps
+  - Alert if |machine_ts - receipt_ts| &gt; threshold (e.g. 60 seconds)
+  - Store receipt timestamps in immutable logging backend (CloudTrail, Splunk HEC)
+
+PRODUCTION HARDENING
+  - Use Apache Flink or Apache Beam with built-in watermark APIs for production-scale
+    streaming; our WatermarkLogMerger is the conceptual equivalent.
+  - Retain out-of-order events beyond the watermark for post-hoc forensic re-analysis.
+  - Set skew_seconds based on empirical NTP monitoring of your fleet.
+
+COMPLEXITY SUMMARY
+  | Approach         | Time       | Space    | Skew-Aware |
+  |------------------|------------|----------|------------|
+  | Naive sort       | O(N log N) | O(N)     | No         |
+  | K-way heap merge | O(N log K) | O(K)     | Partial    |
+  | Watermark stream | O(log K)   | O(rate×S)| Yes        |
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_merge()
+    test_kway_merge()
+    test_watermark_merge()
+    test_empty_inputs()
+</code></pre>
+</body>
+</html>

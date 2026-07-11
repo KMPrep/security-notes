@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q08_rule_engine.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q08_rule_engine.py</h1>
+  <p class="file-path">Source: code\practice\hard\q08_rule_engine.py</p>
+  <p class="line-count">527 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q08 [Hard] — Rule Engine for Security Events
+=============================================================================
+
+PROBLEM
+-------
+Implement a simple SIEM-style detection rule engine that can evaluate rules
+with the following condition types against a stream of security events:
+
+  - equals      : field == value
+  - contains    : field contains substring (case-insensitive)
+  - regex       : field matches compiled regex pattern
+  - gt/lt       : field &gt; value  /  field &lt; value  (numeric)
+  - count       : count of matching events per group key ≥ threshold in window
+  - time_window : event timestamp within a time window
+
+Rules can combine conditions with AND / OR logic.
+Rules have a name, severity, and a list of conditions.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Rule format — YAML, JSON, Python dict, or DSL string?
+   → Python dicts here; note YAML/JSON for production.
+2. Should rules be hot-reloadable?
+   → Show a reload() method but don&#x27;t implement dynamic parsing.
+3. Can a single event match multiple rules?
+   → Yes; return all matching rule names.
+4. Count rules — what is the group key?
+   → Configurable per rule: e.g. group_by=[&quot;src&quot;, &quot;username&quot;].
+5. Are regex patterns compiled at load time or per event?
+   → Compiled at load time (never compile per event — ReDoS risk).
+6. Should we validate rules at load time for safety?
+   → Yes; reject rules with unsafe regex patterns.
+7. How to handle missing fields?
+   → Missing fields evaluate the condition as False (do not throw).
+8. Time window for count rules — rolling or tumbling?
+   → Rolling window with deque-based eviction.
+
+=============================================================================
+APPROACH 1 — NAIVE (linear scan of all rules per event)
+=============================================================================
+For each incoming event, iterate all rules, evaluate all conditions.
+  Time : O(R × C) per event  (R rules, C conditions per rule)
+  Space: O(R × W × E) for count windows (W window size in events, E events)
+
+For small rule sets this is perfectly fine and is the standard approach in
+many SIEM products (Splunk, Sigma).
+
+=============================================================================
+APPROACH 2 — INDEX-ACCELERATED RULE DISPATCH  (optimal for large rule sets)
+=============================================================================
+Build an inverted index: field_value → list of rules that test that field.
+On ingestion, look up the field&#x27;s value in the index to find candidate rules,
+then evaluate only those rules instead of all rules.
+
+For a rule set of 10,000 rules and events with 10 fields, this reduces the
+average rules evaluated per event from 10,000 to ~50–200.
+
+  Time : O(F × I + M × C) per event
+    F = fields in event, I = index lookup O(1), M = matched rule count, C = avg conditions
+  Space: O(R × C) for the index
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Safe regex compilation helper
+# ---------------------------------------------------------------------------
+
+# Simple blocklist of patterns known to cause catastrophic backtracking
+_REDOS_PATTERNS = [
+    re.compile(r&#x27;\(.*\+\)\+&#x27;),       # (a+)+
+    re.compile(r&#x27;\(.*\*\)\*&#x27;),       # (a*)*
+    re.compile(r&#x27;\(\?:.*\|\)\+&#x27;),    # (?:a|b)+
+]
+
+def _safe_compile(pattern: str) -&gt; re.Pattern:
+    &quot;&quot;&quot;Compile a regex, rejecting patterns that look like ReDoS traps.&quot;&quot;&quot;
+    for bad in _REDOS_PATTERNS:
+        if bad.search(pattern):
+            raise ValueError(f&quot;Potentially unsafe regex (ReDoS risk): {pattern!r}&quot;)
+    # Use a timeout via re.compile without full execution — just compilation safety
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f&quot;Invalid regex {pattern!r}: {exc}&quot;) from exc
+
+
+# ---------------------------------------------------------------------------
+# Condition Classes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Condition:
+    field: str
+    op: str          # equals | contains | regex | gt | lt | exists
+    value: Any = None
+    _compiled: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -&gt; None:
+        if self.op == &quot;regex&quot; and self.value:
+            self._compiled = _safe_compile(str(self.value))
+
+    def evaluate(self, event: dict) -&gt; bool:
+        # Safely retrieve nested field via dot notation: &quot;a.b.c&quot;
+        val = event
+        for part in self.field.split(&quot;.&quot;):
+            if not isinstance(val, dict):
+                return False
+            val = val.get(part)
+            if val is None:
+                return self.op == &quot;not_exists&quot;
+        if self.op == &quot;exists&quot;:
+            return val is not None
+        if self.op == &quot;not_exists&quot;:
+            return val is None
+        if val is None:
+            return False
+
+        str_val = str(val).lower()
+        cmp_val = str(self.value).lower() if self.value is not None else &quot;&quot;
+
+        if self.op == &quot;equals&quot;:
+            return str_val == cmp_val
+        if self.op == &quot;not_equals&quot;:
+            return str_val != cmp_val
+        if self.op == &quot;contains&quot;:
+            return cmp_val in str_val
+        if self.op == &quot;not_contains&quot;:
+            return cmp_val not in str_val
+        if self.op == &quot;startswith&quot;:
+            return str_val.startswith(cmp_val)
+        if self.op == &quot;regex&quot;:
+            return bool(self._compiled and self._compiled.search(str(val)))
+        if self.op in (&quot;gt&quot;, &quot;&gt;&quot;):
+            try:
+                return float(val) &gt; float(self.value)
+            except (ValueError, TypeError):
+                return False
+        if self.op in (&quot;lt&quot;, &quot;&lt;&quot;):
+            try:
+                return float(val) &lt; float(self.value)
+            except (ValueError, TypeError):
+                return False
+        if self.op in (&quot;gte&quot;, &quot;&gt;=&quot;):
+            try:
+                return float(val) &gt;= float(self.value)
+            except (ValueError, TypeError):
+                return False
+        if self.op in (&quot;lte&quot;, &quot;&lt;=&quot;):
+            try:
+                return float(val) &lt;= float(self.value)
+            except (ValueError, TypeError):
+                return False
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Rule Definition
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Rule:
+    name: str
+    severity: str             # critical | high | medium | low | info
+    conditions: List[Condition]
+    logic: str = &quot;AND&quot;        # AND | OR
+    # Count-based fields (optional — only for count rules)
+    count_threshold: Optional[int] = None
+    group_by: List[str] = field(default_factory=list)
+    window_seconds: Optional[float] = None
+    ts_field: str = &quot;ts&quot;
+    # Internal state for count rules
+    _windows: Dict[Tuple, deque] = field(
+        default_factory=lambda: defaultdict(deque), repr=False)
+
+    def matches_conditions(self, event: dict) -&gt; bool:
+        if not self.conditions:
+            return False
+        if self.logic == &quot;AND&quot;:
+            return all(c.evaluate(event) for c in self.conditions)
+        else:  # OR
+            return any(c.evaluate(event) for c in self.conditions)
+
+    def evaluate(self, event: dict) -&gt; bool:
+        &quot;&quot;&quot;
+        Evaluate this rule against a single event.
+        For count rules, also updates the rolling window counter.
+        &quot;&quot;&quot;
+        if not self.matches_conditions(event):
+            return False
+
+        # Simple rule (no count threshold) — match immediately
+        if self.count_threshold is None:
+            return True
+
+        # Count rule — increment counter and check threshold
+        return self._check_count(event)
+
+    def _check_count(self, event: dict) -&gt; bool:
+        ts_raw = event.get(self.ts_field, time.time())
+        ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else time.time()
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+        except (ValueError, TypeError):
+            pass
+
+        # Group key
+        key = tuple(str(event.get(f, &quot;&quot;)) for f in self.group_by)
+        window = self._windows[key]
+
+        # Evict old events
+        if self.window_seconds:
+            cutoff = ts - self.window_seconds
+            while window and window[0] &lt; cutoff:
+                window.popleft()
+
+        window.append(ts)
+        return len(window) &gt;= self.count_threshold
+
+    @classmethod
+    def from_dict(cls, d: dict) -&gt; &quot;Rule&quot;:
+        &quot;&quot;&quot;Build a Rule from a plain dict (YAML/JSON compatible).&quot;&quot;&quot;
+        conditions = []
+        for c in d.get(&quot;conditions&quot;, []):
+            conditions.append(Condition(
+                field=c[&quot;field&quot;],
+                op=c[&quot;op&quot;],
+                value=c.get(&quot;value&quot;),
+            ))
+        return cls(
+            name=d[&quot;name&quot;],
+            severity=d.get(&quot;severity&quot;, &quot;medium&quot;),
+            conditions=conditions,
+            logic=d.get(&quot;logic&quot;, &quot;AND&quot;),
+            count_threshold=d.get(&quot;count_threshold&quot;),
+            group_by=d.get(&quot;group_by&quot;, []),
+            window_seconds=d.get(&quot;window_seconds&quot;),
+            ts_field=d.get(&quot;ts_field&quot;, &quot;ts&quot;),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rule Engine
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RuleMatch:
+    rule_name: str
+    severity: str
+    event: dict
+    ts: float
+
+
+class RuleEngine:
+    &quot;&quot;&quot;
+    SIEM-style rule engine.
+
+    Approach 1 (default): Linear scan — O(R × C) per event.
+    Approach 2 (use_index=True): Inverted index dispatch — O(F × I + M × C).
+    &quot;&quot;&quot;
+
+    def __init__(self, rules: List[Rule] = None, use_index: bool = False) -&gt; None:
+        self._rules: List[Rule] = []
+        self._use_index = use_index
+        # Inverted index: field_name → set of rule indices
+        self._field_index: Dict[str, Set[int]] = defaultdict(set)
+        self._matches: List[RuleMatch] = []
+        self.malformed = 0
+        if rules:
+            for rule in rules:
+                self.add_rule(rule)
+
+    def add_rule(self, rule: Rule) -&gt; None:
+        idx = len(self._rules)
+        self._rules.append(rule)
+        if self._use_index:
+            for cond in rule.conditions:
+                self._field_index[cond.field].add(idx)
+
+    def reload_rules(self, rules: List[Rule]) -&gt; None:
+        &quot;&quot;&quot;Hot-reload: replace all rules atomically.&quot;&quot;&quot;
+        old_rules = self._rules
+        self._rules = []
+        self._field_index = defaultdict(set)
+        try:
+            for rule in rules:
+                self.add_rule(rule)
+        except Exception:
+            self._rules = old_rules
+            raise
+
+    def process(self, event: dict) -&gt; List[RuleMatch]:
+        if not isinstance(event, dict):
+            self.malformed += 1
+            return []
+
+        ts = self._extract_ts(event)
+        matches = []
+
+        if self._use_index:
+            # Index-accelerated: only test rules that reference fields in this event
+            candidate_indices: Set[int] = set()
+            for key in event:
+                candidate_indices.update(self._field_index.get(key, set()))
+            rules_to_test = [self._rules[i] for i in candidate_indices]
+        else:
+            rules_to_test = self._rules
+
+        for rule in rules_to_test:
+            try:
+                if rule.evaluate(event):
+                    m = RuleMatch(rule_name=rule.name, severity=rule.severity,
+                                  event=event, ts=ts)
+                    matches.append(m)
+                    self._matches.append(m)
+            except Exception:
+                # Individual rule failure must not crash the engine
+                pass
+
+        return matches
+
+    def _extract_ts(self, event: dict) -&gt; float:
+        raw = event.get(&quot;ts&quot;, time.time())
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        try:
+            return datetime.fromisoformat(str(raw).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+        except (ValueError, TypeError):
+            return time.time()
+
+    def get_all_matches(self) -&gt; List[RuleMatch]:
+        return self._matches
+
+
+# ---------------------------------------------------------------------------
+# Sample Rule Set
+# ---------------------------------------------------------------------------
+
+SAMPLE_RULES = [
+    Rule.from_dict({
+        &quot;name&quot;: &quot;brute_force_ssh&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+        &quot;conditions&quot;: [
+            {&quot;field&quot;: &quot;type&quot;,   &quot;op&quot;: &quot;equals&quot;,  &quot;value&quot;: &quot;auth&quot;},
+            {&quot;field&quot;: &quot;result&quot;, &quot;op&quot;: &quot;equals&quot;,  &quot;value&quot;: &quot;failure&quot;},
+            {&quot;field&quot;: &quot;port&quot;,   &quot;op&quot;: &quot;equals&quot;,  &quot;value&quot;: &quot;22&quot;},
+        ],
+        &quot;count_threshold&quot;: 5,
+        &quot;group_by&quot;: [&quot;src&quot;],
+        &quot;window_seconds&quot;: 60,
+    }),
+    Rule.from_dict({
+        &quot;name&quot;: &quot;encoded_powershell&quot;,
+        &quot;severity&quot;: &quot;critical&quot;,
+        &quot;conditions&quot;: [
+            {&quot;field&quot;: &quot;process&quot;, &quot;op&quot;: &quot;contains&quot;, &quot;value&quot;: &quot;powershell&quot;},
+            {&quot;field&quot;: &quot;cmdline&quot;, &quot;op&quot;: &quot;contains&quot;, &quot;value&quot;: &quot;-enc&quot;},
+        ],
+    }),
+    Rule.from_dict({
+        &quot;name&quot;: &quot;large_outbound&quot;,
+        &quot;severity&quot;: &quot;medium&quot;,
+        &quot;conditions&quot;: [
+            {&quot;field&quot;: &quot;bytes_out&quot;, &quot;op&quot;: &quot;gt&quot;, &quot;value&quot;: 1_000_000},
+            {&quot;field&quot;: &quot;dst_port&quot;,  &quot;op&quot;: &quot;not_equals&quot;, &quot;value&quot;: &quot;80&quot;},
+        ],
+    }),
+    Rule.from_dict({
+        &quot;name&quot;: &quot;dns_txt_record&quot;,
+        &quot;severity&quot;: &quot;high&quot;,
+        &quot;logic&quot;: &quot;AND&quot;,
+        &quot;conditions&quot;: [
+            {&quot;field&quot;: &quot;type&quot;,        &quot;op&quot;: &quot;equals&quot;,  &quot;value&quot;: &quot;dns&quot;},
+            {&quot;field&quot;: &quot;record_type&quot;, &quot;op&quot;: &quot;equals&quot;,  &quot;value&quot;: &quot;TXT&quot;},
+        ],
+    }),
+    Rule.from_dict({
+        &quot;name&quot;: &quot;suspicious_useragent&quot;,
+        &quot;severity&quot;: &quot;medium&quot;,
+        &quot;conditions&quot;: [
+            {&quot;field&quot;: &quot;user_agent&quot;, &quot;op&quot;: &quot;regex&quot;,
+             &quot;value&quot;: r&quot;(sqlmap|nmap|masscan|nikto|nessus)&quot;},
+        ],
+    }),
+]
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_simple_rule():
+    engine = RuleEngine(rules=[SAMPLE_RULES[1]])  # encoded_powershell
+    event = {&quot;process&quot;: &quot;powershell.exe&quot;, &quot;cmdline&quot;: &quot;powershell -enc SQBFAFgA&quot;, &quot;ts&quot;: 0}
+    matches = engine.process(event)
+    assert len(matches) == 1
+    assert matches[0].rule_name == &quot;encoded_powershell&quot;
+    print(&quot;Simple rule: passed&quot;)
+
+
+def test_no_match():
+    engine = RuleEngine(rules=[SAMPLE_RULES[1]])
+    event = {&quot;process&quot;: &quot;notepad.exe&quot;, &quot;cmdline&quot;: &quot;open file.txt&quot;, &quot;ts&quot;: 0}
+    matches = engine.process(event)
+    assert len(matches) == 0
+    print(&quot;No match: passed&quot;)
+
+
+def test_count_rule():
+    engine = RuleEngine(rules=[SAMPLE_RULES[0]])  # brute_force_ssh
+    base_ts = 1_000_000.0
+    results = []
+    for i in range(6):
+        e = {&quot;type&quot;: &quot;auth&quot;, &quot;result&quot;: &quot;failure&quot;, &quot;port&quot;: &quot;22&quot;,
+             &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;ts&quot;: base_ts + i * 5}
+        results += engine.process(e)
+    # Alert should fire at the 5th event
+    assert any(m.rule_name == &quot;brute_force_ssh&quot; for m in results), \
+        f&quot;Expected brute_force_ssh; got {results}&quot;
+    print(&quot;Count rule: passed&quot;)
+
+
+def test_count_rule_window_expiry():
+    &quot;&quot;&quot;Events spread across more than 60s should NOT trigger.&quot;&quot;&quot;
+    engine = RuleEngine(rules=[SAMPLE_RULES[0]])
+    base_ts = 1_000_000.0
+    results = []
+    for i in range(5):
+        e = {&quot;type&quot;: &quot;auth&quot;, &quot;result&quot;: &quot;failure&quot;, &quot;port&quot;: &quot;22&quot;,
+             &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;ts&quot;: base_ts + i * 30}  # 30s apart → span 120s
+        results += engine.process(e)
+    assert not any(m.rule_name == &quot;brute_force_ssh&quot; for m in results), \
+        &quot;Should not alert for events spread &gt; window&quot;
+    print(&quot;Count rule window expiry: passed&quot;)
+
+
+def test_regex_rule():
+    engine = RuleEngine(rules=[SAMPLE_RULES[4]])
+    event = {&quot;user_agent&quot;: &quot;Mozilla/5.0 sqlmap/1.7&quot;, &quot;ts&quot;: 0}
+    matches = engine.process(event)
+    assert matches[0].rule_name == &quot;suspicious_useragent&quot;
+    print(&quot;Regex rule: passed&quot;)
+
+
+def test_missing_field():
+    engine = RuleEngine(rules=[SAMPLE_RULES[2]])  # large_outbound
+    event = {&quot;dst_port&quot;: &quot;443&quot;, &quot;ts&quot;: 0}  # missing bytes_out
+    matches = engine.process(event)
+    assert len(matches) == 0
+    print(&quot;Missing field: passed&quot;)
+
+
+def test_index_accelerated():
+    engine = RuleEngine(rules=SAMPLE_RULES, use_index=True)
+    event = {&quot;process&quot;: &quot;powershell.exe&quot;, &quot;cmdline&quot;: &quot;powershell -enc abc&quot;, &quot;ts&quot;: 0}
+    matches = engine.process(event)
+    assert any(m.rule_name == &quot;encoded_powershell&quot; for m in matches)
+    print(&quot;Index-accelerated engine: passed&quot;)
+
+
+def test_unsafe_regex():
+    try:
+        Condition(field=&quot;cmd&quot;, op=&quot;regex&quot;, value=r&quot;(a+)+&quot;)
+        print(&quot;WARN: unsafe regex should have been rejected&quot;)
+    except ValueError:
+        print(&quot;Unsafe regex rejected: passed&quot;)
+
+
+def test_multiple_rules_match():
+    engine = RuleEngine(rules=SAMPLE_RULES)
+    event = {&quot;process&quot;: &quot;powershell.exe&quot;, &quot;cmdline&quot;: &quot;powershell -enc x&quot;,
+             &quot;bytes_out&quot;: 5_000_000, &quot;dst_port&quot;: &quot;443&quot;, &quot;ts&quot;: 0}
+    matches = engine.process(event)
+    rule_names = {m.rule_name for m in matches}
+    assert &quot;encoded_powershell&quot; in rule_names
+    assert &quot;large_outbound&quot; in rule_names
+    print(f&quot;Multiple rules: {rule_names}&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Rule engines are the detection core of every SIEM.  Weaknesses include:
+  - Rule bypass: attacker obfuscates known-bad strings (base64, Unicode escaping)
+    → combine regex rules with decoding/normalization before matching.
+  - ReDoS (regex denial of service): a single malicious log line with a
+    crafted input and an unsafe regex can lock a CPU core indefinitely.
+    → Always compile at load time; reject exponentially backtracking patterns;
+      use re2 / hyperscan for production.
+  - Rule explosion: too many rules → high CPU per event.
+    → Use the index-accelerated dispatch (Approach 2) for large rule sets.
+  - Silent rule failure: a buggy rule throws an exception and is silently skipped.
+    → Log and alert on rule evaluation errors; never swallow them silently in prod.
+
+PRODUCTION CONSIDERATIONS
+  - Use Sigma (open standard) for portable rule authoring; translate to engine DSL.
+  - Store rule set in version control; CI/CD pipeline validates rules before deploy.
+  - Measure rule performance: log evaluation latency per rule; prune slow rules.
+  - Count rules require state; shard state by group_by key for distributed engines.
+  - For threat hunting: allow retroactive rule application over historical logs.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_simple_rule()
+    test_no_match()
+    test_count_rule()
+    test_count_rule_window_expiry()
+    test_regex_rule()
+    test_missing_field()
+    test_index_accelerated()
+    test_unsafe_regex()
+    test_multiple_rules_match()
+</code></pre>
+</body>
+</html>

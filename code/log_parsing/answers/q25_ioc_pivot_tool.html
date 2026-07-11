@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q25_ioc_pivot_tool.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q25_ioc_pivot_tool.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q25_ioc_pivot_tool.py</p>
+  <p class="line-count">266 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q25. IOC Pivot &amp; Cross-Reference Tool
+=======================================
+Scan a log corpus against an IOC list (IPs, domains, hashes, URLs).
+Extract context (3 lines before/after each hit), deduplicate, and
+produce a pivot report showing each IOC and all matching log lines.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: grep -r evil.com .
+  Problem: You&#x27;d need to run grep for each IOC. With 10,000 IOCs and
+  50 log files, that&#x27;s 500,000 subprocess invocations. Also, grep output
+  doesn&#x27;t give you context across multiple log types or deduplicated hits.
+
+BETTER: Precompile all IOC patterns into one alternation regex.
+  Problem: A single alternation regex with 10,000 patterns is slow and
+  the backtracking makes it exponential in pathological cases.
+  Better: Aho-Corasick for exact string matching (O(N + M + Z) where
+  Z = match count). Python doesn&#x27;t have it in stdlib, so we simulate
+  the key property with a compiled set-lookup after line splitting.
+
+GOOGLE-LEVEL (this file):
+  - Normalize IOCs into typed buckets (IP, domain, hash, URL).
+  - Per-line tokenization: extract IPs, domains, hashes from each log line
+    and do O(1) set-lookup against the IOC buckets.
+  - Context window: maintain a circular buffer of last N lines per file;
+    emit N lines before + N lines after each hit.
+  - Deduplication: (ioc, file, hit_line_no) tuple prevents reporting the
+    same match from context of an adjacent hit.
+  - Pivot report: IOC → list of {file, line, context}.
+
+Complexity: O(N × T) where T = tokens per line (≈ 10), lookups O(1).
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict, deque
+from datetime import datetime
+from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE IOC LIST  (one IOC per line, may be prefixed with TYPE:)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_IOCS = &quot;&quot;&quot;\
+ip:198.51.100.1
+ip:203.0.113.5
+domain:evil.com
+domain:c2beacon.evil.com
+domain:malware.example.net
+hash:aabbccddeeff00112233445566778899
+url:http://evil.com/payload.ps1
+url:http://bad.example/s.ps1
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE LOG CORPUS  (simulated as a single stream; real usage passes files)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z FIREWALL src=10.0.0.1 dst=198.51.100.1 proto=tcp dport=443 action=ALLOW
+2024-03-12T08:00:01Z DNS query=c2beacon.evil.com src=10.0.0.1 answer=198.51.100.1
+2024-03-12T08:00:02Z PROXY url=http://evil.com/payload.ps1 user=alice status=200
+2024-03-12T08:00:03Z FIREWALL src=10.0.0.2 dst=8.8.8.8 proto=udp dport=53 action=ALLOW
+2024-03-12T08:00:04Z AUTH user=alice src_ip=10.0.0.1 event=LOGIN_SUCCESS
+2024-03-12T08:00:05Z SYSMON image=powershell.exe cmdline=IEX ... hash=aabbccddeeff00112233445566778899
+2024-03-12T08:00:06Z FIREWALL src=10.0.0.3 dst=203.0.113.5 proto=tcp dport=4444 action=ALLOW
+2024-03-12T08:00:07Z HTTP url=http://bad.example/s.ps1 status=200
+2024-03-12T08:01:00Z FIREWALL src=10.0.0.1 dst=1.1.1.1 proto=udp dport=53 action=ALLOW
+2024-03-12T08:01:01Z DNS query=normal.example.com src=10.0.0.1 answer=93.184.216.34
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONTEXT_LINES = 3  # lines before and after each match
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IOC PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_iocs(text: str) -&gt; dict[str, set[str]]:
+    &quot;&quot;&quot;
+    Parse IOC list. Return dict with keys: ip, domain, hash, url.
+    Auto-detects type if no prefix given.
+    &quot;&quot;&quot;
+    buckets: dict[str, set[str]] = {
+        &quot;ip&quot;:     set(),
+        &quot;domain&quot;: set(),
+        &quot;hash&quot;:   set(),
+        &quot;url&quot;:    set(),
+    }
+
+    IP_RE   = re.compile(r&#x27;^\d{1,3}(?:\.\d{1,3}){3}$&#x27;)
+    HASH_RE = re.compile(r&#x27;^[0-9a-fA-F]{32,64}$&#x27;)
+    URL_RE  = re.compile(r&#x27;^https?://&#x27;)
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(&quot;#&quot;):
+            continue
+
+        if &quot;:&quot; in line and line.split(&quot;:&quot;, 1)[0].lower() in buckets:
+            ioc_type, value = line.split(&quot;:&quot;, 1)
+            buckets[ioc_type.lower()].add(value.strip().lower())
+        else:
+            value = line.lower()
+            if IP_RE.match(value):
+                buckets[&quot;ip&quot;].add(value)
+            elif URL_RE.match(value):
+                buckets[&quot;url&quot;].add(value)
+            elif HASH_RE.match(value):
+                buckets[&quot;hash&quot;].add(value)
+            else:
+                buckets[&quot;domain&quot;].add(value)
+
+    return buckets
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOKENIZERS  (extract typed values from a log line)
+# ─────────────────────────────────────────────────────────────────────────────
+
+IP_TOKEN_RE    = re.compile(r&#x27;\b\d{1,3}(?:\.\d{1,3}){3}\b&#x27;)
+DOMAIN_TOKEN_RE = re.compile(r&#x27;\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b&#x27;,
+                              re.IGNORECASE)
+HASH_TOKEN_RE  = re.compile(r&#x27;\b[0-9a-fA-F]{32,64}\b&#x27;)
+URL_TOKEN_RE   = re.compile(r&#x27;https?://\S+&#x27;)
+
+
+def extract_tokens(line: str) -&gt; dict[str, set[str]]:
+    lower = line.lower()
+    return {
+        &quot;ip&quot;:     set(IP_TOKEN_RE.findall(lower)),
+        &quot;domain&quot;: set(DOMAIN_TOKEN_RE.findall(lower)),
+        &quot;hash&quot;:   set(HASH_TOKEN_RE.findall(lower)),
+        &quot;url&quot;:    set(URL_TOKEN_RE.findall(lower)),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCANNER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def scan_lines(
+    lines: list[str],
+    ioc_buckets: dict[str, set[str]],
+    source_name: str = &quot;stream&quot;,
+) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Scan lines against IOC buckets.
+    Returns list of {ioc, ioc_type, source, line_no, line, context_before, context_after}.
+    &quot;&quot;&quot;
+    results = []
+    n = len(lines)
+    already_matched: set[tuple] = set()  # (ioc, line_no) dedup
+
+    for idx, line in enumerate(lines):
+        tokens = extract_tokens(line)
+        for ioc_type, ioc_set in ioc_buckets.items():
+            hits = tokens[ioc_type].intersection(ioc_set)
+            for ioc in hits:
+                key = (ioc, idx)
+                if key in already_matched:
+                    continue
+                already_matched.add(key)
+
+                before = lines[max(0, idx - CONTEXT_LINES): idx]
+                after  = lines[idx + 1: min(n, idx + CONTEXT_LINES + 1)]
+
+                results.append({
+                    &quot;ioc&quot;:            ioc,
+                    &quot;ioc_type&quot;:       ioc_type,
+                    &quot;source&quot;:         source_name,
+                    &quot;line_no&quot;:        idx + 1,
+                    &quot;line&quot;:           line.strip(),
+                    &quot;context_before&quot;: [l.strip() for l in before],
+                    &quot;context_after&quot;:  [l.strip() for l in after],
+                })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIVOT REPORT BUILDER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_pivot(results: list[dict]) -&gt; dict[str, list[dict]]:
+    &quot;&quot;&quot;Group results by IOC value for the pivot report.&quot;&quot;&quot;
+    pivot: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        pivot[r[&quot;ioc&quot;]].append(r)
+    return pivot
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(pivot: dict[str, list[dict]], ioc_buckets: dict[str, set[str]]) -&gt; None:
+    total_iocs    = sum(len(v) for v in ioc_buckets.values())
+    matched_iocs  = len(pivot)
+    total_matches = sum(len(v) for v in pivot.values())
+
+    print(&quot;=&quot; * 65)
+    print(&quot;IOC PIVOT &amp; CROSS-REFERENCE REPORT&quot;)
+    print(&quot;=&quot; * 65)
+    print(f&quot;\nIOC list: {total_iocs} indicators  |  &quot;
+          f&quot;Matched: {matched_iocs}  |  Total hits: {total_matches}&quot;)
+
+    print(&quot;\nIOC Breakdown:&quot;)
+    for ioc_type, ioc_set in ioc_buckets.items():
+        matched = [ioc for ioc in ioc_set if ioc in pivot]
+        print(f&quot;  {ioc_type:8s} total={len(ioc_set)}  matched={len(matched)}&quot;)
+
+    print(f&quot;\n{&#x27;─&#x27; * 65}&quot;)
+    for ioc in sorted(pivot.keys()):
+        hits = pivot[ioc]
+        ioc_type = hits[0][&quot;ioc_type&quot;]
+        print(f&quot;\n  IOC [{ioc_type.upper()}]: {ioc}  ({len(hits)} hit(s))&quot;)
+        for h in hits:
+            print(f&quot;    [{h[&#x27;source&#x27;]}] line {h[&#x27;line_no&#x27;]}: {h[&#x27;line&#x27;][:90]}&quot;)
+            for ctx in h[&quot;context_before&quot;]:
+                print(f&quot;      &lt;&lt; {ctx[:80]}&quot;)
+            for ctx in h[&quot;context_after&quot;]:
+                print(f&quot;      &gt;&gt; {ctx[:80]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    # Usage: q25_ioc_pivot_tool.py [ioc_file] [log_file ...]
+    # Without args: uses embedded sample data.
+
+    if len(sys.argv) &gt; 1:
+        ioc_path  = Path(sys.argv[1])
+        log_paths = [Path(p) for p in sys.argv[2:]] if len(sys.argv) &gt; 2 else []
+
+        ioc_text = ioc_path.read_text(encoding=&quot;utf-8&quot;)
+        all_results: list[dict] = []
+
+        if log_paths:
+            for lp in log_paths:
+                lines = lp.read_text(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;).splitlines()
+                ioc_buckets = load_iocs(ioc_text)
+                all_results.extend(scan_lines(lines, ioc_buckets, source_name=lp.name))
+        else:
+            print(&quot;[WARN] No log files provided. Pass log file paths after the IOC file.&quot;)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        ioc_buckets = load_iocs(SAMPLE_IOCS)
+        log_lines   = SAMPLE_LOG.splitlines()
+        all_results = scan_lines(log_lines, ioc_buckets, source_name=&quot;embedded_sample&quot;)
+
+    pivot = build_pivot(all_results)
+    print_report(pivot, ioc_buckets if len(sys.argv) == 1 else load_iocs(
+        Path(sys.argv[1]).read_text(encoding=&quot;utf-8&quot;)))
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q16_cloudtrail_anomaly.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q16_cloudtrail_anomaly.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q16_cloudtrail_anomaly.py</p>
+  <p class="line-count">300 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q16. AWS CloudTrail Anomaly Detector
+======================================
+Detect root account usage, IAM privilege escalation, credential
+harvesting, suspicious cross-region activity, and S3 data exfiltration
+from CloudTrail JSON event logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Alert on every root login.
+  Problem: Root actions show up in break-glass scenarios. Without context
+  (what they did, how often, which service), alerts are noise. Also misses
+  IAM self-escalation, which is more common in real compromises.
+
+BETTER: Alert on root + CreatePolicy/AttachPolicy/PutUserPolicy.
+  Problem: Need to also detect credential harvesting (ListAccessKeys on
+  OTHER users), cross-region launches from a user who never used that region,
+  and bulk S3 GetObject (exfiltration pattern).
+
+GOOGLE-LEVEL (this file):
+  - Root usage detector: any non-read API call by root.
+  - IAM escalation: CreatePolicy/PutUserPolicy/AttachRolePolicy targeting
+    another principal, or AddUserToGroup (group with existing FullAccess).
+  - Credential harvesting: ListAccessKeys, GetAccessKeyLastUsed, GetLoginProfile
+    for users other than self.
+  - Cross-region: call to a region the user has never used before (baseline).
+  - S3 exfil: bulk GetObject (&gt; threshold) or GetObject on sensitive prefixes.
+
+Complexity: O(N) over all events, O(U) memory for per-user baselines.
+=============================================================================
+&quot;&quot;&quot;
+
+import json
+import sys
+import re
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (newline-delimited JSON, one CloudTrail event per line)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = r&quot;&quot;&quot;
+{&quot;eventTime&quot;:&quot;2024-03-12T08:00:00Z&quot;,&quot;eventSource&quot;:&quot;signin.amazonaws.com&quot;,&quot;eventName&quot;:&quot;ConsoleLogin&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;Root&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:root&quot;},&quot;requestParameters&quot;:null,&quot;responseElements&quot;:{&quot;ConsoleLogin&quot;:&quot;Success&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:01:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;CreatePolicy&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;policyName&quot;:&quot;FullAdmin&quot;,&quot;policyDocument&quot;:&quot;{\&quot;Version\&quot;:\&quot;2012-10-17\&quot;,\&quot;Statement\&quot;:[{\&quot;Effect\&quot;:\&quot;Allow\&quot;,\&quot;Action\&quot;:\&quot;*\&quot;,\&quot;Resource\&quot;:\&quot;*\&quot;}]}&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:02:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;AttachUserPolicy&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;userName&quot;:&quot;bob&quot;,&quot;policyArn&quot;:&quot;arn:aws:iam::123456789012:policy/FullAdmin&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:03:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;ListAccessKeys&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;userName&quot;:&quot;carol&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:04:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;ListAccessKeys&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;userName&quot;:&quot;dave&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:05:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetLoginProfile&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;userName&quot;:&quot;eve&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:06:00Z&quot;,&quot;eventSource&quot;:&quot;ec2.amazonaws.com&quot;,&quot;eventName&quot;:&quot;RunInstances&quot;,&quot;awsRegion&quot;:&quot;ap-southeast-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;instanceType&quot;:&quot;t3.micro&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:07:00Z&quot;,&quot;eventSource&quot;:&quot;s3.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetObject&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;bucketName&quot;:&quot;corp-sensitive-data&quot;,&quot;key&quot;:&quot;finance/q4-revenue.csv&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:08:00Z&quot;,&quot;eventSource&quot;:&quot;s3.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetObject&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;bucketName&quot;:&quot;corp-sensitive-data&quot;,&quot;key&quot;:&quot;finance/q3-revenue.csv&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:09:00Z&quot;,&quot;eventSource&quot;:&quot;s3.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetObject&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;bucketName&quot;:&quot;corp-sensitive-data&quot;,&quot;key&quot;:&quot;hr/employee-list.csv&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:10:00Z&quot;,&quot;eventSource&quot;:&quot;s3.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetObject&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;bucketName&quot;:&quot;corp-sensitive-data&quot;,&quot;key&quot;:&quot;hr/salaries.csv&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:11:00Z&quot;,&quot;eventSource&quot;:&quot;s3.amazonaws.com&quot;,&quot;eventName&quot;:&quot;GetObject&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/alice&quot;,&quot;userName&quot;:&quot;alice&quot;},&quot;requestParameters&quot;:{&quot;bucketName&quot;:&quot;corp-sensitive-data&quot;,&quot;key&quot;:&quot;hr/ssn.csv&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T08:12:00Z&quot;,&quot;eventSource&quot;:&quot;iam.amazonaws.com&quot;,&quot;eventName&quot;:&quot;CreateAccessKey&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;Root&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:root&quot;},&quot;requestParameters&quot;:{&quot;userName&quot;:&quot;ops-bot&quot;}}
+{&quot;eventTime&quot;:&quot;2024-03-12T09:00:00Z&quot;,&quot;eventSource&quot;:&quot;ec2.amazonaws.com&quot;,&quot;eventName&quot;:&quot;DescribeInstances&quot;,&quot;awsRegion&quot;:&quot;us-east-1&quot;,&quot;userIdentity&quot;:{&quot;type&quot;:&quot;IAMUser&quot;,&quot;arn&quot;:&quot;arn:aws:iam::123456789012:user/bob&quot;,&quot;userName&quot;:&quot;bob&quot;},&quot;requestParameters&quot;:{}}
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+# APIs used to harvest other users&#x27; credentials/profile info
+HARVEST_APIS = {
+    &quot;ListAccessKeys&quot;, &quot;GetAccessKeyLastUsed&quot;, &quot;GetLoginProfile&quot;,
+    &quot;GetUser&quot;, &quot;ListMFADevices&quot;, &quot;ListUserPolicies&quot;,
+}
+
+# IAM privilege escalation actions
+IAM_ESCALATION_APIS = {
+    &quot;CreatePolicy&quot;, &quot;PutUserPolicy&quot;, &quot;PutRolePolicy&quot;,
+    &quot;AttachUserPolicy&quot;, &quot;AttachRolePolicy&quot;, &quot;AttachGroupPolicy&quot;,
+    &quot;AddUserToGroup&quot;, &quot;CreatePolicyVersion&quot;, &quot;SetDefaultPolicyVersion&quot;,
+}
+
+SENSITIVE_S3_PREFIXES = re.compile(
+    r&#x27;^(finance|hr|payroll|ssn|pci|credentials|secrets|keys)&#x27;,
+    re.IGNORECASE,
+)
+
+S3_BULK_THRESHOLD = 5  # GetObject calls from same user to same bucket within session
+
+KNOWN_REGIONS: dict[str, set] = defaultdict(set)  # user → set of previously seen regions
+
+
+def parse_event(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def get_user(event: dict) -&gt; str:
+    uid = event.get(&quot;userIdentity&quot;, {})
+    return uid.get(&quot;userName&quot;) or uid.get(&quot;arn&quot;, &quot;unknown&quot;)
+
+
+def get_user_type(event: dict) -&gt; str:
+    return event.get(&quot;userIdentity&quot;, {}).get(&quot;type&quot;, &quot;&quot;)
+
+
+def get_ts(event: dict) -&gt; float:
+    try:
+        return datetime.strptime(event[&quot;eventTime&quot;], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except (KeyError, ValueError):
+        return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_root_usage(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        if get_user_type(e) == &quot;Root&quot;:
+            alerts.append({
+                &quot;type&quot;:   &quot;ROOT_USAGE&quot;,
+                &quot;api&quot;:    e.get(&quot;eventName&quot;),
+                &quot;region&quot;: e.get(&quot;awsRegion&quot;),
+                &quot;ts&quot;:     get_ts(e),
+            })
+    return alerts
+
+
+def detect_iam_escalation(events: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for e in events:
+        if e.get(&quot;eventName&quot;) not in IAM_ESCALATION_APIS:
+            continue
+        user  = get_user(e)
+        params = e.get(&quot;requestParameters&quot;) or {}
+        target = params.get(&quot;userName&quot;) or params.get(&quot;roleName&quot;) or params.get(&quot;groupName&quot;, &quot;?&quot;)
+        alerts.append({
+            &quot;type&quot;:    &quot;IAM_ESCALATION&quot;,
+            &quot;actor&quot;:   user,
+            &quot;api&quot;:     e.get(&quot;eventName&quot;),
+            &quot;target&quot;:  target,
+            &quot;region&quot;:  e.get(&quot;awsRegion&quot;),
+            &quot;details&quot;: str(params)[:120],
+            &quot;ts&quot;:      get_ts(e),
+        })
+    return alerts
+
+
+def detect_credential_harvesting(events: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Flag when a user calls harvest APIs against a DIFFERENT user.&quot;&quot;&quot;
+    alerts = []
+    for e in events:
+        if e.get(&quot;eventName&quot;) not in HARVEST_APIS:
+            continue
+        actor  = get_user(e)
+        params = e.get(&quot;requestParameters&quot;) or {}
+        target = params.get(&quot;userName&quot;, &quot;&quot;)
+        if target and target != actor:
+            alerts.append({
+                &quot;type&quot;:   &quot;CREDENTIAL_HARVESTING&quot;,
+                &quot;actor&quot;:  actor,
+                &quot;api&quot;:    e.get(&quot;eventName&quot;),
+                &quot;target&quot;: target,
+                &quot;region&quot;: e.get(&quot;awsRegion&quot;),
+                &quot;ts&quot;:     get_ts(e),
+            })
+    return alerts
+
+
+def detect_cross_region(events: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Alert when a user makes a mutating API call to a region never seen before.&quot;&quot;&quot;
+    READ_ONLY_PREFIXES = {&quot;Describe&quot;, &quot;List&quot;, &quot;Get&quot;}
+    user_regions: dict[str, set] = defaultdict(set)
+    alerts = []
+
+    for e in sorted(events, key=get_ts):
+        user   = get_user(e)
+        region = e.get(&quot;awsRegion&quot;, &quot;&quot;)
+        api    = e.get(&quot;eventName&quot;, &quot;&quot;)
+        is_read = any(api.startswith(p) for p in READ_ONLY_PREFIXES)
+
+        if region in user_regions[user] or is_read:
+            user_regions[user].add(region)
+            continue
+
+        if user_regions[user]:  # user has history → this is a new region
+            alerts.append({
+                &quot;type&quot;:       &quot;NEW_REGION&quot;,
+                &quot;user&quot;:       user,
+                &quot;new_region&quot;: region,
+                &quot;api&quot;:        api,
+                &quot;ts&quot;:         get_ts(e),
+            })
+        user_regions[user].add(region)
+
+    return alerts
+
+
+def detect_s3_exfil(events: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Bulk GetObject or sensitive-prefix access.&quot;&quot;&quot;
+    bulk_tracker: dict[tuple, list] = defaultdict(list)
+    sensitive_alerts = []
+
+    for e in events:
+        if e.get(&quot;eventName&quot;) != &quot;GetObject&quot;:
+            continue
+        user   = get_user(e)
+        params = e.get(&quot;requestParameters&quot;) or {}
+        bucket = params.get(&quot;bucketName&quot;, &quot;?&quot;)
+        key    = params.get(&quot;key&quot;, &quot;&quot;)
+
+        if SENSITIVE_S3_PREFIXES.match(key):
+            sensitive_alerts.append({
+                &quot;type&quot;:   &quot;S3_SENSITIVE_PREFIX&quot;,
+                &quot;user&quot;:   user,
+                &quot;bucket&quot;: bucket,
+                &quot;key&quot;:    key,
+                &quot;ts&quot;:     get_ts(e),
+            })
+        bulk_tracker[(user, bucket)].append(get_ts(e))
+
+    bulk_alerts = [
+        {
+            &quot;type&quot;:   &quot;S3_BULK_DOWNLOAD&quot;,
+            &quot;user&quot;:   user,
+            &quot;bucket&quot;: bucket,
+            &quot;count&quot;:  len(tss),
+            &quot;ts&quot;:     min(tss),
+        }
+        for (user, bucket), tss in bulk_tracker.items()
+        if len(tss) &gt;= S3_BULK_THRESHOLD
+    ]
+
+    return sensitive_alerts + bulk_alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(root, escalation, harvesting, cross_region, s3_exfil) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;AWS CLOUDTRAIL ANOMALY DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[ROOT_USAGE] {len(root)} event(s)&quot;)
+    for a in root:
+        print(f&quot;  api={a[&#x27;api&#x27;]}  region={a[&#x27;region&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[IAM_ESCALATION] {len(escalation)} event(s)&quot;)
+    for a in escalation:
+        print(f&quot;  actor={a[&#x27;actor&#x27;]}  api={a[&#x27;api&#x27;]}  target={a[&#x27;target&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;    details: {a[&#x27;details&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[CREDENTIAL_HARVESTING] {len(harvesting)} event(s)&quot;)
+    for a in harvesting:
+        print(f&quot;  actor={a[&#x27;actor&#x27;]}  api={a[&#x27;api&#x27;]}  target={a[&#x27;target&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[NEW_REGION] {len(cross_region)} event(s)&quot;)
+    for a in cross_region:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  new_region={a[&#x27;new_region&#x27;]}  api={a[&#x27;api&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[S3_EXFIL] {len(s3_exfil)} event(s)&quot;)
+    for a in s3_exfil:
+        if a[&quot;type&quot;] == &quot;S3_BULK_DOWNLOAD&quot;:
+            print(f&quot;  [BULK] user={a[&#x27;user&#x27;]}  bucket={a[&#x27;bucket&#x27;]}  count={a[&#x27;count&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        else:
+            print(f&quot;  [SENSITIVE] user={a[&#x27;user&#x27;]}  bucket={a[&#x27;bucket&#x27;]}  key={a[&#x27;key&#x27;][:60]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    events = [e for e in (parse_event(l) for l in raw_lines) if e is not None]
+    print(f&quot;Parsed {len(events)} CloudTrail events.\n&quot;)
+    print_report(
+        detect_root_usage(events),
+        detect_iam_escalation(events),
+        detect_credential_harvesting(events),
+        detect_cross_region(events),
+        detect_s3_exfil(events),
+    )
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q11_session_reconstruction.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q11_session_reconstruction.py</h1>
+  <p class="file-path">Source: code\day5\answers\q11_session_reconstruction.py</p>
+  <p class="line-count">356 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q11. Session Reconstruction
+============================
+Given (user, timestamp, action) events sorted by timestamp:
+- Group consecutive events per user into sessions (gap &gt; 30 min = new session).
+- For each session report: user, session start, session end, actions taken.
+- Flag sessions with any &quot;DELETE&quot; or &quot;EXPORT&quot; action.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Reconstruct user sessions from an event log.&quot;
+
+--- CANDIDATE FIRST RESPONSE (group by user, ignore gaps) ---
+&quot;I&#x27;d group all events by user and that&#x27;s one session per user.&quot;
+
+Follow-up: &quot;What about the 30-minute gap rule?&quot;
+→ Need to track the PREVIOUS event&#x27;s timestamp per user and start a new
+  session when the gap exceeds 30 minutes.
+
+Follow-up: &quot;Are events guaranteed to be globally sorted by time?&quot;
+→ Not necessarily — need to sort per-user by timestamp before reconstructing.
+
+Follow-up: &quot;What if the timestamp format is inconsistent?&quot;
+→ Parse to a numeric (epoch) value first; compare numerically.
+
+--- CANDIDATE SECOND RESPONSE (sort per user, gap-based session split) ---
+Better. Follow-up: &quot;How do you handle two users whose sessions interleave
+in the original log?&quot;
+→ Already handled by sorting per-user independently — global order doesn&#x27;t matter.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Parse timestamps to epoch, sort per user, session reconstruction with gap
+rule, flag suspicious sessions, clean structured output.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from datetime import datetime, timezone
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (user, ISO-timestamp, action)
+SAMPLE_EVENTS = [
+    (&quot;alice&quot;, &quot;2024-01-15T09:00:00Z&quot;, &quot;LOGIN&quot;),
+    (&quot;bob&quot;,   &quot;2024-01-15T09:01:00Z&quot;, &quot;LOGIN&quot;),
+    (&quot;alice&quot;, &quot;2024-01-15T09:05:00Z&quot;, &quot;VIEW&quot;),
+    (&quot;alice&quot;, &quot;2024-01-15T09:10:00Z&quot;, &quot;DOWNLOAD&quot;),
+    (&quot;bob&quot;,   &quot;2024-01-15T09:15:00Z&quot;, &quot;VIEW&quot;),
+    (&quot;alice&quot;, &quot;2024-01-15T09:20:00Z&quot;, &quot;EXPORT&quot;),   # suspicious
+    (&quot;bob&quot;,   &quot;2024-01-15T09:45:00Z&quot;, &quot;DELETE&quot;),   # suspicious
+    (&quot;alice&quot;, &quot;2024-01-15T10:00:00Z&quot;, &quot;LOGOUT&quot;),
+    # Alice logs in again 40 min later — new session
+    (&quot;alice&quot;, &quot;2024-01-15T10:40:00Z&quot;, &quot;LOGIN&quot;),
+    (&quot;alice&quot;, &quot;2024-01-15T10:45:00Z&quot;, &quot;VIEW&quot;),
+    (&quot;alice&quot;, &quot;2024-01-15T10:50:00Z&quot;, &quot;DELETE&quot;),   # suspicious, second session
+    (&quot;alice&quot;, &quot;2024-01-15T10:55:00Z&quot;, &quot;LOGOUT&quot;),
+    (&quot;bob&quot;,   &quot;2024-01-15T09:50:00Z&quot;, &quot;LOGOUT&quot;),
+    # Charlie - single session
+    (&quot;charlie&quot;, &quot;2024-01-15T11:00:00Z&quot;, &quot;LOGIN&quot;),
+    (&quot;charlie&quot;, &quot;2024-01-15T11:05:00Z&quot;, &quot;VIEW&quot;),
+    (&quot;charlie&quot;, &quot;2024-01-15T11:10:00Z&quot;, &quot;LOGOUT&quot;),
+]
+
+SESSION_GAP_SECONDS = 30 * 60   # 30 minutes
+SUSPICIOUS_ACTIONS  = {&quot;DELETE&quot;, &quot;EXPORT&quot;}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TIMESTAMP PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_ts(ts_str: str) -&gt; float:
+    &quot;&quot;&quot;Parse ISO-8601 timestamp to Unix epoch float. Returns -1.0 on failure.&quot;&quot;&quot;
+    try:
+        ts_str = ts_str.strip().replace(&quot;Z&quot;, &quot;+00:00&quot;)
+        dt = datetime.fromisoformat(ts_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, AttributeError):
+        return -1.0
+
+
+def _epoch_to_iso(epoch: float) -&gt; str:
+    &quot;&quot;&quot;Convert epoch float back to ISO-8601 UTC string.&quot;&quot;&quot;
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        &quot;%Y-%m-%dT%H:%M:%SZ&quot;
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual grouping, manual sort, manual session split, no defaultdict)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_sort_events(events):
+    &quot;&quot;&quot;Insertion sort by timestamp (float) ascending.&quot;&quot;&quot;
+    for i in range(1, len(events)):
+        cur = events[i]
+        j = i - 1
+        while j &gt;= 0 and events[j][&quot;ts_epoch&quot;] &gt; cur[&quot;ts_epoch&quot;]:
+            events[j + 1] = events[j]
+            j -= 1
+        events[j + 1] = cur
+
+
+def reconstruct_without_builtins(raw_events):
+    &quot;&quot;&quot;
+    raw_events: list of (user, timestamp_str, action)
+    Returns list of session dicts.
+    &quot;&quot;&quot;
+    malformed = 0
+    # Step 1: Parse and group by user (manual dict)
+    user_events = {}
+    for item in raw_events:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            print(f&quot;[WARN] Malformed event record: {item}&quot;, file=sys.stderr)
+            malformed += 1
+            continue
+        user, ts_str, action = item
+        ts = _parse_ts(ts_str)
+        if ts &lt; 0:
+            print(f&quot;[WARN] Bad timestamp &#x27;{ts_str}&#x27; for user {user}, skipping.&quot;,
+                  file=sys.stderr)
+            malformed += 1
+            continue
+
+        ev = {&quot;user&quot;: user, &quot;ts_epoch&quot;: ts, &quot;ts_str&quot;: ts_str, &quot;action&quot;: action}
+        if user not in user_events:
+            user_events[user] = []
+        user_events[user].append(ev)
+
+    # Step 2: Sort each user&#x27;s events by timestamp
+    for user in user_events:
+        _manual_sort_events(user_events[user])
+
+    # Step 3: Reconstruct sessions
+    sessions = []
+    session_id = 0
+
+    for user, events in user_events.items():
+        if not events:
+            continue
+
+        # Start the first session
+        session_actions = [events[0][&quot;action&quot;]]
+        session_start   = events[0][&quot;ts_epoch&quot;]
+        session_end     = events[0][&quot;ts_epoch&quot;]
+
+        for i in range(1, len(events)):
+            ev   = events[i]
+            gap  = ev[&quot;ts_epoch&quot;] - events[i - 1][&quot;ts_epoch&quot;]
+
+            if gap &gt; SESSION_GAP_SECONDS:
+                # Close current session
+                session_id += 1
+                is_suspicious = False
+                for act in session_actions:
+                    if act in SUSPICIOUS_ACTIONS:
+                        is_suspicious = True
+                        break
+
+                sessions.append({
+                    &quot;id&quot;:           session_id,
+                    &quot;user&quot;:         user,
+                    &quot;start&quot;:        _epoch_to_iso(session_start),
+                    &quot;end&quot;:          _epoch_to_iso(session_end),
+                    &quot;actions&quot;:      session_actions,
+                    &quot;suspicious&quot;:   is_suspicious,
+                    &quot;duration_min&quot;: round((session_end - session_start) / 60, 1),
+                })
+
+                # Start new session
+                session_actions = [ev[&quot;action&quot;]]
+                session_start   = ev[&quot;ts_epoch&quot;]
+                session_end     = ev[&quot;ts_epoch&quot;]
+            else:
+                session_actions.append(ev[&quot;action&quot;])
+                session_end = ev[&quot;ts_epoch&quot;]
+
+        # Close last session
+        session_id += 1
+        is_suspicious = False
+        for act in session_actions:
+            if act in SUSPICIOUS_ACTIONS:
+                is_suspicious = True
+                break
+        sessions.append({
+            &quot;id&quot;:           session_id,
+            &quot;user&quot;:         user,
+            &quot;start&quot;:        _epoch_to_iso(session_start),
+            &quot;end&quot;:          _epoch_to_iso(session_end),
+            &quot;actions&quot;:      session_actions,
+            &quot;suspicious&quot;:   is_suspicious,
+            &quot;duration_min&quot;: round((session_end - session_start) / 60, 1),
+        })
+
+    return sessions, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (defaultdict, sorted, any())
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reconstruct_with_builtins(raw_events):
+    malformed  = 0
+    user_events = defaultdict(list)
+
+    for item in raw_events:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            print(f&quot;[WARN] Malformed event: {item}&quot;, file=sys.stderr)
+            malformed += 1
+            continue
+        user, ts_str, action = item
+        ts = _parse_ts(ts_str)
+        if ts &lt; 0:
+            print(f&quot;[WARN] Bad timestamp &#x27;{ts_str}&#x27; for {user}.&quot;, file=sys.stderr)
+            malformed += 1
+            continue
+        user_events[user].append({&quot;ts&quot;: ts, &quot;ts_str&quot;: ts_str, &quot;action&quot;: action})
+
+    sessions   = []
+    session_id = 0
+
+    for user, events in user_events.items():
+        events = sorted(events, key=lambda e: e[&quot;ts&quot;])
+        if not events:
+            continue
+
+        start   = events[0][&quot;ts&quot;]
+        end     = events[0][&quot;ts&quot;]
+        actions = [events[0][&quot;action&quot;]]
+
+        for i in range(1, len(events)):
+            gap = events[i][&quot;ts&quot;] - events[i - 1][&quot;ts&quot;]
+            if gap &gt; SESSION_GAP_SECONDS:
+                session_id += 1
+                sessions.append({
+                    &quot;id&quot;:           session_id,
+                    &quot;user&quot;:         user,
+                    &quot;start&quot;:        _epoch_to_iso(start),
+                    &quot;end&quot;:          _epoch_to_iso(end),
+                    &quot;actions&quot;:      actions,
+                    &quot;suspicious&quot;:   any(a in SUSPICIOUS_ACTIONS for a in actions),
+                    &quot;duration_min&quot;: round((end - start) / 60, 1),
+                })
+                start   = events[i][&quot;ts&quot;]
+                end     = events[i][&quot;ts&quot;]
+                actions = [events[i][&quot;action&quot;]]
+            else:
+                actions.append(events[i][&quot;action&quot;])
+                end = events[i][&quot;ts&quot;]
+
+        session_id += 1
+        sessions.append({
+            &quot;id&quot;:           session_id,
+            &quot;user&quot;:         user,
+            &quot;start&quot;:        _epoch_to_iso(start),
+            &quot;end&quot;:          _epoch_to_iso(end),
+            &quot;actions&quot;:      actions,
+            &quot;suspicious&quot;:   any(a in SUSPICIOUS_ACTIONS for a in actions),
+            &quot;duration_min&quot;: round((end - start) / 60, 1),
+        })
+
+    return sessions, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(sessions, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  SESSION RECONSTRUCTION REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Malformed events skipped: {malformed}&quot;)
+    print(f&quot;Session gap threshold   : {SESSION_GAP_SECONDS // 60} minutes&quot;)
+    print(f&quot;Total sessions found    : {len(sessions)}\n&quot;)
+
+    flagged = [s for s in sessions if s[&quot;suspicious&quot;]]
+    normal  = [s for s in sessions if not s[&quot;suspicious&quot;]]
+
+    print(f&quot;All Sessions ({len(sessions)}):&quot;)
+    for s in sorted(sessions, key=lambda x: (x[&quot;user&quot;], x[&quot;start&quot;])):
+        flag_str = &quot; *** SUSPICIOUS ***&quot; if s[&quot;suspicious&quot;] else &quot;&quot;
+        print(f&quot;  [{s[&#x27;id&#x27;]:&gt;2}] {s[&#x27;user&#x27;]:&lt;12} {s[&#x27;start&#x27;]} → {s[&#x27;end&#x27;]}  &quot;
+              f&quot;({s[&#x27;duration_min&#x27;]} min)  actions={s[&#x27;actions&#x27;]}{flag_str}&quot;)
+
+    print(f&quot;\nSuspicious Sessions ({len(flagged)}):&quot;)
+    if flagged:
+        for s in flagged:
+            suspect_acts = [a for a in s[&quot;actions&quot;] if a in SUSPICIOUS_ACTIONS]
+            print(f&quot;  User: {s[&#x27;user&#x27;]}  |  {s[&#x27;start&#x27;]} → {s[&#x27;end&#x27;]}&quot;
+                  f&quot;  |  Suspicious actions: {suspect_acts}&quot;)
+    else:
+        print(&quot;  None.&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    print(&quot;[INFO] Using built-in sample data.\n&quot;)
+
+    sessions_manual,  mal_manual  = reconstruct_without_builtins(SAMPLE_EVENTS)
+    sessions_builtin, mal_builtin = reconstruct_with_builtins(SAMPLE_EVENTS)
+
+    print_report(sessions_manual,  mal_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(sessions_builtin, mal_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check
+    assert len(sessions_manual) == len(sessions_builtin), \
+        f&quot;Session count mismatch: {len(sessions_manual)} vs {len(sessions_builtin)}&quot;
+    manual_suspicious  = sorted(s[&quot;user&quot;] for s in sessions_manual  if s[&quot;suspicious&quot;])
+    builtin_suspicious = sorted(s[&quot;user&quot;] for s in sessions_builtin if s[&quot;suspicious&quot;])
+    assert manual_suspicious == builtin_suspicious, \
+        f&quot;Suspicious user mismatch: {manual_suspicious} vs {builtin_suspicious}&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Grouping : O(E)  — E = total events
+# Sorting  : O(E_u log E_u) per user → O(E log E) total
+# Session  : O(E)  — one scan per user after sort
+# Overall  : O(E log E)
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;Events arrive in a stream. How do you reconstruct sessions in real-time?&quot;
+#     → Maintain per-user state in a dict: last_event_time, current_session.
+#       Use a timeout mechanism (e.g., scheduled job) to close sessions that
+#       have been inactive for &gt; 30 minutes.
+# - &quot;What if a user&#x27;s session should span devices (same user, different IPs)?&quot;
+#     → Add device/IP as a secondary dimension. Session boundary is:
+#       gap &gt; 30 min OR different device.
+# - &quot;How would you detect session hijacking?&quot;
+#     → Flag sessions where the source IP changes mid-session, especially
+#       if the geolocation changes dramatically (impossible travel).
+# - &quot;What if a user has millions of events in one session?&quot;
+#     → Don&#x27;t store all actions in a list. Store only counts, first/last action,
+#       and the LAST event&#x27;s timestamp (needed for gap calculation).
+# =============================================================================
+</code></pre>
+</body>
+</html>

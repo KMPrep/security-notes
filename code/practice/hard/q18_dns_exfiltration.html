@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q18_dns_exfiltration.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q18_dns_exfiltration.py</h1>
+  <p class="file-path">Source: code\practice\hard\q18_dns_exfiltration.py</p>
+  <p class="line-count">523 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q18 [Hard] — DNS Data Exfiltration Detection
+=============================================================================
+
+PROBLEM
+-------
+Attackers encode stolen data in DNS query labels and slowly drip-query
+a C2-controlled domain.  Detect DNS-based covert channel / exfiltration:
+
+  1. High query rate to a single domain (burst indicator)
+  2. Unusually long subdomains (encoded payload)
+  3. High Shannon entropy in subdomain labels (Base32/Base64/hex encoding)
+  4. Many unique subdomains under the same parent domain (enumeration)
+  5. Query type abuse: TXT/NULL/ANY records used for data transfer
+  6. NXDOMAIN flood (probing phase before registering payload domains)
+  7. Low-volume &quot;slow drip&quot; exfiltration spread over many minutes
+
+Input: stream of DNS query events with fields:
+  src_ip, domain, qtype, ts, response_code, answer_count
+
+CLARIFYING QUESTIONS
+--------------------
+1. Do we have full recursive query logs or only stub-resolver logs?
+   → Full resolver logs.
+2. Can we afford per-query per-domain state?
+   → Yes; O(D) domains tracked, evict idle ones.
+3. What encoding schemes do attackers use?
+   → Base32 (RFC 4648), Base64url, hex.  All have high entropy.
+4. What is a &quot;suspicious&quot; label length?
+   → Label &gt;40 chars; total FQDN &gt;200 chars are strong signals.
+5. Should we ignore well-known CDN/cloud domains?
+   → Accept an allowlist; default allowlist includes common CDNs.
+
+=============================================================================
+APPROACH 1 — NAIVE (per-query checks, no state)
+=============================================================================
+  Compute entropy of subdomain; compare label length; check qtype.
+  O(L) per query (L = FQDN length).
+  Misses slow-drip and burst patterns.
+
+=============================================================================
+APPROACH 2 — STATEFUL PER-DOMAIN TRACKER + SLIDING WINDOWS (RECOMMENDED)
+=============================================================================
+  Per parent-domain state:
+    - Sliding window query counter (burst)
+    - Sliding window set of unique subdomain labels (enumeration)
+    - Max entropy seen; running average label length
+    - NXDOMAIN counter
+  O(1) amortised per query.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+import re
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, FrozenSet, List, Optional, Set
+
+# ---------------------------------------------------------------------------
+# Well-known allowlist
+# ---------------------------------------------------------------------------
+
+_ALLOWLIST_TLDS: FrozenSet[str] = frozenset({
+    &quot;googleapis.com&quot;, &quot;gstatic.com&quot;, &quot;akamaihd.net&quot;, &quot;cloudfront.net&quot;,
+    &quot;fastly.net&quot;, &quot;windowsupdate.com&quot;, &quot;apple.com&quot;, &quot;microsoft.com&quot;,
+    &quot;amazon.com&quot;, &quot;s3.amazonaws.com&quot;,
+})
+
+_SUSPICIOUS_QTYPES: FrozenSet[str] = frozenset({&quot;TXT&quot;, &quot;NULL&quot;, &quot;ANY&quot;, &quot;CNAME&quot;})
+
+_LONG_LABEL_THRESHOLD = 40
+_ENTROPY_THRESHOLD = 3.5  # bits per character; random Base32/hex ≈ 4.5+
+_BURST_THRESHOLD = 50     # queries per window
+_BURST_WINDOW_S = 60.0
+_UNIQUE_LABELS_THRESHOLD = 100
+_UNIQUE_LABELS_WINDOW_S = 300.0
+_NXDOMAIN_THRESHOLD = 20
+_NXDOMAIN_WINDOW_S = 60.0
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DnsEvent:
+    src_ip: str
+    domain: str          # full FQDN
+    qtype: str
+    ts: float
+    response_code: str   # NOERROR | NXDOMAIN | SERVFAIL
+    answer_count: int = 0
+
+
+@dataclass
+class DnsAlert:
+    alert_type: str
+    severity: str
+    src_ip: str
+    domain: str
+    parent_domain: str
+    ts: float
+    detail: str
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_event(raw: dict) -&gt; Optional[DnsEvent]:
+    ts = _parse_ts(raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return DnsEvent(
+        src_ip=raw.get(&quot;src_ip&quot;, &quot;&quot;),
+        domain=raw.get(&quot;domain&quot;, &quot;&quot;).lower().rstrip(&quot;.&quot;),
+        qtype=raw.get(&quot;qtype&quot;, &quot;A&quot;).upper(),
+        ts=ts,
+        response_code=raw.get(&quot;response_code&quot;, &quot;NOERROR&quot;).upper(),
+        answer_count=int(raw.get(&quot;answer_count&quot;, 0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entropy calculation
+# ---------------------------------------------------------------------------
+
+def _shannon_entropy(s: str) -&gt; float:
+    &quot;&quot;&quot;Shannon entropy (bits per character) for string s.&quot;&quot;&quot;
+    if not s:
+        return 0.0
+    freq: Dict[str, int] = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+# ---------------------------------------------------------------------------
+# Domain decomposition
+# ---------------------------------------------------------------------------
+
+_TLD_LIKE_RE = re.compile(r&quot;[a-z]+$&quot;)
+
+def _parent_domain(fqdn: str, depth: int = 2) -&gt; str:
+    &quot;&quot;&quot;
+    Return the registrable domain (last `depth` labels).
+    E.g. &quot;foo.bar.evil.com&quot; → &quot;evil.com&quot;  (depth=2)
+    &quot;&quot;&quot;
+    parts = fqdn.split(&quot;.&quot;)
+    if len(parts) &lt;= depth:
+        return fqdn
+    return &quot;.&quot;.join(parts[-depth:])
+
+
+def _subdomain(fqdn: str, depth: int = 2) -&gt; str:
+    &quot;&quot;&quot;Return everything before the registrable domain.&quot;&quot;&quot;
+    parts = fqdn.split(&quot;.&quot;)
+    if len(parts) &lt;= depth:
+        return &quot;&quot;
+    return &quot;.&quot;.join(parts[:-depth])
+
+
+def _max_label_len(fqdn: str) -&gt; int:
+    return max((len(l) for l in fqdn.split(&quot;.&quot;) if l), default=0)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive stateless detector
+# ---------------------------------------------------------------------------
+
+class NaiveDnsExfilDetector:
+    &quot;&quot;&quot;
+    Per-query stateless checks.  O(L) per query.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowlist: Optional[Set[str]] = None,
+        entropy_threshold: float = _ENTROPY_THRESHOLD,
+        label_length_threshold: int = _LONG_LABEL_THRESHOLD,
+    ) -&gt; None:
+        self.allowlist = (allowlist or set()) | _ALLOWLIST_TLDS
+        self.entropy_threshold = entropy_threshold
+        self.label_threshold = label_length_threshold
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[DnsAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        parent = _parent_domain(evt.domain)
+        if parent in self.allowlist:
+            return []
+
+        alerts = []
+        subdomain = _subdomain(evt.domain)
+
+        # Check entropy
+        if subdomain:
+            entropy = _shannon_entropy(subdomain.replace(&quot;.&quot;, &quot;&quot;))
+            if entropy &gt;= self.entropy_threshold:
+                alerts.append(DnsAlert(
+                    alert_type=&quot;high_entropy_subdomain&quot;,
+                    severity=&quot;high&quot;,
+                    src_ip=evt.src_ip,
+                    domain=evt.domain,
+                    parent_domain=parent,
+                    ts=evt.ts,
+                    detail=f&quot;Subdomain entropy={entropy:.2f} (threshold={self.entropy_threshold})&quot;,
+                ))
+
+        # Check label length
+        max_len = _max_label_len(evt.domain)
+        if max_len &gt;= self.label_threshold:
+            alerts.append(DnsAlert(
+                alert_type=&quot;long_dns_label&quot;,
+                severity=&quot;medium&quot;,
+                src_ip=evt.src_ip,
+                domain=evt.domain,
+                parent_domain=parent,
+                ts=evt.ts,
+                detail=f&quot;Max label length={max_len} chars&quot;,
+            ))
+
+        # Suspicious qtype
+        if evt.qtype in _SUSPICIOUS_QTYPES:
+            alerts.append(DnsAlert(
+                alert_type=&quot;suspicious_qtype&quot;,
+                severity=&quot;medium&quot;,
+                src_ip=evt.src_ip,
+                domain=evt.domain,
+                parent_domain=parent,
+                ts=evt.ts,
+                detail=f&quot;Suspicious query type {evt.qtype!r}&quot;,
+            ))
+
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full stateful detector
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _DomainState:
+    # burst window
+    query_times: deque = field(default_factory=deque)
+    # unique labels window: deque of (ts, label)
+    label_times: deque = field(default_factory=deque)
+    label_set: Set[str] = field(default_factory=set)
+    # NXDOMAIN burst
+    nxdomain_times: deque = field(default_factory=deque)
+    # flags
+    burst_alerted: bool = False
+    enum_alerted: bool = False
+    nxdomain_alerted: bool = False
+    # stats
+    total_queries: int = 0
+    max_entropy: float = 0.0
+
+
+class DnsExfilDetector:
+    &quot;&quot;&quot;
+    Stateful DNS exfiltration detector with per-parent-domain tracking.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowlist: Optional[Set[str]] = None,
+        burst_threshold: int = _BURST_THRESHOLD,
+        burst_window_s: float = _BURST_WINDOW_S,
+        unique_labels_threshold: int = _UNIQUE_LABELS_THRESHOLD,
+        unique_labels_window_s: float = _UNIQUE_LABELS_WINDOW_S,
+        nxdomain_threshold: int = _NXDOMAIN_THRESHOLD,
+        nxdomain_window_s: float = _NXDOMAIN_WINDOW_S,
+        entropy_threshold: float = _ENTROPY_THRESHOLD,
+        label_length_threshold: int = _LONG_LABEL_THRESHOLD,
+    ) -&gt; None:
+        self.allowlist = (allowlist or set()) | _ALLOWLIST_TLDS
+        self.burst_threshold = burst_threshold
+        self.burst_window = burst_window_s
+        self.unique_threshold = unique_labels_threshold
+        self.unique_window = unique_labels_window_s
+        self.nxdomain_threshold = nxdomain_threshold
+        self.nxdomain_window = nxdomain_window_s
+        self._naive = NaiveDnsExfilDetector(
+            allowlist=allowlist,
+            entropy_threshold=entropy_threshold,
+            label_length_threshold=label_length_threshold,
+        )
+        self._state: Dict[str, _DomainState] = defaultdict(_DomainState)
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[DnsAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        parent = _parent_domain(evt.domain)
+        if parent in self.allowlist:
+            return []
+
+        alerts: List[DnsAlert] = []
+
+        # Per-event naive checks
+        alerts.extend(self._naive.process(raw))
+
+        st = self._state[parent]
+        st.total_queries += 1
+        now = evt.ts
+
+        # --- Burst detection ---
+        cutoff = now - self.burst_window
+        while st.query_times and st.query_times[0] &lt; cutoff:
+            st.query_times.popleft()
+        st.query_times.append(now)
+        if len(st.query_times) &gt; self.burst_threshold:
+            if not st.burst_alerted:
+                st.burst_alerted = True
+                alerts.append(DnsAlert(
+                    alert_type=&quot;dns_query_burst&quot;,
+                    severity=&quot;high&quot;,
+                    src_ip=evt.src_ip,
+                    domain=evt.domain,
+                    parent_domain=parent,
+                    ts=now,
+                    detail=(f&quot;{len(st.query_times)} queries to {parent!r} &quot;
+                            f&quot;in {self.burst_window}s&quot;),
+                ))
+        else:
+            st.burst_alerted = False
+
+        # --- Unique subdomain enumeration ---
+        subdomain = _subdomain(evt.domain)
+        if subdomain:
+            cutoff_u = now - self.unique_window
+            # Evict old labels
+            while st.label_times and st.label_times[0][0] &lt; cutoff_u:
+                _, old_label = st.label_times.popleft()
+                # Rebuild set (simple approach, bounded by window size)
+                st.label_set = {l for _, l in st.label_times}
+            st.label_times.append((now, subdomain))
+            st.label_set.add(subdomain)
+            if len(st.label_set) &gt; self.unique_threshold:
+                if not st.enum_alerted:
+                    st.enum_alerted = True
+                    alerts.append(DnsAlert(
+                        alert_type=&quot;subdomain_enumeration&quot;,
+                        severity=&quot;high&quot;,
+                        src_ip=evt.src_ip,
+                        domain=evt.domain,
+                        parent_domain=parent,
+                        ts=now,
+                        detail=(f&quot;{len(st.label_set)} unique subdomains under {parent!r} &quot;
+                                f&quot;in {self.unique_window}s&quot;),
+                    ))
+
+        # --- NXDOMAIN flood ---
+        if evt.response_code == &quot;NXDOMAIN&quot;:
+            cutoff_nx = now - self.nxdomain_window
+            while st.nxdomain_times and st.nxdomain_times[0] &lt; cutoff_nx:
+                st.nxdomain_times.popleft()
+            st.nxdomain_times.append(now)
+            if len(st.nxdomain_times) &gt; self.nxdomain_threshold:
+                if not st.nxdomain_alerted:
+                    st.nxdomain_alerted = True
+                    alerts.append(DnsAlert(
+                        alert_type=&quot;nxdomain_flood&quot;,
+                        severity=&quot;medium&quot;,
+                        src_ip=evt.src_ip,
+                        domain=evt.domain,
+                        parent_domain=parent,
+                        ts=now,
+                        detail=(f&quot;{len(st.nxdomain_times)} NXDOMAINs for {parent!r} &quot;
+                                f&quot;in {self.nxdomain_window}s&quot;),
+                    ))
+
+        return alerts
+
+    def evict_idle(self, before_ts: float) -&gt; int:
+        &quot;&quot;&quot;Remove per-domain state that hasn&#x27;t seen queries since before_ts.&quot;&quot;&quot;
+        stale = [p for p, st in self._state.items()
+                 if st.query_times and st.query_times[-1] &lt; before_ts]
+        for p in stale:
+            del self._state[p]
+        return len(stale)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _raw_dns(src, domain, qtype=&quot;A&quot;, ts=1000.0, rc=&quot;NOERROR&quot;) -&gt; dict:
+    return {&quot;src_ip&quot;: src, &quot;domain&quot;: domain, &quot;qtype&quot;: qtype,
+            &quot;ts&quot;: ts, &quot;response_code&quot;: rc, &quot;answer_count&quot;: 1}
+
+
+def test_high_entropy_subdomain():
+    det = DnsExfilDetector(entropy_threshold=3.5)
+    # &quot;aabbccddee...1234&quot; — high entropy Base32-like
+    label = &quot;MFRA&quot; * 12  # 48 chars of high-entropy
+    alerts = det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;{label.lower()}.evil.com&quot;))
+    assert any(a.alert_type == &quot;high_entropy_subdomain&quot; for a in alerts), \
+        f&quot;Expected high_entropy; got {[a.alert_type for a in alerts]}&quot;
+    print(&quot;High entropy subdomain: passed&quot;)
+
+
+def test_long_label():
+    det = DnsExfilDetector(label_length_threshold=40)
+    label = &quot;x&quot; * 50
+    alerts = det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;{label}.evil.com&quot;))
+    assert any(a.alert_type == &quot;long_dns_label&quot; for a in alerts)
+    print(&quot;Long label: passed&quot;)
+
+
+def test_burst():
+    det = DnsExfilDetector(burst_threshold=5, burst_window_s=60)
+    all_alerts = []
+    for i in range(7):
+        all_alerts += det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;sub{i}.evil.com&quot;, ts=float(1000 + i)))
+    assert any(a.alert_type == &quot;dns_query_burst&quot; for a in all_alerts)
+    print(&quot;Burst: passed&quot;)
+
+
+def test_nxdomain_flood():
+    det = DnsExfilDetector(nxdomain_threshold=3, nxdomain_window_s=60)
+    all_alerts = []
+    for i in range(5):
+        all_alerts += det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;rand{i}.evil.com&quot;,
+                                            ts=float(1000 + i), rc=&quot;NXDOMAIN&quot;))
+    assert any(a.alert_type == &quot;nxdomain_flood&quot; for a in all_alerts)
+    print(&quot;NXDOMAIN flood: passed&quot;)
+
+
+def test_allowlist():
+    det = DnsExfilDetector()
+    label = &quot;x&quot; * 50
+    alerts = det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;{label}.googleapis.com&quot;))
+    assert len(alerts) == 0
+    print(&quot;Allowlist: passed&quot;)
+
+
+def test_suspicious_qtype():
+    det = DnsExfilDetector()
+    alerts = det.process(_raw_dns(&quot;10.0.0.1&quot;, &quot;evil.com&quot;, qtype=&quot;TXT&quot;))
+    assert any(a.alert_type == &quot;suspicious_qtype&quot; for a in alerts)
+    print(&quot;Suspicious qtype: passed&quot;)
+
+
+def test_subdomain_enumeration():
+    det = DnsExfilDetector(unique_labels_threshold=3, unique_labels_window_s=120)
+    all_alerts = []
+    for i in range(5):
+        all_alerts += det.process(_raw_dns(&quot;10.0.0.1&quot;, f&quot;label{i}.evil.com&quot;, ts=float(1000 + i)))
+    assert any(a.alert_type == &quot;subdomain_enumeration&quot; for a in all_alerts)
+    print(&quot;Subdomain enumeration: passed&quot;)
+
+
+def test_malformed():
+    det = DnsExfilDetector()
+    r = det.process({&quot;src_ip&quot;: &quot;x&quot;})  # missing ts
+    assert r == []
+    assert det.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  DNS tunneling / DNS covert channel lets attackers exfiltrate data through
+  recursive DNS infrastructure that is usually unrestricted by perimeter firewalls.
+
+TECHNIQUES
+  iodine, dnscat2, dns2tcp: encode data as hex/Base32 in A/AAAA subdomains.
+  TXT record abuse: C2 replies with commands in TXT records.
+  CNAME chains: multiple redirections to delay detection.
+  Slow drip: one query every 30s → low volume but persistent.
+
+INDICATORS
+  - Label entropy &gt; 3.5 bits/char  (random Base32 ≈ 4.5)
+  - Max label length &gt; 40 chars
+  - &gt; 50 unique subdomains in 5 minutes
+  - TXT / NULL qtype from endpoints
+  - High NXDOMAIN rate to a single eTLD
+
+HARDENING
+  - DNS RPZ (Response Policy Zones): block known C2 domains.
+  - Internal recursive resolver only: block direct external DNS on 53/tcp+udp.
+  - DoH/DoT inspection: decrypt and inspect DNS-over-HTTPS if used.
+  - Query rate limiting per source IP at the resolver.
+  - Monitor EDR telemetry: processes making unusual DNS calls (curl, ncat, iodine).
+
+FALSE POSITIVES
+  - Legitimate CDN domains with long labels (mitigated by allowlist).
+  - DKIM/SPF TXT records query.
+  - Dynamic DNS update flood (TSIG).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_high_entropy_subdomain()
+    test_long_label()
+    test_burst()
+    test_nxdomain_flood()
+    test_allowlist()
+    test_suspicious_qtype()
+    test_subdomain_enumeration()
+    test_malformed()
+</code></pre>
+</body>
+</html>

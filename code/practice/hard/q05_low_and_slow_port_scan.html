@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q05_low_and_slow_port_scan.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q05_low_and_slow_port_scan.py</h1>
+  <p class="file-path">Source: code\practice\hard\q05_low_and_slow_port_scan.py</p>
+  <p class="line-count">472 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q05 [Hard] — Detect Low-and-Slow Port Scan
+=============================================================================
+
+PROBLEM
+-------
+A low-and-slow port scanner probes ports at a rate designed to stay under
+simple per-minute thresholds (e.g. 1 probe every 10 minutes).  Across a
+multi-hour window it accumulates evidence of systematic scanning.
+Detect such source IPs from a network event stream.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input format — (src, dst, dst_port, timestamp) events?
+   → Yes, parsed dicts with those fields.
+2. What constitutes a &quot;scan&quot; — connections to many ports on ONE host, or
+   ports across MANY hosts?
+   → Flag both: single-host multi-port (vertical scan) and
+     multi-host same-port (horizontal scan).
+3. What thresholds trigger detection?
+   → Configurable: e.g. ≥15 unique ports on one dst, or ≥15 unique dsts
+     on one port, within a rolling 4-hour window.
+4. What is the window size?
+   → Rolling window of configurable duration (default 4 hours).
+5. Should we suppress alerts for known scanners (e.g. internal vulnerability
+   scanners)?
+   → Yes; accept an allowlist of src IPs.
+6. What should happen when the stream is replayed or out of order?
+   → Tolerate ≤60 s out-of-order events; older events are dropped.
+7. Memory bounds?
+   → Sliding window per (src) or (src, dst): evict entries older than window.
+
+=============================================================================
+APPROACH 1 — NAIVE  (dict of sets, no eviction)
+=============================================================================
+For each src, maintain:
+  scan_data[src][dst] = set of ports probed
+Check at query time: any dst with |ports| ≥ threshold → vertical scan.
+Check across dsts: |{dsts}| ≥ threshold for a given port → horizontal scan.
+
+  Time : O(1) per event, O(S×D×P) per query  (S srcs, D dsts, P ports)
+  Space: O(S×D×P) — unbounded; never evicts old events ← PROBLEM
+
+=============================================================================
+APPROACH 2 — SLIDING WINDOW with Deque + Set per (src, dst)  (RECOMMENDED)
+=============================================================================
+Per (src, dst) pair, keep:
+  - A deque of (timestamp, port) sorted by ts for O(1) eviction of old events.
+  - A dict {port: count} for O(1) cardinality tracking.
+
+When checking vertical scan: evict events older than window from deque,
+decrement counts, then check if |unique ports| ≥ threshold.
+
+Per (src, port) pair, same design for horizontal scan.
+
+  Time : O(1) amortised per event (deque push + dict update)
+  Space: O(events within window) — bounded by event rate × window size
+
+=============================================================================
+APPROACH 3 — HYPERLOGLOG for approximate distinct count  (large-scale)
+=============================================================================
+For extreme scale (millions of events/second), replace the exact set with
+HyperLogLog to count distinct ports/dsts approximately in O(1) time and
+O(log log N) space per (src, dst) tracker.
+
+  Error: ±1.04/√m where m = HLL register count (m=1024 → ±3.25% error)
+  Trade-off: no ability to evict individual events from HLL → use epoch-based
+  HLLs (current epoch + previous epoch) and merge for window estimate.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScanAlert:
+    src: str
+    scan_type: str          # &quot;vertical&quot; | &quot;horizontal&quot;
+    target: str             # dst IP (vertical) or port str (horizontal)
+    unique_count: int        # number of unique ports or dsts
+    window_seconds: float
+    first_seen: float
+    last_seen: float
+    sample_targets: List    # first 10 unique ports/dsts seen
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (no eviction, dict of sets)
+# ---------------------------------------------------------------------------
+
+class NaivePortScanDetector:
+    &quot;&quot;&quot;
+    Stores all events; checks thresholds at query time.
+    Simple to implement, breaks on long-running streams.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        vertical_threshold: int = 15,   # unique ports on one dst
+        horizontal_threshold: int = 15,  # unique dsts for one port
+        allowlist: Set[str] = None,
+    ) -&gt; None:
+        self.vertical_threshold = vertical_threshold
+        self.horizontal_threshold = horizontal_threshold
+        self.allowlist: Set[str] = allowlist or set()
+        # vertical: src -&gt; dst -&gt; set of ports
+        self._v: Dict[str, Dict[str, Set[int]]] = defaultdict(lambda: defaultdict(set))
+        # horizontal: src -&gt; port -&gt; set of dsts
+        self._h: Dict[str, Dict[int, Set[str]]] = defaultdict(lambda: defaultdict(set))
+        self.malformed = 0
+
+    def process(self, event: dict) -&gt; None:
+        src = event.get(&quot;src&quot;)
+        dst = event.get(&quot;dst&quot;)
+        port = event.get(&quot;dst_port&quot;)
+        if not src or not dst or port is None:
+            self.malformed += 1
+            return
+        if src in self.allowlist:
+            return
+        try:
+            port = int(port)
+        except (ValueError, TypeError):
+            self.malformed += 1
+            return
+        self._v[src][dst].add(port)
+        self._h[src][port].add(dst)
+
+    def get_alerts(self) -&gt; List[ScanAlert]:
+        alerts = []
+        # Vertical scan: one src probing many ports on one dst
+        for src, dst_map in self._v.items():
+            for dst, ports in dst_map.items():
+                if len(ports) &gt;= self.vertical_threshold:
+                    alerts.append(ScanAlert(
+                        src=src, scan_type=&quot;vertical&quot;, target=dst,
+                        unique_count=len(ports), window_seconds=float(&quot;inf&quot;),
+                        first_seen=0, last_seen=0,
+                        sample_targets=sorted(ports)[:10],
+                    ))
+        # Horizontal scan: one src hitting one port on many dsts
+        for src, port_map in self._h.items():
+            for port, dsts in port_map.items():
+                if len(dsts) &gt;= self.horizontal_threshold:
+                    alerts.append(ScanAlert(
+                        src=src, scan_type=&quot;horizontal&quot;, target=str(port),
+                        unique_count=len(dsts), window_seconds=float(&quot;inf&quot;),
+                        first_seen=0, last_seen=0,
+                        sample_targets=sorted(dsts)[:10],
+                    ))
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Sliding Window with Deque + Counter  (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class _SlidingWindowCounter:
+    &quot;&quot;&quot;
+    Tracks unique values in a sliding time window.
+    Each value is stored with the timestamp it was first seen in the window.
+    Duplicate values within the window extend no further (only the earliest ts
+    is tracked; we rely on eviction to clean up when that ts expires).
+
+    Internal state per (src, context_key):
+      deque: [(timestamp, value), ...]  ordered by ts (oldest first)
+      value_counts: {value: count_in_window}   for O(1) size check
+    &quot;&quot;&quot;
+
+    def __init__(self, window_seconds: float) -&gt; None:
+        self.window = window_seconds
+        self._queue: deque = deque()             # (ts, value)
+        self._counts: Dict = defaultdict(int)   # value → occurrences in window
+        self._first_ts: Optional[float] = None
+        self._last_ts: Optional[float] = None
+
+    def add(self, ts: float, value) -&gt; None:
+        self._evict(ts)
+        self._queue.append((ts, value))
+        self._counts[value] += 1
+        if self._first_ts is None:
+            self._first_ts = ts
+        self._last_ts = ts
+
+    def _evict(self, current_ts: float) -&gt; None:
+        cutoff = current_ts - self.window
+        while self._queue and self._queue[0][0] &lt; cutoff:
+            old_ts, old_val = self._queue.popleft()
+            self._counts[old_val] -= 1
+            if self._counts[old_val] &lt;= 0:
+                del self._counts[old_val]
+
+    def unique_count(self) -&gt; int:
+        return len(self._counts)
+
+    def unique_values(self) -&gt; Set:
+        return set(self._counts.keys())
+
+    @property
+    def first_seen(self) -&gt; Optional[float]:
+        return self._queue[0][0] if self._queue else None
+
+    @property
+    def last_seen(self) -&gt; Optional[float]:
+        return self._last_ts
+
+
+class SlidingWindowPortScanDetector:
+    &quot;&quot;&quot;
+    Sliding-window port scan detector.
+
+    Maintains per (src, dst) deque for vertical scans and
+    per (src, port) deque for horizontal scans.
+    Memory: O(events within window × 2)
+
+    On each process() call, checks both vertical and horizontal conditions
+    immediately — O(1) amortised.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        window_seconds: float = 4 * 3600,
+        vertical_threshold: int = 15,
+        horizontal_threshold: int = 15,
+        allowlist: Set[str] = None,
+    ) -&gt; None:
+        self.window = window_seconds
+        self.vertical_threshold = vertical_threshold
+        self.horizontal_threshold = horizontal_threshold
+        self.allowlist: Set[str] = allowlist or set()
+        # (src, dst) → SlidingWindowCounter of ports
+        self._vertical: Dict[Tuple[str, str], _SlidingWindowCounter] = {}
+        # (src, port) → SlidingWindowCounter of dsts
+        self._horizontal: Dict[Tuple[str, int], _SlidingWindowCounter] = {}
+        self._alerts: List[ScanAlert] = []
+        self._alerted: Set[Tuple] = set()   # dedup key
+        self.malformed = 0
+
+    def process(self, event: dict) -&gt; List[ScanAlert]:
+        &quot;&quot;&quot;Process one event; return any new alerts triggered.&quot;&quot;&quot;
+        src = event.get(&quot;src&quot;)
+        dst = event.get(&quot;dst&quot;)
+        port = event.get(&quot;dst_port&quot;)
+        ts = _parse_ts(event.get(&quot;ts&quot;, 0.0))
+
+        if not src or not dst or port is None or ts is None:
+            self.malformed += 1
+            return []
+        if src in self.allowlist:
+            return []
+        try:
+            port = int(port)
+        except (ValueError, TypeError):
+            self.malformed += 1
+            return []
+
+        new_alerts = []
+
+        # --- Vertical scan tracking ---
+        vkey = (src, dst)
+        if vkey not in self._vertical:
+            self._vertical[vkey] = _SlidingWindowCounter(self.window)
+        vctr = self._vertical[vkey]
+        vctr.add(ts, port)
+        if vctr.unique_count() &gt;= self.vertical_threshold:
+            alert_key = (&quot;vertical&quot;, src, dst)
+            if alert_key not in self._alerted:
+                self._alerted.add(alert_key)
+                a = ScanAlert(
+                    src=src, scan_type=&quot;vertical&quot;, target=dst,
+                    unique_count=vctr.unique_count(),
+                    window_seconds=self.window,
+                    first_seen=vctr.first_seen or ts,
+                    last_seen=ts,
+                    sample_targets=sorted(vctr.unique_values())[:10],
+                )
+                new_alerts.append(a)
+                self._alerts.append(a)
+            else:
+                # Update existing alert count
+                for a in self._alerts:
+                    if a.scan_type == &quot;vertical&quot; and a.src == src and a.target == dst:
+                        a.unique_count = vctr.unique_count()
+                        a.last_seen = ts
+
+        # --- Horizontal scan tracking ---
+        hkey = (src, port)
+        if hkey not in self._horizontal:
+            self._horizontal[hkey] = _SlidingWindowCounter(self.window)
+        hctr = self._horizontal[hkey]
+        hctr.add(ts, dst)
+        if hctr.unique_count() &gt;= self.horizontal_threshold:
+            alert_key = (&quot;horizontal&quot;, src, str(port))
+            if alert_key not in self._alerted:
+                self._alerted.add(alert_key)
+                a = ScanAlert(
+                    src=src, scan_type=&quot;horizontal&quot;, target=str(port),
+                    unique_count=hctr.unique_count(),
+                    window_seconds=self.window,
+                    first_seen=hctr.first_seen or ts,
+                    last_seen=ts,
+                    sample_targets=sorted(hctr.unique_values())[:10],
+                )
+                new_alerts.append(a)
+                self._alerts.append(a)
+
+        return new_alerts
+
+    def get_all_alerts(self) -&gt; List[ScanAlert]:
+        return self._alerts
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_event(src: str, dst: str, port: int, ts: float) -&gt; dict:
+    return {&quot;src&quot;: src, &quot;dst&quot;: dst, &quot;dst_port&quot;: port, &quot;ts&quot;: ts}
+
+
+def test_naive_vertical():
+    det = NaivePortScanDetector(vertical_threshold=5)
+    for port in range(1, 6):
+        det.process(_make_event(&quot;10.0.0.1&quot;, &quot;192.168.1.1&quot;, port, 0))
+    alerts = det.get_alerts()
+    v_alerts = [a for a in alerts if a.scan_type == &quot;vertical&quot;]
+    assert len(v_alerts) == 1
+    assert v_alerts[0].src == &quot;10.0.0.1&quot;
+    assert v_alerts[0].unique_count == 5
+    print(&quot;NaivePortScanDetector vertical: passed&quot;)
+
+
+def test_naive_horizontal():
+    det = NaivePortScanDetector(horizontal_threshold=5)
+    for i in range(1, 6):
+        det.process(_make_event(&quot;10.0.0.1&quot;, f&quot;192.168.1.{i}&quot;, 22, 0))
+    alerts = det.get_alerts()
+    h_alerts = [a for a in alerts if a.scan_type == &quot;horizontal&quot;]
+    assert len(h_alerts) == 1
+    assert h_alerts[0].target == &quot;22&quot;
+    print(&quot;NaivePortScanDetector horizontal: passed&quot;)
+
+
+def test_sliding_window_vertical():
+    det = SlidingWindowPortScanDetector(
+        window_seconds=3600, vertical_threshold=5
+    )
+    alerts = []
+    base_ts = 1_000_000.0
+    # 5 unique ports → triggers vertical
+    for port in range(1, 6):
+        alerts += det.process(_make_event(&quot;10.0.0.1&quot;, &quot;192.168.1.1&quot;, port, base_ts + port * 60))
+    assert any(a.scan_type == &quot;vertical&quot; for a in alerts), &quot;Expected vertical alert&quot;
+    print(&quot;SlidingWindow vertical: passed&quot;)
+
+
+def test_sliding_window_eviction():
+    &quot;&quot;&quot;Events that fall outside the window should be evicted, resetting count.&quot;&quot;&quot;
+    det = SlidingWindowPortScanDetector(
+        window_seconds=600, vertical_threshold=5
+    )
+    base_ts = 1_000_000.0
+    # First batch: 4 ports within window
+    for port in range(1, 5):
+        det.process(_make_event(&quot;10.0.0.1&quot;, &quot;192.168.1.1&quot;, port, base_ts + port * 10))
+    # Jump far into future — all previous events evicted
+    far_ts = base_ts + 700
+    for port in range(10, 13):
+        det.process(_make_event(&quot;10.0.0.1&quot;, &quot;192.168.1.1&quot;, port, far_ts + port))
+    # Only 3 ports in current window → no alert
+    assert len(det.get_all_alerts()) == 0, &quot;Should not alert after eviction&quot;
+    print(&quot;SlidingWindow eviction: passed&quot;)
+
+
+def test_allowlist():
+    det = SlidingWindowPortScanDetector(
+        window_seconds=3600, vertical_threshold=5,
+        allowlist={&quot;10.0.0.99&quot;}
+    )
+    base_ts = 1_000_000.0
+    for port in range(1, 20):
+        det.process(_make_event(&quot;10.0.0.99&quot;, &quot;192.168.1.1&quot;, port, base_ts + port))
+    assert len(det.get_all_alerts()) == 0, &quot;Allowlisted IP should not trigger alert&quot;
+    print(&quot;Allowlist: passed&quot;)
+
+
+def test_malformed():
+    det = SlidingWindowPortScanDetector()
+    det.process({})
+    det.process({&quot;src&quot;: &quot;1.1.1.1&quot;})
+    det.process({&quot;src&quot;: &quot;1.1.1.1&quot;, &quot;dst&quot;: &quot;2.2.2.2&quot;, &quot;dst_port&quot;: &quot;bad&quot;, &quot;ts&quot;: 0})
+    assert det.malformed == 3
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Low-and-slow port scans are a reconnaissance technique used to map a network
+  without triggering rate-based IDS rules (e.g. &quot;more than 10 unique ports
+  per minute from same src&quot;).  Common examples:
+  - Nmap -T1 (paranoid timing: 1 probe per 5 minutes)
+  - Masscan with very low rate
+  - Manual attacker manually trying ports over hours
+
+  After a slow scan, the attacker:
+  1. Identifies listening services (open ports)
+  2. Focuses exploitation on discovered services
+  3. Uses findings for lateral movement
+
+DETECTION STRATEGY
+  - 4-hour rolling window catches scans that complete in under a business day.
+  - Combine vertical + horizontal: an attacker scanning the entire /16 on port
+    22 is a horizontal scanner; mapping one host&#x27;s service portfolio is vertical.
+  - Threshold of 15 unique ports is a practical balance (reduces false positives
+    from applications that legitimately open many sockets).
+
+FALSE POSITIVES
+  - Vulnerability scanners (Qualys, Tenable, Nessus): add to allowlist.
+  - Load balancers probing backend health: whitelist known infra src IPs.
+  - Cloud metadata services: filter RFC-1918 + 169.254.0.0/16 dsts if needed.
+
+FALSE NEGATIVES
+  - Scan rate slower than window/threshold (e.g. 1 probe/hour over 2 days):
+    extend window to 24h or track across multiple rolling windows.
+  - Scan from many coordinated source IPs (distributed scan): requires
+    per-dst aggregation across all sources (handled in Q06 variant).
+
+PRODUCTION HARDENING
+  - Use Redis sorted-sets for the deque per (src, dst) — O(log N) push/evict,
+    O(1) cardinality via PFADD/PFCOUNT for HLL-based approximation.
+  - Emit alerts to SIEM with full evidence (ports seen, time range).
+  - Correlate with connection-refused (RST) vs open ratios for confidence boost.
+  - Schedule window rotations to avoid memory spikes at epoch boundaries.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_vertical()
+    test_naive_horizontal()
+    test_sliding_window_vertical()
+    test_sliding_window_eviction()
+    test_allowlist()
+    test_malformed()
+</code></pre>
+</body>
+</html>

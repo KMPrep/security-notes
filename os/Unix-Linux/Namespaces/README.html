@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Linux Namespaces</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: os\Unix-Linux\Namespaces\README.md</p>
+<h1 id="linux-namespaces">Linux Namespaces</h1>
+<p><strong>Category:</strong> Unix/Linux Security, Container Isolation<br />
+<strong>Parent:</strong> <a href="../README.md">os/Unix-Linux/README.md</a></p>
+<h2 id="overview">Overview</h2>
+<p>Linux namespaces are the kernel mechanism that provides isolation between groups of processes. They are the foundational technology behind containers (Docker, containerd, Podman) and some sandboxing implementations (Chromium, Flatpak). Each namespace wraps a specific system resource and gives processes inside the namespace their own isolated view of that resource.</p>
+<p>For security engineering, namespaces matter in two directions:</p>
+<ol>
+<li><strong>As an isolation primitive:</strong> containers depend on namespaces to isolate filesystem, network, PIDs, and users from each other and from the host.</li>
+<li><strong>As an attack surface:</strong> namespaces can be escaped or misconfigured in ways that allow a process inside a namespace to affect resources outside it.</li>
+</ol>
+<hr />
+<h2 id="the-8-namespace-types">The 8 Namespace Types</h2>
+<table>
+<thead>
+<tr>
+<th>Namespace</th>
+<th>Flag</th>
+<th>What It Isolates</th>
+<th>Security relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Mount (mnt)</strong></td>
+<td><code>CLONE_NEWNS</code></td>
+<td>Filesystem mount points; each namespace has its own mount table</td>
+<td>Container filesystem isolation; host mounts leaked into container = escape path</td>
+</tr>
+<tr>
+<td><strong>PID</strong></td>
+<td><code>CLONE_NEWPID</code></td>
+<td>Process ID space; PIDs restart from 1 inside</td>
+<td>Without PID ns, container can see and signal host processes</td>
+</tr>
+<tr>
+<td><strong>Network (net)</strong></td>
+<td><code>CLONE_NEWNET</code></td>
+<td>Network interfaces, routing, sockets, iptables</td>
+<td>Each container gets its own virtual NIC; without net ns, containers share host network</td>
+</tr>
+<tr>
+<td><strong>UTS</strong></td>
+<td><code>CLONE_NEWUTS</code></td>
+<td>Hostname and domain name</td>
+<td>Low security relevance; cosmetic isolation</td>
+</tr>
+<tr>
+<td><strong>IPC</strong></td>
+<td><code>CLONE_NEWIPC</code></td>
+<td>System V IPC, POSIX message queues</td>
+<td>Without IPC ns, container can read/write host IPC objects</td>
+</tr>
+<tr>
+<td><strong>User (user)</strong></td>
+<td><code>CLONE_NEWUSER</code></td>
+<td>UID/GID mappings — UID 0 inside maps to unprivileged UID on host</td>
+<td>Allows rootless containers; can be abused to gain capabilities</td>
+</tr>
+<tr>
+<td><strong>Cgroup</strong></td>
+<td><code>CLONE_NEWCGROUP</code></td>
+<td>cgroup v2 filesystem view</td>
+<td>Without cgroup ns, container can see host cgroup hierarchy</td>
+</tr>
+<tr>
+<td><strong>Time</strong></td>
+<td><code>CLONE_NEWTIME</code></td>
+<td>System clock offsets (Linux 5.6+)</td>
+<td>Low security relevance; protects against clock manipulation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="how-namespaces-work">How Namespaces Work</h2>
+<pre class="mermaid">
+flowchart TD
+    HOST[Host kernel] --> NS1[Container A]
+    HOST --> NS2[Container B]
+    NS1 --> PID1A[PID ns: 1=nginx 2=worker]
+    NS1 --> NET1A[Net ns: eth0=172.17.0.2]
+    NS1 --> MNT1A[Mnt ns: / = overlay on host]
+    NS2 --> PID1B[PID ns: 1=app 2=helper]
+    NS2 --> NET1B[Net ns: eth0=172.17.0.3]
+    NS2 --> MNT1B[Mnt ns: / = overlay on host]
+</pre>
+<p>On the host, the container processes appear with their real PIDs (e.g., 4271, 4272). Inside the PID namespace, they see 1, 2.</p>
+<hr />
+<h2 id="namespace-inspection-commands">Namespace Inspection Commands</h2>
+<pre><code class="language-bash"># List all namespaces for a process
+ls -la /proc/&lt;pid&gt;/ns/
+
+# View namespace IDs for all processes
+lsns
+
+# Enter a specific namespace of a running container
+nsenter -t &lt;pid&gt; --mount --pid --net -- /bin/bash
+
+# Create a new network namespace and run a command in it
+ip netns add testns
+ip netns exec testns ip link list
+ip netns del testns
+
+# Show your own namespaces
+ls -la /proc/self/ns/
+</code></pre>
+<hr />
+<h2 id="user-namespaces-power-and-danger">User Namespaces: Power and Danger</h2>
+<p>The user namespace is the most security-relevant. It maps UIDs inside the namespace to different UIDs on the host:</p>
+<pre><code>Inside namespace: UID 0 (root)
+     ↕ mapping: uid_map says 0 → 1000
+Outside (host): UID 1000 (unprivileged user)
+</code></pre>
+<p>This enables <strong>rootless containers</strong> — a container process runs as UID 0 inside but maps to an unprivileged UID on the host. If the container is escaped, the attacker lands as a normal user, not root.</p>
+<h3 id="user-namespace-attack-surface">User Namespace Attack Surface</h3>
+<p>User namespaces also grant the creating process a full set of capabilities <strong>within the new namespace</strong>. This has historically been a kernel attack surface:</p>
+<table>
+<thead>
+<tr>
+<th>CVE</th>
+<th>Mechanism</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CVE-2022-0847 (Dirty Pipe)</td>
+<td>pipe page flag manipulation</td>
+<td>Any user could overwrite read-only files including SUID binaries</td>
+</tr>
+<tr>
+<td>CVE-2021-3493</td>
+<td>Ubuntu-specific user ns + overlayfs</td>
+<td>Unprivileged user gains kernel code execution</td>
+</tr>
+<tr>
+<td>CVE-2019-5736 (runc)</td>
+<td>/proc/self/exe race via procfs</td>
+<td>Container process overwrites host runc binary</td>
+</tr>
+<tr>
+<td>CVE-2016-5195 (Dirty COW)</td>
+<td>MAP_PRIVATE + ptrace race in copy-on-write</td>
+<td>Write to read-only mapped files; overwrite SUID binaries</td>
+</tr>
+</tbody>
+</table>
+<p>Many Linux distributions restrict unprivileged user namespace creation:</p>
+<pre><code class="language-bash"># Restrict user namespaces (Ubuntu 23.10+, some RHEL configs)
+sysctl -w kernel.unprivileged_userns_clone=0
+
+# Check current setting
+cat /proc/sys/kernel/unprivileged_userns_clone
+</code></pre>
+<hr />
+<h2 id="mount-namespace-container-filesystem-isolation">Mount Namespace: Container Filesystem Isolation</h2>
+<p>The mount namespace gives each container its own mount table. The container's <code>/</code> is a separate overlay filesystem stacked on top of container image layers.</p>
+<h3 id="dangerous-mount-configurations">Dangerous Mount Configurations</h3>
+<table>
+<thead>
+<tr>
+<th>Misconfiguration</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-v /:/host</code> — mount host root into container</td>
+<td>Container has full read/write access to host filesystem</td>
+</tr>
+<tr>
+<td><code>-v /proc:/host-proc</code> — mount host <code>/proc</code></td>
+<td>Container can read all host process memory, environ, cmdline</td>
+</tr>
+<tr>
+<td><code>-v /etc:/etc</code> — mount host <code>/etc</code></td>
+<td>Container can modify <code>/etc/passwd</code>, <code>/etc/shadow</code>, <code>sudoers</code></td>
+</tr>
+<tr>
+<td><code>-v /var/run/docker.sock:/var/run/docker.sock</code></td>
+<td>Container can create new privileged containers → full host compromise</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-docker-socket-escape">The Docker Socket Escape</h3>
+<p>Mounting the Docker socket into a container is a trivially exploitable misconfiguration:</p>
+<pre><code class="language-bash"># Inside container with Docker socket mounted
+docker run -it --privileged -v /:/host ubuntu chroot /host
+# Now you have root on the host
+</code></pre>
+<hr />
+<h2 id="network-namespace-container-network-isolation">Network Namespace: Container Network Isolation</h2>
+<p>Each container gets its own network namespace with virtual Ethernet pair (<code>veth</code>) connecting to the host bridge.</p>
+<pre class="mermaid">
+flowchart LR
+    CONT[Container net ns\neth0=172.17.0.2] <-->|veth pair| BRIDGE[docker0 bridge\n172.17.0.1]
+    BRIDGE --> HOST[Host network ns\neth0=192.168.1.10]
+</pre>
+<h3 id="network-namespace-attack-scenarios">Network Namespace Attack Scenarios</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--network=host</code></td>
+<td>Container shares host network stack; can bind host ports; can sniff host traffic</td>
+</tr>
+<tr>
+<td>CAP_NET_ADMIN + net ns</td>
+<td>Container can modify its own routing, arp cache, iptables</td>
+</tr>
+<tr>
+<td>Unfiltered inter-container communication</td>
+<td>Container A can reach container B directly on bridge network</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="pid-namespace-and-isolation-gaps">PID Namespace and Isolation Gaps</h2>
+<p>Without a PID namespace, container processes appear in the host's PID list. With a PID namespace, container processes have isolated PIDs — but the host can still see and kill them by their host PID.</p>
+<h3 id="security-implications">Security Implications</h3>
+<ul>
+<li><strong>No PID ns</strong> → container process can <code>kill -9</code> other user's processes (if same UID), read <code>/proc/&lt;host-pid&gt;/environ</code> for sensitive data</li>
+<li><strong>With PID ns</strong> → container process 1 is its own init; container cannot signal host processes; <code>/proc</code> is largely isolated</li>
+<li><strong>Shared PID ns</strong> (<code>--pid=host</code>) → container can ptrace host processes if <code>CAP_SYS_PTRACE</code> is held</li>
+</ul>
+<hr />
+<h2 id="namespace-escape-techniques">Namespace Escape Techniques</h2>
+<h3 id="1-exploiting-a-privileged-sibling-container">1. Exploiting a privileged sibling container</h3>
+<p>If you can communicate with a privileged container (one with CAP_SYS_ADMIN or host mounts), you may be able to trigger it to run commands for you.</p>
+<h3 id="2-nsenter-from-a-privileged-context">2. nsenter from a privileged context</h3>
+<p>From the host or from a container with sufficient privileges:</p>
+<pre><code class="language-bash"># Enter all namespaces of a target container
+nsenter -t &lt;container-pid&gt; --all -- /bin/bash
+</code></pre>
+<h3 id="3-host-pid-namespace-shared">3. Host PID namespace shared</h3>
+<p>If <code>--pid=host</code> is set, the container can see host processes. With <code>CAP_SYS_PTRACE</code>, it can inject into them.</p>
+<h3 id="4-user-namespace-kernel-exploit-chain">4. User namespace + kernel exploit chain</h3>
+<p>Unpriv user creates user namespace → gains full capabilities within that ns → exploits kernel bug reachable from that privileged position → escapes to real root.</p>
+<hr />
+<h2 id="hardening-namespace-configuration-checklist">Hardening: Namespace Configuration Checklist</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>How</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Never use <code>--network=host</code></td>
+<td>Omit flag; use bridge networking</td>
+<td>Prevents host network stack access</td>
+</tr>
+<tr>
+<td>Never use <code>--pid=host</code></td>
+<td>Omit flag</td>
+<td>Prevents host process visibility</td>
+</tr>
+<tr>
+<td>Never mount <code>/var/run/docker.sock</code></td>
+<td>Audit <code>docker run</code> and Compose files</td>
+<td>Prevents trivial container escape</td>
+</tr>
+<tr>
+<td>Never mount host root or sensitive dirs</td>
+<td>Audit volume mounts</td>
+<td>Prevents host filesystem access</td>
+</tr>
+<tr>
+<td>Restrict unprivileged user ns creation</td>
+<td><code>sysctl kernel.unprivileged_userns_clone=0</code></td>
+<td>Reduces kernel attack surface</td>
+</tr>
+<tr>
+<td>Use user namespaces for rootless containers</td>
+<td>Run Docker or Podman in rootless mode</td>
+<td>Reduces blast radius of container escape</td>
+</tr>
+<tr>
+<td>Audit namespace sharing in Kubernetes</td>
+<td><code>hostPID: false</code>, <code>hostNetwork: false</code>, <code>hostIPC: false</code> in pod spec</td>
+<td>Prevents namespace sharing misconfigs at cluster level</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="kubernetes-namespace-security-context">Kubernetes Namespace Security Context</h2>
+<pre><code class="language-yaml"># Secure pod spec - deny all dangerous host namespace sharing
+spec:
+  hostPID: false
+  hostNetwork: false
+  hostIPC: false
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        capabilities:
+          drop: [&quot;ALL&quot;]
+</code></pre>
+<hr />
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Root Cause</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Docker socket mounted into container</td>
+<td>Convenience for CI pipelines</td>
+<td>Trivial full host compromise</td>
+</tr>
+<tr>
+<td><code>--privileged</code> container</td>
+<td>No namespace/cap restrictions</td>
+<td>Full host access; same as root on host</td>
+</tr>
+<tr>
+<td><code>--network=host</code> + sensitive service</td>
+<td>Network isolation not applied</td>
+<td>Container can bind host ports, sniff traffic</td>
+</tr>
+<tr>
+<td>User namespace exploit chain</td>
+<td>Unpatched kernel + unprivileged user ns</td>
+<td>Unprivileged user to host root</td>
+</tr>
+<tr>
+<td>Host <code>/proc</code> mounted in container</td>
+<td>Debug shortcut</td>
+<td>Container reads all host process secrets</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Namespaces are the isolation primitive for containers — not a security boundary by themselves.</li>
+<li>Container security depends on correct namespace configuration + seccomp + capabilities + non-root user.</li>
+<li>The Docker socket mount is the most common and most dangerous misconfiguration.</li>
+<li>User namespaces expand attack surface for kernel bugs — restrict unprivileged creation in production.</li>
+<li><code>--privileged</code> negates nearly all namespace-based isolation — never use in production.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

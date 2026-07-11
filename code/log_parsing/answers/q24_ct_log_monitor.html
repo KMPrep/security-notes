@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q24_ct_log_monitor.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q24_ct_log_monitor.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q24_ct_log_monitor.py</p>
+  <p class="line-count">279 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q24. Certificate Transparency (CT) Log Monitor
+================================================
+Detect unexpected CAs, wildcard certs, short-lived certificates,
+SAN mismatches, and lookalike domains from CT log entries.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Alert if a certificate is issued by an unknown CA.
+  Problem: Hundreds of CAs are trusted. Maintaining the list is hard.
+  More importantly, this misses the common attack: an *authorized* CA
+  issuing a cert for a lookalike domain (g00gle.com, paypa1.com).
+
+BETTER: Flag short-lived certs and wildcard certs.
+  Problem: Short-lived certs are increasingly the norm (Let&#x27;s Encrypt).
+  Need to combine signals: short-lived + lookalike + unexpected CA.
+  Also need SAN mismatch detection (CN and SANs disagree — may indicate
+  misconfiguration or cert transparency abuse).
+
+GOOGLE-LEVEL (this file):
+  - Lookalike detection: Levenshtein distance ≤ 2 against known-good domains.
+  - Wildcard: *.example.com → over-permissive; track by issuer.
+  - Unexpected CA: CA not in approved list.
+  - Short-lived: validity &lt; 7 days.
+  - SAN vs CN mismatch: CN not in SANs.
+  - Risk scoring: additive, sorted output.
+
+Complexity: O(N × D) for Levenshtein where D = approved domain count.
+=============================================================================
+&quot;&quot;&quot;
+
+import json
+import sys
+import re
+from datetime import datetime, timezone
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified CT log, one JSON per line)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = r&quot;&quot;&quot;
+{&quot;log_index&quot;:1001,&quot;not_before&quot;:&quot;2024-03-12T08:00:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:00:00Z&quot;,&quot;issuer&quot;:&quot;Let&#x27;s Encrypt&quot;,&quot;cn&quot;:&quot;example.com&quot;,&quot;sans&quot;:[&quot;example.com&quot;,&quot;www.example.com&quot;]}
+{&quot;log_index&quot;:1002,&quot;not_before&quot;:&quot;2024-03-12T08:01:00Z&quot;,&quot;not_after&quot;:&quot;2024-03-14T08:01:00Z&quot;,&quot;issuer&quot;:&quot;QuickCerts Inc&quot;,&quot;cn&quot;:&quot;example.com&quot;,&quot;sans&quot;:[&quot;example.com&quot;]}
+{&quot;log_index&quot;:1003,&quot;not_before&quot;:&quot;2024-03-12T08:02:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:02:00Z&quot;,&quot;issuer&quot;:&quot;Unknown CA&quot;,&quot;cn&quot;:&quot;*.corp-internal.com&quot;,&quot;sans&quot;:[&quot;*.corp-internal.com&quot;]}
+{&quot;log_index&quot;:1004,&quot;not_before&quot;:&quot;2024-03-12T08:03:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:03:00Z&quot;,&quot;issuer&quot;:&quot;DigiCert&quot;,&quot;cn&quot;:&quot;g00gle.com&quot;,&quot;sans&quot;:[&quot;g00gle.com&quot;,&quot;www.g00gle.com&quot;]}
+{&quot;log_index&quot;:1005,&quot;not_before&quot;:&quot;2024-03-12T08:04:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:04:00Z&quot;,&quot;issuer&quot;:&quot;DigiCert&quot;,&quot;cn&quot;:&quot;paypa1.com&quot;,&quot;sans&quot;:[&quot;paypa1.com&quot;]}
+{&quot;log_index&quot;:1006,&quot;not_before&quot;:&quot;2024-03-12T08:05:00Z&quot;,&quot;not_after&quot;:&quot;2024-09-12T08:05:00Z&quot;,&quot;issuer&quot;:&quot;Let&#x27;s Encrypt&quot;,&quot;cn&quot;:&quot;loginmybank.com&quot;,&quot;sans&quot;:[&quot;loginmybank.com&quot;,&quot;www.loginmybank.com&quot;]}
+{&quot;log_index&quot;:1007,&quot;not_before&quot;:&quot;2024-03-12T08:06:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:06:00Z&quot;,&quot;issuer&quot;:&quot;Sectigo&quot;,&quot;cn&quot;:&quot;api.example.com&quot;,&quot;sans&quot;:[&quot;api.example.com&quot;,&quot;cdn.example.com&quot;]}
+{&quot;log_index&quot;:1008,&quot;not_before&quot;:&quot;2024-03-12T08:07:00Z&quot;,&quot;not_after&quot;:&quot;2024-06-12T08:07:00Z&quot;,&quot;issuer&quot;:&quot;Let&#x27;s Encrypt&quot;,&quot;cn&quot;:&quot;mycompany.com&quot;,&quot;sans&quot;:[&quot;otherdomain.net&quot;]}
+MALFORMED_JSON
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+APPROVED_CAS = {
+    &quot;Let&#x27;s Encrypt&quot;,
+    &quot;DigiCert&quot;,
+    &quot;Sectigo&quot;,
+    &quot;GlobalSign&quot;,
+    &quot;Entrust&quot;,
+    &quot;Amazon&quot;,
+}
+
+# Your protected/monitored domains
+PROTECTED_DOMAINS = {
+    &quot;google.com&quot;, &quot;paypal.com&quot;, &quot;mybank.com&quot;, &quot;example.com&quot;,
+    &quot;microsoft.com&quot;, &quot;amazon.com&quot;, &quot;apple.com&quot;,
+}
+
+SHORT_LIVED_DAYS = 7
+LOOKALIKE_DISTANCE = 2  # Levenshtein distance threshold
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEVENSHTEIN DISTANCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def levenshtein(s1: str, s2: str) -&gt; int:
+    if len(s1) &lt; len(s2):
+        return levenshtein(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    prev = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (c1 != c2)))
+        prev = curr
+    return prev[-1]
+
+
+def extract_sld(domain: str) -&gt; str:
+    &quot;&quot;&quot;Return second-level domain (e.g., &#x27;google&#x27; from &#x27;www.google.com&#x27;).&quot;&quot;&quot;
+    parts = domain.strip(&quot;*. &quot;).split(&quot;.&quot;)
+    if len(parts) &gt;= 2:
+        return parts[-2] + &quot;.&quot; + parts[-1]
+    return domain
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_event(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    required = (&quot;not_before&quot;, &quot;not_after&quot;, &quot;issuer&quot;, &quot;cn&quot;, &quot;sans&quot;)
+    if not all(k in obj for k in required):
+        return None
+    try:
+        nb = datetime.strptime(obj[&quot;not_before&quot;], &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc)
+        na = datetime.strptime(obj[&quot;not_after&quot;],  &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return {
+        &quot;idx&quot;:       obj.get(&quot;log_index&quot;, 0),
+        &quot;not_before&quot;: nb,
+        &quot;not_after&quot;:  na,
+        &quot;validity_days&quot;: (na - nb).days,
+        &quot;issuer&quot;:    obj[&quot;issuer&quot;],
+        &quot;cn&quot;:        obj[&quot;cn&quot;].lower(),
+        &quot;sans&quot;:      [s.lower() for s in obj[&quot;sans&quot;]],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_unexpected_ca(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:   &quot;UNEXPECTED_CA&quot;,
+            &quot;issuer&quot;: r[&quot;issuer&quot;],
+            &quot;cn&quot;:     r[&quot;cn&quot;],
+            &quot;idx&quot;:    r[&quot;idx&quot;],
+            &quot;score&quot;:  3,
+        }
+        for r in records
+        if r[&quot;issuer&quot;] not in APPROVED_CAS
+    ]
+
+
+def detect_wildcard(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:   &quot;WILDCARD_CERT&quot;,
+            &quot;issuer&quot;: r[&quot;issuer&quot;],
+            &quot;cn&quot;:     r[&quot;cn&quot;],
+            &quot;idx&quot;:    r[&quot;idx&quot;],
+            &quot;score&quot;:  2,
+        }
+        for r in records
+        if r[&quot;cn&quot;].startswith(&quot;*&quot;) or any(s.startswith(&quot;*&quot;) for s in r[&quot;sans&quot;])
+    ]
+
+
+def detect_short_lived(records: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:    &quot;SHORT_LIVED&quot;,
+            &quot;cn&quot;:      r[&quot;cn&quot;],
+            &quot;issuer&quot;:  r[&quot;issuer&quot;],
+            &quot;days&quot;:    r[&quot;validity_days&quot;],
+            &quot;idx&quot;:     r[&quot;idx&quot;],
+            &quot;score&quot;:   2,
+        }
+        for r in records
+        if 0 &lt; r[&quot;validity_days&quot;] &lt; SHORT_LIVED_DAYS
+    ]
+
+
+def detect_san_mismatch(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        cn_clean = r[&quot;cn&quot;].lstrip(&quot;*.&quot;)
+        if cn_clean and not any(cn_clean in s or s.endswith(&quot;.&quot; + cn_clean) for s in r[&quot;sans&quot;]):
+            alerts.append({
+                &quot;type&quot;:  &quot;SAN_CN_MISMATCH&quot;,
+                &quot;cn&quot;:    r[&quot;cn&quot;],
+                &quot;sans&quot;:  r[&quot;sans&quot;],
+                &quot;idx&quot;:   r[&quot;idx&quot;],
+                &quot;score&quot;: 2,
+            })
+    return alerts
+
+
+def detect_lookalike(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        cn_sld = extract_sld(r[&quot;cn&quot;])
+        for protected in PROTECTED_DOMAINS:
+            protected_sld = extract_sld(protected)
+            if cn_sld == protected_sld:
+                continue  # exact match is fine
+            dist = levenshtein(cn_sld.split(&quot;.&quot;)[0], protected_sld.split(&quot;.&quot;)[0])
+            if dist &lt;= LOOKALIKE_DISTANCE:
+                alerts.append({
+                    &quot;type&quot;:     &quot;LOOKALIKE_DOMAIN&quot;,
+                    &quot;cn&quot;:       r[&quot;cn&quot;],
+                    &quot;target&quot;:   protected,
+                    &quot;distance&quot;: dist,
+                    &quot;issuer&quot;:   r[&quot;issuer&quot;],
+                    &quot;idx&quot;:      r[&quot;idx&quot;],
+                    &quot;score&quot;:    5,
+                })
+                break  # one alert per cert per detection type
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(unexpected_ca, wildcard, short_lived, san_mismatch, lookalike) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;CT LOG MONITOR — SUSPICIOUS CERTIFICATE REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    all_alerts = unexpected_ca + wildcard + short_lived + san_mismatch + lookalike
+    all_alerts.sort(key=lambda x: x[&quot;score&quot;], reverse=True)
+
+    counts = {
+        &quot;UNEXPECTED_CA&quot;: len(unexpected_ca),
+        &quot;WILDCARD_CERT&quot;: len(wildcard),
+        &quot;SHORT_LIVED&quot;:   len(short_lived),
+        &quot;SAN_CN_MISMATCH&quot;: len(san_mismatch),
+        &quot;LOOKALIKE_DOMAIN&quot;: len(lookalike),
+    }
+    for k, v in counts.items():
+        print(f&quot;  {k:20s} {v}&quot;)
+
+    print(f&quot;\n{&#x27;─&#x27; * 65}&quot;)
+    for a in all_alerts:
+        t = a[&quot;type&quot;]
+        print(f&quot;\n  [{t}]  idx={a[&#x27;idx&#x27;]}  score={a[&#x27;score&#x27;]}&quot;)
+        if t == &quot;LOOKALIKE_DOMAIN&quot;:
+            print(f&quot;    cn={a[&#x27;cn&#x27;]}  target={a[&#x27;target&#x27;]}  distance={a[&#x27;distance&#x27;]}  issuer={a[&#x27;issuer&#x27;]}&quot;)
+        elif t == &quot;SHORT_LIVED&quot;:
+            print(f&quot;    cn={a[&#x27;cn&#x27;]}  days={a[&#x27;days&#x27;]}  issuer={a[&#x27;issuer&#x27;]}&quot;)
+        elif t == &quot;SAN_CN_MISMATCH&quot;:
+            print(f&quot;    cn={a[&#x27;cn&#x27;]}  sans={a[&#x27;sans&#x27;]}&quot;)
+        else:
+            print(f&quot;    cn={a.get(&#x27;cn&#x27;,&#x27;?&#x27;)}  issuer={a.get(&#x27;issuer&#x27;,&#x27;?&#x27;)}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_event(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} CT log entries.\n&quot;)
+    print_report(
+        detect_unexpected_ca(records),
+        detect_wildcard(records),
+        detect_short_lived(records),
+        detect_san_mismatch(records),
+        detect_lookalike(records),
+    )
+</code></pre>
+</body>
+</html>

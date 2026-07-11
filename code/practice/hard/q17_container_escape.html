@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q17_container_escape.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q17_container_escape.py</h1>
+  <p class="file-path">Source: code\practice\hard\q17_container_escape.py</p>
+  <p class="line-count">499 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q17 [Hard] — Container Escape Indicators
+=============================================================================
+
+PROBLEM
+-------
+Detect process and system call events that suggest a container escape attempt.
+Container escapes exploit the gap between the container isolation boundary
+and the host kernel.  Indicators include:
+
+  1. nsenter / unshare / chroot calls — namespace manipulation
+  2. Mount syscall with unusual targets (/proc, /sys, /dev, host paths)
+  3. Process executing from /proc/*/fd/* or /proc/*/mem (memfd tricks)
+  4. CAP_SYS_ADMIN capability usage
+  5. Writing to /proc/sysrq-trigger, /proc/kcore, /proc/kmem
+  6. Child process PID 1 in a different PID namespace (pid_ns change)
+  7. Docker socket access: open(&quot;/var/run/docker.sock&quot;, ...)
+  8. cgroup release_agent write (CVE-2022-0492 pattern)
+  9. Unusual parent for sensitive files (e.g. /etc/crontab written by containerd-shim)
+ 10. runc binary execution from inside a container (CVE-2019-5736 pattern)
+
+Input: a stream of process/syscall events with fields:
+  pid, ppid, container_id, exe, cmdline, syscall, path, ts, uid, ns_pid
+
+CLARIFYING QUESTIONS
+--------------------
+1. Are events enriched with container_id?
+   → Yes; container_id=&quot;&quot; means host.
+2. Are we on the host (eBPF) or inside the container?
+   → Assume host-level eBPF sensor (Falco-style).
+3. Do we need to correlate across multiple events (e.g. fork → exec → write)?
+   → Yes for cgroup escape pattern; stateful chain detection needed.
+4. What is the baseline for &quot;unusual&quot;?
+   → Configurable allowlist of known-good processes that may trigger these.
+5. PID namespace change detection?
+   → Compare ns_pid of process vs ns_pid of parent; alert if they differ
+     AND event comes from a container (container_id != &quot;&quot;).
+
+=============================================================================
+APPROACH 1 — NAIVE (per-event keyword match + path check)
+=============================================================================
+Simple list of indicators; match event fields against patterns.
+  O(I) per event  (I = number of indicators, ≈ 20)
+  No stateful correlation.
+
+=============================================================================
+APPROACH 2 — INDEXED DISPATCH + STATEFUL CHAIN DETECTION (RECOMMENDED)
+=============================================================================
+  - Dict of (exe_basename / syscall / path_prefix) → handler
+  - Chain state machine: track per-container multi-step escape sequences
+    (e.g. nsenter → mount → exec)
+  O(1) per event for direct rules; O(1) per event for chain state.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Dict, FrozenSet, List, Optional, Set
+
+# ---------------------------------------------------------------------------
+# Known-bad patterns
+# ---------------------------------------------------------------------------
+
+_ESCAPE_EXES: FrozenSet[str] = frozenset({
+    &quot;nsenter&quot;, &quot;unshare&quot;, &quot;chroot&quot;, &quot;pivot_root&quot;,
+    &quot;runc&quot;, &quot;containerd-shim&quot;, &quot;docker&quot;,  # runc/docker should not run *inside* containers
+})
+
+_ESCAPE_PATHS: FrozenSet[str] = frozenset({
+    &quot;/proc/sysrq-trigger&quot;,
+    &quot;/proc/kcore&quot;,
+    &quot;/proc/kmem&quot;,
+    &quot;/proc/sys/kernel/core_pattern&quot;,
+    &quot;/var/run/docker.sock&quot;,
+    &quot;/run/docker.sock&quot;,
+    &quot;/run/containerd/containerd.sock&quot;,
+})
+
+_ESCAPE_PATH_PREFIXES: FrozenSet[str] = frozenset({
+    &quot;/proc/&quot;,       # accessing arbitrary /proc paths from container
+    &quot;/sys/&quot;,        # sysfs manipulation
+    &quot;/dev/&quot;,        # device access
+    &quot;/host&quot;,        # host filesystem mounts
+    &quot;/mnt/host&quot;,
+    &quot;/var/lib/docker&quot;,
+    &quot;/run/snapd&quot;,
+})
+
+_CGROUP_PATHS: FrozenSet[str] = frozenset({
+    &quot;/sys/fs/cgroup&quot;,
+    &quot;/cgroup&quot;,
+})
+
+_DANGEROUS_SYSCALLS: FrozenSet[str] = frozenset({
+    &quot;mount&quot;, &quot;umount&quot;, &quot;umount2&quot;,
+    &quot;pivot_root&quot;, &quot;chroot&quot;,
+    &quot;unshare&quot;, &quot;setns&quot;,
+    &quot;ptrace&quot;,
+    &quot;process_vm_readv&quot;, &quot;process_vm_writev&quot;,
+    &quot;perf_event_open&quot;,
+    &quot;bpf&quot;,
+    &quot;kexec_load&quot;, &quot;kexec_file_load&quot;,
+})
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ContainerEvent:
+    pid: int
+    ppid: int
+    container_id: str    # &quot;&quot; = host
+    exe: str
+    cmdline: str
+    syscall: str
+    path: str            # file path accessed (for open/write/mount)
+    ts: float
+    uid: int
+    ns_pid: int          # PID in the container&#x27;s PID namespace
+    event_type: str      # process | syscall | file
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class EscapeAlert:
+    alert_type: str
+    severity: str
+    container_id: str
+    pid: int
+    exe: str
+    ts: float
+    detail: str
+    indicator: str       # which indicator triggered this
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_event(raw: dict) -&gt; Optional[ContainerEvent]:
+    ts = _parse_ts(raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return ContainerEvent(
+        pid=int(raw.get(&quot;pid&quot;, 0)),
+        ppid=int(raw.get(&quot;ppid&quot;, 0)),
+        container_id=raw.get(&quot;container_id&quot;, &quot;&quot;),
+        exe=raw.get(&quot;exe&quot;, &quot;&quot;),
+        cmdline=raw.get(&quot;cmdline&quot;, &quot;&quot;),
+        syscall=raw.get(&quot;syscall&quot;, &quot;&quot;),
+        path=raw.get(&quot;path&quot;, &quot;&quot;),
+        ts=ts,
+        uid=int(raw.get(&quot;uid&quot;, 0)),
+        ns_pid=int(raw.get(&quot;ns_pid&quot;, 0)),
+        event_type=raw.get(&quot;event_type&quot;, &quot;process&quot;),
+        raw=raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _exe_basename(exe: str) -&gt; str:
+    return os.path.basename(exe).lower()
+
+
+def _path_is_dangerous(path: str) -&gt; Optional[str]:
+    &quot;&quot;&quot;Return the matching dangerous path or prefix, or None.&quot;&quot;&quot;
+    if path in _ESCAPE_PATHS:
+        return path
+    for prefix in _ESCAPE_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return prefix
+    return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive per-event check
+# ---------------------------------------------------------------------------
+
+class NaiveEscapeDetector:
+    &quot;&quot;&quot;
+    Stateless per-event escape indicator detector.
+    O(I) per event.
+    &quot;&quot;&quot;
+
+    def __init__(self, allowlist: Optional[Set[str]] = None) -&gt; None:
+        self.allowlist = allowlist or set()
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[EscapeAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        if _exe_basename(evt.exe) in self.allowlist or evt.container_id == &quot;&quot;:
+            # Not from inside a container — only flag container-scoped events
+            return []
+
+        alerts = []
+        base_exe = _exe_basename(evt.exe)
+
+        # Rule 1: suspicious exe inside container
+        if base_exe in _ESCAPE_EXES:
+            alerts.append(EscapeAlert(
+                alert_type=&quot;suspicious_exe_in_container&quot;,
+                severity=&quot;high&quot;,
+                container_id=evt.container_id,
+                pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                detail=f&quot;{base_exe!r} executed inside container&quot;,
+                indicator=&quot;exe_in_container&quot;,
+            ))
+
+        # Rule 2: dangerous syscall from container
+        if evt.syscall in _DANGEROUS_SYSCALLS:
+            alerts.append(EscapeAlert(
+                alert_type=&quot;dangerous_syscall&quot;,
+                severity=&quot;critical&quot;,
+                container_id=evt.container_id,
+                pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                detail=f&quot;syscall {evt.syscall!r} from container process {base_exe!r}&quot;,
+                indicator=&quot;dangerous_syscall&quot;,
+            ))
+
+        # Rule 3: path access
+        matched_path = _path_is_dangerous(evt.path)
+        if matched_path and evt.event_type in (&quot;file&quot;, &quot;syscall&quot;):
+            severity = &quot;critical&quot; if evt.path in _ESCAPE_PATHS else &quot;high&quot;
+            alerts.append(EscapeAlert(
+                alert_type=&quot;dangerous_path_access&quot;,
+                severity=severity,
+                container_id=evt.container_id,
+                pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                detail=f&quot;Container {evt.container_id!r} accessed {evt.path!r}&quot;,
+                indicator=&quot;path_access&quot;,
+            ))
+
+        # Rule 4: docker socket access
+        if &quot;/docker.sock&quot; in evt.path or &quot;/containerd.sock&quot; in evt.path:
+            alerts.append(EscapeAlert(
+                alert_type=&quot;docker_socket_access&quot;,
+                severity=&quot;critical&quot;,
+                container_id=evt.container_id,
+                pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                detail=f&quot;Container accessed Docker/containerd socket {evt.path!r}&quot;,
+                indicator=&quot;docker_socket&quot;,
+            ))
+
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Stateful chain detector (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class EscapeChainState(Enum):
+    IDLE = 0
+    MOUNT_OBSERVED = 1       # suspicious mount
+    CGROUP_WRITE = 2         # cgroup release_agent written
+    CHAIN_COMPLETE = 3       # full escape chain observed
+
+
+@dataclass
+class _ContainerChain:
+    state: EscapeChainState = EscapeChainState.IDLE
+    mount_ts: Optional[float] = None
+    mount_path: str = &quot;&quot;
+    write_ts: Optional[float] = None
+    chain_window_s: float = 30.0
+
+
+class ContainerEscapeDetector:
+    &quot;&quot;&quot;
+    Full container escape detector with:
+    1. Per-event indicator checks (delegates to NaiveEscapeDetector)
+    2. Stateful cgroup escape chain detection (CVE-2022-0492 / runc)
+    3. PID namespace change detection
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowlist: Optional[Set[str]] = None,
+        chain_window_s: float = 30.0,
+    ) -&gt; None:
+        self._naive = NaiveEscapeDetector(allowlist=allowlist)
+        self.allowlist = allowlist or set()
+        self.chain_window = chain_window_s
+        # container_id → chain state
+        self._chains: Dict[str, _ContainerChain] = defaultdict(
+            lambda: _ContainerChain(chain_window_s=chain_window_s))
+        # container_id → set of ns_pids seen (for PID ns change)
+        self._ns_pids: Dict[str, Set[int]] = defaultdict(set)
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[EscapeAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        alerts: List[EscapeAlert] = []
+
+        # Per-event naive checks (only inside containers)
+        alerts.extend(self._naive.process(raw))
+
+        cid = evt.container_id
+        if not cid:
+            return alerts  # host events — skip chain tracking
+
+        # --- PID namespace change detection ---
+        if evt.ns_pid:
+            ns_set = self._ns_pids[cid]
+            if ns_set and evt.ns_pid not in ns_set and evt.ns_pid == 1:
+                # ns_pid=1 from a process that is not the original PID 1 → namespace change
+                alerts.append(EscapeAlert(
+                    alert_type=&quot;pid_ns_change&quot;,
+                    severity=&quot;critical&quot;,
+                    container_id=cid, pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                    detail=f&quot;PID namespace change detected (ns_pid=1 seen for secondary process)&quot;,
+                    indicator=&quot;pid_ns_change&quot;,
+                ))
+            ns_set.add(evt.ns_pid)
+
+        # --- Cgroup release_agent escape chain ---
+        chain = self._chains[cid]
+        if chain.state == EscapeChainState.IDLE:
+            # Step 1: mount of cgroup (or /proc) inside container
+            if evt.syscall == &quot;mount&quot; and any(
+                    evt.path.startswith(p) for p in _CGROUP_PATHS):
+                chain.state = EscapeChainState.MOUNT_OBSERVED
+                chain.mount_ts = evt.ts
+                chain.mount_path = evt.path
+        elif chain.state == EscapeChainState.MOUNT_OBSERVED:
+            # Step 2: write to release_agent
+            if evt.path.endswith(&quot;release_agent&quot;) and evt.event_type == &quot;file&quot;:
+                # Check timeout
+                if chain.mount_ts and evt.ts - chain.mount_ts &lt;= chain.chain_window_s:
+                    chain.state = EscapeChainState.CHAIN_COMPLETE
+                    chain.write_ts = evt.ts
+                    alerts.append(EscapeAlert(
+                        alert_type=&quot;cgroup_release_agent_escape&quot;,
+                        severity=&quot;critical&quot;,
+                        container_id=cid, pid=evt.pid, exe=evt.exe, ts=evt.ts,
+                        detail=(f&quot;cgroup release_agent escape chain: &quot;
+                                f&quot;mount {chain.mount_path!r} → write release_agent &quot;
+                                f&quot;within {evt.ts - chain.mount_ts:.1f}s&quot;),
+                        indicator=&quot;cgroup_escape_chain&quot;,
+                    ))
+                else:
+                    chain.state = EscapeChainState.IDLE
+            elif chain.mount_ts and evt.ts - chain.mount_ts &gt; chain.chain_window_s:
+                chain.state = EscapeChainState.IDLE  # expired
+
+        return alerts
+
+    def active_containers(self) -&gt; int:
+        return len(self._chains)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _ev(cid, exe, syscall=&quot;&quot;, path=&quot;&quot;, ns_pid=0, event_type=&quot;process&quot;,
+        ts=1000.0, uid=0) -&gt; dict:
+    return {
+        &quot;pid&quot;: 1234, &quot;ppid&quot;: 1, &quot;container_id&quot;: cid,
+        &quot;exe&quot;: exe, &quot;cmdline&quot;: f&quot;{exe} -arg&quot;,
+        &quot;syscall&quot;: syscall, &quot;path&quot;: path,
+        &quot;ts&quot;: ts, &quot;uid&quot;: uid, &quot;ns_pid&quot;: ns_pid,
+        &quot;event_type&quot;: event_type,
+    }
+
+
+def test_suspicious_exe():
+    det = ContainerEscapeDetector()
+    alerts = det.process(_ev(&quot;ctr-abc&quot;, &quot;/usr/bin/nsenter&quot;))
+    assert any(a.alert_type == &quot;suspicious_exe_in_container&quot; for a in alerts)
+    print(&quot;Suspicious exe: passed&quot;)
+
+
+def test_dangerous_syscall():
+    det = ContainerEscapeDetector()
+    alerts = det.process(_ev(&quot;ctr-abc&quot;, &quot;/bin/sh&quot;, syscall=&quot;mount&quot;,
+                              path=&quot;/sys/fs/cgroup&quot;, event_type=&quot;syscall&quot;))
+    assert any(a.alert_type == &quot;dangerous_syscall&quot; for a in alerts)
+    print(&quot;Dangerous syscall: passed&quot;)
+
+
+def test_docker_socket_access():
+    det = ContainerEscapeDetector()
+    alerts = det.process(_ev(&quot;ctr-abc&quot;, &quot;/usr/bin/curl&quot;,
+                              path=&quot;/var/run/docker.sock&quot;, event_type=&quot;file&quot;))
+    assert any(a.alert_type == &quot;docker_socket_access&quot; for a in alerts)
+    print(&quot;Docker socket access: passed&quot;)
+
+
+def test_cgroup_escape_chain():
+    det = ContainerEscapeDetector(chain_window_s=30)
+    # Step 1: mount cgroup
+    det.process(_ev(&quot;ctr-xyz&quot;, &quot;/bin/sh&quot;, syscall=&quot;mount&quot;,
+                     path=&quot;/sys/fs/cgroup/memory&quot;, ts=1000.0, event_type=&quot;syscall&quot;))
+    # Step 2: write release_agent
+    alerts = det.process(_ev(&quot;ctr-xyz&quot;, &quot;/bin/sh&quot;,
+                               path=&quot;/sys/fs/cgroup/memory/release_agent&quot;,
+                               event_type=&quot;file&quot;, ts=1010.0))
+    assert any(a.alert_type == &quot;cgroup_release_agent_escape&quot; for a in alerts), \
+        f&quot;Expected cgroup escape; got {[a.alert_type for a in alerts]}&quot;
+    print(&quot;Cgroup escape chain: passed&quot;)
+
+
+def test_cgroup_chain_timeout():
+    det = ContainerEscapeDetector(chain_window_s=5)
+    det.process(_ev(&quot;ctr-xyz&quot;, &quot;/bin/sh&quot;, syscall=&quot;mount&quot;,
+                     path=&quot;/sys/fs/cgroup/memory&quot;, ts=1000.0, event_type=&quot;syscall&quot;))
+    # Write comes 60s later — chain should expire
+    alerts = det.process(_ev(&quot;ctr-xyz&quot;, &quot;/bin/sh&quot;,
+                               path=&quot;/sys/fs/cgroup/memory/release_agent&quot;,
+                               event_type=&quot;file&quot;, ts=1060.0))
+    assert not any(a.alert_type == &quot;cgroup_release_agent_escape&quot; for a in alerts)
+    print(&quot;Cgroup chain timeout: passed&quot;)
+
+
+def test_host_events_skipped():
+    det = ContainerEscapeDetector()
+    # container_id=&quot;&quot; → host, not a container escape
+    alerts = det.process(_ev(&quot;&quot;, &quot;/usr/bin/nsenter&quot;, syscall=&quot;mount&quot;))
+    assert len(alerts) == 0
+    print(&quot;Host events skipped: passed&quot;)
+
+
+def test_malformed():
+    det = ContainerEscapeDetector()
+    r = det.process({&quot;pid&quot;: 1})  # missing ts
+    assert r == []
+    assert det.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Container escapes break the isolation boundary between workloads and the host.
+  Once an attacker escapes to the host, they have:
+  - Access to all other container filesystems via /var/lib/docker or /var/lib/containerd
+  - Node credentials (kubeconfig, cloud metadata IMDS token)
+  - Ability to tamper with the container runtime / kubelet
+
+PROMINENT ESCAPES
+  CVE-2019-5736 (runc overwrite): attacker overwrites the host runc binary
+    via /proc/self/exe while runc is executing — requires CAP_SYS_PTRACE.
+  CVE-2020-15257 (containerd shim): exploits the containerd shim API
+    exposed via an abstract UNIX socket — mounted inside containers.
+  CVE-2022-0492 (cgroup release_agent): writable cgroup v1 mount inside
+    container → write a payload to release_agent → triggered on cgroup cleanup.
+  Docker socket bind mount: if the Docker socket is mounted into a container,
+    attacker runs `docker run -v /:/host alpine chroot /host`.
+
+DEFENCES
+  - Seccomp profiles: block dangerous syscalls (mount, unshare, ptrace).
+  - AppArmor / SELinux: MAC policies prevent access to host paths.
+  - Read-only filesystem: prevents writing to release_agent.
+  - Drop ALL capabilities; add only what the workload needs.
+  - Never mount Docker socket or host paths into containers.
+  - Runtime security: Falco (eBPF rules) for real-time syscall monitoring.
+
+DETECTION GAPS
+  - Kernel exploits (0-days) may not trigger any of these indicators.
+  - If attacker has CAP_SYS_PTRACE they can manipulate the monitoring process.
+  - Rootkits can hide processes from /proc — monitor at the eBPF layer (not /proc).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_suspicious_exe()
+    test_dangerous_syscall()
+    test_docker_socket_access()
+    test_cgroup_escape_chain()
+    test_cgroup_chain_timeout()
+    test_host_events_skipped()
+    test_malformed()
+</code></pre>
+</body>
+</html>

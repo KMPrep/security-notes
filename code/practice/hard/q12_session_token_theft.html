@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q12_session_token_theft.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q12_session_token_theft.py</h1>
+  <p class="file-path">Source: code\practice\hard\q12_session_token_theft.py</p>
+  <p class="line-count">508 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q12 [Hard] — Session Token Theft Detection
+=============================================================================
+
+PROBLEM
+-------
+A session token is bound to a single user.  Detect when the same session
+token is used from:
+  - A different IP address (IP anomaly)
+  - A different User-Agent (UA anomaly)
+  - A geographically impossible location within a short time window
+    (impossible travel: two requests from cities 10,000 km apart in 5 minutes)
+  - Concurrent usage from multiple IPs simultaneously
+
+Each session usage event contains: session_id, ts, src_ip, user_agent,
+user_id, and optionally geo_lat / geo_lon.
+
+CLARIFYING QUESTIONS
+--------------------
+1. How many IPs per session are allowed before alerting?
+   → Configurable; default max_ips_per_session=1 (strict) or 2 (allows VPN split).
+2. Is User-Agent rotation suspicious?
+   → Yes, if the UA changes mid-session.  Allow list of known mobile UAs that
+     may rotate slightly.
+3. How do we detect impossible travel?
+   → Haversine distance / travel_speed = distance / time_delta.
+     If speed &gt; 900 km/h (faster than commercial aircraft), flag it.
+4. What is the session lifetime?
+   → Max session age configurable; after expiry, evict from memory.
+5. Can the same IP legitimately re-appear after a gap?
+   → Yes (dynamic IPs, reconnect).  Track set of seen IPs, not just current.
+6. How do we handle proxies/CDNs?
+   → Accept X-Forwarded-For as a flag in event dict; normalise before lookup.
+7. Concurrent usage definition?
+   → Two events for the same session from different IPs within concurrent_window_seconds.
+
+=============================================================================
+APPROACH 1 — NAIVE (full history scan per session)
+=============================================================================
+Store all events per session in a list.
+On each new event, scan all past events for anomalies.
+  Time : O(N) per event (N events in this session)
+  Space: O(total events) — no eviction
+  Impractical for long-running sessions.
+
+=============================================================================
+APPROACH 2 — SESSION PROFILE STORE (RECOMMENDED)
+=============================================================================
+Maintain a compact per-session profile:
+  - anchor_ip: first IP seen (or set of known IPs)
+  - anchor_ua: first User-Agent
+  - last_event: (ts, src_ip, lat, lon)
+  - seen_ips: set of all IPs (bounded by max_ips_to_track)
+  - active: bool (is session within lifetime?)
+
+On each new event:
+  1. Check IP anomaly: src_ip not in seen_ips
+  2. Check UA anomaly: user_agent != anchor_ua
+  3. Check impossible travel: haversine(last_pos, new_pos) / Δts &gt; speed_limit
+  4. Check concurrent use: another event from a different IP within concurrent_window
+
+  Time : O(1) per event (set lookup + math)
+  Space: O(active sessions × max_ips_to_track)
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MAX_AIRCRAFT_SPEED_KMH = 900.0   # impossible travel threshold
+EARTH_RADIUS_KM = 6371.0
+
+
+class AnomalyType(Enum):
+    IP_CHANGE = &quot;ip_change&quot;
+    UA_CHANGE = &quot;ua_change&quot;
+    IMPOSSIBLE_TRAVEL = &quot;impossible_travel&quot;
+    CONCURRENT_USE = &quot;concurrent_use&quot;
+
+
+# ---------------------------------------------------------------------------
+# Haversine distance
+# ---------------------------------------------------------------------------
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -&gt; float:
+    &quot;&quot;&quot;Great-circle distance in kilometres between two lat/lon points.&quot;&quot;&quot;
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionEvent:
+    session_id: str
+    user_id: str
+    ts: float
+    src_ip: str
+    user_agent: str
+    geo_lat: Optional[float] = None
+    geo_lon: Optional[float] = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class SessionAnomaly:
+    session_id: str
+    user_id: str
+    anomaly_type: AnomalyType
+    ts: float
+    src_ip: str
+    detail: str
+    severity: str = &quot;high&quot;
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_event(raw: dict) -&gt; Optional[SessionEvent]:
+    ts = _parse_ts(raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    sid = raw.get(&quot;session_id&quot;)
+    uid = raw.get(&quot;user_id&quot;)
+    ip = raw.get(&quot;src_ip&quot;)
+    ua = raw.get(&quot;user_agent&quot;, &quot;&quot;)
+    if not sid or not uid or not ip:
+        return None
+    lat = raw.get(&quot;geo_lat&quot;)
+    lon = raw.get(&quot;geo_lon&quot;)
+    return SessionEvent(session_id=sid, user_id=uid, ts=ts, src_ip=ip,
+                        user_agent=ua,
+                        geo_lat=float(lat) if lat is not None else None,
+                        geo_lon=float(lon) if lon is not None else None,
+                        raw=raw)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive full-scan detector
+# ---------------------------------------------------------------------------
+
+class NaiveSessionTheftDetector:
+    &quot;&quot;&quot;
+    Store all events per session; scan full history on each new event.
+    O(N) per event — only for small datasets / forensic analysis.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        max_ips_per_session: int = 1,
+        impossible_speed_kmh: float = MAX_AIRCRAFT_SPEED_KMH,
+    ) -&gt; None:
+        self.max_ips = max_ips_per_session
+        self.speed_limit = impossible_speed_kmh
+        self._events: Dict[str, List[SessionEvent]] = defaultdict(list)
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[SessionAnomaly]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        history = self._events[evt.session_id]
+        anomalies = []
+
+        seen_ips = {e.src_ip for e in history}
+        if seen_ips and evt.src_ip not in seen_ips and len(seen_ips) &gt;= self.max_ips:
+            anomalies.append(SessionAnomaly(
+                session_id=evt.session_id, user_id=evt.user_id,
+                anomaly_type=AnomalyType.IP_CHANGE, ts=evt.ts,
+                src_ip=evt.src_ip,
+                detail=f&quot;New IP {evt.src_ip!r} for session already seen from {seen_ips}&quot;,
+            ))
+
+        # UA change
+        if history and history[0].user_agent and evt.user_agent != history[0].user_agent:
+            anomalies.append(SessionAnomaly(
+                session_id=evt.session_id, user_id=evt.user_id,
+                anomaly_type=AnomalyType.UA_CHANGE, ts=evt.ts,
+                src_ip=evt.src_ip,
+                detail=f&quot;UA changed from {history[0].user_agent!r} to {evt.user_agent!r}&quot;,
+            ))
+
+        # Impossible travel: compare against last event with geo
+        for past in reversed(history):
+            if past.geo_lat is not None and evt.geo_lat is not None:
+                dt = abs(evt.ts - past.ts)
+                if dt &gt; 0:
+                    dist = haversine_km(past.geo_lat, past.geo_lon,
+                                        evt.geo_lat, evt.geo_lon)
+                    speed = dist / (dt / 3600)
+                    if speed &gt; self.speed_limit:
+                        anomalies.append(SessionAnomaly(
+                            session_id=evt.session_id, user_id=evt.user_id,
+                            anomaly_type=AnomalyType.IMPOSSIBLE_TRAVEL, ts=evt.ts,
+                            src_ip=evt.src_ip,
+                            detail=f&quot;Speed {speed:.0f} km/h &gt; limit {self.speed_limit} km/h &quot;
+                                   f&quot;(dist={dist:.0f} km in {dt:.0f}s)&quot;,
+                            severity=&quot;critical&quot;,
+                        ))
+                break
+
+        history.append(evt)
+        return anomalies
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Session Profile Store (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _SessionProfile:
+    session_id: str
+    user_id: str
+    anchor_ua: str
+    first_seen_ts: float
+    last_ts: float
+    last_ip: str
+    last_lat: Optional[float] = None
+    last_lon: Optional[float] = None
+    seen_ips: Set[str] = field(default_factory=set)
+    # Recent events per IP for concurrent-use check: ip → deque of ts
+    recent_ips: Dict[str, deque] = field(default_factory=lambda: defaultdict(deque))
+
+
+class SessionTheftDetector:
+    &quot;&quot;&quot;
+    Streaming O(1)-per-event session theft detector using compact session profiles.
+
+    max_ips_per_session  : alert if session used from more IPs than this
+    concurrent_window_s  : concurrent use detection window (seconds)
+    session_ttl_s        : evict profiles older than this (no recent activity)
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        max_ips_per_session: int = 1,
+        impossible_speed_kmh: float = MAX_AIRCRAFT_SPEED_KMH,
+        concurrent_window_s: float = 60.0,
+        session_ttl_s: float = 3600.0,
+    ) -&gt; None:
+        self.max_ips = max_ips_per_session
+        self.speed_limit = impossible_speed_kmh
+        self.concurrent_window = concurrent_window_s
+        self.session_ttl = session_ttl_s
+        self._profiles: Dict[str, _SessionProfile] = {}
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[SessionAnomaly]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        sid = evt.session_id
+        anomalies: List[SessionAnomaly] = []
+
+        if sid not in self._profiles:
+            # Create new profile
+            profile = _SessionProfile(
+                session_id=sid,
+                user_id=evt.user_id,
+                anchor_ua=evt.user_agent,
+                first_seen_ts=evt.ts,
+                last_ts=evt.ts,
+                last_ip=evt.src_ip,
+                last_lat=evt.geo_lat,
+                last_lon=evt.geo_lon,
+                seen_ips={evt.src_ip},
+            )
+            profile.recent_ips[evt.src_ip].append(evt.ts)
+            self._profiles[sid] = profile
+            return anomalies
+
+        profile = self._profiles[sid]
+
+        # --- Check 1: IP anomaly ---
+        if evt.src_ip not in profile.seen_ips:
+            if len(profile.seen_ips) &gt;= self.max_ips:
+                anomalies.append(SessionAnomaly(
+                    session_id=sid, user_id=evt.user_id,
+                    anomaly_type=AnomalyType.IP_CHANGE, ts=evt.ts,
+                    src_ip=evt.src_ip,
+                    detail=f&quot;Session used from new IP {evt.src_ip!r}; &quot;
+                           f&quot;known IPs={profile.seen_ips}&quot;,
+                ))
+
+        # --- Check 2: User-Agent change ---
+        if evt.user_agent and profile.anchor_ua and evt.user_agent != profile.anchor_ua:
+            anomalies.append(SessionAnomaly(
+                session_id=sid, user_id=evt.user_id,
+                anomaly_type=AnomalyType.UA_CHANGE, ts=evt.ts,
+                src_ip=evt.src_ip,
+                detail=f&quot;UA changed: {profile.anchor_ua!r} → {evt.user_agent!r}&quot;,
+            ))
+
+        # --- Check 3: Impossible travel ---
+        if (evt.geo_lat is not None and profile.last_lat is not None
+                and evt.src_ip != profile.last_ip):
+            dt = abs(evt.ts - profile.last_ts)
+            if dt &gt; 0:
+                dist = haversine_km(profile.last_lat, profile.last_lon,
+                                    evt.geo_lat, evt.geo_lon)
+                speed = dist / (dt / 3600)
+                if speed &gt; self.speed_limit:
+                    anomalies.append(SessionAnomaly(
+                        session_id=sid, user_id=evt.user_id,
+                        anomaly_type=AnomalyType.IMPOSSIBLE_TRAVEL, ts=evt.ts,
+                        src_ip=evt.src_ip,
+                        detail=f&quot;Speed {speed:.0f} km/h (dist={dist:.0f} km in {dt:.0f}s)&quot;,
+                        severity=&quot;critical&quot;,
+                    ))
+
+        # --- Check 4: Concurrent use from different IPs ---
+        for ip, ts_deque in profile.recent_ips.items():
+            # Evict old entries
+            cutoff = evt.ts - self.concurrent_window
+            while ts_deque and ts_deque[0] &lt; cutoff:
+                ts_deque.popleft()
+
+        if evt.src_ip != profile.last_ip:
+            # Check if any other IP was active within concurrent_window
+            for ip, ts_deque in profile.recent_ips.items():
+                if ip != evt.src_ip and ts_deque:
+                    anomalies.append(SessionAnomaly(
+                        session_id=sid, user_id=evt.user_id,
+                        anomaly_type=AnomalyType.CONCURRENT_USE, ts=evt.ts,
+                        src_ip=evt.src_ip,
+                        detail=f&quot;Session active from {ip!r} and {evt.src_ip!r} within &quot;
+                               f&quot;{self.concurrent_window}s&quot;,
+                        severity=&quot;critical&quot;,
+                    ))
+                    break  # one alert per event is enough
+
+        # Update profile
+        profile.seen_ips.add(evt.src_ip)
+        profile.recent_ips[evt.src_ip].append(evt.ts)
+        profile.last_ts = evt.ts
+        profile.last_ip = evt.src_ip
+        if evt.geo_lat is not None:
+            profile.last_lat = evt.geo_lat
+            profile.last_lon = evt.geo_lon
+
+        return anomalies
+
+    def evict_expired(self, now: float) -&gt; int:
+        &quot;&quot;&quot;Remove expired session profiles.  Returns count evicted.&quot;&quot;&quot;
+        expired = [sid for sid, p in self._profiles.items()
+                   if now - p.last_ts &gt; self.session_ttl]
+        for sid in expired:
+            del self._profiles[sid]
+        return len(expired)
+
+    def active_sessions(self) -&gt; int:
+        return len(self._profiles)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _ev(sid, uid, ts, ip, ua=&quot;Mozilla/5.0&quot;, lat=None, lon=None) -&gt; dict:
+    d = {&quot;session_id&quot;: sid, &quot;user_id&quot;: uid, &quot;ts&quot;: ts,
+         &quot;src_ip&quot;: ip, &quot;user_agent&quot;: ua}
+    if lat is not None:
+        d[&quot;geo_lat&quot;] = lat
+        d[&quot;geo_lon&quot;] = lon
+    return d
+
+
+def test_no_anomaly():
+    det = SessionTheftDetector()
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1000, &quot;10.0.0.1&quot;))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1060, &quot;10.0.0.1&quot;))
+    assert len(r) == 0
+    print(&quot;No anomaly: passed&quot;)
+
+
+def test_ip_change():
+    det = SessionTheftDetector(max_ips_per_session=1)
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1000, &quot;10.0.0.1&quot;))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1060, &quot;10.0.0.2&quot;))
+    assert any(a.anomaly_type == AnomalyType.IP_CHANGE for a in r)
+    print(&quot;IP change: passed&quot;)
+
+
+def test_ua_change():
+    det = SessionTheftDetector()
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1000, &quot;10.0.0.1&quot;, ua=&quot;Chrome/100&quot;))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1060, &quot;10.0.0.1&quot;, ua=&quot;curl/7.80&quot;))
+    assert any(a.anomaly_type == AnomalyType.UA_CHANGE for a in r)
+    print(&quot;UA change: passed&quot;)
+
+
+def test_impossible_travel():
+    # New York ≈ (40.7, -74.0)  London ≈ (51.5, -0.1) — ~5500 km
+    # 5500 km in 60 seconds → ~330,000 km/h — impossible
+    det = SessionTheftDetector()
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 0, &quot;1.1.1.1&quot;, lat=40.7, lon=-74.0))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 60, &quot;2.2.2.2&quot;, lat=51.5, lon=-0.1))
+    assert any(a.anomaly_type == AnomalyType.IMPOSSIBLE_TRAVEL for a in r), \
+        f&quot;Expected impossible travel; got {r}&quot;
+    print(&quot;Impossible travel: passed&quot;)
+
+
+def test_possible_travel():
+    # Same location — no impossible travel
+    det = SessionTheftDetector()
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 0, &quot;1.1.1.1&quot;, lat=37.77, lon=-122.42))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 100, &quot;1.1.1.1&quot;, lat=37.78, lon=-122.43))
+    assert not any(a.anomaly_type == AnomalyType.IMPOSSIBLE_TRAVEL for a in r)
+    print(&quot;Possible travel: passed&quot;)
+
+
+def test_concurrent_use():
+    det = SessionTheftDetector(concurrent_window_s=300)
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1000, &quot;10.0.0.1&quot;))
+    r = det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 1050, &quot;10.0.0.99&quot;))  # different IP within 300s
+    assert any(a.anomaly_type == AnomalyType.CONCURRENT_USE for a in r), \
+        f&quot;Expected CONCURRENT_USE; got {r}&quot;
+    print(&quot;Concurrent use: passed&quot;)
+
+
+def test_eviction():
+    det = SessionTheftDetector(session_ttl_s=100)
+    det.process(_ev(&quot;s1&quot;, &quot;u1&quot;, 0, &quot;1.1.1.1&quot;))
+    assert det.active_sessions() == 1
+    count = det.evict_expired(now=200)
+    assert count == 1
+    assert det.active_sessions() == 0
+    print(&quot;Eviction: passed&quot;)
+
+
+def test_malformed():
+    det = SessionTheftDetector()
+    r = det.process({&quot;session_id&quot;: &quot;s1&quot;})  # missing ts, user_id, src_ip
+    assert r == []
+    assert det.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Session tokens are high-value targets.  After stealing a token (via XSS,
+  packet sniffing on HTTP, MITM, or credential stuffing), an attacker reuses
+  it from their own IP and browser.
+
+  Detection signals:
+  - IP change mid-session: most legitimate users don&#x27;t change IPs mid-session.
+    (Exception: mobile roaming, dual-stack, corporate VPN split tunneling.)
+  - User-Agent change: legitimate browsers don&#x27;t change UA for the same session.
+    (Exception: some mobile apps rotate UAs — build an allowlist.)
+  - Impossible travel: physics-based detection, very low false-positive rate.
+  - Concurrent use from two IPs: strongest signal — session can&#x27;t be in two places at once.
+
+DEFENCES (beyond detection)
+  - Bind session to IP at issuance (risky for mobile users).
+  - Bind session to TLS channel binding (token binding RFC 8471).
+  - Short session lifetimes (15–30 min) with silent re-auth for sensitive operations.
+  - Detect and rotate tokens proactively on any anomaly; prompt re-authentication.
+  - Store session fingerprint (IP subnet /24, UA hash, accept-language) and
+    score each request against it.
+
+FAILURE MODES
+  - IP blocklist evasion: attacker uses the same ISP as the victim.
+  - IPv6 rotation: ISPs assign new /128 per connection; track /64 subnet.
+  - Headless browser mimics real UA: combine with JS fingerprinting.
+  - VPN usage by victim causes IP change — FP; use geo proximity heuristic.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_no_anomaly()
+    test_ip_change()
+    test_ua_change()
+    test_impossible_travel()
+    test_possible_travel()
+    test_concurrent_use()
+    test_eviction()
+    test_malformed()
+</code></pre>
+</body>
+</html>

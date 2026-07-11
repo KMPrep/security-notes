@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q1_apache_deep_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q1_apache_deep_parser.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q1_apache_deep_parser.py</p>
+  <p class="line-count">314 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q1. Apache/Nginx Combined Log Deep Parser
+==========================================
+Parse HTTP access logs, detect scanners, path traversal, error spikes,
+and large-response exfiltration candidates.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Split by space, grab positional fields.
+  Problem: timestamp contains a space inside []; quoted request contains spaces.
+  Breaks immediately on any real log line.
+
+BETTER: Single regex for the full line; basic field extraction.
+  Problem: still no URL-decoding for traversal detection, no aggregation,
+  no reporting structure.
+
+GOOGLE-LEVEL (this file):
+  - Compiled regex for Combined Log Format.
+  - URL-decode paths before traversal matching (catches %2e%2e bypasses).
+  - Streaming parse — O(1) memory per line; only aggregation dicts grow.
+  - Scanner fingerprint DB as a compiled set of patterns (not repeated re.search calls).
+  - Error-spike detection via per-IP error counter with threshold.
+  - Clear, structured report at the end.
+
+Complexity: O(N) time, O(U) space where U = unique IPs/paths (U &lt;&lt; N in practice).
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import math
+from collections import defaultdict
+from urllib.parse import unquote_plus
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (embedded so script is self-contained)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+10.0.0.1 - alice [12/Mar/2024:08:15:32 -0500] &quot;GET /index.html HTTP/1.1&quot; 200 2048 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.2 - - [12/Mar/2024:08:15:33 -0500] &quot;GET /admin HTTP/1.1&quot; 404 512 &quot;-&quot; &quot;sqlmap/1.7.2&quot;
+10.0.0.3 - bob  [12/Mar/2024:08:15:34 -0500] &quot;GET /../etc/passwd HTTP/1.1&quot; 200 1048600 &quot;-&quot; &quot;nikto/2.1.6&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:35 -0500] &quot;GET /api/data HTTP/1.1&quot; 500 256 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:36 -0500] &quot;GET /api/data HTTP/1.1&quot; 500 256 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:37 -0500] &quot;POST /login HTTP/1.1&quot; 401 128 &quot;-&quot; &quot;curl/7.88&quot;
+10.0.0.5 - - [12/Mar/2024:08:15:38 -0500] &quot;GET /%2e%2e/%2e%2e/etc/shadow HTTP/1.1&quot; 403 64 &quot;-&quot; &quot;python-requests/2.28&quot;
+10.0.0.6 - - [12/Mar/2024:08:15:39 -0500] &quot;GET /backup.sql HTTP/1.1&quot; 200 52428800 &quot;-&quot; &quot;wget/1.21&quot;
+10.0.0.7 - - [12/Mar/2024:08:15:40 -0500] &quot;HEAD /index.html HTTP/1.1&quot; 200 0 &quot;-&quot; &quot;masscan/1.3&quot;
+10.0.0.2 - - [12/Mar/2024:08:15:41 -0500] &quot;GET /etc/passwd HTTP/1.1&quot; 404 128 &quot;-&quot; &quot;sqlmap/1.7.2&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:42 -0500] &quot;GET /api/users HTTP/1.1&quot; 403 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:43 -0500] &quot;GET /api/admin HTTP/1.1&quot; 403 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:44 -0500] &quot;GET /api/keys HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:45 -0500] &quot;GET /api/secrets HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:46 -0500] &quot;GET /api/tokens HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:47 -0500] &quot;GET /api/v2 HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:48 -0500] &quot;GET /api/v3 HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:49 -0500] &quot;GET /api/v4 HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:50 -0500] &quot;GET /api/v5 HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+10.0.0.4 - - [12/Mar/2024:08:15:51 -0500] &quot;GET /api/v6 HTTP/1.1&quot; 500 64 &quot;-&quot; &quot;Mozilla/5.0&quot;
+THIS LINE IS MALFORMED AND MUST BE SKIPPED GRACEFULLY
+10.0.0.8 - carol [12/Mar/2024:08:16:00 -0500] &quot;GET /index.html HTTP/1.1&quot; 200 1024 &quot;-&quot; &quot;Mozilla/5.0&quot;
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+ERROR_SPIKE_THRESHOLD = 10       # flag IPs with &gt; this many 4xx/5xx responses
+LARGE_RESPONSE_BYTES  = 1_048_576  # 1 MB
+
+# Scanner fingerprints — compiled once
+SCANNER_PATTERNS = re.compile(
+    r&#x27;sqlmap|nikto|masscan|nmap|dirbuster|gobuster|dirb|wfuzz|&#x27;
+    r&#x27;nuclei|zap|burpsuite|acunetix|w3af|skipfish|hydra|medusa&#x27;,
+    re.IGNORECASE,
+)
+
+# Path traversal indicators (checked AFTER URL-decoding)
+TRAVERSAL_PATTERN = re.compile(r&#x27;\.\.[\\/]|%252e|%2e%2e&#x27;, re.IGNORECASE)
+
+# Combined Log Format — single compiled regex
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ip&gt;\S+)&#x27;                   # client IP
+    r&#x27;\s+\S+&#x27;                        # ident (-)
+    r&#x27;\s+(?P&lt;user&gt;\S+)&#x27;              # auth user
+    r&#x27;\s+\[(?P&lt;ts&gt;[^\]]+)\]&#x27;         # [timestamp]
+    r&#x27;\s+&quot;(?P&lt;method&gt;\S+)&#x27;           # &quot;METHOD
+    r&#x27;\s+(?P&lt;path&gt;\S+)&#x27;              #  /path
+    r&#x27;\s+[^&quot;]+&quot;\s*&#x27;                  #  HTTP/1.1&quot;
+    r&#x27;(?P&lt;status&gt;\d{3})&#x27;             # status code
+    r&#x27;\s+(?P&lt;bytes&gt;\S+)&#x27;             # bytes
+    r&#x27;(?:\s+&quot;(?P&lt;referrer&gt;[^&quot;]*)&quot;)?&#x27;  # optional referrer
+    r&#x27;(?:\s+&quot;(?P&lt;ua&gt;[^&quot;]*)&quot;)?&#x27;        # optional User-Agent
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSE HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_line(line: str) -&gt; dict | None:
+    &quot;&quot;&quot;Return parsed dict or None for malformed lines.&quot;&quot;&quot;
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    raw_bytes = m.group(&quot;bytes&quot;)
+    try:
+        byte_count = int(raw_bytes) if raw_bytes != &quot;-&quot; else 0
+    except ValueError:
+        byte_count = 0
+    return {
+        &quot;ip&quot;:       m.group(&quot;ip&quot;),
+        &quot;user&quot;:     m.group(&quot;user&quot;),
+        &quot;ts&quot;:       m.group(&quot;ts&quot;),
+        &quot;method&quot;:   m.group(&quot;method&quot;),
+        &quot;path&quot;:     m.group(&quot;path&quot;),
+        &quot;status&quot;:   int(m.group(&quot;status&quot;)),
+        &quot;bytes&quot;:    byte_count,
+        &quot;referrer&quot;: m.group(&quot;referrer&quot;) or &quot;-&quot;,
+        &quot;ua&quot;:       m.group(&quot;ua&quot;) or &quot;-&quot;,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — Manual aggregation (no Counter, no sorted key lambda)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_logs_manual(lines: list[str]) -&gt; dict:
+    ip_requests:    dict[str, int]       = defaultdict(int)
+    ip_errors:      dict[str, int]       = defaultdict(int)
+    status_dist:    dict[int, int]       = defaultdict(int)
+    path_requests:  dict[str, int]       = defaultdict(int)
+    scanner_hits:   list[dict]           = []
+    traversal_hits: list[dict]           = []
+    large_response: list[dict]           = []
+    malformed:      int                  = 0
+
+    for line in lines:
+        record = parse_line(line)
+        if record is None:
+            malformed += 1
+            continue
+
+        ip     = record[&quot;ip&quot;]
+        status = record[&quot;status&quot;]
+        path   = record[&quot;path&quot;]
+        ua     = record[&quot;ua&quot;]
+        byt    = record[&quot;bytes&quot;]
+
+        ip_requests[ip]   += 1
+        status_dist[status] += 1
+        path_requests[path] += 1
+
+        if status &gt;= 400:
+            ip_errors[ip] += 1
+
+        # Scanner detection
+        if SCANNER_PATTERNS.search(ua):
+            scanner_hits.append({&quot;ip&quot;: ip, &quot;ua&quot;: ua, &quot;path&quot;: path, &quot;ts&quot;: record[&quot;ts&quot;]})
+
+        # Path traversal — URL-decode first to catch encoded variants
+        decoded_path = unquote_plus(path)
+        if TRAVERSAL_PATTERN.search(decoded_path) or TRAVERSAL_PATTERN.search(path):
+            traversal_hits.append({&quot;ip&quot;: ip, &quot;path&quot;: path, &quot;decoded&quot;: decoded_path, &quot;status&quot;: status, &quot;ts&quot;: record[&quot;ts&quot;]})
+
+        # Large response
+        if byt &gt; LARGE_RESPONSE_BYTES:
+            large_response.append({&quot;ip&quot;: ip, &quot;path&quot;: path, &quot;bytes&quot;: byt, &quot;status&quot;: status, &quot;ts&quot;: record[&quot;ts&quot;]})
+
+    # Top-5 IPs manually
+    sorted_ips   = sorted(ip_requests.items(), key=lambda x: x[1], reverse=True)[:5]
+    sorted_paths = sorted(path_requests.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    error_spikes = {ip: cnt for ip, cnt in ip_errors.items() if cnt &gt; ERROR_SPIKE_THRESHOLD}
+
+    return {
+        &quot;total_requests&quot;: sum(ip_requests.values()),
+        &quot;malformed_lines&quot;: malformed,
+        &quot;status_distribution&quot;: dict(sorted(status_dist.items())),
+        &quot;top5_ips&quot;: sorted_ips,
+        &quot;top5_paths&quot;: sorted_paths,
+        &quot;scanner_hits&quot;: scanner_hits,
+        &quot;traversal_hits&quot;: traversal_hits,
+        &quot;large_response_hits&quot;: large_response,
+        &quot;error_spike_ips&quot;: error_spikes,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — Idiomatic Python (Counter + dataclasses)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from collections import Counter
+
+def analyze_logs_idiomatic(lines: list[str]) -&gt; dict:
+    ip_counter     = Counter()
+    status_counter = Counter()
+    path_counter   = Counter()
+    ip_errors      = Counter()
+    scanner_hits   = []
+    traversal_hits = []
+    large_response = []
+    malformed      = 0
+
+    for line in lines:
+        r = parse_line(line)
+        if r is None:
+            malformed += 1
+            continue
+
+        ip_counter[r[&quot;ip&quot;]]       += 1
+        status_counter[r[&quot;status&quot;]] += 1
+        path_counter[r[&quot;path&quot;]]   += 1
+
+        if r[&quot;status&quot;] &gt;= 400:
+            ip_errors[r[&quot;ip&quot;]] += 1
+
+        if SCANNER_PATTERNS.search(r[&quot;ua&quot;]):
+            scanner_hits.append(r)
+
+        decoded = unquote_plus(r[&quot;path&quot;])
+        if TRAVERSAL_PATTERN.search(decoded) or TRAVERSAL_PATTERN.search(r[&quot;path&quot;]):
+            traversal_hits.append({**r, &quot;decoded_path&quot;: decoded})
+
+        if r[&quot;bytes&quot;] &gt; LARGE_RESPONSE_BYTES:
+            large_response.append(r)
+
+    return {
+        &quot;total_requests&quot;:    sum(ip_counter.values()),
+        &quot;malformed_lines&quot;:   malformed,
+        &quot;status_distribution&quot;: dict(sorted(status_counter.items())),
+        &quot;top5_ips&quot;:          ip_counter.most_common(5),
+        &quot;top5_paths&quot;:        path_counter.most_common(5),
+        &quot;scanner_hits&quot;:      scanner_hits,
+        &quot;traversal_hits&quot;:    traversal_hits,
+        &quot;large_response_hits&quot;: large_response,
+        &quot;error_spike_ips&quot;:   {ip: cnt for ip, cnt in ip_errors.items() if cnt &gt; ERROR_SPIKE_THRESHOLD},
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT PRINTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(result: dict) -&gt; None:
+    print(&quot;=&quot; * 60)
+    print(&quot;HTTP ACCESS LOG ANALYSIS REPORT&quot;)
+    print(&quot;=&quot; * 60)
+    print(f&quot;Total requests  : {result[&#x27;total_requests&#x27;]}&quot;)
+    print(f&quot;Malformed lines : {result[&#x27;malformed_lines&#x27;]}&quot;)
+
+    print(&quot;\n── Status Code Distribution ──&quot;)
+    for code, cnt in result[&quot;status_distribution&quot;].items():
+        bar = &quot;█&quot; * min(cnt, 40)
+        print(f&quot;  {code}  {cnt:&gt;4}  {bar}&quot;)
+
+    print(&quot;\n── Top 5 IPs ──&quot;)
+    for ip, cnt in result[&quot;top5_ips&quot;]:
+        print(f&quot;  {ip:&lt;18} {cnt} requests&quot;)
+
+    print(&quot;\n── Top 5 Paths ──&quot;)
+    for path, cnt in result[&quot;top5_paths&quot;]:
+        print(f&quot;  {path:&lt;40} {cnt} requests&quot;)
+
+    print(&quot;\n── [ALERT] Scanner Fingerprints Detected ──&quot;)
+    if result[&quot;scanner_hits&quot;]:
+        for h in result[&quot;scanner_hits&quot;]:
+            print(f&quot;  IP={h[&#x27;ip&#x27;]}  UA={h[&#x27;ua&#x27;][:60]}  path={h[&#x27;path&#x27;]}&quot;)
+    else:
+        print(&quot;  None&quot;)
+
+    print(&quot;\n── [ALERT] Path Traversal Attempts ──&quot;)
+    if result[&quot;traversal_hits&quot;]:
+        for h in result[&quot;traversal_hits&quot;]:
+            print(f&quot;  IP={h[&#x27;ip&#x27;]}  raw={h[&#x27;path&#x27;]}  decoded={h.get(&#x27;decoded_path&#x27;, h[&#x27;path&#x27;])}  status={h[&#x27;status&#x27;]}&quot;)
+    else:
+        print(&quot;  None&quot;)
+
+    print(&quot;\n── [ALERT] Large Response / Possible Exfiltration ──&quot;)
+    if result[&quot;large_response_hits&quot;]:
+        for h in result[&quot;large_response_hits&quot;]:
+            print(f&quot;  IP={h[&#x27;ip&#x27;]}  path={h[&#x27;path&#x27;]}  bytes={h[&#x27;bytes&#x27;]:,}  status={h[&#x27;status&#x27;]}&quot;)
+    else:
+        print(&quot;  None&quot;)
+
+    print(&quot;\n── [ALERT] Error Spike IPs (&gt;{} errors) ──&quot;.format(ERROR_SPIKE_THRESHOLD))
+    if result[&quot;error_spike_ips&quot;]:
+        for ip, cnt in result[&quot;error_spike_ips&quot;].items():
+            print(f&quot;  IP={ip}  errors={cnt}&quot;)
+    else:
+        print(&quot;  None&quot;)
+    print(&quot;=&quot; * 60)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            lines = fh.readlines()
+    else:
+        print(&quot;[INFO] No file supplied — using embedded sample data.\n&quot;)
+        lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    result = analyze_logs_idiomatic(lines)
+    print_report(result)
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Confidential Computing &amp; Hardware Root of Trust</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Security\Confidential-Computing\README.md</p>
+<h1 id="gcp-confidential-computing-hardware-root-of-trust">GCP Confidential Computing &amp; Hardware Root of Trust</h1>
+<p><strong>Domain:</strong> Cloud Security / Trusted Execution Environments (TEEs) / Data-in-Use Protection<br />
+<strong>GCP services:</strong> Confidential VMs, Shielded VMs, Confidential GKE Nodes, Confidential Space, Assured Workloads<br />
+<strong>Hardware:</strong> AMD SEV / SEV-ES / SEV-SNP, Intel TDX, Intel SGX, ARM CCA (context)<br />
+<strong>Cross-refs:</strong> <code>infra/Side-Channel/Spectre-Meltdown/README.md</code>, <code>infra/Virtualization/Hypervisors/README.md</code>, <code>infra/Zero-Trust/BeyondCorp/README.md</code><br />
+<strong>Standards:</strong> NIST SP 800-193 (Platform Firmware Resiliency), IETF RATS RFC 9334, FIPS 140-3, TCG TPM 2.0</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Data has three states — <strong>at rest</strong> (on disk), <strong>in transit</strong> (on the wire), and <strong>in use</strong> (loaded into RAM and CPU registers while being processed). The industry solved at-rest with disk/KMS encryption and in-transit with TLS, but for decades data-in-use sat in plaintext DRAM, fully visible to anything with sufficient privilege: the hypervisor, a compromised host kernel, a cloud operator with physical/console access, a co-tenant exploiting a side channel, or an attacker who dumped memory via a cold-boot or DMA attack. <strong>Confidential Computing closes that third gap</strong> by executing workloads inside a hardware-enforced <strong>Trusted Execution Environment (TEE)</strong> where memory is encrypted with a key held inside the CPU and never exposed to the host software stack.</p>
+<p>On GCP this is delivered primarily through <strong>Confidential VMs</strong> (transparent, whole-VM memory encryption via AMD SEV/SEV-SNP or Intel TDX), layered on top of <strong>Shielded VM</strong> boot-integrity guarantees (secure boot, vTPM, measured boot, integrity monitoring). The defining property is a shift in the <strong>trust model</strong>: with Confidential Computing you no longer have to trust the hypervisor or the cloud provider's host software to preserve confidentiality of your running workload — you cryptographically reduce your Trusted Computing Base (TCB) to the CPU silicon, its microcode, and (for VM-based TEEs) your own guest OS. <strong>Remote attestation</strong> is what makes this trust actionable: before releasing secrets to a workload, a relying party verifies a hardware-signed quote proving the workload is genuinely running inside an authentic, up-to-date TEE.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- Confidential Computing protects <strong>data in use</strong> by encrypting RAM with a CPU-resident key; it complements — not replaces — at-rest and in-transit encryption.<br />
+- The threat model it targets is the <strong>privileged adversary</strong>: malicious/compromised hypervisor, a cloud insider, or a co-tenant — parties that TLS and KMS do nothing about.<br />
+- GCP <strong>Confidential VM</strong> = transparent full-VM memory encryption (AMD SEV-SNP / Intel TDX); <strong>Shielded VM</strong> = boot integrity (secure boot + vTPM + integrity monitoring). They are orthogonal and you usually want both.<br />
+- <strong>Attestation is the load-bearing control.</strong> A TEE without <em>verified</em> attestation gives false assurance — you must check the hardware signature, the measurement/PCR values, and the TCB/firmware version against a policy, then gate secret release on it.<br />
+- TEEs are <strong>not</strong> side-channel-proof. SGX and SEV have a long CVE history (Foreshadow, SGAxe, ÆPIC, CipherLeaks, transient-execution leaks). SEV-SNP/TDX add integrity + rollback protection but you still design assuming side channels exist.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>A TEE provides three properties in hardware: <strong>confidentiality</strong> (memory encrypted, invisible to more-privileged software), <strong>integrity</strong> (memory can't be silently modified/replayed by the host), and <strong>attestability</strong> (the platform can produce a signed statement of what is running). Different silicon draws the isolation boundary in different places, which is the single most important concept to internalize.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it means</th>
+<th>GCP / hardware realization</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TEE (Trusted Execution Environment)</strong></td>
+<td>HW-isolated execution context with encrypted memory + attestation</td>
+<td>Confidential VM, Confidential GKE node, Confidential Space, SGX enclave</td>
+</tr>
+<tr>
+<td><strong>TCB (Trusted Computing Base)</strong></td>
+<td>The set of components you must trust for the security property to hold</td>
+<td>VM-TEE: CPU + microcode + your guest OS. Enclave-TEE: CPU + microcode + enclave code only</td>
+</tr>
+<tr>
+<td><strong>Process-based TEE (enclave)</strong></td>
+<td>A small trusted region <em>inside</em> an untrusted process; OS/kernel excluded from TCB</td>
+<td><strong>Intel SGX</strong> — smallest TCB, hardest to program (app must be partitioned)</td>
+</tr>
+<tr>
+<td><strong>VM-based TEE (confidential VM)</strong></td>
+<td>The <em>whole guest VM</em> is the trust boundary; hypervisor excluded from TCB</td>
+<td><strong>AMD SEV/SEV-SNP</strong>, <strong>Intel TDX</strong> — lift-and-shift, larger TCB</td>
+</tr>
+<tr>
+<td><strong>Memory encryption engine</strong></td>
+<td>Inline AES engine on the memory controller encrypting DRAM traffic</td>
+<td>AMD: AES-128 (SEV) / AES with per-VM keys; Intel TDX/MKTME: AES-XTS</td>
+</tr>
+<tr>
+<td><strong>VEK / per-VM key</strong></td>
+<td>Ephemeral memory-encryption key bound to one guest, generated in the SoC</td>
+<td>AMD PSP (Platform Security Processor) generates &amp; guards VEKs; never leaves silicon</td>
+</tr>
+<tr>
+<td><strong>Reverse Map Table (RMP)</strong></td>
+<td>HW table enforcing that a physical page maps to exactly one owner</td>
+<td><strong>SEV-SNP</strong> feature — stops hypervisor memory remapping/aliasing/replay</td>
+</tr>
+<tr>
+<td><strong>Measured / measured boot</strong></td>
+<td>Cryptographic hash chain of firmware→bootloader→kernel into PCRs</td>
+<td>Shielded VM vTPM PCRs; Confidential VM launch measurement</td>
+</tr>
+<tr>
+<td><strong>Attestation report / quote</strong></td>
+<td>HW-signed structure containing measurements + TEE identity + nonce</td>
+<td>SEV-SNP <code>ATTESTATION_REPORT</code>, TDX <code>TDREPORT</code>→<code>TDQUOTE</code>, SGX quote</td>
+</tr>
+<tr>
+<td><strong>Attestation service / verifier</strong></td>
+<td>Party that validates the signature chain and measurement policy</td>
+<td>Google Attestation Verification Service; Intel/AMD roots of trust</td>
+</tr>
+<tr>
+<td><strong>Root of trust</strong></td>
+<td>The immutable hardware anchor a chain of trust extends from</td>
+<td>AMD PSP + VCEK/VLEK signing keys; Intel provisioning cert (PCK)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The isolation boundary — the key mental model.</strong> In a normal cloud VM the hypervisor sits <em>above</em> the guest and can read every guest page. Memory ballooning, live migration, introspection, and a compromised host all rely on that visibility. A confidential VM inverts one specific property: the memory-encryption engine tags every guest page with a per-VM key, so when the hypervisor reads a confidential guest's DRAM it sees ciphertext. The hypervisor can still <em>schedule</em>, <em>deny service</em>, and <em>observe access patterns</em> (it is not removed from the availability or metadata TCB), but it cannot read plaintext or (with SEV-SNP/TDX) tamper undetectably.</p>
+<p><strong>AMD SEV family — the evolution matters in practice:</strong><br />
+- <strong>SEV (2017):</strong> Encrypts guest memory with a per-VM key. Register state on VMEXIT is <em>not</em> protected → hypervisor can read/modify guest registers.<br />
+- <strong>SEV-ES (Encrypted State, 2018):</strong> Adds encryption of the guest register state on world switch (VMSA is encrypted/integrity-checked). Closes the register-leak gap.<br />
+- <strong>SEV-SNP (Secure Nested Paging, 2020):</strong> Adds <strong>integrity</strong> via the Reverse Map Table (RMP). Defeats the hypervisor's ability to remap, alias, replay, or corrupt guest pages, and adds interrupt-injection protection and TCB versioning/rollback protection. <strong>This is the modern baseline</strong> and what you should insist on. GCP's N2D/C2D/C3D confidential offerings use SEV/SEV-SNP.</p>
+<p><strong>Intel TDX (Trust Domain Extensions):</strong> VM-based TEE analogous to SEV-SNP. Introduces a new CPU mode (SEAM) and the <strong>TDX Module</strong> (an Intel-signed reference TCB module) that mediates between the untrusted VMM and Trust Domains (TDs). Memory encrypted with MKTME keys; integrity + access control enforced by the TDX module and hardware. GCP offers TDX on <strong>C3</strong> (Intel Sapphire Rapids) confidential VMs.</p>
+<p><strong>Intel SGX (Software Guard Extensions):</strong> Process-based. The app creates an <strong>enclave</strong> — encrypted pages (the EPC) that even ring-0 can't read. Smallest TCB but you must refactor the app into trusted/untrusted halves and cross the boundary with ECALLs/OCALLs. On GCP, SGX is not a general Confidential VM feature; the enclave model instead shows up in third-party/partner offerings and is more common on other clouds. SGX's brutal side-channel history (Foreshadow/L1TF, SGAxe, ÆPIC Leak) is the cautionary tale for the whole field.</p>
+<p><strong>Shielded VM — a separate, complementary control.</strong> Confidential VM protects <em>runtime memory</em>; Shielded VM protects <em>boot integrity</em> and answers "did this VM boot the software I expect, unmodified?" Three pillars:<br />
+1. <strong>Secure Boot</strong> — UEFI verifies each boot component's signature against a trusted certificate DB; unsigned/tampered bootloaders/kernels won't load. Blocks boot-level rootkits/bootkits.<br />
+2. <strong>vTPM (virtual TPM 2.0)</strong> — a virtualized, Google-attested TPM providing <strong>Measured Boot</strong>: firmware→bootloader→kernel hashes are extended into PCRs. Also provides sealed storage and a hardware-rooted identity for attestation.<br />
+3. <strong>Integrity Monitoring</strong> — Google compares the runtime boot measurements against a known-good <strong>integrity policy baseline</strong>; drift (e.g., a new kernel module, a modified bootloader) raises an integrity event you can alert on.</p>
+<p><strong>Confidential GKE Nodes:</strong> Confidential VM applied to Kubernetes worker nodes — every node's memory is encrypted so pod data-in-use is protected from the host and node metadata plane. Enabled per node pool (<code>--enable-confidential-nodes</code>). Note it protects the node's RAM; it does not by itself encrypt pod-to-pod traffic (use mTLS/service mesh) or protect against a compromised pod on the same node.</p>
+<p><strong>Confidential Space:</strong> A hardened, attestation-gated environment (built on Confidential VM + a minimal, measured OS image) for <strong>multi-party computation / data clean rooms</strong> — parties release their data to a workload <em>only after</em> attestation proves the exact container image and that no operator has shell access.</p>
+<p><strong>Assured Workloads:</strong> Not a TEE — a <strong>compliance and data-boundary control plane</strong>. It pins resources to a regulatory regime (FedRAMP High/Moderate, IL4/IL5, CJIS, ITAR, EU/regional data boundary, HIPAA) by enforcing data residency, personnel access controls (support-staff nationality/location), CMEK requirements, and product restrictions via <strong>Organization Policy</strong> constraints. It complements Confidential Computing: TEEs give <em>technical</em> insider-threat reduction; Assured Workloads gives <em>administrative/sovereignty</em> guarantees and provable compliance boundaries. In practice, keep them distinct.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Launch a Confidential VM (AMD SEV) — the canonical command:</strong></p>
+<pre><code class="language-bash">gcloud compute instances create conf-vm-sev \
+  --zone=us-central1-a \
+  --machine-type=n2d-standard-4 \
+  --confidential-compute-type=SEV \
+  --maintenance-policy=TERMINATE \
+  --image-family=ubuntu-2204-lts \
+  --image-project=ubuntu-os-cloud
+</code></pre>
+<p>Notes on each flag: <code>--confidential-compute-type=SEV</code> turns on transparent memory encryption. <strong><code>--maintenance-policy=TERMINATE</code> is mandatory</strong> — confidential VMs historically could not be live-migrated (the per-VM key can't leave the SoC), so host maintenance stops the VM instead of migrating it; design for that availability trade-off. The machine family must support the TEE (<code>n2d</code>/<code>c2d</code>/<code>c3d</code> for AMD; <code>c3</code> for Intel TDX).</p>
+<p><strong>Launch a Confidential VM with Intel TDX on C3:</strong></p>
+<pre><code class="language-bash">gcloud compute instances create conf-vm-tdx \
+  --zone=us-central1-a \
+  --machine-type=c3-standard-4 \
+  --confidential-compute-type=TDX \
+  --maintenance-policy=TERMINATE \
+  --min-cpu-platform=&quot;Intel Sapphire Rapids&quot; \
+  --image-family=ubuntu-2204-lts \
+  --image-project=ubuntu-os-cloud
+</code></pre>
+<p><strong>Explicitly enable all Shielded VM options</strong> (Confidential VMs enable Shielded features by default, but be explicit for policy clarity):</p>
+<pre><code class="language-bash">gcloud compute instances create hardened-vm \
+  --zone=us-central1-a \
+  --machine-type=n2d-standard-4 \
+  --confidential-compute-type=SEV_SNP \
+  --maintenance-policy=TERMINATE \
+  --shielded-secure-boot \
+  --shielded-vtpm \
+  --shielded-integrity-monitoring \
+  --image-family=ubuntu-2204-lts \
+  --image-project=ubuntu-os-cloud
+</code></pre>
+<p><code>--shielded-secure-boot</code> enforces UEFI signature checks; <code>--shielded-vtpm</code> provisions the measured-boot TPM; <code>--shielded-integrity-monitoring</code> streams boot-measurement comparisons to Cloud Logging/Monitoring. <code>--confidential-compute-type=SEV_SNP</code> selects the integrity-protected SNP variant where available.</p>
+<p><strong>Enforce it org-wide with Organization Policy</strong> — never rely on humans remembering flags:</p>
+<pre><code class="language-yaml"># constraint: require Shielded VM for every new instance
+name: organizations/123456789/policies/compute.requireShieldedVm
+spec:
+  rules:
+    - enforce: true
+</code></pre>
+<pre><code class="language-bash">gcloud resource-manager org-policies enable-enforce \
+  compute.requireShieldedVm \
+  --organization=123456789
+</code></pre>
+<p><strong>Confidential GKE node pool:</strong></p>
+<pre><code class="language-bash">gcloud container node-pools create conf-pool \
+  --cluster=prod-cluster \
+  --region=us-central1 \
+  --machine-type=n2d-standard-8 \
+  --enable-confidential-nodes \
+  --shielded-secure-boot \
+  --shielded-integrity-monitoring \
+  --num-nodes=3
+</code></pre>
+<p>Or enforce cluster-wide at creation with <code>--enable-confidential-nodes</code> so every node pool inherits memory encryption.</p>
+<p><strong>Verify SEV is actually active from inside the guest</strong> (don't assume — verify):</p>
+<pre><code class="language-bash"># Kernel confirms memory encryption is on
+dmesg | grep -i sev
+# -&gt; AMD Memory Encryption Features active: SEV SEV-ES SEV-SNP
+
+# Confirm the guest sees the confidential flag
+lscpu | grep -i sev
+</code></pre>
+<p><strong>Assured Workloads folder for FedRAMP High:</strong></p>
+<pre><code class="language-bash">gcloud assured workloads create \
+  --organization=123456789 \
+  --location=us \
+  --display-name=&quot;fedramp-high-boundary&quot; \
+  --compliance-regime=FEDRAMP_HIGH \
+  --billing-account=billingAccounts/0X0X0X-0X0X0X-0X0X0X \
+  --next-rotation-time=2026-09-01T00:00:00Z \
+  --key-rotation-period=7776000s
+</code></pre>
+<p><strong>Attestation-gated secret release (conceptual policy),</strong> the pattern that makes TEEs useful. In Confidential Space, an OIDC token containing the attestation claims is minted by the attestation service; you bind a Secret Manager / KMS key release to a Workload Identity Pool provider that only trusts that token when claims match:</p>
+<pre><code class="language-yaml"># WIP attribute condition — release key ONLY to the exact attested image,
+# on genuine SEV-SNP hardware, with no operator shell access
+attributeCondition: &gt;
+  assertion.swname == 'CONFIDENTIAL_SPACE' &amp;&amp;
+  assertion.submods.confidential_space.support_attributes.contains('STABLE') &amp;&amp;
+  assertion.submods.container.image_digest ==
+    'sha256:9b2c...verified-digest...e41' &amp;&amp;
+  assertion.hwmodel == 'GCP_AMD_SEV' &amp;&amp;
+  assertion.dbgstat == 'disabled-since-boot'
+</code></pre>
+<p>The last two lines are the crux: <code>dbgstat == disabled-since-boot</code> proves no debugger/console was ever attached (an operator can't peek), and the <code>image_digest</code> pin proves <em>exactly</em> which code will see the plaintext. Change the container, and the token no longer matches — secrets stay sealed.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Where confidential computing sits vs the other two states of data</strong></p>
+<pre class="mermaid">
+flowchart LR
+  A[Data at rest] --> B[Disk and KMS encryption]
+  C[Data in transit] --> D[TLS and mTLS]
+  E[Data in use] --> F[TEE memory encryption]
+  F --> G[Hypervisor sees ciphertext]
+  B --> H[Complete protection lifecycle]
+  D --> H
+  G --> H
+</pre>
+<p><strong>Diagram B — Trust boundary of a Confidential VM (who is inside vs outside the TCB)</strong></p>
+<pre class="mermaid">
+flowchart TD
+  subgraph Trusted
+    A[CPU silicon and microcode]
+    B[AMD PSP root of trust]
+    C[Guest OS and workload]
+    D[Per VM memory key in SoC]
+  end
+  subgraph Untrusted
+    E[Hypervisor and host kernel]
+    F[Cloud operator console]
+    G[Co tenant VMs]
+    H[Physical DRAM bus]
+  end
+  E -->|reads only ciphertext| C
+  F -->|no plaintext access| C
+  G -->|isolated by per VM key| C
+  H -->|encrypted traffic| D
+</pre>
+<p><strong>Diagram C — Remote attestation sequence (the load-bearing control)</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+  participant W as Workload in TEE
+  participant CPU as CPU root of trust
+  participant AS as Attestation Verifier
+  participant RP as Relying Party KMS
+  W->>CPU: Request attestation report with nonce
+  CPU-->>W: Signed report with measurements and TEE identity
+  W->>AS: Send report and certificate chain
+  AS->>AS: Verify signature to hardware root
+  AS->>AS: Check measurement and TCB version policy
+  AS-->>W: Signed attestation token
+  W->>RP: Present token to request secret
+  RP->>RP: Validate token claims and image digest
+  RP-->>W: Release secret only if policy matches
+</pre>
+<p><strong>Diagram D — Measured boot chain (Shielded VM integrity)</strong></p>
+<pre class="mermaid">
+flowchart LR
+  A[UEFI firmware] --> B[Measure into PCR0]
+  B --> C[Bootloader]
+  C --> D[Measure into PCR4]
+  D --> E[Kernel and initrd]
+  E --> F[Measure into PCR7 to 9]
+  F --> G[vTPM quote signed]
+  G --> H[Integrity monitoring compares baseline]
+  H --> I{Drift detected}
+  I -->|Yes| J[Raise integrity event]
+  I -->|No| K[Boot trusted]
+</pre>
+<p><strong>Diagram E — Decision flow: which TEE / control to choose</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> NeedInUse
+  NeedInUse --> LiftAndShift: whole VM unchanged
+  NeedInUse --> MinimalTCB: refactor app acceptable
+  LiftAndShift --> ConfidentialVM: SEV_SNP or TDX
+  MinimalTCB --> Enclave: SGX process TEE
+  ConfidentialVM --> MultiParty: parties distrust each other
+  MultiParty --> ConfidentialSpace: attestation gated release
+  ConfidentialVM --> Compliance: data residency required
+  Compliance --> AssuredWorkloads
+  Enclave --> [*]
+  ConfidentialSpace --> [*]
+  AssuredWorkloads --> [*]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<p>TEEs have a rich vulnerability history — the signal is that you know these are <em>real, exploited</em> weaknesses, not that TEEs are useless.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Year</th>
+<th>Component</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Foreshadow / L1TF</strong> (CVE-2018-3615)</td>
+<td>2018</td>
+<td>Intel SGX</td>
+<td>Speculative read of L1 cache leaks enclave data</td>
+<td>Transient execution breaks enclave confidentiality; microcode + flushing needed</td>
+</tr>
+<tr>
+<td><strong>SGAxe</strong></td>
+<td>2020</td>
+<td>Intel SGX</td>
+<td>Extends CacheOut/L1TF to extract SGX attestation keys</td>
+<td>Compromised attestation key lets attacker forge quotes → attestation trust collapses</td>
+</tr>
+<tr>
+<td><strong>Plundervolt</strong> (CVE-2019-11157)</td>
+<td>2019</td>
+<td>Intel SGX</td>
+<td>Undervolting via <code>MSR</code> faults enclave computation</td>
+<td>Physical/software voltage glitch bypasses enclave integrity</td>
+</tr>
+<tr>
+<td><strong>ÆPIC Leak</strong> (CVE-2022-21233)</td>
+<td>2022</td>
+<td>Intel SGX</td>
+<td>Uninitialized APIC MMIO reads leak stale enclave data</td>
+<td>Architectural (non-speculative) leak — no timing needed</td>
+</tr>
+<tr>
+<td><strong>CipherLeaks</strong> (CVE-2021-46744)</td>
+<td>2021</td>
+<td>AMD SEV-ES/SNP</td>
+<td>Ciphertext side channel: XTS-like determinism leaks register values</td>
+<td>Even integrity-protected SEV leaks via observable ciphertext patterns</td>
+</tr>
+<tr>
+<td><strong>SEVerity / unauthenticated encryption</strong></td>
+<td>2020</td>
+<td>AMD SEV (pre-SNP)</td>
+<td>No integrity → hypervisor injects/moves ciphertext to run arbitrary code</td>
+<td>Why SEV-SNP's RMP integrity is mandatory, not optional</td>
+</tr>
+<tr>
+<td><strong>SEVurity</strong></td>
+<td>2020</td>
+<td>AMD SEV/SEV-ES</td>
+<td>Tweak reuse in memory encryption enables code injection</td>
+<td>Confidentiality without integrity is not enough</td>
+</tr>
+<tr>
+<td><strong>undeSErVed / VM migration attacks</strong></td>
+<td>2019</td>
+<td>AMD SEV</td>
+<td>Malicious hypervisor abuses migration to decrypt</td>
+<td>Pre-SNP debug and migration paths were attack surface</td>
+</tr>
+<tr>
+<td><strong>CacheWarp</strong> (CVE-2023-20592)</td>
+<td>2023</td>
+<td>AMD SEV-ES/SNP</td>
+<td><code>INVD</code> mishandling lets attacker roll back cache writes</td>
+<td>Rollback of guest state to hijack control flow inside SNP</td>
+</tr>
+<tr>
+<td><strong>WeSee / Ahoi attacks</strong></td>
+<td>2024</td>
+<td>AMD SEV-SNP</td>
+<td>Malicious interrupt/#VC injection into confidential guest</td>
+<td>Interrupt-handling paths remain host-controllable attack surface</td>
+</tr>
+<tr>
+<td><strong>Meltdown / Spectre</strong> (CVE-2017-5754 / 5753 / 5715)</td>
+<td>2018</td>
+<td>All CPUs</td>
+<td>Transient execution reads across isolation boundaries</td>
+<td>Underlying class enabling many TEE side channels (see cross-ref)</td>
+</tr>
+<tr>
+<td><strong>TPM-FAIL</strong> (CVE-2019-16863)</td>
+<td>2019</td>
+<td>TPM 2.0</td>
+<td>Timing leak in ECDSA/ECC signing recovers TPM keys</td>
+<td>vTPM/TPM roots of trust themselves need constant-time crypto</td>
+</tr>
+<tr>
+<td><strong>faulTPM</strong></td>
+<td>2023</td>
+<td>AMD fTPM (PSP)</td>
+<td>Voltage fault against the PSP extracts fTPM secrets</td>
+<td>The root of trust (PSP) is itself attackable with physical access</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — SGAxe and the attestation-key catastrophe (2020).</strong> SGX's whole value proposition is that a remote party can trust an enclave <em>because</em> the CPU signs a quote with a key only genuine Intel hardware holds. SGAxe chained transient-execution leakage to extract that attestation key material from the architectural enclave. Once an attacker holds the signing key, they can produce <strong>valid attestation quotes for fake enclaves</strong> — a relying party verifying signatures correctly would still be fooled. The lesson for a Senior engineer: attestation trust is only as strong as the secrecy of the platform's signing key and the freshness of its TCB. This is exactly why verifiers must check <strong>TCB recovery / security-version numbers (SVNs)</strong> and reject quotes from downlevel microcode — Intel <em>revokes and re-issues</em> provisioning certificates after such breaks. A verifier that ignores TCB version is exploitable even after a patch exists.</p>
+<p><strong>Case study 2 — SEV without integrity (SEVerity/SEVurity, 2020).</strong> Pre-SNP AMD SEV encrypted memory but did <strong>not</strong> authenticate it. A malicious hypervisor — precisely the adversary SEV claims to defend against — could move, replay, or splice ciphertext blocks. Researchers demonstrated injecting a chosen instruction sequence into an encrypted guest to gain code execution, fully defeating the confidentiality goal. The fix wasn't a patch; it was an architecture: <strong>SEV-SNP's Reverse Map Table</strong> cryptographically enforces single-owner, non-replayable page mappings. The takeaway you should state in practice: <em>confidentiality without integrity is a false sense of security in the confidential-computing threat model</em>, which is why you require SEV-<strong>SNP</strong> (or TDX), not plain SEV.</p>
+<p><strong>Case study 3 — CipherLeaks / ciphertext side channels (2021).</strong> Even SEV-SNP leaked information through a subtle channel: because memory encryption is deterministic per address (XTS-style tweak), an attacker observing <em>ciphertext values</em> in DRAM over time can correlate them to plaintext register spills on VMEXIT, recovering cryptographic key bits from constant-time libraries. AMD's mitigation (ciphertext hiding / VMSA changes) reduced but illustrates the enduring theme: <strong>TEEs stop reads of plaintext, not observation of side effects.</strong> You still deploy defense-in-depth (constant-time crypto, address-space randomization inside the guest) as if the host is watching, because for these channels, it effectively is.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>Unverified attestation</strong> (trust the TEE without checking the quote)</td>
+<td>T1606 Forge Web Credentials / design gap</td>
+<td>App enables TEE but never validates the signed report</td>
+<td>False assurance; secrets released to non-TEE or fake TEE</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Attestation replay</strong> (reuse an old valid quote)</td>
+<td>T1550 Use Alternate Auth Material</td>
+<td>Verifier omits nonce/freshness check</td>
+<td>Attacker impersonates a legitimate enclave</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Stale TCB accepted</strong> (downlevel microcode/firmware)</td>
+<td>Patch/config gap</td>
+<td>Verifier ignores TCB SVN / security version</td>
+<td>Known-broken platform passes attestation</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>Compromised attestation key</strong> (SGAxe-class)</td>
+<td>Credential theft</td>
+<td>Side-channel extraction of platform signing key</td>
+<td>Forged quotes; total attestation-trust collapse</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Missing integrity (plain SEV)</strong></td>
+<td>Data manipulation</td>
+<td>Memory encrypted but not authenticated</td>
+<td>Hypervisor injects/replays code into guest</td>
+<td>Low (SNP fixes)</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>Ciphertext side channel</strong> (CipherLeaks)</td>
+<td>T1005 side channel</td>
+<td>Deterministic memory encryption</td>
+<td>Register/key leakage to co-located host</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>Transient-execution leak</strong> (Foreshadow/L1TF, Meltdown)</td>
+<td>Side channel</td>
+<td>Speculative reads across TEE boundary</td>
+<td>Enclave/guest memory disclosure</td>
+<td>Low-Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Fault/glitch attack</strong> (Plundervolt, faulTPM)</td>
+<td>T1200 Hardware Additions</td>
+<td>Voltage/clock manipulation</td>
+<td>Corrupt computation or extract secrets</td>
+<td>Low (needs access)</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>Malicious interrupt injection</strong> (Ahoi/WeSee)</td>
+<td>Exploitation</td>
+<td>Host controls interrupt delivery to guest</td>
+<td>Control-flow hijack inside SEV-SNP</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Guest OS compromise inside the TEE</strong></td>
+<td>T1068 Priv Esc</td>
+<td>TEE trusts the whole guest; app RCE = full plaintext access</td>
+<td>Encryption is moot; attacker is <em>inside</em> the boundary</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td><strong>Supply-chain / rogue image</strong></td>
+<td>T1195 Supply Chain Compromise</td>
+<td>Attested workload is itself malicious/backdoored</td>
+<td>Legit attestation of malicious code; data exfil</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td><strong>Shielded VM disabled / not enforced</strong></td>
+<td>Misconfiguration</td>
+<td>No org policy; VM launched without secure boot/vTPM</td>
+<td>Bootkit persistence; no integrity signal</td>
+<td>High</td>
+</tr>
+<tr>
+<td>13</td>
+<td><strong>Integrity events ignored</strong></td>
+<td>Detection gap</td>
+<td>Integrity-monitoring alerts unrouted/unmonitored</td>
+<td>Boot tampering goes unnoticed</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td><strong>Availability trade-off exploited</strong> (no live migration)</td>
+<td>Denial of Service</td>
+<td>Confidential VMs TERMINATE on maintenance</td>
+<td>Unexpected downtime; SLA breach</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td><strong>Metadata / access-pattern leakage</strong></td>
+<td>Side channel</td>
+<td>Host still sees timing, page faults, I/O patterns</td>
+<td>Inference of secrets without reading plaintext</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td><strong>Key-release policy too loose</strong></td>
+<td>Broken access control</td>
+<td>WIP/KMS condition doesn't pin image digest or dbgstat</td>
+<td>Secrets to debug-enabled or wrong workload</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td><strong>Assured Workloads bypass</strong></td>
+<td>T1078 Valid Accounts / config</td>
+<td>Resources created outside the AW folder boundary</td>
+<td>Data residency/compliance violation</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td><strong>Cold-boot / physical DRAM attack</strong></td>
+<td>T1200 Hardware</td>
+<td>Physical access to encrypted DIMMs</td>
+<td>Mitigated by memory encryption; keys in SoC</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td><strong>vTPM/root-of-trust weakness</strong> (TPM-FAIL)</td>
+<td>Cryptographic weakness</td>
+<td>Non-constant-time signing in TPM</td>
+<td>Attestation/sealing key recovery</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>20</td>
+<td><strong>Confidential GKE inter-pod exposure</strong></td>
+<td>Lateral Movement</td>
+<td>Node RAM encrypted but pod-to-pod plaintext</td>
+<td>Compromised pod reads co-located pod data</td>
+<td>Medium</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Unverified attestation</td>
+<td>Mandatory verifier: check signature to HW root before any secret</td>
+<td>Attestation service / KMS release policy</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Attestation replay</td>
+<td>Fresh nonce per request; short token TTL</td>
+<td>Relying party / verifier</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Stale TCB</td>
+<td>Enforce minimum TCB SVN / firmware version in policy</td>
+<td>Attestation policy</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Compromised attest key</td>
+<td>Honor Intel/AMD key revocation; require TCB recovery</td>
+<td>Verifier cert-chain validation</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Missing integrity</td>
+<td>Require SEV-<strong>SNP</strong> or TDX, never plain SEV</td>
+<td>Instance provisioning + org policy</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Ciphertext side channel</td>
+<td>Constant-time crypto in guest; enable ciphertext hiding</td>
+<td>Guest workload + platform config</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Transient execution</td>
+<td>Patched microcode; core scheduling / no SMT co-residency</td>
+<td>Platform + guest kernel</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Fault/glitch</td>
+<td>Physical security (cloud handles); firmware fault detection</td>
+<td>Provider / hardware</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Interrupt injection</td>
+<td>Updated SNP/#VC handling; restrict host interrupt surface</td>
+<td>Guest kernel + microcode</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Guest OS compromise</td>
+<td>Minimal hardened image; workload hardening; least privilege inside TEE</td>
+<td>Guest image + app</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Rogue attested image</td>
+<td>Pin image digest in release policy; signed/verified builds</td>
+<td>KMS/WIP condition + Binary Authorization</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Shielded VM off</td>
+<td>Org policy <code>compute.requireShieldedVm</code> = enforced</td>
+<td>Organization Policy</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Ignored integrity events</td>
+<td>Route integrity logs to SIEM; alert on drift</td>
+<td>Cloud Logging → SCC / SIEM</td>
+</tr>
+<tr>
+<td>14</td>
+<td>No live migration</td>
+<td>Design for TERMINATE; MIGs + graceful drain</td>
+<td>Deployment architecture</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Access-pattern leak</td>
+<td>Oblivious algorithms; pad/blind sensitive ops</td>
+<td>Application design</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Loose key policy</td>
+<td>Pin image_digest + dbgstat=disabled in attribute condition</td>
+<td>Workload Identity Pool / KMS</td>
+</tr>
+<tr>
+<td>17</td>
+<td>AW bypass</td>
+<td>Enforce AW org policies; monitor out-of-boundary creates</td>
+<td>Assured Workloads + SCC</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Cold-boot</td>
+<td>Memory encryption (inherent to TEE)</td>
+<td>Hardware</td>
+</tr>
+<tr>
+<td>19</td>
+<td>vTPM weakness</td>
+<td>Patched TPM firmware; Google-managed vTPM</td>
+<td>Provider</td>
+</tr>
+<tr>
+<td>20</td>
+<td>GKE inter-pod</td>
+<td>mTLS service mesh + NetworkPolicy + pod-per-node isolation</td>
+<td>GKE workload layer</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1) Verified remote attestation with policy (threats 1–4).</strong> This is <em>the</em> control — everything else assumes it. Mechanically: the workload asks the CPU root of trust for a signed report containing a hash of what booted (the launch measurement), the TEE type/mode, and a caller-supplied nonce. The relying party (or Google's Attestation Verification Service) validates the certificate chain up to the AMD <strong>VCEK/VLEK</strong> or Intel <strong>PCK</strong> root, confirms the <strong>nonce</strong> matches (anti-replay), checks the <strong>measurement</strong> against an allow-list, and enforces a <strong>minimum TCB security-version number</strong> so patched-but-downlevel platforms are rejected. Only then is a short-lived attestation token minted, and secret release (KMS/Secret Manager) is <em>conditioned</em> on that token's claims — including the exact container <code>image_digest</code> and <code>dbgstat == disabled-since-boot</code>. Implementation: Confidential Space + Workload Identity Pool attribute conditions (see §2.2). Trade-off/limit: it moves trust to the verifier and the measurement allow-list — a stale or overly permissive policy silently defeats the whole scheme, and you now own the operational burden of updating allow-lists on every legitimate image change.</p>
+<p><strong>2) Require SEV-SNP / TDX (integrity), not plain SEV (threat 5, 9).</strong> Confidentiality without integrity is exploitable (SEVerity). SEV-SNP's <strong>Reverse Map Table</strong> enforces that each physical page has exactly one validated owner and cannot be remapped, aliased, or replayed by the hypervisor; TDX's TDX-Module + hardware provide the equivalent. Implementation: <code>--confidential-compute-type=SEV_SNP</code> or <code>=TDX</code>, plus an org policy restricting instance creation to SNP/TDX-capable configurations. Trade-off: narrower machine-family/region availability and the no-live-migration constraint; SNP also adds some world-switch overhead versus plain SEV.</p>
+<p><strong>3) Enforce Shielded VM org-wide + wire integrity monitoring to detection (threats 12, 13).</strong> Secure Boot blocks unsigned bootloaders/kernels (bootkit defense); the vTPM measures the boot chain into PCRs; Integrity Monitoring diffs runtime measurements against a signed baseline and emits events on drift. The control is only real if (a) it's <em>enforced</em>, not opt-in — hence <code>compute.requireShieldedVm</code> at the org node — and (b) the integrity events are <em>routed and alerted on</em>. Implementation: org policy + a log sink filtering <code>earlyBootReportEvent</code>/<code>lateBootReportEvent</code> mismatches into Security Command Center or your SIEM. Trade-off: legitimate kernel/driver updates change measurements and generate baseline-update noise; you need a process to re-baseline after approved changes, or you'll train responders to ignore the alerts.</p>
+<p><strong>4) Pin the attested workload with Binary Authorization + digest pinning (threats 11, 16).</strong> Attestation proves code runs <em>in</em> a TEE; it does <strong>not</strong> prove the code is trustworthy — a backdoored image attests perfectly. You close this by only ever attesting/releasing to images that passed a signed CI/CD provenance check. Implementation: Binary Authorization admission policy requiring attestor signatures (SLSA provenance) for GKE, plus pinning the exact <code>image_digest</code> in the KMS/WIP release condition so a swapped image fails to obtain secrets. Trade-off: tight coupling between your build pipeline's signing keys and runtime trust — compromise of the signing attestor undermines both layers, so those keys belong in an HSM/KMS with strict separation of duties.</p>
+<p><strong>5) Assured Workloads for sovereignty/compliance boundaries (threat 17).</strong> Where TEEs give <em>technical</em> insider-threat reduction, Assured Workloads gives <em>administrative and jurisdictional</em> guarantees: it pins a resource folder to a compliance regime and enforces data residency, provider-personnel access constraints (location/nationality of support staff), CMEK, and product allow-lists via Organization Policy. Implementation: <code>gcloud assured workloads create --compliance-regime=FEDRAMP_HIGH …</code> then create all regulated resources <em>inside</em> that folder, with SCC monitoring for out-of-boundary resource creation. Trade-off: reduced product/region availability and higher operational friction; AW is a boundary and a policy set, not a magic wrapper — resources created outside the folder aren't covered, so you must monitor for bypass.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>Shielded VM integrity events</strong> — Cloud Logging <code>compute.googleapis.com</code> with <code>jsonPayload.@type</code> = <code>ShieldedVmIntegrityEvent</code>; fields <code>earlyBootReportEvent.policyEvaluationPassed</code>, <code>lateBootReportEvent.policyEvaluationPassed</code>, and <code>actualMeasurements</code> vs <code>policyMeasurements</code> (PCR values).</li>
+<li><strong>Admin Activity audit logs</strong> — <code>compute.instances.insert</code> to catch VMs created <em>without</em> <code>confidentialInstanceConfig</code> or Shielded flags; <code>compute.instances.setShieldedInstanceIntegrityPolicy</code> (baseline resets — a re-baseline can hide tampering).</li>
+<li><strong>Attestation verification logs</strong> — from your verifier: failed signature chains, nonce mismatches, rejected TCB SVNs, unknown measurements.</li>
+<li><strong>KMS / Secret Manager access logs</strong> — secret-release decisions tied to attestation tokens; denials indicate policy mismatch or attack.</li>
+<li><strong>Assured Workloads / SCC findings</strong> — org-policy violations, resource-outside-boundary, personnel-access anomalies.</li>
+<li><strong>Guest-side</strong> — <code>dmesg</code> SEV/TDX status at boot; host maintenance TERMINATE events (availability signal).</li>
+</ul>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>Sigma-style — VM created without Confidential/Shielded protection in a regulated project:</strong></p>
+<pre><code class="language-yaml">title: Compute instance created without Confidential or Shielded VM
+logsource:
+  product: gcp
+  service: cloudaudit
+detection:
+  selection:
+    protoPayload.methodName: 'v1.compute.instances.insert'
+  filter_conf:
+    protoPayload.request.confidentialInstanceConfig.enableConfidentialCompute: true
+  filter_shield:
+    protoPayload.request.shieldedInstanceConfig.enableSecureBoot: true
+  condition: selection and not (filter_conf and filter_shield)
+level: high
+tags:
+  - attack.defense_evasion
+  - attack.t1578   # Modify Cloud Compute Infrastructure
+</code></pre>
+<p><strong>BigQuery / log-analytics SQL — Shielded VM integrity failures (boot tampering) in last 24h:</strong></p>
+<pre><code class="language-sql">SELECT
+  resource.labels.instance_id,
+  timestamp,
+  jsonPayload.lateBootReportEvent.policyEvaluationPassed AS late_pass,
+  jsonPayload.earlyBootReportEvent.policyEvaluationPassed AS early_pass
+FROM `my_project.compute_logs.cloudaudit_googleapis_com_system_event`
+WHERE jsonPayload.&quot;@type&quot; LIKE '%ShieldedVmIntegrityEvent%'
+  AND (jsonPayload.lateBootReportEvent.policyEvaluationPassed = false
+       OR jsonPayload.earlyBootReportEvent.policyEvaluationPassed = false)
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+ORDER BY timestamp DESC;
+</code></pre>
+<p><strong>KQL-style — repeated attestation/secret-release denials from one workload (possible forged-quote or policy-mismatch probing):</strong></p>
+<pre><code class="language-kql">SecretManagerAudit
+| where MethodName == &quot;AccessSecretVersion&quot; and ResponseStatus == &quot;PERMISSION_DENIED&quot;
+| where Reason has &quot;attestation&quot; or Reason has &quot;attribute_condition&quot;
+| summarize denials = count() by CallerPrincipal, ImageDigest, bin(TimeGenerated, 10m)
+| where denials &gt; 5
+</code></pre>
+<h3 id="response-playbook-containment-eradication-recovery">Response playbook (containment → eradication → recovery)</h3>
+<ol>
+<li><strong>Triage / scope.</strong> For an integrity-monitoring alert, pull <code>actualMeasurements</code> vs <code>policyMeasurements</code> — determine whether it's an approved change (kernel update) or unexpected drift. For attestation-denial spikes, identify the workload principal and image digest.</li>
+<li><strong>Contain.</strong> Isolate the instance: remove its service-account bindings, apply a deny-all firewall/network tag, and revoke any short-lived attestation tokens by rotating the KMS key / disabling the WIP provider so no further secrets release. For a node, cordon + drain the GKE node.</li>
+<li><strong>Preserve evidence.</strong> Snapshot the boot disk (note: guest memory is encrypted and not host-dumpable — that's by design; rely on disk + logs). Export relevant audit, integrity, and attestation logs.</li>
+<li><strong>Eradicate.</strong> If boot tampering is confirmed, do not "clean" — <strong>destroy and rebuild</strong> from a known-good, signed image; the whole point of measured boot is that you now know the current image is untrusted. Rotate secrets that could have been exposed.</li>
+<li><strong>Root-cause the trust chain.</strong> Confirm the platform TCB version, whether SNP/TDX integrity was actually on, and whether the release policy pinned image digest + <code>dbgstat</code>. Tighten the attribute condition if it was too loose.</li>
+<li><strong>Recover.</strong> Redeploy on SEV-SNP/TDX with enforced Shielded VM, re-baseline integrity policy from the new golden image, and confirm attestation succeeds end-to-end before restoring traffic.</li>
+<li><strong>Hardening / post-incident.</strong> Push the missing org policy (<code>compute.requireShieldedVm</code>), add Binary Authorization if a rogue image was involved, and add/upgrade the detections above.</li>
+</ol>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What problem does confidential computing solve that at-rest and in-transit encryption do not?</strong><br />
+<em>Answer:</em> It protects <strong>data in use</strong> — data that is decrypted and sitting in RAM/registers while being processed. At-rest encryption protects disks and in-transit encryption (TLS) protects the wire, but between those two, data lives in plaintext in memory where a privileged adversary — the hypervisor, host kernel, a cloud operator, or a co-tenant via side channel — can read it. Confidential computing uses a hardware TEE to keep that in-use data encrypted in DRAM with a CPU-resident key, closing the third gap so the full lifecycle is covered.<br />
+<em>Signal:</em> Do they understand the three states of data and place the technology correctly.</p>
+<p><strong>Q2. Difference between a Confidential VM and a Shielded VM on GCP?</strong><br />
+<em>Answer:</em> They're orthogonal. A <strong>Shielded VM</strong> protects <strong>boot integrity</strong> — secure boot (signature-checked bootloader/kernel), a vTPM providing measured boot, and integrity monitoring that alerts on drift; it answers "did this VM boot the software I expect?" A <strong>Confidential VM</strong> protects <strong>runtime memory</strong> by encrypting the guest's RAM with a per-VM key via AMD SEV-SNP or Intel TDX, so the hypervisor can't read data in use. You typically want both — Confidential VMs actually enable Shielded features by default — because one covers boot-time tampering and the other covers runtime memory disclosure.<br />
+<em>Signal:</em> Avoids conflating the two, which is a very common mistake.</p>
+<p><strong>Q3. What is remote attestation and why is it essential?</strong><br />
+<em>Answer:</em> Attestation is the CPU producing a <strong>hardware-signed report</strong> proving that a genuine, up-to-date TEE is running specific measured code. It's essential because a TEE alone is worthless if you can't <em>verify</em> it — a relying party must confirm, before releasing secrets or data, that the workload really is inside authentic hardware running the expected code. Verification checks the signature up to the hardware root (AMD VCEK / Intel PCK), a fresh nonce for anti-replay, the boot measurement against an allow-list, and a minimum TCB version. Only then do you trust the environment.<br />
+<em>Signal:</em> Recognizes attestation, not encryption, as the trust-establishing mechanism.</p>
+<p><strong>Q4. Name the AMD SEV generations and what each added.</strong><br />
+<em>Answer:</em> <strong>SEV (2017)</strong> encrypts guest memory with a per-VM key but leaves register state exposed on VMEXIT. <strong>SEV-ES (2018)</strong> adds encryption/integrity of the guest register state (the VMSA) on world switches. <strong>SEV-SNP (2020)</strong> adds full <strong>memory integrity</strong> via the Reverse Map Table — preventing the hypervisor from remapping, aliasing, or replaying pages — plus interrupt protection and TCB rollback protection. SNP is the modern baseline; plain SEV's lack of integrity was exploitable (SEVerity).<br />
+<em>Signal:</em> Knows the evolution and <em>why</em> integrity (SNP) matters, not just names.</p>
+<p><strong>Q5. Why must Confidential VMs use <code>--maintenance-policy=TERMINATE</code>, and what's the trade-off?</strong><br />
+<em>Answer:</em> The per-VM memory-encryption key is generated inside the SoC and never leaves it, so the VM's encrypted state historically can't be live-migrated to another host. When Google needs to do host maintenance, the confidential VM is <strong>stopped (TERMINATE)</strong> rather than migrated. The trade-off is availability: you must architect for abrupt stops — use managed instance groups, graceful shutdown handling, and stateless or replicated designs — because you lose seamless live migration that regular VMs enjoy.<br />
+<em>Signal:</em> Understands the operational cost of the security guarantee.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design a system where three companies jointly compute on their combined data without any party (or the cloud) seeing another's raw data.</strong><br />
+<em>Answer:</em> Use <strong>Confidential Space</strong> on Confidential VMs (SEV-SNP/TDX). Publish the exact analytic <strong>container image and its digest</strong>; each party independently reviews it. The workload runs in a TEE and requests an <strong>attestation token</strong> proving the exact <code>image_digest</code>, genuine confidential hardware, and <code>dbgstat == disabled-since-boot</code> (no operator shell). Each party binds their data's decryption key in Cloud KMS to a Workload Identity Pool condition that only issues the key when the token's claims match. So each party's KMS releases their key <em>only</em> to the attested, unmodified, non-debuggable workload — not to each other and not to a Google operator. Outputs are aggregated results only. Add Binary Authorization so the image is provably from a trusted build. The residual risks are side channels and a malicious-but-attested image, so the image must be jointly reviewed and minimal.<br />
+<em>Signal:</em> Can compose attestation + KMS conditions + Confidential Space into a real MPC/clean-room design.</p>
+<p><strong>Q7. When would you choose SGX enclaves over Confidential VMs, and vice versa?</strong><br />
+<em>Answer:</em> Choose <strong>SGX (process TEE)</strong> when you need the <em>smallest possible TCB</em> — only the enclave code is trusted, the OS/kernel/hypervisor are all excluded — for a small, security-critical routine like key handling or a licensing check, and you can afford to refactor the app into trusted/untrusted halves crossing ECALL/OCALL boundaries. Choose <strong>Confidential VMs (VM TEE)</strong> for <strong>lift-and-shift</strong>: you protect an entire unmodified workload/OS with zero code changes, at the cost of a much larger TCB (your whole guest OS is trusted, so a guest RCE defeats it). In practice for cloud data-in-use protection at scale, VM TEEs win on operability; SGX wins for tiny, high-assurance secrets with a hostile OS assumption — and SGX's side-channel history (Foreshadow, SGAxe) is a real cost.<br />
+<em>Signal:</em> Trades TCB size against operability and knows the programming-model cost.</p>
+<p><strong>Q8. How do you make attestation <em>actually</em> secure? What does a naive implementation get wrong?</strong><br />
+<em>Answer:</em> A naive implementation "enables the TEE" and assumes it's protected, or verifies a quote's signature but nothing else. A correct verifier must: (1) validate the certificate chain to the genuine <strong>hardware root</strong> and honor revocation; (2) check a <strong>fresh nonce</strong> to stop replay of old quotes; (3) compare the <strong>measurement</strong> to an allow-list of expected images; (4) enforce a <strong>minimum TCB / security-version number</strong> so patched-but-downlevel platforms are rejected (this is what stops post-SGAxe forged quotes); and (5) gate secret release on all of the above plus workload-specific claims like image digest and debug status. Miss the nonce → replay; miss the TCB check → accept broken platforms; skip verification entirely → the TEE is theater.<br />
+<em>Signal:</em> Depth on the failure modes that make real deployments insecure.</p>
+<p><strong>Q9. Confidential GKE Nodes protect node memory. What does that NOT protect, and how do you close the gaps?</strong><br />
+<em>Answer:</em> It encrypts the <em>node's</em> RAM against the host, but it does <strong>not</strong>: (1) encrypt <strong>pod-to-pod traffic</strong> — you still need mTLS / a service mesh (Istio) and NetworkPolicy; (2) protect a pod from <strong>another compromised pod on the same node</strong> — kernel namespaces still share the node, so a container escape or a noisy-neighbor pod is in scope, mitigated with strong pod security standards, gVisor/sandboxing, and pod-per-node placement for sensitive workloads; (3) protect against a <strong>malicious image</strong> — add Binary Authorization; or (4) protect <strong>secrets at the app layer</strong> — use Secret Manager with attestation-gated release. Confidential nodes are one layer; you compose it with mesh mTLS, admission control, and workload isolation.<br />
+<em>Signal:</em> Understands the precise scope boundary and defense-in-depth.</p>
+<p><strong>Q10. How does Assured Workloads relate to Confidential Computing — same thing?</strong><br />
+<em>Answer:</em> No — they solve different problems and complement each other. <strong>Confidential Computing</strong> is a <em>technical</em> control: hardware memory encryption reducing the TCB so the hypervisor/insider can't read data in use. <strong>Assured Workloads</strong> is an <em>administrative/sovereignty</em> control plane: it pins a resource folder to a compliance regime (FedRAMP High, IL5, CJIS, EU data boundary) and enforces data residency, provider-personnel access restrictions (support-staff location/nationality), CMEK, and product allow-lists via Organization Policy. A regulated system often uses both: TEEs for provable technical insider-threat reduction, Assured Workloads for provable jurisdictional/compliance boundaries and auditability. They're distinct layers of the same defense-in-depth story.<br />
+<em>Signal:</em> Doesn't conflate technical and compliance controls.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep dive</h3>
+<p><strong>Q11. Walk through the SEVerity attack and explain why SEV-SNP's Reverse Map Table stops it.</strong><br />
+<em>Answer:</em> Plain AMD SEV encrypted guest memory but did <strong>not</strong> authenticate it — there was no integrity binding between a physical page, its contents, and its owner. A malicious hypervisor (the exact adversary SEV claims to defend against) could therefore remap, alias, or replay ciphertext pages, and because the encryption tweak was address-dependent and reusable, researchers spliced in a chosen ciphertext that decrypted to attacker-controlled instructions, achieving code execution inside the "protected" guest. SEV-SNP introduces the <strong>Reverse Map Table (RMP)</strong>: a hardware-maintained structure recording, for every physical page, its single validated owner and guest-physical mapping. Any attempt by the hypervisor to remap, double-map, or replay a page that violates the RMP triggers a fault. This enforces single-ownership, non-aliasing, and anti-replay — turning confidentiality-only SEV into confidentiality <strong>plus integrity</strong>, which is why you require SNP.<br />
+<em>Signal:</em> Deep understanding that confidentiality without integrity is exploitable, at the mechanism level.</p>
+<p><strong>Q12. Are TEEs vulnerable to Spectre/Meltdown-class side channels? How do you reason about residual risk?</strong><br />
+<em>Answer:</em> Yes. TEEs stop <em>architectural reads</em> of plaintext by privileged software, but transient-execution and microarchitectural side channels (Foreshadow/L1TF against SGX, Meltdown/Spectre broadly, CipherLeaks' ciphertext channel against SEV, ÆPIC's uninitialized-MMIO leak) can exfiltrate secrets <em>without</em> an architectural read — via cache timing, speculative loads, or observable ciphertext. The residual-risk reasoning: (1) the TEE reduces but doesn't eliminate the attack surface; (2) you require patched microcode and enforce a <strong>minimum TCB version</strong> in attestation so downlevel platforms are rejected; (3) you avoid SMT co-residency for the most sensitive workloads (core scheduling); (4) you keep the in-guest software <strong>constant-time and side-channel-hardened</strong> as if the host is observing, because for these channels it effectively is; and (5) you accept that TEEs raise the bar and shrink the TCB rather than providing absolute secrecy. See <code>infra/Side-Channel/Spectre-Meltdown</code> for the underlying transient-execution mechanics.<br />
+<em>Signal:</em> Nuanced — doesn't oversell TEEs, cross-links the attack class.</p>
+<p><strong>Q13. Design an attestation-gated secret-release flow and enumerate what each check defends against.</strong><br />
+<em>Answer:</em> Flow: the TEE workload requests a hardware attestation report with a verifier-supplied <strong>nonce</strong>; Google's Attestation Verification Service validates the signature to the AMD/Intel root, checks the measurement and TCB SVN, and mints a short-lived <strong>OIDC attestation token</strong> with claims (hwmodel, image_digest, dbgstat, support_attributes). The workload presents that token to a <strong>Workload Identity Pool</strong> provider whose <code>attributeCondition</code> requires <code>hwmodel == GCP_AMD_SEV</code>, <code>image_digest == &lt;pinned sha256&gt;</code>, and <code>dbgstat == disabled-since-boot</code>; on match it federates to a service account allowed to <code>AccessSecretVersion</code> in Secret Manager / decrypt with a KMS key. Each check's purpose: <strong>signature-to-root</strong> defeats fake/software TEEs; <strong>nonce</strong> defeats quote replay; <strong>TCB SVN</strong> defeats downlevel/known-broken platforms (post-SGAxe); <strong>image_digest pin</strong> defeats swapped/rogue code (even if attested); <strong>dbgstat</strong> defeats an operator attaching a debugger to peek at memory; <strong>short TTL</strong> limits token theft. Miss any one and you have a corresponding bypass.<br />
+<em>Signal:</em> Can enumerate defenses per control — senior depth.</p>
+<p><strong>Q14. A malicious insider at the cloud provider wants your data. Precisely what does Confidential Computing stop, and what does it not?</strong><br />
+<em>Answer:</em> <strong>Stops:</strong> reading your VM's plaintext memory via the hypervisor, host kernel, or console (they see ciphertext); tampering with/injecting into guest memory (with SNP/TDX integrity); and — with attestation + <code>dbgstat</code> gating — attaching a debugger to a Confidential Space workload to release secrets. It cryptographically removes host-software confidentiality from your TCB. <strong>Does not stop:</strong> an insider with the ability to <strong>deny service</strong> (they still schedule and can stop your VM), observe <strong>metadata and access patterns</strong> (timing, page-fault, I/O side channels), exploit a <strong>microarchitectural side channel</strong> on shared hardware, or subvert the <strong>hardware root of trust with physical fault injection</strong> (faulTPM-class, though at real physical/operational cost). It also does nothing if the <strong>workload itself is compromised</strong> (RCE inside the guest) or the <strong>image is malicious but attested</strong>. So it's a strong confidentiality/integrity control against privileged software adversaries, not an availability or side-channel panacea — pair it with attestation policy, Assured Workloads for personnel controls, and app-layer hardening.<br />
+<em>Signal:</em> Crisp threat-model boundary — knows exactly what's in and out of scope.</p>
+<p><strong>Q15. Compare AMD SEV-SNP, Intel TDX, and Intel SGX across TCB, integrity, migration, and use case — and state what you'd standardize on for a data-processing platform.</strong><br />
+<em>Answer:</em> <strong>SGX</strong> is a <em>process</em> TEE: smallest TCB (only enclave code; OS excluded), strong isolation, but requires app refactoring, has a hard memory limit and heavy side-channel history (Foreshadow, SGAxe, ÆPIC); best for tiny high-assurance secrets. <strong>SEV-SNP</strong> is a <em>VM</em> TEE: whole-guest TCB, integrity via RMP, transparent lift-and-shift, no live migration, broad AMD availability on GCP N2D/C3D. <strong>TDX</strong> is Intel's <em>VM</em> TEE analog: TDX-Module-mediated TDs, MKTME encryption, integrity + access control, on GCP C3 Sapphire Rapids. For a general <strong>data-processing platform</strong> I'd standardize on <strong>VM-based TEEs (SEV-SNP or TDX)</strong> — they give data-in-use protection with zero app changes, integrated with Confidential Space for attestation-gated data sharing — and reserve SGX for a narrow enclave (e.g., a root-key custodian) only if the minimal-TCB requirement justifies the engineering cost. I'd require the <em>integrity-protected</em> variant (SNP/TDX, never plain SEV), enforce attestation with TCB-version policy, and architect around the no-live-migration constraint. Between SNP and TDX I'd let hardware availability/region and existing microcode-patch cadence decide, keeping the attestation-verification abstraction provider-agnostic.<br />
+<em>Signal:</em> Synthesizes the whole space into a defensible standardization decision with trade-offs.</p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>GCP</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VM-level data-in-use encryption</td>
+<td><strong>Confidential VM</strong> (SEV/SEV-SNP on N2D/C2D/C3D; TDX on C3)</td>
+<td><strong>AMD SEV-SNP</strong> on EC2 (M6a/C6a etc.); Nitro isolates hypervisor by design</td>
+<td><strong>Confidential VM</strong> (DCasv5/ECasv5 AMD SEV-SNP; DCesv5 Intel TDX)</td>
+</tr>
+<tr>
+<td>Process/enclave TEE</td>
+<td>Partner SGX offerings; Confidential Space for app isolation</td>
+<td><strong>AWS Nitro Enclaves</strong> (isolated VM-based enclave, no persistent storage/network)</td>
+<td><strong>Azure Confidential Enclaves</strong> (Intel SGX on DCsv2/DCsv3)</td>
+</tr>
+<tr>
+<td>Boot integrity (secure boot + vTPM)</td>
+<td><strong>Shielded VM</strong></td>
+<td><strong>Nitro TPM (NitroTPM)</strong> + UEFI Secure Boot</td>
+<td><strong>Trusted Launch</strong> (secure boot + vTPM)</td>
+</tr>
+<tr>
+<td>Confidential Kubernetes</td>
+<td><strong>Confidential GKE Nodes</strong></td>
+<td>EKS on SEV-SNP nodes / Nitro</td>
+<td><strong>Confidential AKS</strong> (AMD SEV-SNP node pools)</td>
+</tr>
+<tr>
+<td>Attestation service</td>
+<td><strong>Google Attestation Verification Service</strong> / Confidential Space tokens</td>
+<td><strong>Nitro Enclaves attestation</strong> (KMS integration via attestation doc)</td>
+<td><strong>Microsoft Azure Attestation (MAA)</strong></td>
+</tr>
+<tr>
+<td>Attestation-gated secret release</td>
+<td>KMS/Secret Manager + Workload Identity Pool conditions</td>
+<td>KMS key policy conditioned on Nitro attestation PCRs</td>
+<td>Azure Key Vault + MAA / SKR (Secure Key Release)</td>
+</tr>
+<tr>
+<td>Multi-party / clean room</td>
+<td><strong>Confidential Space</strong></td>
+<td>Nitro Enclaves</td>
+<td><strong>Azure Confidential Ledger / clean rooms</strong></td>
+</tr>
+<tr>
+<td>Compliance / data-boundary control</td>
+<td><strong>Assured Workloads</strong></td>
+<td><strong>AWS Control Tower + GovCloud / conformance packs</strong></td>
+<td><strong>Azure Policy + sovereign/Gov clouds</strong></td>
+</tr>
+<tr>
+<td>Underlying silicon</td>
+<td>AMD EPYC (SEV-SNP), Intel Xeon SPR (TDX)</td>
+<td>AMD EPYC (SEV-SNP), Nitro hardware</td>
+<td>AMD EPYC (SEV-SNP), Intel Xeon SPR (TDX/SGX)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Note on AWS Nitro:</strong> AWS's approach differs philosophically — the <strong>Nitro System</strong> offloads virtualization to dedicated hardware and <em>removes operator access by design</em> (no interactive host access, hardware-enforced), and <strong>Nitro Enclaves</strong> carve an isolated compute environment out of an EC2 instance with no persistent storage, no external network, and attestation to KMS. AWS also now offers AMD SEV-SNP memory encryption for full-VM confidentiality. So AWS achieves overlapping goals via a different primary architecture (Nitro isolation) plus SEV-SNP, whereas GCP/Azure lead with CPU-TEE memory encryption + attestation.</p>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li>Confidential Computing protects <strong>data in use</strong> by encrypting RAM with a <strong>CPU-resident per-VM key</strong>; it complements at-rest (disk/KMS) and in-transit (TLS) — the full three-state lifecycle.</li>
+<li>The threat model is the <strong>privileged adversary</strong>: malicious/compromised hypervisor, cloud insider, co-tenant. It shrinks your <strong>TCB</strong> to CPU silicon + microcode (+ your guest OS for VM-TEEs).</li>
+<li><strong>Confidential VM ≠ Shielded VM.</strong> Confidential VM = runtime memory encryption (SEV-SNP/TDX). Shielded VM = boot integrity (secure boot + vTPM + integrity monitoring). Use both; enforce via org policy.</li>
+<li><strong>Require the integrity-protected variant</strong> — SEV-<strong>SNP</strong> or TDX, never plain SEV. Confidentiality without integrity was exploited (SEVerity); SNP's Reverse Map Table fixes it in hardware.</li>
+<li><strong>Attestation is the load-bearing control.</strong> Verify signature-to-hardware-root, a fresh nonce, the measurement allow-list, and a minimum TCB version — then gate secret release on the token (pin <code>image_digest</code> and <code>dbgstat</code>).</li>
+<li>TEEs are <strong>not side-channel-proof.</strong> Foreshadow, SGAxe, ÆPIC, CipherLeaks, CacheWarp are real; keep guest crypto constant-time and assume the host observes side effects. Cross-ref Spectre/Meltdown.</li>
+<li>A perfectly attested workload can still be <strong>malicious</strong> — pair attestation with Binary Authorization / signed provenance so you only trust code you built.</li>
+<li><strong>Confidential GKE</strong> encrypts node RAM but not pod-to-pod traffic or same-node pod isolation — add mTLS, NetworkPolicy, and sandboxing.</li>
+<li><strong>Assured Workloads is compliance/sovereignty</strong>, not a TEE — it enforces data residency and provider-personnel controls administratively; use it <em>alongside</em> Confidential Computing.</li>
+<li>Confidential VMs trade away <strong>live migration</strong> (<code>--maintenance-policy=TERMINATE</code>) — design for abrupt host-maintenance stops with MIGs and stateless/replicated architecture.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — Confidential VM overview &amp; Confidential Computing docs (<code>cloud.google.com/confidential-computing</code>, <code>/compute/confidential-vm/docs</code>)</li>
+<li>Google Cloud — Shielded VM docs (secure boot, vTPM, integrity monitoring)</li>
+<li>Google Cloud — Confidential Space &amp; Confidential GKE Nodes documentation</li>
+<li>Google Cloud — Assured Workloads documentation (compliance regimes, org policies)</li>
+<li>AMD — SEV-SNP White Paper: "Strengthening VM Isolation with Integrity Protection and More" (2020)</li>
+<li>Intel — TDX Architecture Specification &amp; Intel SGX Developer Reference</li>
+<li>IETF RFC 9334 — Remote ATtestation procedureS (RATS) Architecture</li>
+<li>NIST SP 800-193 — Platform Firmware Resiliency Guidelines; TCG TPM 2.0 Library Specification</li>
+<li>Confidential Computing Consortium — "A Technical Analysis of Confidential Computing" white paper</li>
+<li>Research: Foreshadow (CVE-2018-3615), SGAxe, Plundervolt (CVE-2019-11157), ÆPIC Leak (CVE-2022-21233), CipherLeaks (CVE-2021-46744), SEVerity/SEVurity, CacheWarp (CVE-2023-20592), faulTPM, TPM-FAIL (CVE-2019-16863)</li>
+<li>MITRE ATT&amp;CK — T1578 (Modify Cloud Compute Infrastructure), T1195 (Supply Chain Compromise), T1550 (Use Alternate Authentication Material)</li>
+<li>Cross-references in this repo — <code>infra/Side-Channel/Spectre-Meltdown/README.md</code>, <code>infra/Virtualization/Hypervisors/README.md</code>, <code>infra/Zero-Trust/BeyondCorp/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

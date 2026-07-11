@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q5_syslog_summarizer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q5_syslog_summarizer.py</h1>
+  <p class="file-path">Source: code\day5\answers\q5_syslog_summarizer.py</p>
+  <p class="line-count">309 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q5. Syslog Severity Summarizer
+================================
+Parse syslog-format file, extract timestamp/hostname/process/message,
+group by process, flag lines matching dangerous patterns.
+
+Syslog format:
+  Jan 15 10:00:01 hostname kernel: [12345.678] something happened
+  Jan 15 10:00:02 hostname sshd[1234]: Failed password for root from 192.168.1.1
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Parse a syslog file. Group by process name. Flag dangerous lines.&quot;
+
+--- CANDIDATE FIRST RESPONSE (naive split, no regex) ---
+&quot;Split each line by spaces. Index 0-2 is the timestamp, index 3 is hostname,
+index 4 has the process name. I&#x27;ll strip the colon from it.&quot;
+
+Follow-up: &quot;What about sshd[1234]: — the PID in brackets?&quot;
+→ Need to strip `[pid]` from the process name.
+Follow-up: &quot;What if a line doesn&#x27;t match the format?&quot;
+→ Need graceful skip.
+Follow-up: &quot;How will you flag patterns like &#x27;Failed password&#x27;?&quot;
+→ Precompile regexes for each detection rule.
+
+--- CANDIDATE SECOND RESPONSE (regex for process extraction, flag list) ---
+Better. Still no proper error handling or structured output.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Full regex parse, compiled detection patterns, per-process grouping,
+flagged events list, streaming line-by-line reading.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+Jan 15 10:00:01 webserver kernel: [12345.678] EXT4-fs: mounted filesystem
+Jan 15 10:00:02 webserver sshd[1234]: Failed password for root from 192.168.1.1
+Jan 15 10:00:03 webserver sshd[1234]: Failed password for invalid user admin from 10.0.0.5
+Jan 15 10:00:04 webserver nginx[5678]: 127.0.0.1 - GET /health HTTP/1.1 200
+Jan 15 10:00:05 webserver sshd[1235]: Accepted publickey for alice from 10.0.0.2
+Jan 15 10:00:06 webserver sudo[9999]:     bob : TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/bin/bash
+Jan 15 10:00:07 webserver kernel: [12350.000] Connection refused from 172.16.0.9
+Jan 15 10:00:08 webserver sshd[1236]: Invalid user oracle from 203.0.113.5
+Jan 15 10:00:09 webserver cron[3333]: (root) CMD (/usr/bin/updatedb)
+Jan 15 10:00:10 webserver nginx[5678]: 10.0.0.1 - GET /admin HTTP/1.1 404
+Jan 15 10:00:11 webserver sshd[1237]: Failed password for invalid user pi from 198.51.100.2
+Jan 15 10:00:12 webserver kernel: [12360.000] usb 1-1: new high-speed USB device
+THIS IS A MALFORMED LINE WITHOUT PROPER SYSLOG FORMAT
+Jan 15 10:00:14 webserver sshd[1238]: Failed password for root from 192.168.1.1 port 54321 ssh2
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTION RULES
+# ─────────────────────────────────────────────────────────────────────────────
+
+DETECTION_RULES = [
+    (&quot;failed_password&quot;,   r&quot;Failed password&quot;),
+    (&quot;invalid_user&quot;,      r&quot;[Ii]nvalid user&quot;),
+    (&quot;connection_refused&quot;, r&quot;[Cc]onnection refused&quot;),
+    (&quot;sudo_shell&quot;,        r&quot;sudo.*COMMAND=/bin/bash&quot;),
+    (&quot;root_login_attempt&quot;, r&quot;Failed password for root&quot;),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Standard syslog: month day time hostname process[pid]: message
+# OR:             month day time hostname process: message
+SYSLOG_RE = re.compile(
+    r&#x27;^(?P&lt;month&gt;[A-Za-z]{3})\s+&#x27;
+    r&#x27;(?P&lt;day&gt;\s*\d+)\s+&#x27;
+    r&#x27;(?P&lt;time&gt;\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;(?P&lt;host&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;proc&gt;[^\[:\s]+)&#x27;   # process name (no [, :, or space)
+    r&#x27;(?:\[\d+\])?&#x27;          # optional [pid]
+    r&#x27;:\s+&#x27;
+    r&#x27;(?P&lt;msg&gt;.*)&#x27;
+)
+
+
+def parse_syslog_line(raw: str):
+    &quot;&quot;&quot;
+    Returns dict with keys: timestamp_str, host, process, message.
+    Returns None if the line doesn&#x27;t match syslog format.
+    &quot;&quot;&quot;
+    raw = raw.strip()
+    if not raw:
+        return None
+    m = SYSLOG_RE.match(raw)
+    if not m:
+        return None
+
+    ts_str = f&quot;{m.group(&#x27;month&#x27;)} {m.group(&#x27;day&#x27;).strip()} {m.group(&#x27;time&#x27;)}&quot;
+    return {
+        &quot;timestamp&quot;: ts_str,
+        &quot;host&quot;:      m.group(&quot;host&quot;),
+        &quot;process&quot;:   m.group(&quot;proc&quot;),
+        &quot;message&quot;:   m.group(&quot;msg&quot;),
+        &quot;raw&quot;:       raw,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual dict grouping, manual pattern matching with re, no defaultdict)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compile_rules(rules):
+    &quot;&quot;&quot;Pre-compile all detection rule regexes.&quot;&quot;&quot;
+    return [(tag, re.compile(pattern)) for tag, pattern in rules]
+
+
+def analyze_without_builtins(lines):
+    &quot;&quot;&quot;
+    Returns:
+      process_groups : dict { process_name -&gt; [event_dict, ...] }
+      flagged        : list of { line_number, process, timestamp, message, tags }
+      malformed      : int
+    &quot;&quot;&quot;
+    compiled_rules = _compile_rules(DETECTION_RULES)
+    process_groups = {}
+    flagged        = []
+    malformed      = 0
+
+    for line_num, raw in enumerate(lines, start=1):
+        entry = parse_syslog_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        proc = entry[&quot;process&quot;]
+
+        # Manual grouping (no defaultdict)
+        if proc not in process_groups:
+            process_groups[proc] = []
+        process_groups[proc].append(entry)
+
+        # Check each detection rule manually
+        matched_tags = []
+        for tag, pattern in compiled_rules:
+            if pattern.search(entry[&quot;message&quot;]):
+                # Manual append-if-not-present
+                already = False
+                for t in matched_tags:
+                    if t == tag:
+                        already = True
+                        break
+                if not already:
+                    matched_tags.append(tag)
+
+        if matched_tags:
+            flagged.append({
+                &quot;line_number&quot;: line_num,
+                &quot;process&quot;:     proc,
+                &quot;timestamp&quot;:   entry[&quot;timestamp&quot;],
+                &quot;message&quot;:     entry[&quot;message&quot;],
+                &quot;tags&quot;:        matched_tags,
+            })
+
+    return process_groups, flagged, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (defaultdict, set, list comprehension)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(lines):
+    compiled_rules = _compile_rules(DETECTION_RULES)
+    process_groups = defaultdict(list)
+    flagged        = []
+    malformed      = 0
+
+    for line_num, raw in enumerate(lines, start=1):
+        entry = parse_syslog_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        process_groups[entry[&quot;process&quot;]].append(entry)
+
+        matched_tags = [tag for tag, pat in compiled_rules
+                        if pat.search(entry[&quot;message&quot;])]
+        if matched_tags:
+            flagged.append({
+                &quot;line_number&quot;: line_num,
+                &quot;process&quot;:     entry[&quot;process&quot;],
+                &quot;timestamp&quot;:   entry[&quot;timestamp&quot;],
+                &quot;message&quot;:     entry[&quot;message&quot;],
+                &quot;tags&quot;:        matched_tags,
+            })
+
+    return dict(process_groups), flagged, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(process_groups, flagged, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  SYSLOG SEVERITY SUMMARY  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Malformed lines skipped: {malformed}\n&quot;)
+
+    print(&quot;Per-Process Event Count:&quot;)
+    for proc in sorted(process_groups.keys()):
+        count = len(process_groups[proc])
+        print(f&quot;  {proc:&lt;20} {count} events&quot;)
+
+    print(f&quot;\nFlagged Events ({len(flagged)} total):&quot;)
+    if not flagged:
+        print(&quot;  None.&quot;)
+    else:
+        for ev in flagged:
+            tags_str = &quot;, &quot;.join(ev[&quot;tags&quot;])
+            print(f&quot;  Line {ev[&#x27;line_number&#x27;]:&gt;4} | {ev[&#x27;timestamp&#x27;]} | &quot;
+                  f&quot;{ev[&#x27;process&#x27;]:&lt;12} | [{tags_str}]&quot;)
+            # Truncate long messages for readability
+            msg = ev[&quot;message&quot;]
+            if len(msg) &gt; 80:
+                msg = msg[:77] + &quot;...&quot;
+            print(f&quot;             {msg}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stream_lines(filepath: str):
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            for line in fh:
+                yield line
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+    except OSError as exc:
+        print(f&quot;[ERROR] OS error: {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        lines = list(stream_lines(sys.argv[1]))
+        if not lines:
+            print(&quot;[WARN] No lines read.&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    pg_manual, fl_manual, mal_manual = analyze_without_builtins(lines)
+    pg_builtin, fl_builtin, mal_builtin = analyze_with_builtins(lines)
+
+    print_report(pg_manual, fl_manual, mal_manual, label=&quot;(Manual / No Builtins)&quot;)
+    print_report(pg_builtin, fl_builtin, mal_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check
+    assert mal_manual == mal_builtin, &quot;Malformed count mismatch!&quot;
+    assert len(fl_manual) == len(fl_builtin), &quot;Flagged count mismatch!&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Parsing  : O(L)  — one regex match per line
+# Flagging : O(L * R) where R = number of detection rules (small constant)
+# Space    : O(L)  — storing all parsed events in process_groups
+#
+# NOTE: For memory-constrained environments, don&#x27;t store all events;
+# only store counters and flagged events (which are a small fraction).
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;How would you add new detection rules without redeploying?&quot;
+#     → Load rules from a config file or database at startup. Use a rules
+#       engine pattern where rules are data, not code.
+# - &quot;What if you need to detect multi-line syslog messages?&quot;
+#     → Buffer lines and join them when the next line doesn&#x27;t start with a
+#       syslog header (continuation lines typically start with whitespace).
+# - &quot;How do you handle syslog from multiple hosts in the same file?&quot;
+#     → Already handled: the &#x27;host&#x27; field is extracted per line. Group by
+#       (host, process) instead of just process.
+# - &quot;What&#x27;s the risk of loading detection rules from an external source?&quot;
+#     → Regex injection / ReDoS attacks. Validate patterns before compiling.
+#       Use re.error exception handling. Consider using re2 for safe regexes.
+# =============================================================================
+</code></pre>
+</body>
+</html>

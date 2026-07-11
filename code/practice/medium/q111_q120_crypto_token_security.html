@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q111_q120_crypto_token_security.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q111_q120_crypto_token_security.py</h1>
+  <p class="file-path">Source: code\practice\medium\q111_q120_crypto_token_security.py</p>
+  <p class="line-count">702 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q111–Q120
+Topic: Crypto &amp; Token Security — Caesar Cipher, XOR, HMAC, Password Hashing,
+       Secure Token Generation, Certificate Parsing
+&quot;&quot;&quot;
+
+import re
+import os
+import hmac
+import math
+import time
+import base64
+import hashlib
+import secrets
+import struct
+import datetime
+from typing import Dict, List, Optional, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q111 — Brute Force Caesar Cipher
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a Caesar-ciphered ciphertext (letters shifted by a fixed key 0-25),
+  find all possible plaintext candidates by brute-forcing all 26 shifts.
+  Optionally rank by English character frequency to find the most likely key.
+
+Clarifying questions:
+  1. Are non-letter characters preserved?
+  2. Is it uppercase-only, lowercase-only, or mixed?
+  3. Should we return all 26 candidates or just the best?
+
+Security angle:
+  Caesar cipher has zero computational security — key space of 26.
+  Understanding brute-force attack complexity is fundamental to cryptanalysis
+  and helps security engineers evaluate why modern ciphers need large key spaces.
+  This maps to CWE-327 (use of broken/risky algorithm).
+&quot;&quot;&quot;
+
+_ENGLISH_FREQ = &quot;etaoinshrdlucmfywgpbvkjxqz&quot;
+
+
+def caesar_encrypt(plaintext: str, shift: int) -&gt; str:
+    result = []
+    for ch in plaintext:
+        if ch.isalpha():
+            base = ord(&#x27;A&#x27;) if ch.isupper() else ord(&#x27;a&#x27;)
+            result.append(chr((ord(ch) - base + shift) % 26 + base))
+        else:
+            result.append(ch)
+    return &quot;&quot;.join(result)
+
+
+def caesar_decrypt(ciphertext: str, shift: int) -&gt; str:
+    return caesar_encrypt(ciphertext, -shift)
+
+
+def brute_force_caesar(ciphertext: str) -&gt; List[Tuple[int, float, str]]:
+    &quot;&quot;&quot;
+    Returns list of (shift, score, plaintext) for all 26 shifts, sorted by
+    decreasing score (higher = more English-like).
+    &quot;&quot;&quot;
+    results = []
+    for shift in range(26):
+        plaintext = caesar_decrypt(ciphertext, shift)
+        # Score: count characters that appear in top-12 English letters
+        top12 = frozenset(_ENGLISH_FREQ[:12])
+        score = sum(1 for c in plaintext.lower() if c in top12) / max(len(plaintext), 1)
+        results.append((shift, score, plaintext))
+    results.sort(key=lambda x: -x[1])
+    return results
+
+
+def test_q111():
+    original = (
+        &quot;The quick brown fox jumps over the lazy dog and then runs &quot;
+        &quot;away into the night&quot;
+    )
+    shift = 13
+    ciphertext = caesar_encrypt(original, shift)
+    candidates = brute_force_caesar(ciphertext)
+    assert candidates[0][0] == shift, (
+        f&quot;Expected top shift {shift}, got {candidates[0][0]}&quot;
+    )
+    assert candidates[0][2] == original
+    print(&quot;Q111 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q112 — Repeating-Key XOR Encrypt/Decrypt
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement repeating-key XOR encryption / decryption.
+  XOR plaintext bytes with repeated key bytes cyclically.
+
+Clarifying questions:
+  1. Are the inputs bytes or strings?
+  2. Should the output be hex-encoded or raw bytes?
+  3. Is this symmetric (encrypt == decrypt)?
+
+Security angle:
+  Repeating-key XOR (Vigenère cipher variant) is broken by Kasiski analysis
+  and the index of coincidence method. It was used in classic ciphers and
+  still appears in CTF challenges and malware obfuscation (XOR with 1-byte key).
+  Understanding its weakness motivates why block ciphers with proper key
+  schedules are required.
+&quot;&quot;&quot;
+
+
+def xor_encrypt(plaintext: bytes, key: bytes) -&gt; bytes:
+    if not key:
+        raise ValueError(&quot;Key must not be empty&quot;)
+    return bytes(p ^ key[i % len(key)] for i, p in enumerate(plaintext))
+
+
+def xor_decrypt(ciphertext: bytes, key: bytes) -&gt; bytes:
+    return xor_encrypt(ciphertext, key)   # XOR is its own inverse
+
+
+def test_q112():
+    plaintext = b&quot;Attack at dawn&quot;
+    key = b&quot;ICE&quot;
+    ciphertext = xor_encrypt(plaintext, key)
+    assert ciphertext != plaintext
+    recovered = xor_decrypt(ciphertext, key)
+    assert recovered == plaintext
+    print(&quot;Q112 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q113 — Detect Single-Byte XOR Cipher
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a hex-encoded ciphertext that was XOR-encrypted with a single byte,
+  find the key byte and recover the plaintext using frequency analysis.
+
+Clarifying questions:
+  1. Is the ciphertext hex-encoded or raw bytes?
+  2. Should we return the single best key or all candidates?
+  3. Should the score be character frequency or chi-squared?
+
+Security angle:
+  Single-byte XOR is trivially broken (only 256 possible keys). It is still
+  used in malware to obfuscate strings, configuration, and network payloads.
+  Reversing this is a core malware analysis skill. The same frequency
+  analysis technique is used against all substitution ciphers.
+&quot;&quot;&quot;
+
+
+def _score_english(data: bytes) -&gt; float:
+    &quot;&quot;&quot;Score bytes for English-likeness using character frequency.&quot;&quot;&quot;
+    freq = {c: data.count(c) for c in range(256)}
+    target = {ord(c): f for c, f in zip(_ENGLISH_FREQ, range(26, 0, -1))}
+    score = sum(freq.get(b, 0) * target.get(b, 0) for b in range(256))
+    score += sum(freq.get(b, 0) * 5 for b in b&quot; &quot;)  # boost spaces
+    return score
+
+
+def break_single_byte_xor(hex_ciphertext: str) -&gt; Tuple[int, str]:
+    &quot;&quot;&quot;
+    Returns (key_byte, plaintext) for the best single-byte XOR key.
+    &quot;&quot;&quot;
+    ciphertext = bytes.fromhex(hex_ciphertext)
+    best_score = -1
+    best_key = 0
+    best_plain = b&quot;&quot;
+
+    for key_byte in range(256):
+        candidate = bytes(b ^ key_byte for b in ciphertext)
+        score = _score_english(candidate)
+        if score &gt; best_score:
+            best_score = score
+            best_key = key_byte
+            best_plain = candidate
+
+    return best_key, best_plain.decode(&quot;latin-1&quot;)
+
+
+def test_q113():
+    original = &quot;Cooking MC&#x27;s like a pound of bacon&quot;
+    key_byte = 88  # &#x27;X&#x27;
+    ciphertext_hex = bytes(b ^ key_byte for b in original.encode(&quot;ascii&quot;)).hex()
+    found_key, plaintext = break_single_byte_xor(ciphertext_hex)
+    assert found_key == key_byte
+    assert plaintext == original
+    print(&quot;Q113 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q114 — HMAC Verification
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement HMAC-SHA256 generation and verification for a message.
+  Demonstrate constant-time comparison to prevent timing attacks.
+
+Clarifying questions:
+  1. Should the HMAC be over raw bytes or a UTF-8 encoded string?
+  2. Should the output be hex or base64?
+  3. Should we support multiple algorithms?
+
+Security angle:
+  HMAC (Hash-based Message Authentication Code) provides both integrity and
+  authenticity. Timing attacks against naive == comparison (where short-circuit
+  evaluation leaks info) are prevented by hmac.compare_digest() which always
+  takes constant time regardless of where the mismatch occurs.
+  This is used in JWT signature verification, webhook signature verification
+  (GitHub, Stripe), and API request signing.
+&quot;&quot;&quot;
+
+
+def generate_hmac(message: bytes, key: bytes, algorithm: str = &quot;sha256&quot;) -&gt; str:
+    &quot;&quot;&quot;Returns hex-encoded HMAC.&quot;&quot;&quot;
+    mac = hmac.new(key, message, algorithm)
+    return mac.hexdigest()
+
+
+def verify_hmac(message: bytes, key: bytes, expected_hex: str, algorithm: str = &quot;sha256&quot;) -&gt; bool:
+    &quot;&quot;&quot;Constant-time HMAC verification.&quot;&quot;&quot;
+    actual = generate_hmac(message, key, algorithm)
+    return hmac.compare_digest(actual, expected_hex)
+
+
+def test_q114():
+    key = b&quot;super-secret-key&quot;
+    msg = b&quot;Hello, world!&quot;
+    mac = generate_hmac(msg, key)
+    assert verify_hmac(msg, key, mac) is True
+    assert verify_hmac(msg, key, &quot;tampered&quot; + mac[8:]) is False
+    assert verify_hmac(b&quot;other message&quot;, key, mac) is False
+    print(&quot;Q114 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q115 — Password Hash Migration
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of stored password hashes in weak format (MD5), implement
+  a migration function that:
+  1. On next login, verifies the old hash.
+  2. Re-hashes the password with PBKDF2-SHA256 (strong KDF).
+  3. Updates the stored record.
+
+Clarifying questions:
+  1. Should the migration be transparent (no user re-enrollment required)?
+  2. What is the PBKDF2 iteration count? (NIST 2023 recommendation: ≥600,000)
+  3. Should we store a &quot;hash_version&quot; field?
+
+Security angle:
+  Hash migration is required when upgrading from legacy systems using MD5/SHA1
+  to modern KDFs. The on-login migration pattern avoids user disruption:
+  users with the old hash scheme get upgraded transparently on first login
+  post-migration. LinkedIn (2012 breach) and Adobe (2013) both suffered due to
+  weak password hashing. NIST SP 800-63B mandates memory-hard KDFs.
+&quot;&quot;&quot;
+
+_PBKDF2_ITERATIONS = 260_000
+
+
+def md5_hash(password: str) -&gt; str:
+    return hashlib.md5(password.encode()).hexdigest()
+
+
+def pbkdf2_hash(password: str, salt: Optional[bytes] = None) -&gt; str:
+    &quot;&quot;&quot;Returns &#x27;pbkdf2:&lt;iterations&gt;:&lt;salt_hex&gt;:&lt;hash_hex&gt;&#x27;.&quot;&quot;&quot;
+    if salt is None:
+        salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac(&quot;sha256&quot;, password.encode(), salt, _PBKDF2_ITERATIONS)
+    return f&quot;pbkdf2:{_PBKDF2_ITERATIONS}:{salt.hex()}:{dk.hex()}&quot;
+
+
+def verify_pbkdf2(password: str, stored: str) -&gt; bool:
+    parts = stored.split(&quot;:&quot;)
+    if len(parts) != 4 or parts[0] != &quot;pbkdf2&quot;:
+        return False
+    _, iterations, salt_hex, expected_hex = parts
+    salt = bytes.fromhex(salt_hex)
+    dk = hashlib.pbkdf2_hmac(&quot;sha256&quot;, password.encode(), salt, int(iterations))
+    return hmac.compare_digest(dk.hex(), expected_hex)
+
+
+def migrate_password_on_login(
+    user_record: Dict,
+    provided_password: str,
+) -&gt; Tuple[bool, Dict]:
+    &quot;&quot;&quot;
+    Returns (login_success, updated_record).
+    If hash_version == &#x27;md5&#x27;, verify and upgrade to pbkdf2.
+    &quot;&quot;&quot;
+    stored = user_record.get(&quot;password_hash&quot;, &quot;&quot;)
+    version = user_record.get(&quot;hash_version&quot;, &quot;md5&quot;)
+
+    if version == &quot;md5&quot;:
+        if not hmac.compare_digest(md5_hash(provided_password), stored):
+            return False, user_record
+        # Upgrade hash
+        new_hash = pbkdf2_hash(provided_password)
+        updated = {**user_record, &quot;password_hash&quot;: new_hash, &quot;hash_version&quot;: &quot;pbkdf2&quot;}
+        return True, updated
+
+    if version == &quot;pbkdf2&quot;:
+        return verify_pbkdf2(provided_password, stored), user_record
+
+    return False, user_record
+
+
+def test_q115():
+    password = &quot;correct-horse-battery&quot;
+    record = {&quot;user&quot;: &quot;alice&quot;, &quot;password_hash&quot;: md5_hash(password), &quot;hash_version&quot;: &quot;md5&quot;}
+
+    # Correct password → migrates
+    success, updated = migrate_password_on_login(record, password)
+    assert success is True
+    assert updated[&quot;hash_version&quot;] == &quot;pbkdf2&quot;
+    assert &quot;pbkdf2:&quot; in updated[&quot;password_hash&quot;]
+
+    # Wrong password
+    success, _ = migrate_password_on_login(record, &quot;wrong-password&quot;)
+    assert success is False
+
+    # Second login with upgraded record
+    success, _ = migrate_password_on_login(updated, password)
+    assert success is True
+    print(&quot;Q115 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q116 — Detect Reused Password Hashes
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a user database with password hashes, detect accounts sharing the same
+  hash (password reuse / credential stuffing indicator).
+
+Clarifying questions:
+  1. Should we check all hashes or only specific hash schemes?
+  2. Should we also flag empty hashes?
+  3. Should the output include usernames or just count?
+
+Security angle:
+  Identical hashes mean identical passwords. If one account is compromised,
+  all accounts with the same hash are immediately accessible (credential
+  stuffing, password spraying). For strong KDFs with per-user salts (bcrypt,
+  PBKDF2), identical hashes should never occur — their presence suggests
+  missing salts or use of a weak unsalted algorithm.
+&quot;&quot;&quot;
+
+from collections import defaultdict
+
+
+def detect_reused_hashes(
+    users: List[Dict],
+    hash_field: str = &quot;password_hash&quot;,
+    min_count: int = 2,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Returns list of {hash, user_count, users} for hashes shared by ≥ min_count users.
+    O(n) time.
+    &quot;&quot;&quot;
+    hash_to_users: Dict[str, List[str]] = defaultdict(list)
+    for user in users:
+        h = user.get(hash_field) or &quot;&quot;
+        username = user.get(&quot;username&quot;) or user.get(&quot;user&quot;) or &quot;unknown&quot;
+        if h:
+            hash_to_users[h].append(username)
+
+    return [
+        {&quot;hash&quot;: h[:16] + &quot;...&quot;, &quot;user_count&quot;: len(ul), &quot;users&quot;: ul}
+        for h, ul in hash_to_users.items()
+        if len(ul) &gt;= min_count
+    ]
+
+
+def test_q116():
+    common_hash = md5_hash(&quot;Password123&quot;)
+    users = [
+        {&quot;username&quot;: &quot;alice&quot;, &quot;password_hash&quot;: common_hash},
+        {&quot;username&quot;: &quot;bob&quot;,   &quot;password_hash&quot;: common_hash},
+        {&quot;username&quot;: &quot;carol&quot;, &quot;password_hash&quot;: md5_hash(&quot;unique-password-carol!&quot;)},
+    ]
+    results = detect_reused_hashes(users)
+    assert len(results) == 1
+    assert set(results[0][&quot;users&quot;]) == {&quot;alice&quot;, &quot;bob&quot;}
+    print(&quot;Q116 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q117 — Detect Weak Passwords Against Dictionary
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of plaintext passwords (or password candidates), flag passwords
+  that appear in a dictionary (rockyou-style list) or fail complexity rules:
+  - Min length &lt; 12
+  - No uppercase
+  - No digit
+  - No special character
+
+Clarifying questions:
+  1. Should we check against a hash of the dictionary (for secure comparison)?
+  2. Is the dictionary provided as a file path or in-memory list?
+  3. Should we score password strength (zxcvbn-style) or just pass/fail?
+
+Security angle:
+  NIST SP 800-63B bans passwords that appear in breach corpuses.
+  Password complexity rules reduce guessability, but NIST now recommends
+  length over complexity (a 16-char passphrase is better than P@ssw0rd1!).
+  This function implements both dictionary check and complexity scoring.
+&quot;&quot;&quot;
+
+_COMPLEXITY_CHECKS = [
+    (lambda p: len(p) &gt;= 12,            &quot;min_length_12&quot;),
+    (lambda p: any(c.isupper() for c in p), &quot;has_uppercase&quot;),
+    (lambda p: any(c.isdigit() for c in p), &quot;has_digit&quot;),
+    (lambda p: any(not c.isalnum() for c in p), &quot;has_special&quot;),
+]
+
+
+def check_password_strength(
+    password: str,
+    dictionary: Optional[frozenset] = None,
+) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;strong&quot;: bool, &quot;failed_checks&quot;: [str], &quot;in_dictionary&quot;: bool}.
+    &quot;&quot;&quot;
+    in_dict = password.lower() in (dictionary or frozenset())
+    failed = [name for fn, name in _COMPLEXITY_CHECKS if not fn(password)]
+    strong = not in_dict and not failed
+    return {&quot;strong&quot;: strong, &quot;failed_checks&quot;: failed, &quot;in_dictionary&quot;: in_dict}
+
+
+def test_q117():
+    dictionary = frozenset({&quot;password&quot;, &quot;123456&quot;, &quot;qwerty&quot;, &quot;letmein&quot;})
+
+    r = check_password_strength(&quot;password&quot;, dictionary)
+    assert r[&quot;strong&quot;] is False
+    assert r[&quot;in_dictionary&quot;] is True
+
+    r = check_password_strength(&quot;abc&quot;, dictionary)
+    assert r[&quot;strong&quot;] is False
+    assert &quot;min_length_12&quot; in r[&quot;failed_checks&quot;]
+
+    r = check_password_strength(&quot;Tr0ub4dor&amp;3xAmple!&quot;, dictionary)
+    assert r[&quot;strong&quot;] is True
+    print(&quot;Q117 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q118 — Generate Secure Random Tokens
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a secure token generator that:
+  1. Uses os.urandom (CSPRNG) via the secrets module.
+  2. Supports URL-safe base64 and hex formats.
+  3. Returns tokens of configurable entropy (default: 256 bits).
+
+Clarifying questions:
+  1. Should the token include a version prefix for rotation tracking?
+  2. Should the token length be fixed or configurable?
+  3. Should we add a HMAC for token integrity verification?
+
+Security angle:
+  Token generation is the foundation of session management, password reset,
+  API keys, and CSRF tokens. Using the secrets module (Python 3.6+) ensures:
+  - os.urandom as the entropy source (CSPRNG).
+  - No accidental seeding from time-based sources.
+  A 256-bit token has 2^256 possible values — computationally infeasible to
+  brute force even with a billion guesses per second for the lifetime of the universe.
+&quot;&quot;&quot;
+
+
+def generate_token_hex(bits: int = 256) -&gt; str:
+    &quot;&quot;&quot;Generate a cryptographically secure token as hex string.&quot;&quot;&quot;
+    num_bytes = bits // 8
+    return secrets.token_hex(num_bytes)
+
+
+def generate_token_urlsafe(bits: int = 256) -&gt; str:
+    &quot;&quot;&quot;Generate a cryptographically secure URL-safe base64 token.&quot;&quot;&quot;
+    num_bytes = bits // 8
+    return secrets.token_urlsafe(num_bytes)
+
+
+def token_entropy_bits(token: str, encoding: str = &quot;hex&quot;) -&gt; float:
+    &quot;&quot;&quot;Estimate entropy bits of a token based on its encoding and length.&quot;&quot;&quot;
+    if encoding == &quot;hex&quot;:
+        return len(token) * 4  # 4 bits per hex char
+    if encoding == &quot;urlsafe_b64&quot;:
+        return len(token) * 6  # ~6 bits per base64 char
+    return len(token) * 8
+
+
+def test_q118():
+    tok_hex = generate_token_hex(256)
+    assert len(tok_hex) == 64   # 256 bits = 32 bytes = 64 hex chars
+    assert all(c in &quot;0123456789abcdef&quot; for c in tok_hex)
+
+    tok_b64 = generate_token_urlsafe(256)
+    assert len(tok_b64) &gt;= 40   # base64url is slightly shorter than hex
+
+    # Two tokens must not be equal
+    assert generate_token_hex() != generate_token_hex()
+
+    entropy = token_entropy_bits(tok_hex, &quot;hex&quot;)
+    assert entropy &gt;= 256
+    print(&quot;Q118 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q119 — Validate Certificate Expiry Chain
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of PEM certificate strings (representing a chain), parse the
+  Not After date from each and flag any that are expired or expiring within
+  N days (default: 30 days).
+
+Clarifying questions:
+  1. Should we validate the chain order (leaf → intermediate → root)?
+  2. Should we use the cryptography library or stdlib only?
+  3. Should we check revocation (OCSP/CRL)?
+
+Security angle:
+  Expired certificates cause service outages and TLS connection failures.
+  High-profile examples: Let&#x27;s Encrypt root expiry (Sep 2021), Ericsson PKI
+  outage (Dec 2021 — network outage across 11 countries due to expired cert).
+  Certificate lifecycle management is a core security operations task.
+  We use a regex-based parser for stdlib-only implementation.
+&quot;&quot;&quot;
+
+# Parse the Not After field from PEM-like cert text (simplified: DER not parsed,
+# we simulate with structured text containing the date)
+_NOT_AFTER_RE = re.compile(r&quot;Not After\s*:\s*(.+)&quot;, re.IGNORECASE)
+_DATE_FORMATS = [&quot;%b %d %H:%M:%S %Y %Z&quot;, &quot;%Y-%m-%dT%H:%M:%SZ&quot;, &quot;%Y-%m-%d&quot;]
+
+
+def parse_not_after(cert_text: str) -&gt; Optional[datetime.datetime]:
+    &quot;&quot;&quot;
+    Parse the Not After field from a certificate text representation.
+    Supports openssl-style output: &#x27;Not After : Dec  7 00:00:00 2024 GMT&#x27;
+    &quot;&quot;&quot;
+    m = _NOT_AFTER_RE.search(cert_text)
+    if not m:
+        return None
+    date_str = m.group(1).strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.datetime.strptime(date_str, fmt).replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except ValueError:
+            continue
+    return None
+
+
+def validate_cert_chain_expiry(
+    cert_texts: List[str],
+    warn_days: int = 30,
+    now: Optional[datetime.datetime] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Returns list of issues for certs that are expired or expiring within warn_days.
+    &quot;&quot;&quot;
+    if now is None:
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+    issues = []
+    for i, cert_text in enumerate(cert_texts):
+        not_after = parse_not_after(cert_text)
+        if not_after is None:
+            issues.append({&quot;index&quot;: i, &quot;status&quot;: &quot;parse_error&quot;, &quot;not_after&quot;: None})
+            continue
+        days_left = (not_after - now).days
+        if days_left &lt; 0:
+            issues.append({&quot;index&quot;: i, &quot;status&quot;: &quot;expired&quot;, &quot;not_after&quot;: not_after.isoformat(), &quot;days_left&quot;: days_left})
+        elif days_left &lt; warn_days:
+            issues.append({&quot;index&quot;: i, &quot;status&quot;: &quot;expiring_soon&quot;, &quot;not_after&quot;: not_after.isoformat(), &quot;days_left&quot;: days_left})
+    return issues
+
+
+def test_q119():
+    now = datetime.datetime(2026, 5, 29, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    certs = [
+        &quot;Not After : May 28 00:00:00 2026 GMT&quot;,   # expired (1 day ago)
+        &quot;Not After : Jun 10 00:00:00 2026 GMT&quot;,   # expiring in 12 days
+        &quot;Not After : Dec 31 00:00:00 2027 GMT&quot;,   # valid
+    ]
+    issues = validate_cert_chain_expiry(certs, warn_days=30, now=now)
+    statuses = {iss[&quot;index&quot;]: iss[&quot;status&quot;] for iss in issues}
+    assert statuses[0] == &quot;expired&quot;
+    assert statuses[1] == &quot;expiring_soon&quot;
+    assert 2 not in statuses
+    print(&quot;Q119 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q120 — Parse PEM Blocks
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse a string containing multiple PEM-encoded blocks and return each block
+  as a dict with its type (CERTIFICATE, PRIVATE KEY, PUBLIC KEY, etc.)
+  and base64 content.
+
+Clarifying questions:
+  1. Should we decode the DER content?
+  2. Should we validate the base64 padding?
+  3. Should we flag dangerous combinations (private key + certificate in same file)?
+
+Security angle:
+  PEM files are used for TLS certificates, private keys, and CRLs. Mishandling
+  PEM files can lead to:
+  - Private key exposure (logging/serving PEM files over HTTP).
+  - Loading wrong cert type (confusing certificate chain order).
+  - Mixing private keys with public certs (accidentally committing private key).
+  Parsing PEM blocks correctly is a prerequisite for any PKI tooling.
+&quot;&quot;&quot;
+
+_PEM_RE = re.compile(
+    r&quot;-----BEGIN ([A-Z0-9 ]+)-----\s*([\s\S]*?)\s*-----END \1-----&quot;,
+    re.MULTILINE,
+)
+
+
+def parse_pem_blocks(pem_string: str) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Returns list of {type: str, raw_b64: str, der_bytes: bytes}.
+    Raises ValueError for invalid base64.
+    &quot;&quot;&quot;
+    blocks = []
+    for match in _PEM_RE.finditer(pem_string):
+        block_type = match.group(1).strip()
+        b64_content = re.sub(r&quot;\s+&quot;, &quot;&quot;, match.group(2))
+        try:
+            # Add padding if needed
+            padding = 4 - len(b64_content) % 4
+            der_bytes = base64.b64decode(b64_content + &quot;=&quot; * (padding % 4))
+        except Exception as exc:
+            raise ValueError(f&quot;Invalid base64 in PEM block &#x27;{block_type}&#x27;: {exc}&quot;) from exc
+        blocks.append({
+            &quot;type&quot;: block_type,
+            &quot;raw_b64&quot;: b64_content[:32] + &quot;...&quot;,
+            &quot;der_length&quot;: len(der_bytes),
+        })
+    return blocks
+
+
+def check_pem_security(pem_string: str) -&gt; Dict:
+    &quot;&quot;&quot;
+    Flag if PEM contains private keys mixed with certificates.
+    &quot;&quot;&quot;
+    blocks = parse_pem_blocks(pem_string)
+    types = {b[&quot;type&quot;] for b in blocks}
+    issues = []
+    private_key_types = types &amp; {&quot;RSA PRIVATE KEY&quot;, &quot;EC PRIVATE KEY&quot;, &quot;PRIVATE KEY&quot;}
+    if private_key_types and &quot;CERTIFICATE&quot; in types:
+        issues.append(&quot;Private key and certificate in the same file — risk of accidental exposure&quot;)
+    return {&quot;blocks&quot;: blocks, &quot;types&quot;: sorted(types), &quot;issues&quot;: issues}
+
+
+def test_q120():
+    # Minimal valid PEM (a real base64 block would be DER-encoded — use dummy content here)
+    dummy_cert_der = base64.b64encode(b&quot;\x30&quot; * 64).decode()
+    pem = f&quot;-----BEGIN CERTIFICATE-----\n{dummy_cert_der}\n-----END CERTIFICATE-----\n&quot;
+
+    blocks = parse_pem_blocks(pem)
+    assert len(blocks) == 1
+    assert blocks[0][&quot;type&quot;] == &quot;CERTIFICATE&quot;
+    assert blocks[0][&quot;der_length&quot;] == 64
+
+    # Two blocks
+    dummy_key_der = base64.b64encode(b&quot;\x02&quot; * 32).decode()
+    pem_two = (
+        f&quot;-----BEGIN CERTIFICATE-----\n{dummy_cert_der}\n-----END CERTIFICATE-----\n&quot;
+        f&quot;-----BEGIN RSA PRIVATE KEY-----\n{dummy_key_der}\n-----END RSA PRIVATE KEY-----\n&quot;
+    )
+    result = check_pem_security(pem_two)
+    assert len(result[&quot;blocks&quot;]) == 2
+    assert any(&quot;Private key&quot; in i for i in result[&quot;issues&quot;])
+    print(&quot;Q120 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q111()
+    test_q112()
+    test_q113()
+    test_q114()
+    test_q115()
+    test_q116()
+    test_q117()
+    test_q118()
+    test_q119()
+    test_q120()
+    print(&quot;\nAll Q111–Q120 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

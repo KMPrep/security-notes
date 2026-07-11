@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q8_log_enricher.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q8_log_enricher.py</h1>
+  <p class="file-path">Source: code\day5\answers\q8_log_enricher.py</p>
+  <p class="line-count">321 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q8. Log Line Enricher
+======================
+Given a log file of IPs and a threat intel dict mapping IP → category,
+enrich each log line: append the threat category if the IP is known bad.
+Flag enriched lines for review.
+Output: enriched lines, count by category.
+
+threat_intel = {&quot;1.2.3.4&quot;: &quot;C2&quot;, &quot;5.6.7.8&quot;: &quot;scanner&quot;, ...}
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;You have a log file. For each line, check if the IP appears in
+a threat intel feed and annotate the line.&quot;
+
+--- CANDIDATE FIRST RESPONSE (linear scan through threat intel per line) ---
+&quot;For each log line, I&#x27;d extract the IP and then loop through the threat intel
+dict to find a match.&quot;
+
+Follow-up: &quot;What&#x27;s the complexity of that?&quot;
+→ O(L * T) where L = lines, T = threat intel entries. If T = 10M and L = 100M
+  that&#x27;s 10^15 operations. Way too slow.
+
+Follow-up: &quot;How do you fix it?&quot;
+→ The threat intel dict is already a hash map — O(1) lookup.
+  Just do `threat_intel.get(ip)`. No need to loop through it.
+  Candidate was confused because they thought of it as a list first.
+
+--- CANDIDATE SECOND RESPONSE (dict lookup, but no regex for IP extraction) ---
+&quot;Use ip = line.split()[3]&quot; — positional. Breaks if format varies.
+
+Follow-up: &quot;What if IPs appear anywhere in the line?&quot;
+→ Use regex to find all IPs in the line, check each against threat intel.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Regex IP extraction, O(1) dict lookup, streaming line-by-line,
+enriched output with category counts, original line preserved.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THREAT INTEL (in production this would load from a file / database / API)
+# ─────────────────────────────────────────────────────────────────────────────
+
+THREAT_INTEL = {
+    &quot;1.2.3.4&quot;:      &quot;C2&quot;,
+    &quot;5.6.7.8&quot;:      &quot;scanner&quot;,
+    &quot;10.0.0.99&quot;:    &quot;C2&quot;,
+    &quot;192.168.1.50&quot;: &quot;exfil&quot;,
+    &quot;203.0.113.10&quot;: &quot;phishing&quot;,
+    &quot;198.51.100.5&quot;: &quot;botnet&quot;,
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-01-15T10:00:00Z src=1.2.3.4 dst=172.16.0.1 bytes=1024 action=ALLOW
+2024-01-15T10:00:01Z src=10.0.0.1 dst=8.8.8.8 bytes=512 action=ALLOW
+2024-01-15T10:00:02Z src=5.6.7.8 dst=172.16.0.2 bytes=4096 action=ALLOW
+2024-01-15T10:00:03Z src=10.0.0.2 dst=10.0.0.99 bytes=256 action=ALLOW
+2024-01-15T10:00:04Z src=192.168.1.50 dst=203.0.113.10 bytes=99999 action=ALLOW
+2024-01-15T10:00:05Z src=10.0.0.3 dst=1.1.1.1 bytes=128 action=ALLOW
+2024-01-15T10:00:06Z src=198.51.100.5 dst=172.16.0.3 bytes=2048 action=DENY
+2024-01-15T10:00:07Z src=10.0.0.4 dst=10.0.0.5 bytes=64 action=ALLOW
+2024-01-15T10:00:08Z src=1.2.3.4 dst=172.16.0.4 bytes=8192 action=ALLOW
+THIS LINE HAS NO IP ADDRESSES AT ALL
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IP EXTRACTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Strict IPv4 pattern (avoid matching version strings like 10.0.0.99x)
+IP_RE = re.compile(r&#x27;\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}&#x27;
+                   r&#x27;(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b&#x27;)
+
+
+def extract_ips(line: str):
+    &quot;&quot;&quot;Return list of all IPv4 addresses found in a line.&quot;&quot;&quot;
+    return IP_RE.findall(line)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (no defaultdict, manual dict for category counts, no any()/all())
+# ─────────────────────────────────────────────────────────────────────────────
+
+def enrich_without_builtins(lines, threat_intel):
+    &quot;&quot;&quot;
+    Returns:
+      enriched_lines : list of strings (original line + optional annotations)
+      flagged_lines  : list of (line_number, line, categories)
+      category_counts: dict { category -&gt; count of enriched lines }
+    &quot;&quot;&quot;
+    enriched_lines  = []
+    flagged_lines   = []
+    category_counts = {}
+
+    for line_num, raw in enumerate(lines, start=1):
+        raw = raw.rstrip(&quot;\n&quot;)
+        if not raw.strip():
+            enriched_lines.append(raw)
+            continue
+
+        ips = extract_ips(raw)
+        matched_categories = []
+
+        # Check each IP against threat intel — O(1) per lookup
+        for ip in ips:
+            if ip in threat_intel:
+                category = threat_intel[ip]
+                # Manual dedup
+                already = False
+                for c in matched_categories:
+                    if c == category:
+                        already = True
+                        break
+                if not already:
+                    matched_categories.append(category)
+
+        if matched_categories:
+            # Append annotation to line
+            annotation = &quot; [THREAT:&quot; + &quot;,&quot;.join(matched_categories) + &quot;]&quot;
+            enriched_line = raw + annotation
+            enriched_lines.append(enriched_line)
+            flagged_lines.append((line_num, enriched_line, matched_categories))
+
+            # Count by category (manual)
+            for cat in matched_categories:
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+        else:
+            enriched_lines.append(raw)
+
+    return enriched_lines, flagged_lines, category_counts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (defaultdict, set, f-strings)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def enrich_with_builtins(lines, threat_intel):
+    enriched_lines  = []
+    flagged_lines   = []
+    category_counts = defaultdict(int)
+
+    for line_num, raw in enumerate(lines, start=1):
+        raw = raw.rstrip(&quot;\n&quot;)
+        if not raw.strip():
+            enriched_lines.append(raw)
+            continue
+
+        ips = extract_ips(raw)
+        # Use a set to deduplicate categories, preserve insertion order with dict
+        matched_categories = list(dict.fromkeys(
+            threat_intel[ip] for ip in ips if ip in threat_intel
+        ))
+
+        if matched_categories:
+            annotation    = f&quot; [THREAT:{&#x27;,&#x27;.join(matched_categories)}]&quot;
+            enriched_line = raw + annotation
+            enriched_lines.append(enriched_line)
+            flagged_lines.append((line_num, enriched_line, matched_categories))
+            for cat in matched_categories:
+                category_counts[cat] += 1
+        else:
+            enriched_lines.append(raw)
+
+    return enriched_lines, flagged_lines, dict(category_counts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(enriched_lines, flagged_lines, category_counts, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  LOG LINE ENRICHER REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Total lines      : {len(enriched_lines)}&quot;)
+    print(f&quot;Enriched (flagged): {len(flagged_lines)}\n&quot;)
+
+    print(&quot;Category Counts:&quot;)
+    if category_counts:
+        for cat, count in sorted(category_counts.items()):
+            print(f&quot;  {cat:&lt;15} {count} line(s)&quot;)
+    else:
+        print(&quot;  None.&quot;)
+
+    print(f&quot;\nFlagged Lines:&quot;)
+    for line_num, line, cats in flagged_lines:
+        print(f&quot;  Line {line_num:&gt;3}: {line}&quot;)
+    print()
+
+
+def write_enriched_output(enriched_lines, filepath: str):
+    &quot;&quot;&quot;Write enriched lines to a file.&quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fh:
+            for line in enriched_lines:
+                fh.write(line + &quot;\n&quot;)
+        print(f&quot;[INFO] Enriched output written to: {filepath}&quot;)
+    except (PermissionError, OSError) as exc:
+        print(f&quot;[ERROR] Could not write output: {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THREAT INTEL LOADER (from a flat file: ip&lt;tab&gt;category)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_threat_intel(filepath: str) -&gt; dict:
+    &quot;&quot;&quot;
+    Load threat intel from a file with lines: ip&lt;whitespace&gt;category
+    Returns dict. Malformed lines are skipped with a warning.
+    &quot;&quot;&quot;
+    intel = {}
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            for line_num, raw in enumerate(fh, start=1):
+                raw = raw.strip()
+                if not raw or raw.startswith(&quot;#&quot;):
+                    continue
+                parts = raw.split()
+                if len(parts) &lt; 2:
+                    print(f&quot;[WARN] Threat intel line {line_num}: malformed, skipping.&quot;,
+                          file=sys.stderr)
+                    continue
+                intel[parts[0]] = parts[1]
+    except FileNotFoundError:
+        print(f&quot;[WARN] Threat intel file not found: {filepath}. &quot;
+              f&quot;Using empty intel.&quot;, file=sys.stderr)
+    except (PermissionError, OSError) as exc:
+        print(f&quot;[ERROR] Could not read threat intel: {exc}&quot;, file=sys.stderr)
+    return intel
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    &quot;&quot;&quot;
+    Usage:
+      python q8_log_enricher.py [logfile] [threat_intel_file]
+      python q8_log_enricher.py                 ← uses sample data
+    &quot;&quot;&quot;
+    if len(sys.argv) == 3:
+        logfile    = sys.argv[1]
+        intel_file = sys.argv[2]
+        threat_intel = load_threat_intel(intel_file)
+        try:
+            with open(logfile, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+                lines = fh.readlines()
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) == 1:
+        print(&quot;[INFO] Using built-in sample data and threat intel.\n&quot;)
+        lines        = SAMPLE_LOG.strip().splitlines(keepends=True)
+        threat_intel = THREAT_INTEL
+    else:
+        print(&quot;Usage: python q8_log_enricher.py [logfile] [threat_intel_file]&quot;,
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not threat_intel:
+        print(&quot;[WARN] Threat intel is empty — no enrichment will occur.&quot;,
+              file=sys.stderr)
+
+    enriched_manual,  flagged_manual,  cats_manual  = enrich_without_builtins(lines, threat_intel)
+    enriched_builtin, flagged_builtin, cats_builtin = enrich_with_builtins(lines, threat_intel)
+
+    print_report(enriched_manual,  flagged_manual,  cats_manual,  label=&quot;(Manual)&quot;)
+    print_report(enriched_builtin, flagged_builtin, cats_builtin, label=&quot;(Builtins)&quot;)
+
+    # write_enriched_output(enriched_builtin, &quot;enriched.log&quot;)
+
+    # Sanity check
+    assert len(flagged_manual) == len(flagged_builtin), &quot;Flagged count mismatch!&quot;
+    assert cats_manual == cats_builtin, f&quot;Category count mismatch: {cats_manual} vs {cats_builtin}&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(L * I_per_line) where I = IPs extracted per line (usually small)
+#         Threat intel lookup is O(1) per IP (hash map)
+# Space : O(T) for threat intel, O(L) for enriched output
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;The threat intel has 50 million IPs. How do you store it?&quot;
+#     → A Python dict of 50M entries uses ~4-6 GB RAM. Options:
+#       1. Use a memory-mapped file (mmap) with a sorted IP list + bisect.
+#       2. Use a Bloom filter for fast &quot;definitely not in list&quot; check,
+#          then confirm with the full dict.
+#       3. Store in Redis/Memcached for distributed access.
+# - &quot;IPs change threat categories over time. How do you handle TTL?&quot;
+#     → Store (category, expiry_timestamp) as the value. Check expiry on lookup.
+#       Run a background job to evict expired entries.
+# - &quot;What about CIDR ranges in threat intel? (e.g., 10.0.0.0/8)&quot;
+#     → Use the ipaddress module: ipaddress.ip_address(ip) in ipaddress.ip_network(&#x27;10.0.0.0/8&#x27;).
+#       Build a list of networks and check membership. For performance,
+#       use a radix tree (Patricia trie) for O(prefix_length) lookup.
+# - &quot;How do you prevent the enrichment annotation from looking like real log data?&quot;
+#     → Use a clearly delimited format: add to end of line with a sentinel,
+#       or output as structured JSON with a separate &#x27;threat&#x27; field.
+# =============================================================================
+</code></pre>
+</body>
+</html>

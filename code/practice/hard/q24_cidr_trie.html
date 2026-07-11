@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q24_cidr_trie.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q24_cidr_trie.py</h1>
+  <p class="file-path">Source: code\practice\hard\q24_cidr_trie.py</p>
+  <p class="line-count">403 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q24 [Hard] — CIDR Trie for IP Lookup
+=============================================================================
+
+PROBLEM
+-------
+Build a data structure that supports:
+  1. Insert a CIDR block (e.g. &quot;10.0.0.0/8&quot;) with an associated tag/metadata.
+  2. Lookup: given an IP address, return ALL matching CIDR blocks (and their tags).
+  3. Best-match: return the most specific (longest-prefix) matching CIDR.
+  4. Delete a CIDR block.
+  5. Count total covered addresses.
+  6. Support both IPv4 and IPv6.
+
+Use case: firewall rule lookup, threat-intel IP reputation lookup,
+geo-IP lookup, SSRF blocklist.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Exact match only or all matching prefixes?
+   → Return all matches + specifically identify the longest prefix match.
+2. IPv4 only or IPv6 too?
+   → Both; store in separate tries or a unified 128-bit trie.
+3. Overlapping CIDRs?
+   → Allowed; all matches returned.
+4. Max number of rules?
+   → Up to ~1 million (BGP full table ≈ 900K IPv4 prefixes).
+5. Thread safety?
+   → Single-threaded; no locking needed.
+
+=============================================================================
+APPROACH 1 — NAIVE (linear scan)
+=============================================================================
+  Store list of (network, tag) pairs.
+  Lookup: iterate all entries; check if IP in network.
+  O(N) lookup, O(1) insert.
+  Unacceptable for large N.
+
+=============================================================================
+APPROACH 2 — BINARY TRIE (Patricia Trie / Radix Tree) — RECOMMENDED
+=============================================================================
+  Store prefixes in a binary trie keyed by prefix bits.
+  Insert: traverse/create nodes for each bit of the prefix.
+  Lookup: traverse bits of IP; collect all nodes marked as terminal.
+  O(W) lookup and insert  (W = address width: 32 for IPv4, 128 for IPv6).
+
+APPROACH 3 — INTERVAL TREE (alternative for large overlapping ranges)
+=============================================================================
+  Represent each CIDR as an integer interval [first, last].
+  Use sorted list + bisect for lookup.
+  O(log N + K) lookup, O(log N) insert (with sorted insertion).
+  Better for heavily overlapping ranges where K matches are needed.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import ipaddress
+from bisect import bisect_left, insort
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CIDREntry:
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network
+    tag: Any
+    prefix_len: int
+
+    def __lt__(self, other: &quot;CIDREntry&quot;) -&gt; bool:
+        return self.prefix_len &lt; other.prefix_len
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive linear scan
+# ---------------------------------------------------------------------------
+
+class NaiveCIDRLookup:
+    &quot;&quot;&quot;
+    O(N) lookup.  Simple baseline.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._entries: List[CIDREntry] = []
+
+    def insert(self, cidr: str, tag: Any = None) -&gt; None:
+        net = ipaddress.ip_network(cidr, strict=False)
+        self._entries.append(CIDREntry(net, tag, net.prefixlen))
+
+    def lookup(self, ip: str) -&gt; List[CIDREntry]:
+        addr = ipaddress.ip_address(ip)
+        return [e for e in self._entries if addr in e.network]
+
+    def best_match(self, ip: str) -&gt; Optional[CIDREntry]:
+        matches = self.lookup(ip)
+        return max(matches, key=lambda e: e.prefix_len) if matches else None
+
+    def delete(self, cidr: str) -&gt; bool:
+        net = ipaddress.ip_network(cidr, strict=False)
+        for i, e in enumerate(self._entries):
+            if e.network == net:
+                self._entries.pop(i)
+                return True
+        return False
+
+    def __len__(self) -&gt; int:
+        return len(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Binary Trie (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class _TrieNode:
+    __slots__ = (&quot;children&quot;, &quot;entries&quot;)
+
+    def __init__(self) -&gt; None:
+        self.children: List[Optional[&quot;_TrieNode&quot;]] = [None, None]
+        self.entries: List[CIDREntry] = []  # CIDRs terminating at this node
+
+
+class CIDRTrie:
+    &quot;&quot;&quot;
+    Binary trie for O(W) IP → CIDR lookup.
+    Supports IPv4 (W=32) and IPv6 (W=128).
+    Stores IPv4 and IPv6 in separate tries.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._root4 = _TrieNode()  # IPv4 trie
+        self._root6 = _TrieNode()  # IPv6 trie
+        self._count = 0
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _network_bits(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -&gt; Iterator[int]:
+        &quot;&quot;&quot;Yield bits of the network address, MSB first.&quot;&quot;&quot;
+        n = int(network.network_address)
+        width = 32 if isinstance(network, ipaddress.IPv4Network) else 128
+        for i in range(width - 1, -1, -1):
+            yield (n &gt;&gt; i) &amp; 1
+
+    @staticmethod
+    def _ip_bits(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -&gt; Iterator[int]:
+        n = int(addr)
+        width = 32 if isinstance(addr, ipaddress.IPv4Address) else 128
+        for i in range(width - 1, -1, -1):
+            yield (n &gt;&gt; i) &amp; 1
+
+    def _root(self, is_v6: bool) -&gt; _TrieNode:
+        return self._root6 if is_v6 else self._root4
+
+    # -----------------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------------
+
+    def insert(self, cidr: str, tag: Any = None) -&gt; None:
+        net = ipaddress.ip_network(cidr, strict=False)
+        is_v6 = isinstance(net, ipaddress.IPv6Network)
+        entry = CIDREntry(net, tag, net.prefixlen)
+        node = self._root(is_v6)
+        bits = self._network_bits(net)
+        for i, bit in enumerate(bits):
+            if i == net.prefixlen:
+                break
+            if node.children[bit] is None:
+                node.children[bit] = _TrieNode()
+            node = node.children[bit]
+        node.entries.append(entry)
+        self._count += 1
+
+    def lookup(self, ip: str) -&gt; List[CIDREntry]:
+        &quot;&quot;&quot;Return all CIDR entries that contain `ip`.&quot;&quot;&quot;
+        addr = ipaddress.ip_address(ip)
+        is_v6 = isinstance(addr, ipaddress.IPv6Address)
+        node = self._root(is_v6)
+        matches: List[CIDREntry] = list(node.entries)  # match root (0.0.0.0/0 if present)
+        for bit in self._ip_bits(addr):
+            child = node.children[bit]
+            if child is None:
+                break
+            node = child
+            matches.extend(node.entries)
+        return matches
+
+    def best_match(self, ip: str) -&gt; Optional[CIDREntry]:
+        &quot;&quot;&quot;Return the longest-prefix matching CIDR.&quot;&quot;&quot;
+        matches = self.lookup(ip)
+        return max(matches, key=lambda e: e.prefix_len) if matches else None
+
+    def delete(self, cidr: str) -&gt; bool:
+        &quot;&quot;&quot;Delete the exact CIDR entry.  Returns True if found and removed.&quot;&quot;&quot;
+        net = ipaddress.ip_network(cidr, strict=False)
+        is_v6 = isinstance(net, ipaddress.IPv6Network)
+        node = self._root(is_v6)
+        for i, bit in enumerate(self._network_bits(net)):
+            if i == net.prefixlen:
+                break
+            if node.children[bit] is None:
+                return False
+            node = node.children[bit]
+        before = len(node.entries)
+        node.entries = [e for e in node.entries if e.network != net]
+        removed = len(node.entries) &lt; before
+        if removed:
+            self._count -= 1
+        return removed
+
+    def __len__(self) -&gt; int:
+        return self._count
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 3 — Interval tree (sorted list + bisect)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Interval:
+    first: int      # integer representation of first IP
+    last: int       # integer representation of last IP
+    entry: CIDREntry
+
+    def __lt__(self, other: &quot;_Interval&quot;) -&gt; bool:
+        return (self.first, -self.last) &lt; (other.first, -other.last)
+
+
+class CIDRIntervalLookup:
+    &quot;&quot;&quot;
+    Represents each CIDR as an integer interval.
+    Sorted by (first, -last) → efficient range search with bisect.
+    O(log N) to find start; O(K) to collect matches.
+    Handles overlapping ranges well.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._intervals: List[_Interval] = []
+
+    def insert(self, cidr: str, tag: Any = None) -&gt; None:
+        net = ipaddress.ip_network(cidr, strict=False)
+        entry = CIDREntry(net, tag, net.prefixlen)
+        interval = _Interval(
+            int(net.network_address),
+            int(net.broadcast_address),
+            entry,
+        )
+        insort(self._intervals, interval)
+
+    def lookup(self, ip: str) -&gt; List[CIDREntry]:
+        addr_int = int(ipaddress.ip_address(ip))
+        results = []
+        # Find all intervals where first &lt;= addr_int &lt;= last
+        # Binary search for insertion point of (addr_int+1, ...) to get upper bound
+        pos = bisect_left(self._intervals, _Interval(addr_int + 1, 0, None))  # type: ignore
+        for i in range(pos - 1, -1, -1):
+            iv = self._intervals[i]
+            if iv.first &gt; addr_int:
+                continue
+            if iv.last &gt;= addr_int:
+                results.append(iv.entry)
+            elif iv.last &lt; addr_int and iv.first &lt; addr_int:
+                # Intervals are sorted; all earlier ones start even smaller
+                # but may still contain addr_int — must scan
+                continue
+        return results
+
+    def best_match(self, ip: str) -&gt; Optional[CIDREntry]:
+        matches = self.lookup(ip)
+        return max(matches, key=lambda e: e.prefix_len) if matches else None
+
+    def delete(self, cidr: str) -&gt; bool:
+        net = ipaddress.ip_network(cidr, strict=False)
+        first = int(net.network_address)
+        last = int(net.broadcast_address)
+        for i, iv in enumerate(self._intervals):
+            if iv.first == first and iv.last == last and iv.entry.network == net:
+                self._intervals.pop(i)
+                return True
+        return False
+
+    def __len__(self) -&gt; int:
+        return len(self._intervals)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _run_tests(impl_name: str, Cls):
+    t = Cls()
+    t.insert(&quot;10.0.0.0/8&quot;, tag=&quot;rfc1918&quot;)
+    t.insert(&quot;10.1.0.0/16&quot;, tag=&quot;subnet-10.1&quot;)
+    t.insert(&quot;192.168.0.0/16&quot;, tag=&quot;rfc1918-192&quot;)
+    t.insert(&quot;0.0.0.0/0&quot;, tag=&quot;default&quot;)
+
+    # Test: IP in 10.1.x.x matches both /8 and /16
+    matches = t.lookup(&quot;10.1.5.5&quot;)
+    tags = {e.tag for e in matches}
+    assert &quot;rfc1918&quot; in tags, f&quot;{impl_name}: Expected rfc1918 in {tags}&quot;
+    assert &quot;subnet-10.1&quot; in tags, f&quot;{impl_name}: Expected subnet-10.1 in {tags}&quot;
+    assert &quot;default&quot; in tags, f&quot;{impl_name}: Expected default in {tags}&quot;
+
+    # Best match should be /16
+    best = t.best_match(&quot;10.1.5.5&quot;)
+    assert best and best.prefix_len == 16, \
+        f&quot;{impl_name}: Expected /16 as best match, got {best}&quot;
+
+    # IP not in any specific subnet
+    best2 = t.best_match(&quot;10.2.0.1&quot;)
+    assert best2 and best2.tag == &quot;rfc1918&quot;, \
+        f&quot;{impl_name}: Expected rfc1918 for 10.2.0.1, got {best2}&quot;
+
+    # Delete and re-check
+    t.delete(&quot;10.1.0.0/16&quot;)
+    best3 = t.best_match(&quot;10.1.5.5&quot;)
+    assert best3 and best3.prefix_len == 8, \
+        f&quot;{impl_name}: After delete, expected /8 as best, got {best3}&quot;
+
+    print(f&quot;{impl_name}: all tests passed&quot;)
+
+
+def test_naive():
+    _run_tests(&quot;NaiveCIDRLookup&quot;, NaiveCIDRLookup)
+
+
+def test_trie():
+    _run_tests(&quot;CIDRTrie&quot;, CIDRTrie)
+
+
+def test_interval():
+    _run_tests(&quot;CIDRIntervalLookup&quot;, CIDRIntervalLookup)
+
+
+def test_ipv6_trie():
+    t = CIDRTrie()
+    t.insert(&quot;fe80::/10&quot;, tag=&quot;link-local&quot;)
+    t.insert(&quot;::/0&quot;, tag=&quot;default6&quot;)
+    t.insert(&quot;::1/128&quot;, tag=&quot;loopback6&quot;)
+    matches = t.lookup(&quot;::1&quot;)
+    tags = {e.tag for e in matches}
+    assert &quot;loopback6&quot; in tags
+    best = t.best_match(&quot;::1&quot;)
+    assert best and best.prefix_len == 128
+    print(&quot;IPv6 trie: passed&quot;)
+
+
+def test_host_route():
+    t = CIDRTrie()
+    t.insert(&quot;192.168.1.100/32&quot;, tag=&quot;host-route&quot;)
+    t.insert(&quot;192.168.1.0/24&quot;, tag=&quot;subnet&quot;)
+    best = t.best_match(&quot;192.168.1.100&quot;)
+    assert best and best.prefix_len == 32 and best.tag == &quot;host-route&quot;
+    print(&quot;Host route (/32) best match: passed&quot;)
+
+
+def test_no_match():
+    t = CIDRTrie()
+    t.insert(&quot;10.0.0.0/8&quot;, tag=&quot;private&quot;)
+    matches = t.lookup(&quot;8.8.8.8&quot;)
+    assert len(matches) == 0
+    print(&quot;No match: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+USE CASES IN SECURITY
+  1. Firewall rule lookup: given packet destination IP, find applicable rules.
+  2. Threat intel: classify src IP as known-malicious / TOR exit / botnet C2.
+  3. SSRF prevention: block requests to private CIDR ranges (Q22).
+  4. Geo-IP: map IP to country/region for rate-limiting and fraud detection.
+  5. DDoS mitigation: match incoming SYN packets against block-listed prefixes.
+
+TRIE vs INTERVAL TREE
+  Trie:           O(W) per lookup regardless of N.  Best for very large tables
+                  (BGP: 900K+ prefixes).  W=32 for IPv4 → 32 comparisons max.
+  Interval tree:  O(log N + K) per lookup.  Better when N is small and many
+                  overlapping ranges need to be collected (K is large).
+  Naive list:     O(N) — only for N &lt; 100 or one-shot checks.
+
+PRODUCTION NOTE
+  For BGP-scale lookups (millions of routes), use a Radix/Patricia trie
+  (Python: `pytricia` library) or hardware TCAM (256-bit ternary CAM).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive()
+    test_trie()
+    test_interval()
+    test_ipv6_trie()
+    test_host_route()
+    test_no_match()
+</code></pre>
+</body>
+</html>

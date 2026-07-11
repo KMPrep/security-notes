@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q81_q90_advanced_detection.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q81_q90_advanced_detection.py</h1>
+  <p class="file-path">Source: code\practice\medium\q81_q90_advanced_detection.py</p>
+  <p class="line-count">922 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q81–Q90
+Topic: Advanced Detection — Kubernetes Sequences, Error Spikes,
+       Session Anomalies, Token Reuse, Geo Spikes, Access Denied
+&quot;&quot;&quot;
+
+import re
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q81 — Detect Suspicious Kubernetes API Sequence
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect a Kubernetes attacker recon sequence in audit logs:
+  1. list/get Pods (enumerate workloads)
+  2. exec into a Pod (interactive access)
+  3. create a new Pod (persistence via backdoor)
+  Flag principals who complete all three within a time window.
+
+Clarifying questions:
+  1. Is this based on k8s audit log verb + resource?
+  2. What time window? (default: 10 minutes)
+  3. Should we alert mid-sequence or only on completion?
+
+Security angle:
+  MITRE ATT&amp;CK for Containers: T1613 (Container Discovery),
+  T1609 (Container Admin Command / exec), T1610 (Deploy Container).
+  The sequence strongly indicates an attacker who compromised a k8s service
+  account or stole a kubeconfig and is escalating inside the cluster.
+&quot;&quot;&quot;
+
+K8S_STEPS = [
+    {&quot;verb&quot;: frozenset({&quot;list&quot;, &quot;get&quot;}), &quot;resource&quot;: &quot;pods&quot;},
+    {&quot;verb&quot;: frozenset({&quot;create&quot;}),      &quot;resource&quot;: &quot;pods/exec&quot;},
+    {&quot;verb&quot;: frozenset({&quot;create&quot;}),      &quot;resource&quot;: &quot;pods&quot;},
+]
+
+
+def detect_k8s_attack_sequence(
+    events: List[Dict],
+    window_seconds: int = 600,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-principal state machine matching ordered K8S_STEPS.
+    O(n) time.
+    &quot;&quot;&quot;
+    state: Dict[str, Dict] = defaultdict(lambda: {&quot;step&quot;: 0, &quot;start_ts&quot;: None})
+    alerts = []
+    sorted_events = sorted(events, key=lambda e: e.get(&quot;ts&quot;, &quot;&quot;))
+
+    for e in sorted_events:
+        principal = e.get(&quot;principal&quot;) or e.get(&quot;user&quot;) or &quot;unknown&quot;
+        verb = (e.get(&quot;verb&quot;) or &quot;&quot;).lower()
+        resource = (e.get(&quot;resource&quot;) or &quot;&quot;).lower()
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        s = state[principal]
+        expected = K8S_STEPS[s[&quot;step&quot;]]
+
+        if verb in expected[&quot;verb&quot;] and resource == expected[&quot;resource&quot;]:
+            if s[&quot;step&quot;] == 0:
+                s[&quot;start_ts&quot;] = ts
+            else:
+                if ts - s[&quot;start_ts&quot;] &gt; window_seconds:
+                    s[&quot;step&quot;] = 0
+                    s[&quot;start_ts&quot;] = ts
+                    continue
+            s[&quot;step&quot;] += 1
+            if s[&quot;step&quot;] == len(K8S_STEPS):
+                alerts.append({
+                    &quot;principal&quot;: principal,
+                    &quot;sequence&quot;: [f&quot;{st[&#x27;verb&#x27;]} {st[&#x27;resource&#x27;]}&quot; for st in K8S_STEPS],
+                    &quot;duration_s&quot;: round(ts - s[&quot;start_ts&quot;], 1),
+                    &quot;ts_completed&quot;: ts_raw,
+                })
+                s[&quot;step&quot;] = 0
+                s[&quot;start_ts&quot;] = None
+
+    return alerts
+
+
+def test_q81():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = [
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;verb&quot;: &quot;list&quot;,   &quot;resource&quot;: &quot;pods&quot;,      &quot;ts&quot;: (base + timedelta(seconds=0)).isoformat()},
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;verb&quot;: &quot;create&quot;, &quot;resource&quot;: &quot;pods/exec&quot;, &quot;ts&quot;: (base + timedelta(seconds=30)).isoformat()},
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;verb&quot;: &quot;create&quot;, &quot;resource&quot;: &quot;pods&quot;,      &quot;ts&quot;: (base + timedelta(seconds=90)).isoformat()},
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;verb&quot;: &quot;get&quot;,    &quot;resource&quot;: &quot;pods&quot;,      &quot;ts&quot;: (base + timedelta(seconds=5)).isoformat()},
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;verb&quot;: &quot;list&quot;,   &quot;resource&quot;: &quot;services&quot;,  &quot;ts&quot;: (base + timedelta(seconds=10)).isoformat()},
+    ]
+    results = detect_k8s_attack_sequence(events, window_seconds=600)
+    principals = {r[&quot;principal&quot;] for r in results}
+    assert &quot;eve&quot; in principals
+    assert &quot;alice&quot; not in principals
+    print(&quot;Q81 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q82 — Detect Repeated 401 Then 200 (Brute Force Success)
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  From HTTP access logs, detect any IP/user that had N consecutive 401
+  responses followed by a 200 — indicating a successful brute force login.
+
+Clarifying questions:
+  1. Must the 401s be strictly consecutive, or just the majority in a window?
+  2. Should we track per-IP, per-username, or per (IP, path)?
+  3. What is N? (default: 5)
+
+Security angle:
+  &quot;Low-and-slow&quot; brute force often flies under rate-limit thresholds. Spotting
+  5+ 401s followed by a 200 on a login endpoint is highly actionable: the
+  account is now compromised. Many SIEMs call this &quot;authentication success
+  after failure&quot; (ASAF). It&#x27;s also the primary pattern for detecting
+  credential-stuffing success.
+&quot;&quot;&quot;
+
+
+def detect_401_then_200(
+    logs: List[Dict],
+    failure_threshold: int = 5,
+    group_by: str = &quot;src_ip&quot;,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-key counter of consecutive 401s reset on non-401.
+    Flag on 200 following ≥ failure_threshold 401s.
+    O(n) time.
+    &quot;&quot;&quot;
+    consecutive_failures: Dict[str, int] = defaultdict(int)
+    alerts = []
+
+    for log in logs:
+        key = log.get(group_by) or &quot;unknown&quot;
+        status = log.get(&quot;status&quot;) or log.get(&quot;status_code&quot;)
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            continue
+
+        if status == 401:
+            consecutive_failures[key] += 1
+        elif status == 200:
+            if consecutive_failures[key] &gt;= failure_threshold:
+                alerts.append({
+                    group_by: key,
+                    &quot;failures_before_success&quot;: consecutive_failures[key],
+                    &quot;ts&quot;: log.get(&quot;ts&quot;),
+                })
+            consecutive_failures[key] = 0
+        else:
+            consecutive_failures[key] = 0
+
+    return alerts
+
+
+def test_q82():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T4&quot;},
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T5&quot;},
+        {&quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;status&quot;: 200, &quot;ts&quot;: &quot;T6&quot;},   # brute force success
+        {&quot;src_ip&quot;: &quot;9.9.9.9&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T7&quot;},
+        {&quot;src_ip&quot;: &quot;9.9.9.9&quot;, &quot;status&quot;: 401, &quot;ts&quot;: &quot;T8&quot;},
+        {&quot;src_ip&quot;: &quot;9.9.9.9&quot;, &quot;status&quot;: 200, &quot;ts&quot;: &quot;T9&quot;},   # only 2 failures → OK
+    ]
+    results = detect_401_then_200(logs, failure_threshold=5)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;1.2.3.4&quot; in ips
+    assert &quot;9.9.9.9&quot; not in ips
+    print(&quot;Q82 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q83 — Detect Slow Brute Force
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect a &quot;slow&quot; brute force — N failed logins from the same IP spread over
+  a long time window (e.g., 24 hours) but never in a short burst.
+
+Clarifying questions:
+  1. Is this per-user or per-IP?
+  2. What is the minimum failure count and window? (default: 20 in 86400s)
+  3. Should we suppress if there&#x27;s also a burst alert (Q71)?
+
+Security angle:
+  Attackers deliberately slow their attempts to evade short-window rate limits.
+  Detecting over a 24-hour window catches these while a 60-second window misses
+  them. Low-and-slow brute force is a growing technique against MFA-bypass
+  endpoints like OTP windows.
+&quot;&quot;&quot;
+
+
+def detect_slow_brute_force(
+    events: List[Dict],
+    min_failures: int = 20,
+    window_hours: int = 24,
+    group_by: str = &quot;src_ip&quot;,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: deque sliding window over a long period.
+    Same O(n) algorithm as Q71 but with a 24-hour window.
+    &quot;&quot;&quot;
+    window_seconds = window_hours * 3600
+    windows: Dict[str, deque] = defaultdict(deque)
+    alerts: Dict[str, Dict] = {}
+
+    for e in events:
+        if e.get(&quot;result&quot;) != &quot;failure&quot;:
+            continue
+        key = e.get(group_by) or &quot;unknown&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[key]
+        window.append(ts)
+        while window and ts - window[0] &gt; window_seconds:
+            window.popleft()
+
+        if len(window) &gt;= min_failures and key not in alerts:
+            alerts[key] = {
+                group_by: key,
+                &quot;failures_in_window&quot;: len(window),
+                &quot;window_hours&quot;: window_hours,
+            }
+
+    return list(alerts.values())
+
+
+def test_q83():
+    base = datetime(2026, 5, 29, 0, 0, 0)
+    events = []
+    # Slow brute force: 25 failures spread over 20 hours
+    for i in range(25):
+        events.append({
+            &quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;result&quot;: &quot;failure&quot;,
+            &quot;ts&quot;: (base + timedelta(hours=i * 0.8)).isoformat(),
+        })
+    # Normal: 5 failures in 24 hours
+    for i in range(5):
+        events.append({
+            &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;result&quot;: &quot;failure&quot;,
+            &quot;ts&quot;: (base + timedelta(hours=i * 4)).isoformat(),
+        })
+
+    results = detect_slow_brute_force(events, min_failures=20, window_hours=24)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q83 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q84 — Detect Session Hijacking Candidate
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given session activity logs (session_id, src_ip, user_agent, ts), flag
+  sessions where the src_ip or user_agent changes mid-session — a candidate
+  for session hijacking or cookie theft.
+
+Clarifying questions:
+  1. How many unique IPs / UAs before alerting? (default: &gt;1 distinct IP)
+  2. Should we ignore CDN/proxy IP changes?
+  3. What about mobile users switching networks?
+
+Security angle:
+  Session hijacking (OWASP A07): stolen cookies used from a different IP.
+  User-agent changes mid-session indicate the attacker&#x27;s browser differs from
+  the victim&#x27;s. Both are weak signals individually; combined they&#x27;re strong.
+  This is how Gmail detects &quot;sign-in from new location during session.&quot;
+&quot;&quot;&quot;
+
+
+def detect_session_hijacking(
+    logs: List[Dict],
+    max_ips: int = 1,
+    check_user_agent: bool = True,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-session sets of IPs and user_agents.
+    O(n) time.
+    &quot;&quot;&quot;
+    session_ips: Dict[str, Set[str]] = defaultdict(set)
+    session_uas: Dict[str, Set[str]] = defaultdict(set)
+
+    for log in logs:
+        sid = log.get(&quot;session_id&quot;) or &quot;unknown&quot;
+        ip = log.get(&quot;src_ip&quot;) or &quot;&quot;
+        ua = log.get(&quot;user_agent&quot;) or &quot;&quot;
+        if ip:
+            session_ips[sid].add(ip)
+        if ua:
+            session_uas[sid].add(ua)
+
+    alerts = []
+    all_sids = set(session_ips) | set(session_uas)
+    for sid in all_sids:
+        ips = session_ips.get(sid, set())
+        uas = session_uas.get(sid, set())
+        reasons = []
+        if len(ips) &gt; max_ips:
+            reasons.append(f&quot;IP changed: {sorted(ips)}&quot;)
+        if check_user_agent and len(uas) &gt; 1:
+            reasons.append(f&quot;UA changed: {sorted(uas)}&quot;)
+        if reasons:
+            alerts.append({
+                &quot;session_id&quot;: sid,
+                &quot;distinct_ips&quot;: len(ips),
+                &quot;distinct_uas&quot;: len(uas),
+                &quot;reasons&quot;: reasons,
+            })
+
+    return alerts
+
+
+def test_q84():
+    logs = [
+        {&quot;session_id&quot;: &quot;s1&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;user_agent&quot;: &quot;Chrome/100&quot;},
+        {&quot;session_id&quot;: &quot;s1&quot;, &quot;src_ip&quot;: &quot;9.9.9.9&quot;, &quot;user_agent&quot;: &quot;Firefox/99&quot;},  # hijack
+        {&quot;session_id&quot;: &quot;s2&quot;, &quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;user_agent&quot;: &quot;Chrome/100&quot;},
+        {&quot;session_id&quot;: &quot;s2&quot;, &quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;user_agent&quot;: &quot;Chrome/100&quot;},  # normal
+    ]
+    results = detect_session_hijacking(logs)
+    sids = {r[&quot;session_id&quot;] for r in results}
+    assert &quot;s1&quot; in sids
+    assert &quot;s2&quot; not in sids
+    print(&quot;Q84 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q85 — Detect Token Reuse After Logout
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given auth events (user, action, token_id, ts), detect if a token is used
+  for API calls AFTER a logout event has been recorded for that token.
+
+Clarifying questions:
+  1. Is the token revoked server-side, or only client-side on logout?
+  2. Should we track per-token or per-user?
+  3. Are tokens JWTs (stateless) or opaque (server-side revocable)?
+
+Security angle:
+  JWT tokens are stateless: if the server doesn&#x27;t maintain a revocation list,
+  a stolen token can be reused even after the legitimate user logs out.
+  Detecting post-logout token use reveals either:
+  - Stolen/replayed tokens (attacker reuse).
+  - Misconfigured logout (client-only invalidation).
+  This maps to OWASP A07 (Auth Failures) and CWE-613 (Insufficient Session Expiration).
+&quot;&quot;&quot;
+
+
+def detect_token_reuse_after_logout(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single pass — record logout timestamp per token,
+    then flag any use event with ts &gt; logout_ts.
+    Requires two passes if events are unordered.
+    O(n) time (two passes).
+    &quot;&quot;&quot;
+    sorted_events = sorted(events, key=lambda e: e.get(&quot;ts&quot;, &quot;&quot;))
+
+    logout_ts: Dict[str, float] = {}
+    alerts = []
+
+    # Pass 1: collect logout timestamps
+    for e in sorted_events:
+        if e.get(&quot;action&quot;) == &quot;logout&quot;:
+            token = e.get(&quot;token_id&quot;) or e.get(&quot;token&quot;) or &quot;&quot;
+            ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+            try:
+                ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+                logout_ts[token] = ts
+            except (ValueError, AttributeError):
+                pass
+
+    # Pass 2: detect use after logout
+    for e in sorted_events:
+        action = e.get(&quot;action&quot;) or &quot;&quot;
+        if action in (&quot;logout&quot;, &quot;login&quot;):
+            continue
+        token = e.get(&quot;token_id&quot;) or e.get(&quot;token&quot;) or &quot;&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        if token in logout_ts:
+            try:
+                ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+            except (ValueError, AttributeError):
+                continue
+            if ts &gt; logout_ts[token]:
+                alerts.append({
+                    &quot;token_id&quot;: token,
+                    &quot;user&quot;: e.get(&quot;user&quot;),
+                    &quot;action&quot;: action,
+                    &quot;ts&quot;: ts_raw,
+                    &quot;logout_ts&quot;: datetime.fromtimestamp(logout_ts[token]).isoformat(),
+                })
+
+    return alerts
+
+
+def test_q85():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = [
+        {&quot;user&quot;: &quot;alice&quot;, &quot;action&quot;: &quot;login&quot;,       &quot;token_id&quot;: &quot;tok-1&quot;, &quot;ts&quot;: (base + timedelta(seconds=0)).isoformat()},
+        {&quot;user&quot;: &quot;alice&quot;, &quot;action&quot;: &quot;api_call&quot;,    &quot;token_id&quot;: &quot;tok-1&quot;, &quot;ts&quot;: (base + timedelta(seconds=30)).isoformat()},
+        {&quot;user&quot;: &quot;alice&quot;, &quot;action&quot;: &quot;logout&quot;,      &quot;token_id&quot;: &quot;tok-1&quot;, &quot;ts&quot;: (base + timedelta(seconds=60)).isoformat()},
+        # Attacker reuses token after logout
+        {&quot;user&quot;: &quot;unknown&quot;, &quot;action&quot;: &quot;api_call&quot;,  &quot;token_id&quot;: &quot;tok-1&quot;, &quot;ts&quot;: (base + timedelta(seconds=120)).isoformat()},
+        # Normal: different token
+        {&quot;user&quot;: &quot;bob&quot;,   &quot;action&quot;: &quot;api_call&quot;,    &quot;token_id&quot;: &quot;tok-2&quot;, &quot;ts&quot;: (base + timedelta(seconds=90)).isoformat()},
+    ]
+    results = detect_token_reuse_after_logout(events)
+    tokens = {r[&quot;token_id&quot;] for r in results}
+    assert &quot;tok-1&quot; in tokens
+    assert &quot;tok-2&quot; not in tokens
+    print(&quot;Q85 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q86 — Detect API Key Used from New IP
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a baseline of (api_key → known IPs) and a stream of new API events,
+  flag API keys used from an IP not in their baseline.
+
+Clarifying questions:
+  1. How is the baseline established? (30-day lookback, static config)
+  2. Should we alert once per new IP or every time?
+  3. Should we tolerate IPs in the same /24 subnet?
+
+Security angle:
+  API keys are long-lived credentials. Unlike OAuth tokens, they rarely rotate.
+  A key suddenly used from a new IP may indicate:
+  - Credential leakage (GitHub secret scanning scenario).
+  - Stolen from a developer laptop or CI/CD pipeline.
+  This is analogous to &quot;impossible travel&quot; for API keys.
+&quot;&quot;&quot;
+
+
+def detect_api_key_from_new_ip(
+    events: List[Dict],
+    baseline: Optional[Dict[str, Set[str]]] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: frozenset baseline lookup.
+    O(n) time per stream event.
+    &quot;&quot;&quot;
+    baseline = baseline or {}
+    # Convert lists to sets if needed
+    frozen_baseline: Dict[str, frozenset] = {
+        k: frozenset(v) for k, v in baseline.items()
+    }
+    seen_alerts: Set[Tuple[str, str]] = set()
+    alerts = []
+
+    for e in events:
+        key = e.get(&quot;api_key&quot;) or &quot;&quot;
+        ip = e.get(&quot;src_ip&quot;) or &quot;&quot;
+        if not (key and ip):
+            continue
+
+        known_ips = frozen_baseline.get(key, frozenset())
+        if ip not in known_ips:
+            alert_key = (key, ip)
+            if alert_key not in seen_alerts:
+                seen_alerts.add(alert_key)
+                alerts.append({
+                    &quot;api_key&quot;: key,
+                    &quot;new_ip&quot;: ip,
+                    &quot;ts&quot;: e.get(&quot;ts&quot;),
+                })
+
+    return alerts
+
+
+def test_q86():
+    baseline = {
+        &quot;key-prod-1&quot;: {&quot;10.0.0.1&quot;, &quot;10.0.0.2&quot;},
+        &quot;key-dev-2&quot;:  {&quot;192.168.1.5&quot;},
+    }
+    events = [
+        {&quot;api_key&quot;: &quot;key-prod-1&quot;, &quot;src_ip&quot;: &quot;10.0.0.1&quot;,   &quot;ts&quot;: &quot;T1&quot;},   # known
+        {&quot;api_key&quot;: &quot;key-prod-1&quot;, &quot;src_ip&quot;: &quot;185.220.0.1&quot;, &quot;ts&quot;: &quot;T2&quot;},   # new!
+        {&quot;api_key&quot;: &quot;key-dev-2&quot;,  &quot;src_ip&quot;: &quot;192.168.1.5&quot;, &quot;ts&quot;: &quot;T3&quot;},   # known
+        {&quot;api_key&quot;: &quot;key-dev-2&quot;,  &quot;src_ip&quot;: &quot;8.8.8.8&quot;,    &quot;ts&quot;: &quot;T4&quot;},   # new!
+    ]
+    results = detect_api_key_from_new_ip(events, baseline)
+    keys = [r[&quot;api_key&quot;] for r in results]
+    assert &quot;key-prod-1&quot; in keys
+    assert &quot;key-dev-2&quot; in keys
+    assert len(results) == 2
+    print(&quot;Q86 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q87 — Detect Sudden Increase in Error Rate
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a stream of HTTP events grouped by minute, detect when the error rate
+  (4xx + 5xx) in a minute exceeds a multiplier (e.g., 3×) compared to the
+  rolling baseline of the previous N minutes.
+
+Clarifying questions:
+  1. What is N for the baseline window? (default: 5 minutes)
+  2. What multiplier constitutes a &quot;spike&quot;? (default: 3×)
+  3. Should we group by endpoint, or globally?
+
+Security angle:
+  A sudden 3× spike in error rate can indicate:
+  - Active attack (scanning for valid paths → 404 flood).
+  - WAF misfire (new rule causing 403 flood).
+  - DDoS causing 5xx cascade.
+  Automated anomaly detection on error rates is core to SRE/SoC integration.
+&quot;&quot;&quot;
+
+
+def _minute_bucket(ts_raw: str) -&gt; Optional[str]:
+    try:
+        dt = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;))
+        return dt.strftime(&quot;%Y-%m-%dT%H:%M&quot;)
+    except (ValueError, AttributeError):
+        return None
+
+
+def detect_error_rate_spike(
+    events: List[Dict],
+    baseline_minutes: int = 5,
+    spike_multiplier: float = 3.0,
+    min_requests: int = 10,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: aggregate into minute buckets, deque baseline.
+    O(n) time.
+    &quot;&quot;&quot;
+    bucket_total: Dict[str, int] = defaultdict(int)
+    bucket_errors: Dict[str, int] = defaultdict(int)
+
+    for e in events:
+        bucket = _minute_bucket(e.get(&quot;ts&quot;, &quot;&quot;))
+        if not bucket:
+            continue
+        bucket_total[bucket] += 1
+        status = e.get(&quot;status&quot;) or 0
+        try:
+            if int(status) &gt;= 400:
+                bucket_errors[bucket] += 1
+        except (TypeError, ValueError):
+            pass
+
+    sorted_buckets = sorted(bucket_total)
+    baseline: deque = deque()   # recent (total, errors) tuples
+    alerts = []
+
+    for bucket in sorted_buckets:
+        total = bucket_total[bucket]
+        errors = bucket_errors.get(bucket, 0)
+        error_rate = errors / total if total else 0.0
+
+        if baseline:
+            baseline_total = sum(b[0] for b in baseline)
+            baseline_errors = sum(b[1] for b in baseline)
+            baseline_rate = baseline_errors / baseline_total if baseline_total else 0.0
+            if (total &gt;= min_requests and baseline_rate &gt; 0
+                    and error_rate &gt;= spike_multiplier * baseline_rate):
+                alerts.append({
+                    &quot;minute&quot;: bucket,
+                    &quot;error_rate&quot;: round(error_rate, 3),
+                    &quot;baseline_rate&quot;: round(baseline_rate, 3),
+                    &quot;multiplier&quot;: round(error_rate / baseline_rate, 2),
+                })
+
+        baseline.append((total, errors))
+        if len(baseline) &gt; baseline_minutes:
+            baseline.popleft()
+
+    return alerts
+
+
+def test_q87():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # 5 quiet minutes: 100 requests, 5% error rate
+    for minute in range(5):
+        for i in range(100):
+            status = 500 if i &lt; 5 else 200
+            events.append({
+                &quot;status&quot;: status,
+                &quot;ts&quot;: (base + timedelta(minutes=minute, seconds=i % 60)).isoformat(),
+            })
+    # Spike minute: 100 requests, 60% error rate
+    for i in range(100):
+        status = 500 if i &lt; 60 else 200
+        events.append({
+            &quot;status&quot;: status,
+            &quot;ts&quot;: (base + timedelta(minutes=5, seconds=i % 60)).isoformat(),
+        })
+
+    results = detect_error_rate_spike(events, baseline_minutes=5, spike_multiplier=3.0)
+    assert len(results) &gt;= 1
+    spike = results[-1]
+    assert spike[&quot;error_rate&quot;] &gt; 0.5
+    print(&quot;Q87 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q88 — Detect Traffic Spike by Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given HTTP logs, detect per-endpoint traffic spikes: when requests to an
+  endpoint in a 1-minute window exceed N× the rolling average of previous
+  M minutes for that endpoint.
+
+Clarifying questions:
+  1. Should paths be normalised (e.g., /user/123 → /user/{id})?
+  2. What constitutes M and N? (default: M=5, N=5×)
+  3. Should bots be excluded?
+
+Security angle:
+  Endpoint-specific spikes indicate:
+  - Targeted DDoS on a specific microservice.
+  - Automated enumeration of a specific resource.
+  - Viral traffic to an innocuous endpoint (false positive).
+  Detecting per-endpoint spikes is more precise than global rate monitoring
+  and directly informs WAF rule tuning.
+&quot;&quot;&quot;
+
+
+def detect_traffic_spike_by_endpoint(
+    events: List[Dict],
+    baseline_minutes: int = 5,
+    spike_multiplier: float = 5.0,
+    min_requests: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-endpoint deque baseline of minute counts.
+    O(n) time, O(endpoints × baseline_minutes) space.
+    &quot;&quot;&quot;
+    # bucket → endpoint → count
+    from collections import Counter
+    bucket_endpoint: Dict[str, Counter] = defaultdict(Counter)
+
+    for e in events:
+        bucket = _minute_bucket(e.get(&quot;ts&quot;, &quot;&quot;))
+        path = e.get(&quot;path&quot;) or &quot;/&quot;
+        if bucket:
+            bucket_endpoint[bucket][path] += 1
+
+    sorted_buckets = sorted(bucket_endpoint)
+    baselines: Dict[str, deque] = defaultdict(deque)
+    alerts = []
+
+    for bucket in sorted_buckets:
+        for path, count in bucket_endpoint[bucket].items():
+            baseline = baselines[path]
+
+            if baseline:
+                avg = sum(baseline) / len(baseline)
+                if count &gt;= min_requests and avg &gt; 0 and count &gt;= spike_multiplier * avg:
+                    alerts.append({
+                        &quot;minute&quot;: bucket,
+                        &quot;path&quot;: path,
+                        &quot;request_count&quot;: count,
+                        &quot;baseline_avg&quot;: round(avg, 1),
+                        &quot;multiplier&quot;: round(count / avg, 2),
+                    })
+
+            baseline.append(count)
+            if len(baseline) &gt; baseline_minutes:
+                baseline.popleft()
+
+    return alerts
+
+
+def test_q88():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # 5 baseline minutes: /api/data gets 10 req/min
+    for minute in range(5):
+        for i in range(10):
+            events.append({
+                &quot;path&quot;: &quot;/api/data&quot;,
+                &quot;ts&quot;: (base + timedelta(minutes=minute, seconds=i * 6)).isoformat(),
+            })
+    # Spike minute: /api/data gets 80 requests
+    for i in range(80):
+        events.append({
+            &quot;path&quot;: &quot;/api/data&quot;,
+            &quot;ts&quot;: (base + timedelta(minutes=5, seconds=i % 60)).isoformat(),
+        })
+    # Other endpoint: steady 5 req/min
+    for minute in range(6):
+        for i in range(5):
+            events.append({
+                &quot;path&quot;: &quot;/health&quot;,
+                &quot;ts&quot;: (base + timedelta(minutes=minute, seconds=i * 10)).isoformat(),
+            })
+
+    results = detect_traffic_spike_by_endpoint(events, baseline_minutes=5, spike_multiplier=4.0)
+    paths = {r[&quot;path&quot;] for r in results}
+    assert &quot;/api/data&quot; in paths
+    assert &quot;/health&quot; not in paths
+    print(&quot;Q88 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q89 — Detect Authentication Spike by Country
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given login events with (user, country, ts), flag any country that generates
+  a sudden spike in authentication attempts compared to its baseline — could
+  indicate a geo-targeted credential stuffing campaign.
+
+Clarifying questions:
+  1. Should we alert per-country globally or per-country per-user?
+  2. What is the baseline period (1 week)?
+  3. Should successful and failed logins both count?
+
+Security angle:
+  Credential stuffing campaigns often originate from specific geographies.
+  A 10× spike from CN, RU, or BR on a Monday morning indicates an automated
+  campaign. Country-level alerting is a standard feature of SIEM auth modules
+  (e.g., Azure AD &quot;sign-in risk&quot; by location).
+&quot;&quot;&quot;
+
+
+def detect_auth_spike_by_country(
+    events: List[Dict],
+    baseline_minutes: int = 5,
+    spike_multiplier: float = 4.0,
+    min_events: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-country deque baseline of per-minute counts.
+    O(n) time.
+    &quot;&quot;&quot;
+    from collections import Counter
+    bucket_country: Dict[str, Counter] = defaultdict(Counter)
+
+    for e in events:
+        bucket = _minute_bucket(e.get(&quot;ts&quot;, &quot;&quot;))
+        country = e.get(&quot;country&quot;) or &quot;UNKNOWN&quot;
+        if bucket:
+            bucket_country[bucket][country] += 1
+
+    sorted_buckets = sorted(bucket_country)
+    baselines: Dict[str, deque] = defaultdict(deque)
+    alerts = []
+
+    for bucket in sorted_buckets:
+        for country, count in bucket_country[bucket].items():
+            baseline = baselines[country]
+            if baseline:
+                avg = sum(baseline) / len(baseline)
+                if count &gt;= min_events and avg &gt; 0 and count &gt;= spike_multiplier * avg:
+                    alerts.append({
+                        &quot;minute&quot;: bucket,
+                        &quot;country&quot;: country,
+                        &quot;count&quot;: count,
+                        &quot;baseline_avg&quot;: round(avg, 1),
+                        &quot;multiplier&quot;: round(count / avg, 2),
+                    })
+            baseline.append(count)
+            if len(baseline) &gt; baseline_minutes:
+                baseline.popleft()
+
+    return alerts
+
+
+def test_q89():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Baseline: 5 minutes, CN sends 5 logins/min
+    for minute in range(5):
+        for i in range(5):
+            events.append({&quot;country&quot;: &quot;CN&quot;, &quot;ts&quot;: (base + timedelta(minutes=minute, seconds=i * 10)).isoformat()})
+    # Spike minute: CN sends 50 logins
+    for i in range(50):
+        events.append({&quot;country&quot;: &quot;CN&quot;, &quot;ts&quot;: (base + timedelta(minutes=5, seconds=i % 60)).isoformat()})
+    # Normal: US steady 10/min
+    for minute in range(6):
+        for i in range(10):
+            events.append({&quot;country&quot;: &quot;US&quot;, &quot;ts&quot;: (base + timedelta(minutes=minute, seconds=i * 5)).isoformat()})
+
+    results = detect_auth_spike_by_country(events, baseline_minutes=5, spike_multiplier=4.0)
+    countries = {r[&quot;country&quot;] for r in results}
+    assert &quot;CN&quot; in countries
+    assert &quot;US&quot; not in countries
+    print(&quot;Q89 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q90 — Detect Repeated Access Denied Events
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given IAM / file-system audit events, find principals with more than N
+  access_denied events in a rolling window — indicating either misconfiguration
+  or an attacker probing authorization boundaries.
+
+Clarifying questions:
+  1. Should we alert per-principal or per (principal, resource)?
+  2. What is N? (default: 10 in 10 minutes)
+  3. Should we also flag the resources being denied?
+
+Security angle:
+  Repeated access-denied is the top signal for:
+  - Privilege escalation attempts (trying restricted APIs).
+  - Misconfigured IAM roles (breaks a workflow, generates noise).
+  - Lateral movement (attacker testing each resource).
+  AWS CloudTrail &quot;unauthorized operation&quot; alerts use this pattern.
+  Differentiating attacker vs. misconfiguration requires additional context
+  (new IP, off-hours, sensitive resource).
+&quot;&quot;&quot;
+
+
+def detect_repeated_access_denied(
+    events: List[Dict],
+    threshold: int = 10,
+    window_seconds: int = 600,
+    group_by: str = &quot;principal&quot;,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: deque sliding window per principal.
+    Also collects the top denied resources.
+    O(n) total time.
+    &quot;&quot;&quot;
+    windows: Dict[str, deque] = defaultdict(deque)
+    denied_resources: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    alerts: Dict[str, Dict] = {}
+
+    for e in events:
+        action = e.get(&quot;action&quot;) or e.get(&quot;result&quot;) or &quot;&quot;
+        if &quot;denied&quot; not in action.lower() and &quot;unauthorized&quot; not in action.lower():
+            continue
+        key = e.get(group_by) or &quot;unknown&quot;
+        resource = e.get(&quot;resource&quot;) or &quot;unknown&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[key]
+        window.append(ts)
+        denied_resources[key][resource] += 1
+
+        while window and ts - window[0] &gt; window_seconds:
+            window.popleft()
+
+        if len(window) &gt; threshold and key not in alerts:
+            top_resources = sorted(
+                denied_resources[key].items(), key=lambda x: -x[1]
+            )[:5]
+            alerts[key] = {
+                group_by: key,
+                &quot;denied_count_in_window&quot;: len(window),
+                &quot;window_seconds&quot;: window_seconds,
+                &quot;top_denied_resources&quot;: [r for r, _ in top_resources],
+            }
+
+    return list(alerts.values())
+
+
+def test_q90():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Attacker: 15 access_denied in 5 minutes
+    for i in range(15):
+        events.append({
+            &quot;principal&quot;: &quot;eve&quot;, &quot;action&quot;: &quot;access_denied&quot;,
+            &quot;resource&quot;: f&quot;s3://bucket-{i % 5}&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 20)).isoformat(),
+        })
+    # Normal admin: 3 access_denied (misconfiguration)
+    for i in range(3):
+        events.append({
+            &quot;principal&quot;: &quot;admin&quot;, &quot;action&quot;: &quot;access_denied&quot;,
+            &quot;resource&quot;: &quot;ec2:DescribeInstances&quot;,
+            &quot;ts&quot;: (base + timedelta(minutes=i * 2)).isoformat(),
+        })
+
+    results = detect_repeated_access_denied(events, threshold=10, window_seconds=600)
+    principals = {r[&quot;principal&quot;] for r in results}
+    assert &quot;eve&quot; in principals
+    assert &quot;admin&quot; not in principals
+    print(&quot;Q90 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q81()
+    test_q82()
+    test_q83()
+    test_q84()
+    test_q85()
+    test_q86()
+    test_q87()
+    test_q88()
+    test_q89()
+    test_q90()
+    print(&quot;\nAll Q81–Q90 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 10 — SIEM Migration from On-Prem Splunk to Cloud SIEM</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario10-siem-cloud-migration.md</p>
+<h1 id="scenario-10-siem-migration-from-on-prem-splunk-to-cloud-siem">Scenario 10 — SIEM Migration from On-Prem Splunk to Cloud SIEM</h1>
+<blockquote>
+<p><strong>Scenario:</strong> A 10-year-old on-prem Splunk deployment is being replaced with a cloud-native SIEM. You have 500+ detection rules, 200 TB of historical logs, and a 24/7 SOC team.</p>
+<p><strong>Candidate questions:</strong></p>
+<ul>
+<li>What threat model applies to a cloud SIEM that ingests all security telemetry?</li>
+<li>How do you prevent detection coverage gaps during migration?</li>
+<li>What controls protect the SIEM from log injection or alert suppression attacks?</li>
+<li>How do you validate that cloud SIEM detection fidelity matches on-prem?</li>
+<li>What is your data sovereignty and residual risk position for logs stored in a cloud provider?</li>
+</ul>
+</blockquote>
+<hr />
+<h2 id="1-assets-what-are-we-protecting">1. ASSETS — What are we protecting?</h2>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Sensitivity</th>
+<th>Why It Matters</th>
+<th>What Could Go Wrong If Compromised</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Security telemetry (all ingested logs)</td>
+<td>Critical</td>
+<td>The entire detection capability depends on log integrity and availability</td>
+<td>Log tampering or deletion blinds SOC; attacker operates undetected</td>
+</tr>
+<tr>
+<td>Detection rules (500+ SPL/YARA-L/Sigma rules)</td>
+<td>Critical</td>
+<td>Encodes institutional knowledge of threat patterns; took 10 years to tune</td>
+<td>Rules deleted or modified suppress alerts for specific attack techniques; attacker reverse-engineers detection gaps</td>
+</tr>
+<tr>
+<td>SOC analyst accounts and credentials</td>
+<td>Critical</td>
+<td>Analysts can view, suppress, modify alerts and playbooks</td>
+<td>Compromised analyst account used to suppress alerts for an active intrusion</td>
+</tr>
+<tr>
+<td>SOAR playbooks and automation workflows</td>
+<td>High</td>
+<td>Automated response actions (isolate host, block IP, revoke credential)</td>
+<td>Modified playbook causes incorrect response; attacker manipulates automation to blocklist legitimate hosts (DoS)</td>
+</tr>
+<tr>
+<td>Historical log archive (200 TB, 10 years)</td>
+<td>High</td>
+<td>Forensic investigation, compliance evidence, threat hunting baseline</td>
+<td>Loss of historical logs eliminates forensic evidence; compliance violations (HIPAA, PCI-DSS)</td>
+</tr>
+<tr>
+<td>Cloud SIEM API and administrative interface</td>
+<td>Critical</td>
+<td>Cloud SIEM admin can modify rules, suppress alerts, change data retention, export all logs</td>
+<td>Admin account compromise is equivalent to compromising the entire detection stack</td>
+</tr>
+<tr>
+<td>Log forwarding infrastructure (forwarders, pipelines)</td>
+<td>High</td>
+<td>Data plane for all security telemetry; if disrupted, logs stop flowing</td>
+<td>Attacker disrupts log pipeline; logs queue and drop; detection goes dark</td>
+</tr>
+<tr>
+<td>Threat intelligence feeds and IOC databases</td>
+<td>High</td>
+<td>Enriches alerts with context; drives some detection rules</td>
+<td>Poisoned threat intel causes false positive flood (DoS on SOC) or suppresses legitimate IOC matches</td>
+</tr>
+<tr>
+<td>Correlation between log sources (identity of which system generated which log)</td>
+<td>High</td>
+<td>Attribution of events to specific hosts/users</td>
+<td>If log source metadata is spoofed, analyst investigates the wrong asset</td>
+</tr>
+<tr>
+<td>Alert triage queue and ticketing integration</td>
+<td>Medium</td>
+<td>Workflow for analyst investigation; drives MTTD/MTTR metrics</td>
+<td>Alert suppression or ticket manipulation hides incident from management</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-threat-actors-who-attacks-and-how">2. THREAT ACTORS — Who attacks and how?</h2>
+<table>
+<thead>
+<tr>
+<th>Actor</th>
+<th>Motivation</th>
+<th>Likely TTPs</th>
+<th>MITRE ATT&amp;CK</th>
+<th>Capability</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Advanced attacker (APT) who is already in the network</td>
+<td>Operational persistence — wants to disable detection during lateral movement</td>
+<td>Target SIEM directly: disable log forwarding, delete specific detection rules, suppress alerts for their C2 traffic</td>
+<td>T1562.001 (Impair Defenses: Disable or Modify Tools), T1070 (Indicator Removal)</td>
+<td>Very High</td>
+<td>External (already inside)</td>
+</tr>
+<tr>
+<td>Cloud provider insider or nation-state with cloud access</td>
+<td>Espionage on sensitive security telemetry</td>
+<td>Access cloud SIEM tenant data; exfiltrate detection rules revealing security gaps; read logs containing credentials and PII</td>
+<td>T1530 (Data from Cloud Storage)</td>
+<td>High</td>
+<td>Supply Chain / Insider</td>
+</tr>
+<tr>
+<td>Compromised SOC analyst account</td>
+<td>Privilege abuse, covering tracks for insider activity</td>
+<td>Suppress alerts for specific source IPs or users; delete evidence-bearing logs; modify detection rule logic</td>
+<td>T1562, T1070.002 (Clear Windows Event Logs)</td>
+<td>High</td>
+<td>Insider</td>
+</tr>
+<tr>
+<td>Log injection attacker</td>
+<td>Manipulate SOC investigations; create false positives</td>
+<td>Craft malicious log entries that trigger spurious alerts; exhaust SOC analyst bandwidth</td>
+<td>T1562.006 (Indicator Blocking)</td>
+<td>Medium</td>
+<td>External / Insider</td>
+</tr>
+<tr>
+<td>Ransomware operator targeting SOC visibility</td>
+<td>Maximize dwell time before encryption</td>
+<td>Identify and disable SIEM forwarders on target hosts before deploying ransomware</td>
+<td>T1562.001</td>
+<td>High</td>
+<td>External</td>
+</tr>
+<tr>
+<td>Migration period opportunist</td>
+<td>Exploit coverage gaps during transition</td>
+<td>Time attack during known migration window when rules are being revalidated and SOC is distracted</td>
+<td>T1078 (Valid Accounts), T1059</td>
+<td>Medium</td>
+<td>External</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-trust-boundaries-where-does-trust-change">3. TRUST BOUNDARIES — Where does trust change?</h2>
+<h3 id="31-high-level-trust-boundary-diagram">3.1 High-level trust boundary diagram</h3>
+<pre class="mermaid">
+flowchart LR
+    Sources["Log Sources\nEndpoints, Firewalls\nCloud Services, AD, Apps"] -->|Encrypted syslog\nFluentd / Cribl / Dataflow| Pipeline["Log Pipeline\nCribl Stream / Pub-Sub / Kinesis"]
+    Pipeline -->|TLS + auth| CloudSIEM["Cloud SIEM\nChronicle / Sentinel / Splunk Cloud"]
+    CloudSIEM -->|Alert enrichment| ThreatIntel["Threat Intel Feeds\nVirusTotal, Mandiant, ISAC"]
+    CloudSIEM -->|Trigger playbook| SOAR["SOAR Platform\nXSOAR / Sentinel Automation"]
+    SOAR -->|Response actions| TargetSystems["Target Systems\nFirewall, EDR, IAM"]
+    SOCAnalyst["SOC Analyst\nSSO + MFA + PAM"] -->|Read-only search\nadmin console| CloudSIEM
+    OnPremSplunk["On-Prem Splunk\n(Legacy, Parallel)"] -.->|Shadow mode during migration| CloudSIEM
+    HistoricalArchive["Historical Log Archive\nS3 / GCS cold tier"] <-->|Ingest + query| CloudSIEM
+</pre>
+<h3 id="32-log-ingestion-and-authentication-flow">3.2 Log ingestion and authentication flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant Host as Endpoint / Server
+    participant Forwarder as Log Forwarder\nSplunk UF / Fluentd
+    participant Pipeline as Log Pipeline\nCribl Stream
+    participant SIEM as Cloud SIEM\nChronicle
+    participant SOC as SOC Analyst
+
+    Host->>Forwarder: Emit logs locally via syslog / WEF
+    Forwarder->>Pipeline: Forward via mTLS (client cert auth)\nencrypted, compressed
+    Pipeline->>Pipeline: Normalize, enrich, deduplicate
+    Pipeline->>SIEM: Ingest via authenticated HTTPS API\nwith source metadata preserved
+    SIEM->>SIEM: Apply detection rules\ngenerate alerts
+    SIEM-->>SOC: Alert in analyst queue with context
+    SOC->>SIEM: Investigate via YARA-L / UDM search
+    SIEM->>SOAR: Trigger automated playbook on High/Critical alert
+</pre>
+<h3 id="33-migration-parallel-run-architecture">3.3 Migration parallel-run architecture</h3>
+<pre class="mermaid">
+flowchart TD
+    LogSources["All Log Sources"] -->|Full stream| Cribl["Cribl Stream\nLog Router"]
+    Cribl -->|100% copy| NewSIEM["Cloud SIEM\nChronicle / Sentinel"]
+    Cribl -->|100% copy during migration| OldSplunk["On-Prem Splunk\nLegacy (until decommission)"]
+    NewSIEM -->|Alerts to| NewSOARQueue["New SOAR Queue"]
+    OldSplunk -->|Alerts to| OldSOARQueue["Old SOAR Queue"]
+    NewSOARQueue -->|Compare alert fidelity| AlertComparison["Rule Parity Dashboard\nAlert count, MTTD comparison"]
+    OldSOARQueue --> AlertComparison
+    AlertComparison -->|Discrepancy detected| SecurityEngineer["Detection Engineer\nTunes missing rule"]
+</pre>
+<h3 id="34-highest-risk-boundary-crossing">3.4 Highest-risk boundary crossing</h3>
+<p>The cloud SIEM's administrative interface is the highest-risk boundary. Unlike on-prem Splunk where admin access requires network-level access to internal Splunk infrastructure, the cloud SIEM admin console is internet-reachable by design. A compromised SOC admin account — obtained via phishing, credential stuffing, or MFA bypass — gives an attacker the ability to modify or delete detection rules, suppress alert categories, export all ingested logs, and alter data retention policies. This is the "foxes guarding the henhouse" problem: the tool designed to detect attackers becomes the attacker's primary target for disabling detection.</p>
+<hr />
+<h2 id="4-attack-surface-entry-points-and-attack-vectors">4. ATTACK SURFACE — Entry points and attack vectors</h2>
+<table>
+<thead>
+<tr>
+<th>Attack Vector</th>
+<th>Entry Point</th>
+<th>Threat</th>
+<th>STRIDE Category</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compromised SOC analyst account (phishing)</td>
+<td>Cloud SIEM admin console</td>
+<td>Attacker silences detection rules for their TTPs</td>
+<td>Tampering / Repudiation</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Cloud SIEM API key leaked in code repository</td>
+<td>Public GitHub / internal repo</td>
+<td>API key used to suppress alerts, modify rules, or bulk-export logs</td>
+<td>Spoofing / Information Disclosure</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Log forwarder compromise on endpoint</td>
+<td>Splunk UF / Fluentd agent</td>
+<td>Attacker stops forwarder service; logs stop flowing from that host</td>
+<td>Denial of Service</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Log injection via crafted log entries</td>
+<td>Any log-generating application</td>
+<td>Inject malformed log entries that cause SIEM parser errors; exploit SIEM parsing CVEs</td>
+<td>Tampering</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Detection rule deletion or modification</td>
+<td>SIEM admin console / API</td>
+<td>Targeted deletion of rules that would detect attacker's TTPs</td>
+<td>Tampering</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Migration coverage gap exploitation</td>
+<td>Transition period window</td>
+<td>Attacker times attack when rules are being revalidated and coverage is partial</td>
+<td>Tampering</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Cloud SIEM tenant misconfiguration</td>
+<td>Cloud admin console</td>
+<td>Logs from sensitive sources inadvertently excluded; data retention set too short</td>
+<td>Tampering / Information Disclosure</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Cloud provider access to tenant data</td>
+<td>Cloud SIEM provider infrastructure</td>
+<td>Provider employee with tenant access reads sensitive security telemetry</td>
+<td>Information Disclosure</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Threat intelligence feed poisoning</td>
+<td>External ITEF / TAXII feed</td>
+<td>Poisoned IOC causes false positive flood; suppresses legitimate detections</td>
+<td>Tampering</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Historical log archive exfiltration</td>
+<td>Cloud storage bucket</td>
+<td>S3/GCS bucket with 200TB of logs exposed publicly or via misconfigured policy</td>
+<td>Information Disclosure</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>SOAR playbook manipulation</td>
+<td>SOAR admin access</td>
+<td>Modified playbook blocks legitimate IPs (DoS) or fails to isolate compromised hosts</td>
+<td>Tampering</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Alert suppression via query manipulation</td>
+<td>Analyst-level SIEM access</td>
+<td>Analyst suppresses specific alert types during active incident</td>
+<td>Repudiation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Log pipeline MITM (forwarder to SIEM)</td>
+<td>Network path</td>
+<td>TLS interception allows log modification in transit</td>
+<td>Tampering</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>SIEM forwarder credential reuse</td>
+<td>Forwarder config files</td>
+<td>Forwarder token/API key stored in plaintext on host; compromised host leaks credentials</td>
+<td>Information Disclosure</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h3 id="41-attack-path-diagram">4.1 Attack path diagram</h3>
+<pre class="mermaid">
+flowchart TD
+    A["Attacker (APT inside network)"] -->|Identify SIEM admin user\nvia OSINT or AD enumeration| B["Phish SOC Admin\nM365 / Google Workspace"]
+    B -->|Stolen credential + MFA bypass\nvia AiTM proxy| C["Cloud SIEM Admin Access\nChronicle / Sentinel portal"]
+    C -->|Modify rule: disable\ndetection for C2 domain| D["Detection Gap Created\nfor attacker C2 traffic"]
+    C -->|Export all ingested logs\nvia API bulk export| E["10 years of security telemetry\nexfiltrated to attacker"]
+    A2["Attacker on Endpoint"] -->|Kill Splunk UF service\nstop-service SplunkForwarder| F["Logs from Endpoint\nStop Flowing to SIEM"]
+    F -->|Detection blind spot| G["Lateral Movement\nUndetected for days"]
+</pre>
+<hr />
+<h2 id="5-controls-defense-in-depth">5. CONTROLS — Defense-in-depth</h2>
+<h3 id="51-preventive-controls">5.1 Preventive Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Gaps / Limitations</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phishing-resistant MFA for all SOC accounts (FIDO2 / hardware key)</td>
+<td>Identity</td>
+<td>FIDO2 bound to cloud SIEM console login via OIDC; blocks AiTM phishing</td>
+<td>Cannot prevent malware on the analyst's device; session hijacking post-auth</td>
+</tr>
+<tr>
+<td>Privileged Access Management for SIEM admin operations (CyberArk, BeyondTrust)</td>
+<td>Identity</td>
+<td>Admin-level changes require PAM checkout with time-limited session; all actions recorded</td>
+<td>Adds friction; may be bypassed in emergency scenarios</td>
+</tr>
+<tr>
+<td>Detection rule version control (GitOps — Sigma rules in Git, CI/CD deploys to SIEM)</td>
+<td>Integrity</td>
+<td>All rule changes via PR with peer review; automated deploy pipeline; rollback in &lt;5 minutes</td>
+<td>CI/CD pipeline compromise could push malicious rules</td>
+</tr>
+<tr>
+<td>Log pipeline integrity: mTLS between forwarder and pipeline (Cribl Stream)</td>
+<td>Transport</td>
+<td>Client certificates on every forwarder; mutual authentication; log entries signed</td>
+<td>Certificate management overhead; expired certs cause log gaps</td>
+</tr>
+<tr>
+<td>Cloud SIEM API access via dedicated service accounts with narrow IAM roles</td>
+<td>API Security</td>
+<td>Separate service accounts for: ingest, alert read, rule management; no omnipotent API key</td>
+<td>Lateral escalation from ingest account to admin if IAM misconfigured</td>
+</tr>
+<tr>
+<td>Historical log archive with Object Lock / WORM (S3 Object Lock, GCS Bucket Lock)</td>
+<td>Data Integrity</td>
+<td>Logs cannot be deleted or modified for retention period; even admin cannot override</td>
+<td>Retention period must be set correctly at bucket creation; governance mistake is irreversible</td>
+</tr>
+<tr>
+<td>Network isolation of cloud SIEM admin console (Conditional Access / IP allowlist)</td>
+<td>Network</td>
+<td>Cloud SIEM admin console accessible only from known SOC IPs + PAM gateway; not open internet</td>
+<td>Dynamic SOC analyst IPs (home, travel) require Conditional Access with device compliance</td>
+</tr>
+<tr>
+<td>Parallel run during migration (dual ingestion to old and new SIEM simultaneously)</td>
+<td>Migration Safety</td>
+<td>100% of logs sent to both SIEMs during migration; alert output compared; no cutover until parity proven</td>
+<td>Cost of running two SIEMs simultaneously; storage cost of 200TB historical migration</td>
+</tr>
+<tr>
+<td>Cloud SIEM audit log forwarded to separate immutable store</td>
+<td>Audit</td>
+<td>Chronicle or Sentinel admin activity logs forwarded to a separate GCS/S3 bucket with Object Lock that SIEM admins cannot access</td>
+<td>Requires out-of-band log sink that SIEM admin cannot modify</td>
+</tr>
+<tr>
+<td>Alert suppression require dual-analyst approval (SOAR workflow)</td>
+<td>Process</td>
+<td>Any alert suppression or rule disable requires approval from second analyst via SOAR change request</td>
+<td>Emergency situations may bypass the workflow</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="52-detective-controls">5.2 Detective Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Signal / Log Source</th>
+<th>What It Detects</th>
+<th>Alert Threshold / Trigger</th>
+<th>MTTD Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cloud SIEM admin audit log</td>
+<td>Rule modification, deletion, suppression, bulk log export, admin login</td>
+<td>Any rule delete or disable event; any bulk export &gt;1GB; admin login from new IP</td>
+<td>&lt; 1 minute</td>
+</tr>
+<tr>
+<td>Log forwarder health monitoring (heartbeat check)</td>
+<td>Forwarder stopped or log gap from specific host</td>
+<td>No log events received from host for &gt;10 minutes during business hours</td>
+<td>&lt; 15 minutes</td>
+</tr>
+<tr>
+<td>Alert rate anomaly per detection rule</td>
+<td>Sudden drop in alert volume from a specific rule</td>
+<td>Rule X produced 0 alerts in 1 hour when historical average is &gt;5/hour</td>
+<td>&lt; 1 hour</td>
+</tr>
+<tr>
+<td>Cloud SIEM API access log</td>
+<td>API calls with excessive rule reads or log exports</td>
+<td>API call to bulk export endpoint; &gt;100 rule API reads in 5 minutes</td>
+<td>&lt; 5 minutes</td>
+</tr>
+<tr>
+<td>IAM credential anomaly (cloud provider)</td>
+<td>Cloud SIEM API key used from unexpected IP or region</td>
+<td>Chronicle API call from IP not matching known SOC egress or CI/CD pipeline IPs</td>
+<td>&lt; 2 minutes</td>
+</tr>
+<tr>
+<td>Log volume drop across all sources</td>
+<td>Log pipeline disruption, partial or total log blackout</td>
+<td>Total log ingest rate drops &gt;30% from 1-hour rolling average</td>
+<td>&lt; 5 minutes</td>
+</tr>
+<tr>
+<td>Detection rule change audit (Git commit history)</td>
+<td>Unauthorized rule modification bypassing GitOps process</td>
+<td>SIEM rule state diverges from Git HEAD (drift detection via nightly comparison)</td>
+<td>&lt; 24 hours (nightly)</td>
+</tr>
+<tr>
+<td>SOAR alert suppression log</td>
+<td>Analyst suppressing alerts outside approved workflow</td>
+<td>Alert suppression event not correlated with approved change request</td>
+<td>&lt; 5 minutes</td>
+</tr>
+<tr>
+<td>Cloud storage access log (S3/GCS)</td>
+<td>Unauthorized access to historical log archive</td>
+<td>GET requests to log archive bucket from IP not in SOC allowlist</td>
+<td>&lt; 2 minutes</td>
+</tr>
+<tr>
+<td>Threat intel feed integrity check</td>
+<td>Poisoned IOC causing false positive spike or IOC hash mismatch</td>
+<td>IOC feed hash mismatch on ingest; &gt;500% increase in false positive rate in 1 hour</td>
+<td>&lt; 10 minutes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="53-corrective-controls">5.3 Corrective Controls</h3>
+<table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Response Action</th>
+<th>Automated or Manual</th>
+<th>Recovery Time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SOC admin account compromise detected</td>
+<td>Revoke cloud SIEM session; disable IAM account; force password reset; audit all changes in last 24h</td>
+<td>Automated session revoke (SOAR); manual audit</td>
+<td>&lt; 5 minutes session revoke; &lt; 2 hours audit</td>
+</tr>
+<tr>
+<td>Detection rule deleted or modified outside GitOps</td>
+<td>Auto-redeploy rule from Git HEAD via CI/CD pipeline; alert Detection Engineering team</td>
+<td>Automated redeployment; manual root cause analysis</td>
+<td>&lt; 10 minutes for rule restoration</td>
+</tr>
+<tr>
+<td>Log forwarder stopped on critical host</td>
+<td>SOAR triggers EDR (CrowdStrike) to restart forwarder service; notify host owner</td>
+<td>Automated restart attempt; manual if automated fails</td>
+<td>&lt; 15 minutes</td>
+</tr>
+<tr>
+<td>Log pipeline disruption (Cribl outage)</td>
+<td>Fail-over to secondary pipeline; buffer logs at source forwarders; alert platform team</td>
+<td>Semi-automated failover; manual escalation</td>
+<td>&lt; 30 minutes</td>
+</tr>
+<tr>
+<td>Historical log archive unauthorized access</td>
+<td>Immediately revoke offending IAM credential; enable S3 bucket versioning; forensic investigation of accessed keys</td>
+<td>Manual investigation; automated credential revoke</td>
+<td>&lt; 10 minutes credential revoke</td>
+</tr>
+<tr>
+<td>Alert suppression abuse confirmed</td>
+<td>Restore suppressed rules; escalate incident to CISO; start insider threat investigation</td>
+<td>Manual</td>
+<td>&lt; 30 minutes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-monitoring-detection-strategy">6. MONITORING &amp; DETECTION STRATEGY</h2>
+<h3 id="61-top-log-sources">6.1 Top log sources</h3>
+<table>
+<thead>
+<tr>
+<th>Log Source</th>
+<th>Event IDs / Fields</th>
+<th>Why Critical for This Scenario</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cloud SIEM admin audit log (Chronicle / Sentinel activity log)</td>
+<td>operation, principal, rule_id, timestamp, IP</td>
+<td>The SIEM itself must be monitored — admin actions here can blind all other detection</td>
+</tr>
+<tr>
+<td>Log forwarder heartbeat metrics (Splunk UF status, Fluentd metrics)</td>
+<td>host, last_event_time, events_per_minute, connection_status</td>
+<td>Detects partial or total log blackout from specific hosts</td>
+</tr>
+<tr>
+<td>Cloud SIEM API access log (GCP Audit Log / Azure Monitor)</td>
+<td>caller_ip, method, resource.name, bytes_transferred</td>
+<td>Detects API-based rule modification or bulk log export</td>
+</tr>
+<tr>
+<td>SOAR audit trail</td>
+<td>action_taken, analyst_id, alert_id, suppression_reason, timestamp</td>
+<td>Tracks all analyst response actions including suppression</td>
+</tr>
+<tr>
+<td>S3/GCS access log for historical archive</td>
+<td>requester, key, operation, bytes_sent, http_status</td>
+<td>Guards the 200TB cold archive from unauthorized bulk download</td>
+</tr>
+<tr>
+<td>CI/CD pipeline log (GitHub Actions / GitLab CI for rule deployment)</td>
+<td>pipeline_id, triggered_by, rule_file_changed, deploy_status</td>
+<td>Detects unauthorized rule changes pushed outside normal PR process</td>
+</tr>
+<tr>
+<td>Cloud provider IAM access log (CloudTrail, GCP IAM audit)</td>
+<td>service_account, resource, permission, source_ip</td>
+<td>Detects escalation of SIEM API key permissions or new admin role assignments</td>
+</tr>
+<tr>
+<td>Network flow logs (SOC egress to SIEM admin console)</td>
+<td>src_ip, dst_ip, bytes_transferred, protocol</td>
+<td>Baseline normal analyst API usage; detect bulk download anomalies</td>
+</tr>
+</tbody>
+</table>
+<h3 id="62-detection-rules">6.2 Detection rules</h3>
+<table>
+<thead>
+<tr>
+<th>Rule Name</th>
+<th>Logic / Condition</th>
+<th>False Positive Risk</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIEM-Rule-Deleted-Or-Disabled</td>
+<td>admin_audit: operation IN [delete_rule, disable_rule] AND principal NOT IN auto_deploy_service_accounts</td>
+<td>Low (rule deployments via CI/CD; known service accounts)</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>SOC-Admin-Login-New-IP</td>
+<td>admin_audit: admin_login AND source_ip NOT IN known_SOC_ips AND NOT IN PAM_gateway_ips</td>
+<td>Medium (travel, home office)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Bulk-Log-Export-Via-API</td>
+<td>API log: method=ExportData AND bytes_transferred &gt; 1GB in single request</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Log-Forwarder-Silent-Critical-Host</td>
+<td>Forwarder metrics: host IN critical_host_list AND last_event_time &gt; now - 10min</td>
+<td>Medium (reboots, maintenance windows)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Log-Volume-Sudden-Drop</td>
+<td>Ingest metrics: total_eps &lt; (30day_avg_eps * 0.70) for 15 consecutive minutes</td>
+<td>Low (scheduled maintenance)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Alert-Rate-Zero-For-Active-Rule</td>
+<td>SIEM metrics: rule_X_alert_count = 0 AND rule_X_last_30d_avg &gt; 5 AND rule_X_status = enabled</td>
+<td>Medium (quiet periods, tuning changes)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>SOAR-Suppression-Without-Ticket</td>
+<td>SOAR audit: suppression_action AND NOT correlated_change_request_id within 15min</td>
+<td>Medium (emergency suppressions)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Rule-State-Git-Drift</td>
+<td>Nightly: deployed_rules_hash != git_head_rules_hash</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Historical-Archive-Unusual-Access</td>
+<td>S3/GCS: GetObject on archive bucket AND requester NOT IN approved_investigators</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>SIEM-API-Key-New-Region</td>
+<td>CloudTrail/GCP: SIEM service account API call from region NOT IN approved_regions</td>
+<td>Low</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>Threat-Intel-Feed-Hash-Mismatch</td>
+<td>Feed ingest: sha256(feed_content) != expected_hash from feed provider</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Admin-Bulk-Rule-Read</td>
+<td>API log: list_rules or get_rule called &gt;50 times in 5 minutes by single principal</td>
+<td>Medium (automated tools)</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h3 id="63-monitoring-architecture-diagram">6.3 Monitoring architecture diagram</h3>
+<pre class="mermaid">
+flowchart LR
+    AllSources["All Log Sources\nEndpoints, Cloud, Network"] -->|mTLS / Cribl Stream| CloudSIEM["Cloud SIEM\nChronicle / Sentinel"]
+    CloudSIEM -->|Admin activity logs| OutOfBandSink["Out-of-Band Audit Sink\nS3 Object Lock\nno SIEM admin access"]
+    OutOfBandSink -->|Stream to| SecondaryMonitor["Secondary SIEM\nor Chronicle Security Operations"]
+    CloudSIEM -->|Forwarder heartbeat metrics| Prometheus["Prometheus / Cloud Monitoring\nForwarder Health Dashboard"]
+    Prometheus -->|Alert on gap| PagerDuty["PagerDuty\nLog Gap Alert"]
+    CloudSIEM -->|Detect on ingested logs| SOCQueue["SOC Alert Queue"]
+    SOCQueue -->|Human triage| SOCAnalyst["SOC Analyst\nTier 1 / 2"]
+    SOCAnalyst -->|Trigger| SOAR["SOAR Automation\nXSOAR / Sentinel Playbooks"]
+    SOAR -->|Response to targets| Response["EDR, Firewall, IAM"]
+    GitRepo["Detection Rules Git Repo\nSigma / YARA-L"] -->|CI/CD deploy| CloudSIEM
+    GitRepo -->|Nightly drift check| DriftMonitor["Rule Drift Monitor\nCompare deployed vs Git"]
+</pre>
+<h3 id="64-kpis-and-baselining">6.4 KPIs and baselining</h3>
+<table>
+<thead>
+<tr>
+<th>KPI</th>
+<th>Baseline Method</th>
+<th>Alert Threshold</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Log ingestion rate (events per second)</td>
+<td>30-day rolling average per source type</td>
+<td>Drop &gt;30% from average for &gt;15 minutes</td>
+<td>Platform Engineering</td>
+</tr>
+<tr>
+<td>Detection rule parity score (new vs. old SIEM)</td>
+<td>Alert count comparison per rule, daily during migration</td>
+<td>&lt;95% alert match rate between legacy and new SIEM for any Severity 1 rule</td>
+<td>Detection Engineering</td>
+</tr>
+<tr>
+<td>Mean time to detect (MTTD) per severity</td>
+<td>Measured from event timestamp to alert creation</td>
+<td>MTTD regression &gt;20% vs. on-prem baseline triggers investigation</td>
+<td>SOC Manager</td>
+</tr>
+<tr>
+<td>SOC alert suppression rate</td>
+<td>% of alerts suppressed vs. triaged</td>
+<td>&gt;10% suppression rate in a day triggers management review</td>
+<td>SOC Lead</td>
+</tr>
+<tr>
+<td>Log forwarder coverage</td>
+<td>% of critical hosts with active forwarder sending events in last hour</td>
+<td>&lt;99% coverage on critical asset list</td>
+<td>Platform Engineering</td>
+</tr>
+<tr>
+<td>Historical archive integrity check</td>
+<td>Weekly SHA-256 spot-check of sampled log files vs. ingest-time hashes</td>
+<td>Any hash mismatch</td>
+<td>Data Governance</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-residual-risk">7. RESIDUAL RISK</h2>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Why Not Mitigated</th>
+<th>Owner</th>
+<th>Acceptance Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cloud SIEM provider has access to all security telemetry</td>
+<td>Medium</td>
+<td>High</td>
+<td>Inherent to cloud SaaS model; data sovereignty depends on provider contractual controls and physical access policies</td>
+<td>CISO + Legal</td>
+<td>Accepted with DPA, SOC 2 Type II review, data residency contractual commitments; reviewed annually</td>
+</tr>
+<tr>
+<td>Nation-state with cloud provider infrastructure access</td>
+<td>Low</td>
+<td>Critical</td>
+<td>Beyond enterprise's control; cloud provider security is a shared-fate dependency</td>
+<td>CISO</td>
+<td>Accepted; offset by encrypting logs at source before forwarding (BYOK); reviewing cloud provider security bulletins</td>
+</tr>
+<tr>
+<td>Migration coverage gap if attack timed to transition</td>
+<td>Medium</td>
+<td>High</td>
+<td>Parallel-run architecture reduces but doesn't eliminate gap; some rule revalidation takes weeks</td>
+<td>SOC Manager + CISO</td>
+<td>Accepted; compensated by extended parallel run (minimum 90 days) and manual threat hunt during cutover window</td>
+</tr>
+<tr>
+<td>Loss of 200TB historical archive if cloud provider has catastrophic failure</td>
+<td>Low</td>
+<td>High</td>
+<td>Backups in same cloud provider suffer same outage; cross-cloud backup is expensive</td>
+<td>Data Governance</td>
+<td>Accepted with cross-region replication; single provider risk documented</td>
+</tr>
+<tr>
+<td>Sophisticated attacker suppressing detection before it fires (zero-day in SIEM parsing)</td>
+<td>Low</td>
+<td>Critical</td>
+<td>Unknown parsing vulnerabilities in cloud SIEM cannot be proactively mitigated</td>
+<td>CISO</td>
+<td>Accepted; offset by defense-in-depth (EDR, network detection) so SIEM is not sole detection layer</td>
+</tr>
+<tr>
+<td>Detection rule intellectual property leakage via cloud admin access</td>
+<td>Medium</td>
+<td>High</td>
+<td>Rules encode detection methodology; if exfiltrated, attacker learns exact gaps</td>
+<td>CISO</td>
+<td>Accepted; rules version-controlled in private Git; cloud SIEM access logged; periodic red team exercises to verify coverage</td>
+</tr>
+<tr>
+<td>Forwarder gaps on legacy systems that cannot run modern agents</td>
+<td>High</td>
+<td>Medium</td>
+<td>Old Unix systems, COBOL mainframes may not support modern forwarders</td>
+<td>Platform Engineering</td>
+<td>Accepted with syslog-based forwarding as compensating control; logged as known coverage gap</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-google-scale-considerations">8. GOOGLE-SCALE CONSIDERATIONS</h2>
+<h3 id="81-automation-and-policy-as-code">8.1 Automation and policy-as-code</h3>
+<p>At Google scale, 500 detection rules are the minimum — a large enterprise might have 5,000+ rules across multiple detection categories. Manual rule management in a SIEM UI is impossible. Every rule exists as Sigma YAML or YARA-L in a Git repository with mandatory PR review, automated syntax validation, CI/CD deployment, and drift detection. Rule lifecycle (creation, testing in staging, promotion to production, deprecation) is a fully automated pipeline. Detection engineers submit PRs; automated tools run the rule against historical logs in a shadow SIEM to validate it would have fired on known-bad events before promotion.</p>
+<h3 id="82-fleet-wide-impact-analysis">8.2 Fleet-wide impact analysis</h3>
+<p>A cloud SIEM is a security chokepoint: every detection depends on it. If an attacker compromises the SIEM admin account and deletes the top 50 detection rules, the security posture of the entire enterprise degrades simultaneously — this is not a single-host incident. At Google scale, the blast radius of SIEM compromise is proportional to the number of detection rules and the number of dependent response automations. A SOC analyst in San Francisco suppressing an alert category inadvertently affects alerting globally. This is why GitOps for rule management and out-of-band audit logging are non-negotiable — the blast radius requires multi-party controls.</p>
+<h3 id="83-eliminating-human-bottlenecks">8.3 Eliminating human bottlenecks</h3>
+<p>The migration of 500 rules from Splunk SPL to Chronicle YARA-L or Sentinel KQL is a multi-month human effort if done manually. At Google scale, this is automated: automated rule translation tools (Sigma as a vendor-neutral format) convert rules between query languages; CI/CD pipelines validate translated rules against test log data; alert fidelity is measured automatically by comparing alert output between old and new SIEM on the same log stream. Human effort is reserved for rules where automated translation fails or alert fidelity diverges — not for the bulk of the migration.</p>
+<h3 id="84-controls-that-break-at-scale">8.4 Controls that break at scale</h3>
+<p>Manual MTTD measurement by a SOC team works at 100 alerts/day. At 100,000 alerts/day (Google scale), every alert quality metric must be automated. The control that breaks is "SOC manager reviews alert volume weekly to spot rule degradation." The replacement is a continuous automated MTTD dashboard that measures the lag between known-bad events (synthetic red team events) and alert creation — every 15 minutes, automatically, with SLA breaches triggering automatic escalation. Similarly, manual log source inventory ("do we have forwarders everywhere?") is replaced by automated asset discovery reconciliation against the CMDB.</p>
+<hr />
+<h2 id="answer-summary-90-second-version">ANSWER SUMMARY — 90-second version</h2>
+<blockquote>
+<p>Use this to open your answer before going deep on any section.</p>
+</blockquote>
+<p>"The threat model for a cloud SIEM starts with the uncomfortable truth that it becomes a high-value target: an attacker who compromises your SIEM admin can silence every detection you have. So the assets I'm protecting aren't just logs — it's the detection rules themselves, the admin credentials, and the audit trail of who touched what.</p>
+<p>My top threats are a phished SOC admin account used to suppress alerts during an active intrusion, a compromised log forwarder agent causing blind spots, and log injection attacks that flood analysts with false positives.</p>
+<p>For controls: FIDO2 MFA for all SOC admin accounts to block AiTM phishing; all detection rules in Git with CI/CD deployment and drift detection so rule deletion is immediately detected and auto-remediated; log forwarder heartbeat monitoring with alerts on any host going dark; and the SIEM's own admin audit log forwarded to a separate immutable store that SIEM admins cannot access.</p>
+<p>For the migration, I'd run parallel ingestion to both old and new SIEMs for at least 90 days, comparing alert output rule-by-rule to prove fidelity before decommissioning on-prem Splunk. Residual risk I'd document: the cloud provider has access to all security telemetry — I accept that with contractual DPA, SOC 2 review, and BYOK encryption of logs at rest."</p>
+<hr />
+<h2 id="likely-follow-up-questions-ideal-answers">LIKELY FOLLOW-UP QUESTIONS &amp; IDEAL ANSWERS</h2>
+<h3 id="follow-up-1-how-do-you-prevent-detection-coverage-gaps-during-migration">Follow-up 1: How do you prevent detection coverage gaps during migration?</h3>
+<p>The primary safeguard is parallel ingestion: all logs forwarded to both the legacy on-prem Splunk and the new cloud SIEM simultaneously, using Cribl Stream or Kafka as the routing layer. This continues until every critical Severity 1 and Severity 2 rule in the new SIEM has been validated to produce alerts matching the legacy system on at least 30 days of live data. I maintain a rule parity dashboard showing alert count comparison per rule per day. Rules below 95% match rate go back to the Detection Engineering queue. Migration only proceeds when parity is demonstrated; decommission of Splunk is the last step, not an intermediate one.</p>
+<h3 id="follow-up-2-what-controls-protect-the-siem-from-log-injection-or-alert-suppression-attacks">Follow-up 2: What controls protect the SIEM from log injection or alert suppression attacks?</h3>
+<p>Log injection is mitigated by parsing robustness — the SIEM's log parsers should handle malformed data gracefully without crashing or producing false records. Cribl Stream at the pipeline layer can normalize and validate log structure before ingestion, rejecting entries that don't match the expected schema for a given source. Alert suppression is a more dangerous attack: I protect against it by storing all detection rules in Git with mandatory peer review, forwarding all alert suppression actions to an immutable audit log, and requiring dual-analyst approval for any suppression in SOAR. Any suppression event that isn't correlated with an approved change request triggers an automatic alert to the SOC lead.</p>
+<h3 id="follow-up-3-how-do-you-validate-that-cloud-siem-detection-fidelity-matches-on-prem">Follow-up 3: How do you validate that cloud SIEM detection fidelity matches on-prem?</h3>
+<p>Validation has two parts: synthetic and live. For synthetic validation, I run a set of known-bad test events (from an internal red team or a tool like Atomic Red Team) through the log pipeline and verify that both SIEMs fire the expected alerts. For live validation, I pipe the same 100% log stream to both SIEMs and run a daily automated comparison: rule X fired N alerts on legacy Splunk; did it fire within ±10% on the cloud SIEM? Any divergence above threshold is logged as a parity failure that blocks migration for that rule. I also validate MTTD: the time from event ingestion to alert creation should be within the same SLA on both platforms.</p>
+<h3 id="follow-up-4-you-mentioned-gitops-for-rule-management-what-happens-if-that-control-fails-what-is-your-next-layer">Follow-up 4: You mentioned GitOps for rule management. What happens if that control fails — what is your next layer?</h3>
+<p>If the CI/CD pipeline is compromised and a malicious rule is pushed, my next layer is a nightly rule drift check that compares the deployed rule state in the cloud SIEM against the Git HEAD. Any divergence — rule exists in SIEM but not in Git, or rule content differs — triggers an immediate alert to Detection Engineering and auto-reverts the rule to the Git version. The third layer is the SIEM's own audit log showing which rule was modified, when, and by which service account — if the CI/CD service account was used outside normal pipeline hours, that's the detection signal. The fourth layer is peer review and 4-eyes approval on any PR that modifies a Severity 1 detection rule.</p>
+<h3 id="follow-up-5-if-you-were-the-attacker-what-is-the-cheapest-path-through-your-control-set">Follow-up 5: If you were the attacker, what is the cheapest path through your control set?</h3>
+<p>The cheapest path is targeting a SOC analyst with a personal device for phishing. Most enterprises have strong MFA on the corporate network but weaker controls on the personal devices analysts use to access the cloud SIEM console from home during an incident. I'd send a spear-phish with an AiTM proxy page, harvest the session cookie after the analyst completes MFA, and use it to access the Chronicle or Sentinel console from my own machine. From there, I have analyst-level access — not admin — but enough to suppress specific alert categories covering my C2 traffic. The hardening I'd prioritize: enforce FIDO2 (not TOTP) for the SIEM console, use Conditional Access to block access from non-managed devices, and bind the session to the originating IP via token binding.</p>
+<hr />
+<h2 id="common-mistakes-to-avoid">COMMON MISTAKES TO AVOID</h2>
+<ul>
+<li><strong>Treating SIEM migration as purely a technical problem</strong> — The hardest part of SIEM migration is rule fidelity validation, SOC workflow continuity, and change management with analysts who have years of Splunk muscle memory. Focusing only on log pipeline architecture misses this.</li>
+<li><strong>Cutting over before parity is proven</strong> — Decommissioning on-prem Splunk before validating rule parity in the cloud SIEM creates a coverage gap. "We'll tune it after cutover" is how six-month undetected intrusions happen.</li>
+<li><strong>Ignoring the SIEM as an attack target</strong> — Treating the SIEM as a detection-only tool and not applying security controls to the SIEM itself (its admin interface, its rules, its audit logs) is the most common oversight.</li>
+<li><strong>Single omnipotent SIEM API key</strong> — Using one API key that can read logs, write rules, and delete data for all integrations creates an enormous blast radius if leaked. Scope API keys by function.</li>
+<li><strong>Not securing the SIEM's own audit logs</strong> — If SIEM audit logs are stored within the SIEM itself, a compromised admin can delete their tracks. Audit logs must go to an out-of-band immutable store.</li>
+<li><strong>Assuming cloud SIEM has better detection out of the box</strong> — Cloud SIEMs (Chronicle, Sentinel) have different query languages and data models than on-prem Splunk. Assuming SPL rules migrate automatically without a translation and validation phase causes significant detection gaps.</li>
+<li><strong>Ignoring data sovereignty and log sensitivity</strong> — Logs contain IP addresses, user identities, and sometimes credentials in cleartext. Not addressing who at the cloud provider can read this data, and what contractual protections exist, is a compliance and privacy gap.</li>
+</ul>
+<hr />
+<p><em>Generated: 2026-05-31 | Source: threat-modeling-prompt.md | Scenario 10 of 50</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

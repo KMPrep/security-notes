@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 23 — HR System Integration with Identity Provider — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario23-hr-idp-integration-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-23-hr-system-integration-with-identity-provider-threat-exploitation-and-blue-team-control-review">Scenario 23 — HR System Integration with Identity Provider — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario23-hr-idp-integration.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario23-hr-idp-integration-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Workday is the authoritative JML source and pushes SCIM events to Okta. Provisioning flows to 80 downstream apps; failures or token abuse can create persistent ghost accounts.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This review maps attacker paths from Workday or SCIM token compromise to enterprise-wide access, provides concrete detection telemetry (Workday audit, Okta System Log, SCIM API logs, downstream app logs), safe purple-team validation queries, and prioritized remediation steps to harden the JML pipeline.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>Granting a broadly scoped, long-lived SCIM token to Workday with unmonitored write privileges to the Okta directory is the highest-risk design choice. That single credential can create, modify, or delete identities across the entire enterprise; exposure (in code, repo, or via a compromised admin) results in mass account creation or modification with immediate SSO access to all downstream apps. Preferred safe pattern: narrow-scoped, short-lived tokens stored in a secrets manager, event-driven near-real-time SCIM, and GitOps-controlled provisioning policies.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Malicious HR admin creating ghost accounts</td>
+<td>Medium, Critical</td>
+<td>Workday audit log</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>SCIM token leak in GitHub or config</td>
+<td>Medium, Critical</td>
+<td>SCIM API logs, Git history</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Leaver de-provisioning failure (connector)</td>
+<td>High, Critical</td>
+<td>Okta System Log, connector API</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Privilege accumulation via mover events</td>
+<td>High, High</td>
+<td>Identity governance platform</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Stale contractor accounts (no expiry)</td>
+<td>Medium, High</td>
+<td>Okta user attributes</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>SCIM token over-permissioned (admin group add)</td>
+<td>Medium, Critical</td>
+<td>Okta System Log</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Workday SaaS supply-chain compromise</td>
+<td>Low, Critical</td>
+<td>Workday audit, bulk SCIM events</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>SCIM token abuse from unexpected IPs</td>
+<td>Medium, Critical</td>
+<td>SCIM API logs (source_ip)</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Misconfigured group-to-role mapping</td>
+<td>Medium, High</td>
+<td>Okta policy change logs</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Okta admin account compromise</td>
+<td>Low, Critical</td>
+<td>Okta admin audit logs</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Orphaned accounts (Okta active, no Workday)</td>
+<td>High, High</td>
+<td>Daily reconciliation report</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Bulk erroneous SCIM push causing mass changes</td>
+<td>Low, Critical</td>
+<td>SCIM event spike metrics</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker obtains HR admin creds or SCIM token]:::attack --> A1[Create ghost employee in Workday]:::attack
+    A1 --> A2[SCIM POST -> Okta create user]:::attack
+    A2 --> C1{Token scope limited & IP allow-list?}:::control
+    C1 -->|Yes| B1[Create blocked/quarantined]:::blocked
+    C1 -->|No| A3[User auto-provisioned to 80 apps]:::attack
+    A3 --> C2{Downstream verification within 1h?}:::control
+    C2 -->|Yes| B2[Connector blocks or remediates]:::blocked
+    C2 -->|No| A4[Immediate admin access & exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-malicious-hr-admin-creating-ghost-accounts">T1 — Malicious HR Admin Creating Ghost Accounts</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Create a fabricated employee record in Workday that auto-provisions into Okta with role-based access to sensitive apps.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: HR admin privileges in Workday or credential compromise.</li>
+<li>Initial action: Create a ghost employee record with plausible metadata (name, manager, jobcode).</li>
+<li>Core exploitation: Workday triggers SCIM POST /Users to Okta with the new user attributes.</li>
+<li>Escalation: Assign role that maps to admin-level app assignments (executive role) or request elevated access via workaround.</li>
+<li>Impact realization: Immediate SSO access to multiple sensitive apps; persistent backdoor.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Dual-approval workflow for role-elevating joiners (HR admin + HRBP + requisition ID required).</li>
+<li>Control 2: Workday change governance: create events flagged in audit and require JML event approval for high-privilege roles.</li>
+<li>Control 3: SCIM event quarantine: new accounts auto-quarantined until downstream verification completes for privileged roles.</li>
+<li>Control 4: Daily reconciliation job: disable Okta accounts not matched to Workday active records automatically.</li>
+<li>Control 5: Behavioral baseline for new accounts: high-sensitivity downloads in first 24 hours trigger automatic disable and alert.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Workday audit: <code>actor_id</code>, <code>employee_record_id</code>, <code>role_assigned</code>, <code>timestamp</code>.</li>
+<li>Okta System Log: <code>eventType</code>, <code>actor</code>, <code>target</code>, <code>source</code> (SCIM) and <code>ip</code>.</li>
+<li>SCIM API logs: <code>method</code>, <code>path</code>, <code>token_id</code>, <code>source_ip</code>.</li>
+<li>Downstream app logs showing first-time admin actions from new account.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<p>OktaSystemLog | where eventType == 'user.create' and source == 'SCIM' | join (OktaSystemLog | where eventType=='user.session.start') on userId | where sessionStartTimestamp - createTimestamp &lt; 10m</p>
+<p>workday-cli create-user --test --role 'Director' --expect-quarantine</p>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T1_A1[HR admin creates ghost]:::attack --> T1_A2[SCIM POST to Okta]:::attack
+    T1_A2 --> T1_C1{Dual-approval required?}:::control
+    T1_C1 -->|Yes| T1_B1[Quarantine until approval]:::blocked
+    T1_C1 -->|No| T1_A3[Auto-provision to apps]:::attack
+    T1_A3 --> T1_C2{Downstream verification?}:::control
+    T1_C2 -->|Yes| T1_B2[Connector blocks]:::blocked
+    T1_C2 -->|No| T1_A4[Admin access & exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-scim-token-leak-in-github-or-config">T2 — SCIM Token Leak in GitHub or Config</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Find SCIM token in repo or config and use it to create Okta accounts or modify existing accounts.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Token committed to a public or internal repo, or stored in plaintext in config.</li>
+<li>Initial action: Attacker harvests token and issues SCIM API calls to Okta.</li>
+<li>Core exploitation: Create accounts, add to admin groups, or modify existing accounts.</li>
+<li>Escalation: Rotate token usage to avoid detection, blend activity over hours/days.</li>
+<li>Impact realization: Persistent unauthorized access across many apps.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Secrets management: no token in code; token stored only in Vault with limited access and automated rotation.</li>
+<li>Control 2: Token scope restriction: token limited to create/deactivate minimal fields; cannot add to admin groups.</li>
+<li>Control 3: SCIM token rotation on any Git event containing credentials via secrets scanning (pre-commit &amp; CI enforcement).</li>
+<li>Control 4: IP allow-listing: accept SCIM calls only from Workday CIDR.</li>
+<li>Control 5: Monitor Git repos for secrets with DLP and block merges with tokens.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Git history alerts and DLP scans showing token leakage.</li>
+<li>SCIM API logs showing calls from unexpected IPs or high-rate patterns.</li>
+<li>Okta System Log events creating many users from same token.</li>
+<li>Vault audit logs showing token issuance and rotation times.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<p>SCIMApiLogs | where source_ip notin (WorkdayCIDR) | summarize count() by token_id, source_ip</p>
+<p>git log --all -p | grep -E "SCIM_TOKEN|x-api-token" || echo 'No tokens found'</p>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T2_A1[Token leaked in repo]:::attack --> T2_A2[Attacker uses token]:::attack
+    T2_A2 --> T2_C1{Token scoped + Vault only?}:::control
+    T2_C1 -->|Yes| T2_B1[Call rejected]:::blocked
+    T2_C1 -->|No| T2_A3[Create users / modify groups]:::attack
+    T2_A3 --> T2_C2{IP allow-list enforced?}:::control
+    T2_C2 -->|Yes| T2_B2[Calls blocked by IP filter]:::blocked
+    T2_C2 -->|No| T2_A4[Enterprise access compromised]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-leaver-de-provisioning-failure-connector">T3 — Leaver De-provisioning Failure (Connector)</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Exploit connector failure to keep downstream app accounts active after Okta disable.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Connector silently fails (API rate limit, auth token expired, transient error).</li>
+<li>Initial action: Okta disables user but connector does not propagate the change.</li>
+<li>Core exploitation: Former employee uses remaining app sessions or API keys to access data.</li>
+<li>Escalation: Use persistent app sessions to create backdoors or exfiltrate data.</li>
+<li>Impact realization: Data exfiltration or unauthorized access despite Okta disable.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Treat connector failures as security incidents; immediate alerts to security + ops.</li>
+<li>Control 2: Post-deprovision verification: automated API checks to confirm disabled state in critical apps within 1 hour.</li>
+<li>Control 3: Retry logic and dead-letter queues for transient connector failures; escalate after retries.</li>
+<li>Control 4: Token-less SSO enforcement (no local creds) for critical apps where possible.</li>
+<li>Control 5: Emergency rapid deprovision playbook for manual removal when automation fails.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Connector health logs and error codes; Dead-letter queue entries.</li>
+<li>Downstream app audit logs showing active sessions post-Okta disable.</li>
+<li>SIEM correlation between Okta disable event and downstream access events.</li>
+<li>Ticketing system alerts for connector failures with SLA breaches.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<p>DownstreamAuth | join (OktaSystemLog | where eventType=='user.deactivate') on userId | where authTime &gt; deactivateTime</p>
+<p>simulate_connector_failure --app Salesforce --expect-alert</p>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T3_A1[Okta disables user]:::attack --> T3_A2[Connector fails to disable downstream]:::attack
+    T3_A2 --> T3_C1{Post-verification within 1h?}:::control
+    T3_C1 -->|Yes| T3_B1[Automated disable done]:::blocked
+    T3_C1 -->|No| T3_A3[Former employee retains access]:::attack
+    T3_A3 --> T3_C2{Emergency deprovision playbook?}:::control
+    T3_C2 -->|Yes| T3_B2[Manual disable & investigation]:::blocked
+    T3_C2 -->|No| T3_A4[Data exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-privilege-accumulation-via-mover-events">T4 — Privilege Accumulation via Mover Events</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Leverage historical access retained across multiple role changes to gain excessive privileges.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Weak recertification and no automatic removal of old-role privileges.</li>
+<li>Initial action: Mover event grants new role while old access is not removed.</li>
+<li>Core exploitation: Attacker uses accumulated permissions to access sensitive systems.</li>
+<li>Escalation: Combine with lateral movement to escalate to privileged roles.</li>
+<li>Impact realization: Unauthorized access and potential data compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Automated role-to-access delta: on mover event, system auto-removes previous role entitlements unless explicitly approved.</li>
+<li>Control 2: Continuous entitlement monitoring with excess-access scoring and auto-recognition of privilege spikes.</li>
+<li>Control 3: Mandatory recertification after each mover event for high-risk roles.</li>
+<li>Control 4: Identity governance rule that blocks simultaneous membership in mutually exclusive roles.</li>
+<li>Control 5: Periodic access clean-up automation (orphan &amp; excess removal workflows).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Identity governance platform scores and change logs.</li>
+<li>Provisioning history showing add/remove events per mover.</li>
+<li>Manager recertification records.</li>
+<li>SIEM alerts for privilege spikes after mover events.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<p>IdentityGovernance | where RoleChangeCount &gt; 2 and ExcessAccessScore &gt; 0.6</p>
+<p>simulate_mover_event --user testuser --from_role 'Sales' --to_role 'Finance' --expect-role-cleanup</p>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T4_A1[Mover event grants new role]:::attack --> T4_A2[Old privileges remain]:::attack
+    T4_A2 --> T4_C1{Auto-removal on mover?}:::control
+    T4_C1 -->|Yes| T4_B1[Old privileges removed]:::blocked
+    T4_C1 -->|No| T4_A3[Privilege accumulation]:::attack
+    T4_A3 --> T4_C2{Recertification enforced?}:::control
+    T4_C2 -->|Yes| T4_B2[Manager removes excess]:::blocked
+    T4_C2 -->|No| T4_A4[Unauthorized access]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-stale-contractor-accounts">T5 — Stale Contractor Accounts</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use contractor account without expiry to access systems long after contract end.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Contractor provisioning without contract end date or expiry policy.</li>
+<li>Initial action: Contractor account remains active and unused until exploited.</li>
+<li>Core exploitation: Attacker takes over contractor account or insider abuses access.</li>
+<li>Escalation: Lateral movement to sensitive systems.</li>
+<li>Impact realization: Long-lived unauthorized access and potential data exfiltration.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Mandatory contract_end_date field in Workday; auto-expire in Okta at contract end.</li>
+<li>Control 2: Short-lived contractor accounts by default (max 12 months) with mandatory renewal.</li>
+<li>Control 3: Periodic review of contractor accounts and enforced deletion for &gt;30 days orphaned.</li>
+<li>Control 4: Less-privileged baseline for contractor roles; require additional approval for elevated access.</li>
+<li>Control 5: Monitor contractor login behavior and alert on lateral access attempts.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Okta user profile fields showing contract_end_date and expiry status.</li>
+<li>Reconciliation job showing contractors with expired contracts still active.</li>
+<li>Access logs showing contractor account privileged actions post-expiry.</li>
+<li>Manager certification records for contractor access.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<p>OktaUsers | where accountType == 'contractor' and (contract_end_date == '' or contract_end_date &lt; now()) and status == 'ACTIVE'</p>
+<p>simulate_contractor_provision --no-end-date --expect-auto-disable</p>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T5_A1[Contractor provisioned without expiry]:::attack --> T5_A2[Account remains active long-term]:::attack
+    T5_A2 --> T5_C1{Auto-expire enforced?}:::control
+    T5_C1 -->|Yes| T5_B1[Account disabled at end date]:::blocked
+    T5_C1 -->|No| T5_A3[Account exploited]:::attack
+    T5_A3 --> T5_C2{Contractor baseline privileges?}:::control
+    T5_C2 -->|Yes| T5_B2[Limited impact]:::blocked
+    T5_C2 -->|No| T5_A4[High-impact access]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-scim-token-over-permissioned-admin-group-add">T6 — SCIM Token Over-Permissioned (Admin Group Add)</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use a SCIM token that can modify groups to add attacker-controlled users to admin groups.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Token grants group modification rights or Workday misconfigured to include group attributes.</li>
+<li>Initial action: SCIM PUT to add new user to <code>admin_group</code>.</li>
+<li>Core exploitation: New user gains admin privileges in Okta and downstream apps.</li>
+<li>Escalation: Create API clients, add more accounts, or create persistent admin users.</li>
+<li>Impact realization: Full identity plane compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Principle of least privilege on SCIM token scopes: disallow group modifications.</li>
+<li>Control 2: Block SCIM group changes from Workday; require separate IT workflow for admin group membership.</li>
+<li>Control 3: SIEM alert for any <code>group.user.add</code> event where group == admin_group and source == SCIM.</li>
+<li>Control 4: Short-lived tokens and rotation on any anomalous group event.</li>
+<li>Control 5: Two-person approval for any admin group membership changes.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Okta System Log for <code>group.user.add</code> with source SCIM.</li>
+<li>Workday event logs showing whether group attribute was present in user record.</li>
+<li>SIEM rule hit for admin group modifications.</li>
+<li>Vault rotation logs on suspicious token use.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<p>OktaSystemLog | where eventType == 'group.user.add' and target == 'admin_group' and source == 'SCIM'</p>
+<p>scim-cli put /Users/<id>/groups --group admin_group --token <scoped_token> --expect 403</p>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T6_A1[SCIM token with group modify privilege used]:::attack --> T6_A2[Add user to admin_group]:::attack
+    T6_A2 --> T6_C1{Token scoped to no-group-modify?}:::control
+    T6_C1 -->|Yes| T6_B1[Request rejected]:::blocked
+    T6_C1 -->|No| T6_A3[User becomes Okta admin]:::attack
+    T6_A3 --> T6_C2{Two-person approval enforced?}:::control
+    T6_C2 -->|Yes| T6_B2[Manual check stops change]:::blocked
+    T6_C2 -->|No| T6_A4[Identity plane compromised]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-workday-saas-supply-chain-compromise">T7 — Workday SaaS Supply-Chain Compromise</h3>
+<p><strong>STRIDE category:</strong> Tampering / Elevation of Privilege<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise Workday or its provisioning pipeline to push bulk malicious JML events.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Compromise vendor pipeline or code that generates SCIM events.</li>
+<li>Initial action: Push bulk joiner events or mass role changes into SCIM stream.</li>
+<li>Core exploitation: Mass provisioning or de-provisioning across Okta and downstream apps.</li>
+<li>Escalation: Disrupt operations or create mass orphan accounts for later activation.</li>
+<li>Impact realization: Widespread access changes or outage at scale.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Out-of-band verification for mass JML events (require change ticket + signature for &gt;X events).</li>
+<li>Control 2: Rate-limiting and anomaly detection on SCIM stream (thresholds for number of changes/hour).</li>
+<li>Control 3: Vendor supply-chain assurance and reproducible event signing for bulk operations.</li>
+<li>Control 4: Staging validation and canary deployment of mass changes before production push.</li>
+<li>Control 5: Emergency rollback capability for mass provisioning events.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SCIM event rate metrics and spike graphs.</li>
+<li>Workday vendor audit trail showing bulk export origin and user.</li>
+<li>SIEM correlation of bulk SCIM events with other unusual activity.</li>
+<li>Job trigger logs for canary/staging validation failures.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<p>simulate_scim_burst --count 500 --expect-rate-alert</p>
+<p>SCIMApiLogs | summarize cnt=count() by bin(TimeGenerated,1h) | where cnt &gt; 100</p>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T7_A1[Vendor pipeline pushes bulk JML]:::attack --> T7_A2[Okta receives mass SCIM events]:::attack
+    T7_A2 --> T7_C1{Rate-limit & canary validation?}:::control
+    T7_C1 -->|Yes| T7_B1[Canary blocks/alerts]:::blocked
+    T7_C1 -->|No| T7_A3[Mass provisioning/de-provisioning]:::attack
+    T7_A3 --> T7_C2{Auto-rollback available?}:::control
+    T7_C2 -->|Yes| T7_B2[Rollback & alert]:::blocked
+    T7_C2 -->|No| T7_A4[Enterprise outage or mass orphaning]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-scim-token-abuse-from-unexpected-ips">T8 — SCIM Token Abuse from Unexpected IPs</h3>
+<p><strong>STRIDE category:</strong> Spoofing / Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use stolen token from attacker-controlled infrastructure; calls originate outside Workday CIDR.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Token theft (leak, exfiltration) and attacker infrastructure to call SCIM.</li>
+<li>Initial action: Issue SCIM creates/modifies from non-Workday IPs.</li>
+<li>Core exploitation: Create accounts and add to privileged groups gradually to evade detection.</li>
+<li>Escalation: Blend activity over time to avoid spike detection.</li>
+<li>Impact realization: Unauthorized account provisioning and access.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: SCIM IP allow-list: accept API calls only from Workday-managed IP ranges.</li>
+<li>Control 2: Token usage anomaly detection: token used from multiple geo locations triggers rotation.</li>
+<li>Control 3: Token binding to TLS client certificates or Mutual TLS to prevent token-only abuse.</li>
+<li>Control 4: Short-lived token validity and automated rotation on anomalous patterns.</li>
+<li>Control 5: SIEM alerting for SCIM calls that include admin_group or mass modifications.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SCIM API logs: <code>token_id</code>, <code>source_ip</code>, <code>method</code>, <code>timestamp</code>.</li>
+<li>Okta System Log: correlated events from SCIM token usage.</li>
+<li>Vault audit showing token issuance and revocation.</li>
+<li>Geo-IP alerts when token used from unexpected regions.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<p>SCIMApiLogs | where source_ip notin (WorkdayCIDR) | project time, token_id, method</p>
+<p>curl -X POST https://okta.example.com/api/v1/users -H 'Authorization: Bearer <token>' --resolve okta.example.com:external_ip</p>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T8_A1[Token used from unexpected IP]:::attack --> T8_A2[SCIM calls accepted]:::attack
+    T8_A2 --> T8_C1{IP allow-list enforced?}:::control
+    T8_C1 -->|Yes| T8_B1[Calls rejected]:::blocked
+    T8_C1 -->|No| T8_A3[Create/modify accounts]:::attack
+    T8_A3 --> T8_C2{Token rotation on anomaly?}:::control
+    T8_C2 -->|Yes| T8_B2[Token revoked & alert]:::blocked
+    T8_C2 -->|No| T8_A4[Unauthorized provisioning]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-misconfigured-group-to-role-mapping">T9 — Misconfigured Group-to-Role Mapping</h3>
+<p><strong>STRIDE category:</strong> Tampering / Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Erroneous regex or mapping assigns new hires to privileged groups.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Misconfiguration in mapping rules or wildcard regex in Okta provisioning policies.</li>
+<li>Initial action: New hire assigned to wrong group during provisioning.</li>
+<li>Core exploitation: Access granted in multiple downstream apps according to group membership.</li>
+<li>Escalation: Attacker leverages policy bug to mass-assign privileged groups.</li>
+<li>Impact realization: Users gain inappropriate privileges leading to data exposure.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Test and validate mapping rules in staging with representative data sets before prod push.</li>
+<li>Control 2: Require PR review and automated unit tests for mapping regex changes (policy-as-code).</li>
+<li>Control 3: Canary deployment of group-mapping changes and sampling validation.</li>
+<li>Control 4: Post-provisioning verification that role assignments match RBAC catalog.</li>
+<li>Control 5: Alert on sudden spikes in privileged group memberships.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Okta provisioning logs showing group assignment events with mapping rule ID.</li>
+<li>Version-controlled mapping rule diffs and PR approvals.</li>
+<li>Downstream app admin logs showing sudden new members.</li>
+<li>Identity governance mismatches flagged by baseline policies.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<p>policy-test-runner --mapping-rule mappings.yml --expect-pass</p>
+<p>OktaSystemLog | where eventType == 'group.user.add' and group in (HighPrivGroups) | summarize count() by bin(TimeGenerated,1h)</p>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T9_A1[Mapping rule change deployed]:::attack --> T9_A2[New hires assigned privileged group]:::attack
+    T9_A2 --> T9_C1{Policy-as-code + tests?}:::control
+    T9_C1 -->|Yes| T9_B1[Automated tests catch failure]:::blocked
+    T9_C1 -->|No| T9_A3[Privileged access granted]:::attack
+    T9_A3 --> T9_C2{Canary validation?}:::control
+    T9_C2 -->|Yes| T9_B2[Canary blocks rollout]:::blocked
+    T9_C2 -->|No| T9_A4[Data exposure]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-okta-admin-account-compromise">T10 — Okta Admin Account Compromise</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise an Okta admin account to alter provisioning, bypass reconciliation, or create persistent admin accounts.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Phishing, credential theft, weak MFA, or SSO bypass for admin.</li>
+<li>Initial action: Log into Okta admin console; change provisioning connectors, create API clients.</li>
+<li>Core exploitation: Disable alerts, rotate SCIM tokens, or add attacker accounts to admin groups.</li>
+<li>Escalation: Create persistent API clients and remove audit traces.</li>
+<li>Impact realization: Full identity plane takeover.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Enforce hardware-backed FIDO2 for admin roles and require IdP conditional access restrictions.</li>
+<li>Control 2: PAM for Okta admin sessions with session recording and JIT access.</li>
+<li>Control 3: Immutable audit logs shipped to SIEM and offline storage with alerts on admin actions.</li>
+<li>Control 4: Break-glass controls with human approval and notifications for any admin role creation.</li>
+<li>Control 5: Periodic admin access recertification and minimum admin counts.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Okta admin audit logs: <code>admin_user</code>, <code>action</code>, <code>ip</code>, <code>user_agent</code>.</li>
+<li>PAM session recordings and access logs.</li>
+<li>SIEM alerts for admin actions outside maintenance windows.</li>
+<li>IdP SigninLogs with ConditionalAccessStatus and MFA used.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<p>OktaAdminLog | where actionType in ('policy.modify','group.create') and TimeGenerated notbetween (MaintenanceWindowStart .. MaintenanceWindowEnd)</p>
+<p>okta-cli admin-login --user admin --password X --expect-fido2-required</p>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T10_A1[Admin creds compromised]:::attack --> T10_A2[Admin actions in Okta]:::attack
+    T10_A2 --> T10_C1{FIDO2 + PAM enforced?}:::control
+    T10_C1 -->|Yes| T10_B1[Login blocked or recorded]:::blocked
+    T10_C1 -->|No| T10_A3[Modify provisioning & create API clients]:::attack
+    T10_A3 --> T10_C2{Immutable audit & offline SIEM?}:::control
+    T10_C2 -->|Yes| T10_B2[Forensic detection & rollback]:::blocked
+    T10_C2 -->|No| T10_A4[Identity plane takeover]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-orphaned-accounts-okta-active-no-workday">T11 — Orphaned Accounts (Okta Active, No Workday)</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use orphaned accounts retained in Okta to access resources that no longer map to Workday employees.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Reconciliation lapses or provisioning failures leave Okta accounts orphaned.</li>
+<li>Initial action: Attacker identifies orphaned accounts (low-use) and re-activates them or takes over credentials.</li>
+<li>Core exploitation: Old service accounts or former employees used to access sensitive data.</li>
+<li>Escalation: Lateral movement into apps with persistent tokens.</li>
+<li>Impact realization: Data leakage and compliance exposure.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Daily reconciliation job that disables orphaned accounts automatically after verification window.</li>
+<li>Control 2: Auto-disable policy for accounts with no Workday match &gt; 24 hours, with audit trail and recovery process.</li>
+<li>Control 3: Monitor dormant accounts and require explicit justification for continued active status.</li>
+<li>Control 4: Restrict legacy local credentials and replace with SSO-only flows where possible.</li>
+<li>Control 5: Periodic offline audit by Internal Audit to validate reconciliation effectiveness.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Daily reconciliation report output with orphaned account list.</li>
+<li>Okta user attributes showing source and creation date.</li>
+<li>SIEM correlation of orphan list and suspicious logins.</li>
+<li>Ticketing records for manual remediation actions.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<p>ReconciliationReport | where workday_status == 'NOT_FOUND' and okta_status == 'ACTIVE'</p>
+<p>simulate_orphan_account --user orphan1 --expect-auto-disable</p>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T11_A1[Reconciliation misses account]:::attack --> T11_A2[Okta account remains active]:::attack
+    T11_A2 --> T11_C1{Daily auto-disable enforced?}:::control
+    T11_C1 -->|Yes| T11_B1[Account disabled]:::blocked
+    T11_C1 -->|No| T11_A3[Attacker takes over account]:::attack
+    T11_A3 --> T11_C2{Dormant account monitoring?}:::control
+    T11_C2 -->|Yes| T11_B2[Anomaly detected]:::blocked
+    T11_C2 -->|No| T11_A4[Data exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-bulk-erroneous-scim-push-causing-mass-changes">T12 — Bulk Erroneous SCIM Push Causing Mass Changes</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Misconfigured or malicious SCIM push that causes mass de-provisioning or mass role changes.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Faulty Workday export or malicious vendor action pushes malformed bulk events.</li>
+<li>Initial action: SCIM stream delivers mass deltas that Okta applies.</li>
+<li>Core exploitation: Mass account disable or elevated assignments applied across org.</li>
+<li>Escalation: Disrupt business continuity or create chaos for ransom or sabotage.</li>
+<li>Impact realization: Large-scale outage and security incidents.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Canary and staged rollout for bulk changes: staging validation and signed bulk manifests.</li>
+<li>Control 2: Rate-limiting on SCIM processing per hour and alert on spike thresholds.</li>
+<li>Control 3: Require out-of-band approval for bulk operations &gt; X accounts.</li>
+<li>Control 4: Automated rollback capability and snapshot of directory state prior to bulk ops.</li>
+<li>Control 5: Independent downstream verification before applying destructive changes.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SCIM event spike graphs and bulk operation manifests.</li>
+<li>Okta System Log of mass change events with actor identity.</li>
+<li>SIEM correlation and automated rollback triggers.</li>
+<li>Backup snapshots showing pre/post directory state.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<p>simulate_scim_bulk_delete --count 1000 --expect-canary-block</p>
+<p>SCIMApiLogs | summarize cnt=count() by bin(TimeGenerated,10m) | where cnt &gt; 200</p>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T12_A1[Bulk SCIM push initiated]:::attack --> T12_A2[Okta applies mass changes]:::attack
+    T12_A2 --> T12_C1{Canary + approval required?}:::control
+    T12_C1 -->|Yes| T12_B1[Canary alerts & halt]:::blocked
+    T12_C1 -->|No| T12_A3[Mass de-provisioning/role change]:::attack
+    T12_A3 --> T12_C2{Automated rollback?}:::control
+    T12_C2 -->|Yes| T12_B2[Rollback executed]:::blocked
+    T12_C2 -->|No| T12_A4[Enterprise outage]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Create test ghost in Workday staging and verify quarantine</td>
+<td>Okta quarantine / no downstream provision</td>
+<td>Downstream access provisioned without quarantine</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Run repo DLP scan for SCIM tokens</td>
+<td>No hits in Git history</td>
+<td>Token found in commit history</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Simulate connector failure and verify alert &amp; remediation</td>
+<td>Connector alert + manual disable</td>
+<td>Downstream account remains active</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Simulate mover events and verify auto-removal</td>
+<td>Old entitlements removed</td>
+<td>Old entitlements persist</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Provision contractor with expiry missing and verify auto-disable</td>
+<td>Auto-disable triggers at policy time</td>
+<td>Contractor remains active</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Attempt SCIM group add in staging with scoped token</td>
+<td>Rejected (403)</td>
+<td>Group add succeeds</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Simulate bulk SCIM push in staging (canary)</td>
+<td>Canary blocks/alerts</td>
+<td>Bulk change applied to prod-like environment</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Execute SCIM call from external IP in staging</td>
+<td>Rejected by IP allow-list</td>
+<td>SCIM call accepted</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Run policy-as-code tests for mapping rules</td>
+<td>Tests pass in CI</td>
+<td>Tests fail or missing</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Attempt admin login without FIDO2 in staging</td>
+<td>Blocked / FIDO2 required</td>
+<td>Admin login succeeds without FIDO2</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Create orphaned account in staging and verify auto-disable</td>
+<td>Auto-disable &amp; alert</td>
+<td>Orphan remains active</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Simulate mass SCIM events and verify canary rollback</td>
+<td>Canary halts and rollback occurs</td>
+<td>Mass event applied to production</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Secrets management &amp; token scoping</td>
+<td>T2, T6, T8</td>
+<td>Strict token scoping required; vendor limits</td>
+</tr>
+<tr>
+<td>Reconciliation &amp; verification</td>
+<td>T1, T3, T11</td>
+<td>Timely downstream verification critical</td>
+</tr>
+<tr>
+<td>Policy-as-code &amp; canary deployments</td>
+<td>T9, T12</td>
+<td>CI/CD tests and canary gating required</td>
+</tr>
+<tr>
+<td>Identity governance &amp; recertification</td>
+<td>T4, T5</td>
+<td>More frequent recertification for movers needed</td>
+</tr>
+<tr>
+<td>Connector health &amp; alerting</td>
+<td>T3, T11</td>
+<td>SLAs and DLQ monitoring required</td>
+</tr>
+<tr>
+<td>Vendor &amp; supply-chain assurance</td>
+<td>T7</td>
+<td>Limited visibility into vendor internal ops</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Rotate and scope SCIM token, store in Vault, and enforce IP allow-listing</strong> — closes T2, T6, T8. Implementation: rotate token, update connectors, and enforce Workday CIDR allow-list in Okta.</li>
+<li><strong>Enable daily HR-to-Okta reconciliation with automatic orphan disable</strong> — closes T1, T11. Implementation: run reconciliation job, auto-disable unmatched accounts with audit trail.</li>
+<li><strong>Require dual-approval for elevated-role joiners and quarantine new privileged accounts</strong> — closes T1 and T9. Implementation: Workday workflow and Okta quarantine policy.</li>
+<li><strong>Implement post-deprovision downstream verification for critical apps</strong> — closes T3. Implementation: automated API checks and SOAR-driven remediation.</li>
+<li><strong>Policy-as-code for mapping rules + canary deployment and automated rollback</strong> — closes T9 and T12. Implementation: CI tests, canary, and rollback playbooks.</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario23-hr-idp-integration.md</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

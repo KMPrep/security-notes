@@ -1,0 +1,1719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 01 — ZTNA Replacement: Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario01-ztna-replacement-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-01-ztna-replacement-threat-exploitation-and-blue-team-control-review">Scenario 01 — ZTNA Replacement: Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario01-ztna-replacement.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario01-ztna-replacement-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> A 20,000-employee enterprise replacing hub-and-spoke VPN with ZTNA (Zscaler ZPA / BeyondCorp), serving managed and BYOD devices accessing on-prem SAP, internal SaaS, and cloud workloads through an on-prem connector brokered by a cloud policy engine.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This document reviews the threat model from two lenses:</p>
+<ol>
+<li><strong>Attacker lens:</strong> How an attacker would realistically exploit each identified threat, including prerequisites, reconnaissance steps, tool usage, and escalation path.</li>
+<li><strong>Blue-team lens:</strong> What controls must stop or detect the attack, where each control is enforced, and what telemetry proves the control is firing.</li>
+</ol>
+<p>The review focuses on <strong>attack mechanics, prerequisites, command-level purple-team validation examples, detection evidence, and control validation</strong>. Commands use placeholder values and are intended for an owned lab or approved internal purple-team exercise only. High-risk techniques are described at the technique level and paired with safe defensive validation commands.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p><strong>The ZTNA connector's internal network routing scope</strong> is the single most consequential architectural decision in this deployment. If the connector host is granted broad routes to application subnets (e.g., the entire 10.0.0.0/8 corporate range), then RCE on the connector host instantly gives an attacker full internal network reach — all ZTNA policy controls are bypassed because the attacker is operating on the connector OS directly, not through the policy engine. The correct design scopes each connector to only the specific <code>&lt;app-host-IP&gt;:&lt;port&gt;</code> tuples it serves, enforced at the OS host firewall level (iptables/nftables or Windows Firewall with Advanced Security) and at the VLAN/microsegmentation layer (NSX-T, AWS Security Groups). A connector serving only SAP port 8080 must have zero route to the AD domain controllers or any other app subnet — not because the policy engine blocks it, but because the network physically does not allow it.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<p>Every attack tree uses this convention:</p>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Credential Phishing (password + OTP intercept)</td>
+<td>High likelihood, Critical impact</td>
+<td>IdP Sign-In Logs — risk_level, mfa_method fields</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>AiTM Proxy Phishing (EvilGinx2 session hijack)</td>
+<td>High likelihood, Critical impact</td>
+<td>ZTNA Access Logs — session token from two src_ip</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>ZTNA Connector CVE Exploitation (RCE)</td>
+<td>Medium likelihood, Critical impact</td>
+<td>Connector Health Log + NSX-T Flow Logs</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>BYOD Info-Stealer Token Theft (Redline/Raccoon)</td>
+<td>High likelihood, High impact</td>
+<td>EDR process telemetry — lsass/browser credential access</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>ZTNA Policy Misconfiguration (wildcard rule)</td>
+<td>Medium likelihood, High impact</td>
+<td>ZTNA Management Audit Log — change_type, rule content</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>IdP Admin Account Takeover</td>
+<td>Medium likelihood, Critical impact</td>
+<td>IdP Admin Audit Log — mfa_policy_update events</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Session Token Replay from Stolen Token</td>
+<td>High likelihood, High impact</td>
+<td>ZTNA Access Logs — same session_token, two src_ip</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>ZTNA Vendor Supply Chain Compromise</td>
+<td>Low likelihood, Critical impact</td>
+<td>SBOM delta + connector binary hash verification</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Lateral Movement from Compromised Connector</td>
+<td>Medium likelihood, Critical impact</td>
+<td>NSX-T / VPC Flow Logs — connector to non-app subnets</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Device Certificate Extraction and Replay</td>
+<td>Low likelihood, High impact</td>
+<td>PKI OCSP Responder Logs — cert serial, REVOKED status</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>ZTNA Management Plane Credential Compromise</td>
+<td>Medium likelihood, High impact</td>
+<td>ZTNA Admin Audit Log — policy rule modification events</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>BYOD Posture Drop Not Detected Mid-Session</td>
+<td>Medium likelihood, High impact</td>
+<td>MDM Compliance Logs — compliance_state transitions</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>Impossible Travel Not Correlated</td>
+<td>High likelihood, High impact</td>
+<td>SIEM correlation — IdP geo vs ZTNA access geo</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>DNS Rebinding via ZTNA Tunnel to Internal Services</td>
+<td>Low likelihood, Medium impact</td>
+<td>ZTNA Access Logs — unusual dst_host patterns</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker targets 20k-user ZTNA deployment]:::attack --> A1[AiTM phishing captures post-MFA session cookie]:::attack
+    A1 --> C1{FIDO2 hardware key enforced for all users?}:::control
+    C1 -->|Yes - origin-bound| B1[AiTM defeated - no credential or cookie captured]:::blocked
+    C1 -->|No - software MFA / TOTP| A2[Session cookie replayed from attacker VPS]:::attack
+    A2 --> C2{Token replay detection in ZTNA logs?}:::control
+    C2 -->|Detected - same token, two IPs| B2[Session revoked - attacker locked out]:::blocked
+    C2 -->|Not detected| A3[Attacker accesses SAP ERP via ZTNA]:::attack
+    A3 --> A4[Connector CVE exploited for RCE on connector host]:::attack
+    A4 --> C3{Connector network scope limited to app IP-port only?}:::control
+    C3 -->|Yes - microsegmentation enforced| B3[Lateral movement blocked at network layer]:::blocked
+    C3 -->|No - broad subnet routes| A5[Pivot to AD, cloud GW, other app subnets]:::attack
+    A5 --> A6[SAP credentials harvested - ransomware or exfil]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-credential-phishing-password-otp-interception">T1 — Credential Phishing (Password + OTP Interception)</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Capture a user's username, password, and TOTP/SMS OTP via a lookalike phishing page, then use those credentials to authenticate to the real IdP and gain ZTNA access before the OTP expires.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker identifies target domain (e.g., <code>corp-login.example.com</code>) via OSINT, LinkedIn, or prior recon on the ZTNA vendor's known customer list.</li>
+<li><strong>Initial action:</strong> Registers <code>corp-l0gin.example.com</code>, clones the IdP login page (Okta or Azure AD), and sends spearphish via email with urgency lure ("Your ZTNA access will expire in 24 hours").</li>
+<li><strong>Core exploitation:</strong> User submits credentials to fake page. Attacker's server immediately relays them to real IdP, prompts the user for their TOTP/SMS code, and relays that too — the entire sequence completes within a 30-second TOTP window. (Note: against software TOTP/SMS; FIDO2 with hardware key defeats this because the credential is origin-bound.)</li>
+<li><strong>Escalation:</strong> With valid IdP session, attacker authenticates to ZTNA broker, which issues a ZTNA access token for authorized applications.</li>
+<li><strong>Impact realization:</strong> Attacker browses SAP ERP, internal SaaS, or cloud workloads with the victim user's permissions for the duration of the session lifetime.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Enforce FIDO2/WebAuthn hardware key (YubiKey 5 NFC or Google Titan) for all users via IdP strong authentication policy — <code>Okta: Authenticator enrollment policy → require FIDO2 WebAuthn</code>, <code>Azure AD: Authentication methods → FIDO2 security key → enforce for all users</code>. Hardware FIDO2 binds credential to origin; phishing page cannot relay an assertion.</li>
+<li><strong>Control 2 (Preventive):</strong> Enable Okta ThreatInsight or Azure AD Identity Protection risk-based conditional access — block or require step-up on <code>signin_risk_level = high</code> or <code>ip_reputation = malicious</code>.</li>
+<li><strong>Control 3 (Detective):</strong> Alert on <code>mfa_method != fido2_webauthn</code> for users in high-sensitivity application groups — TOTP or SMS use should be flagged as policy exception.</li>
+<li><strong>Control 4 (Detective):</strong> SIEM rule: <code>idp_signin where result=success AND src_ip NOT IN employee_known_ip_ranges AND mfa_method IN [totp, sms] → alert</code>.</li>
+<li><strong>Control 5 (Response):</strong> Automated session revocation via IdP API (<code>POST /api/v1/users/{userId}/sessions</code> clear) triggered by risk score breach; SOAR playbook pages on-call identity team.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Azure AD Sign-In Logs:</strong> <code>AuthenticationDetails</code> field — <code>authenticationMethod = FIDO2 SecurityKey</code> for all high-sensitivity app access; any row with <code>authenticationMethod = MicrosoftAuthenticator (TOTP)</code> in that group should alert.</li>
+<li><strong>Okta System Log:</strong> Event <code>user.authentication.auth_via_mfa</code> with <code>authenticationContext.credentialType = FIDO2_WEBAUTHN</code>; absence = policy gap.</li>
+<li><strong>ZTNA Access Logs (ZPA):</strong> <code>auth_type</code> field — cross-reference IdP MFA method with ZTNA access grant; mismatches (ZTNA grant without FIDO2 confirmation) should not be possible post-policy enforcement.</li>
+<li><strong>SIEM:</strong> Chronicle/Splunk rule firing on <code>signin_location_country != employee_home_country AND result = success</code> within baseline period.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that FIDO2 is enforced for all users in the high-sensitivity app group
+# Run in Azure AD tenant (read-only — no changes made)
+Connect-MgGraph -Scopes &quot;Policy.Read.All&quot;,&quot;UserAuthenticationMethod.Read.All&quot;
+Get-MgPolicyAuthenticationMethodPolicy | Select-Object -ExpandProperty AuthenticationMethodConfigurations |
+  Where-Object { $_.Id -eq &quot;Fido2&quot; } |
+  Select-Object Id, State, @{N=&quot;IncludedGroups&quot;;E={$_.IncludeTargets.Id}}
+# Expected: State = enabled, IncludedGroups contains &lt;high-sensitivity-app-group-id&gt;
+</code></pre>
+<pre><code class="language-kql">// Detect successful sign-ins NOT using FIDO2 for users in the protected application group
+SigninLogs
+| where ResultType == 0
+| where AuthenticationDetails has_any (&quot;MicrosoftAuthenticator&quot;, &quot;PhoneAppOTP&quot;, &quot;OneWaySMS&quot;, &quot;TOTP&quot;)
+| where UserPrincipalName in (
+    // Users who should be on FIDO2-only policy
+    datatable(upn:string)[&quot;&lt;upn-list-from-group&gt;&quot;]
+  )
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, AuthenticationDetails, AppDisplayName
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Spearphish sent - fake IdP login page]:::attack --> A2[User enters credentials and TOTP on fake page]:::attack
+    A2 --> C1{Is FIDO2 hardware key enforced?}:::control
+    C1 -->|Yes - origin-bound assertion| B1[Phish fails - credential not replayable]:::blocked
+    C1 -->|No - TOTP or SMS MFA| A3[Attacker relays creds and OTP to real IdP in real time]:::attack
+    A3 --> C2{Risk-based conditional access checks IP reputation?}:::control
+    C2 -->|Yes - attacker IP flagged| B2[Step-up challenge or block triggered]:::blocked
+    C2 -->|No - IP not in threat intel| A4[Attacker gains valid IdP session]:::attack
+    A4 --> C3{SIEM detects new geo and MFA method anomaly?}:::control
+    C3 -->|Yes - alert fires in time| B3[Session revoked before damage]:::blocked
+    C3 -->|No - detection missed| A5[Attacker accesses ZTNA-protected apps as victim user]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-aitm-proxy-phishing-evilginx2-modlishka-session-hijack">T2 — AiTM Proxy Phishing (EvilGinx2 / Modlishka Session Hijack)</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use a reverse-proxy phishing framework to relay authentication end-to-end against the real IdP, capture the post-MFA session cookie (including after TOTP/push MFA), and replay it from an attacker-controlled IP to hijack an authenticated ZTNA session — bypassing MFA entirely.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker deploys EvilGinx2 on a VPS with a convincing lookalike domain; configures a "phishlet" matching the target IdP (Okta, Azure AD) to capture the <code>sid</code> or <code>ESTSAUTH</code> session cookie.</li>
+<li><strong>Initial action:</strong> Phishing email directs victim to reverse-proxy URL. The proxy transparently relays all traffic to the real IdP, including MFA challenges. The victim completes legitimate authentication (including push MFA or TOTP) against the real IdP.</li>
+<li><strong>Core exploitation:</strong> EvilGinx2 captures the authenticated session cookie (<code>ESTSAUTH</code> for Azure AD, <code>sid</code> for Okta) after MFA completion. The cookie represents a fully authenticated session — MFA has already been passed.</li>
+<li><strong>Escalation:</strong> Attacker imports the session cookie into their browser or uses <code>curl</code>/<code>python-requests</code> to directly call the ZTNA broker's token endpoint, presenting the stolen session cookie. ZTNA broker issues an access token for authorized applications.</li>
+<li><strong>Impact realization:</strong> Attacker has an active ZTNA session under the victim's identity, valid for the full session lifetime (up to 8 hours), potentially accessing SAP ERP and cloud workloads.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Enforce FIDO2/WebAuthn — the only MFA method that defeats AiTM because the assertion includes origin binding. Any MFA method that produces a bearer token (TOTP, SMS, push notification) is defeated by AiTM. Configure Azure AD: <code>Conditional Access → Grant → Require authentication strength → Phishing-resistant MFA</code>.</li>
+<li><strong>Control 2 (Preventive):</strong> Enable Continuous Access Evaluation (CAE) in Azure AD — ensures IdP revokes sessions in near-real-time when risk signals fire, rather than waiting for token expiry.</li>
+<li><strong>Control 3 (Detective):</strong> ZTNA/IdP detection for session token used from two distinct source IPs within a short window — Zscaler ZPA logs <code>session_id</code> + <code>src_ip</code>; alert when same session appears from two non-consecutive IPs within 10 minutes.</li>
+<li><strong>Control 4 (Detective):</strong> Azure AD Sign-In Logs — <code>RiskEventType: unfamiliarFeatures</code> or <code>tokenIssuerType: AzureAD</code> with <code>IPAddress</code> in known AiTM infrastructure ranges (Bulletproof hosting ASNs); threat intel feed enrichment.</li>
+<li><strong>Control 5 (Response):</strong> SOAR automated response: on session-token-multi-IP alert → call <code>POST /api/v1/users/{userId}/sessions</code> (Okta) or <code>DELETE /v1.0/users/{id}/authentication/signInSessions</code> (Microsoft Graph) to revoke all sessions immediately.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Azure AD Sign-In Logs:</strong> <code>RiskLevelDuringSignIn = high</code> for sessions originating from AiTM proxy IP ranges; <code>TokenIssuancePolicy</code> missing binding → session rebindable.</li>
+<li><strong>ZTNA Access Logs (ZPA):</strong> <code>src_ip</code> field — same <code>user_id</code> + <code>session_token</code> appearing from two distinct IPs within 10-minute window.</li>
+<li><strong>CAE Audit:</strong> <code>AuditLogs</code> → <code>ActivityDisplayName: Revoke sign-in sessions</code> — confirms CAE acted on risk event.</li>
+<li><strong>Threat Intel SIEM:</strong> Chronicle UDM event <code>network.http.referral_url</code> matching known EvilGinx2/Modlishka hosting patterns from threat intel feeds (Mandiant, Recorded Future).</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate Continuous Access Evaluation is enabled for the tenant (read-only check)
+Connect-MgGraph -Scopes &quot;Policy.Read.All&quot;
+Get-MgPolicyContinuousAccessEvaluationPolicy | Select-Object MigrateToMicrosoft, Migrate
+# Expected output: policy shows CAE enforcement mode = enabled
+
+# Validate Conditional Access requires phishing-resistant MFA for ZTNA app registration
+Get-MgIdentityConditionalAccessPolicy | Where-Object { $_.DisplayName -like &quot;*ZTNA*&quot; } |
+  Select-Object DisplayName, @{N=&quot;GrantControls&quot;;E={$_.GrantControls.AuthenticationStrength.DisplayName}}
+# Expected: GrantControls shows &quot;Phishing-resistant MFA&quot;
+</code></pre>
+<pre><code class="language-kql">// Detect same user appearing from two different IPs within 10 minutes — AiTM session replay indicator
+let window = 10m;
+SigninLogs
+| where ResultType == 0
+| summarize IPs = make_set(IPAddress), SignInCount = count() by UserPrincipalName, SessionId, bin(TimeGenerated, window)
+| where array_length(IPs) &gt; 1
+| project TimeGenerated, UserPrincipalName, SessionId, IPs, SignInCount
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[EvilGinx2 reverse proxy deployed - phishing link sent]:::attack --> A2[Victim completes MFA against real IdP via proxy]:::attack
+    A2 --> C1{Is MFA method FIDO2 with origin binding?}:::control
+    C1 -->|Yes - assertion tied to real IdP origin| B1[AiTM cannot relay FIDO2 assertion - attack fails]:::blocked
+    C1 -->|No - TOTP or push MFA| A3[Session cookie captured by EvilGinx2 after MFA]:::attack
+    A3 --> C2{CAE or short session lifetime enforced?}:::control
+    C2 -->|Yes - CAE revokes on risk signal| B2[Stolen cookie invalidated before replay succeeds]:::blocked
+    C2 -->|No - long-lived session| A4[Attacker replays session cookie from attacker VPS]:::attack
+    A4 --> C3{Token multi-IP replay detection in ZTNA logs?}:::control
+    C3 -->|Yes - alert fires, session revoked| B3[Attacker session terminated - containment]:::blocked
+    C3 -->|No - detection gap| A5[Attacker operates as victim user in ZTNA session]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-ztna-connector-cve-exploitation-remote-code-execution">T3 — ZTNA Connector CVE Exploitation (Remote Code Execution)</h3>
+<p><strong>STRIDE category:</strong> Tampering, Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Exploit a vulnerability in the on-prem ZTNA connector software to gain RCE on the connector host, then use that internal foothold to bypass ZTNA policy controls and access application subnets directly.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker identifies the ZTNA vendor and connector version via ZTNA banner/headers exposed during the authentication handshake, or via OSINT on the target's IT vendor disclosures. Connector version is often visible in Zscaler ZPA or BeyondCorp connector health dashboards if admin credentials are obtained.</li>
+<li><strong>Initial action:</strong> Attacker checks NVD/vendor advisories for unpatched CVEs in the deployed connector version. Alternatively, attacker first gains limited ZTNA access via T1/T2, pivots to enumerate the connector's management interface.</li>
+<li><strong>Core exploitation:</strong> Exploit delivered via the connector's inbound management port (if exposed internally) or via a crafted request relayed through the ZTNA broker tunnel. Successful exploitation yields a shell on the connector host (OS-level execution context).</li>
+<li><strong>Escalation:</strong> From the connector host, attacker uses OS-level network tools (<code>ip route</code>, <code>netstat</code>, <code>nmap</code>) to enumerate reachable subnets. If connector routing is broad, attacker directly SSHs or SMBs to SAP application servers, AD domain controllers, or cloud gateway hosts. Installs <code>impacket</code> or <code>Cobalt Strike</code> beacon for persistent C2.</li>
+<li><strong>Impact realization:</strong> Internal network foothold equivalent to old-model VPN access. Ransomware deployment on SAP ERP hosts, Active Directory compromise, or silent data exfiltration through the ZTNA tunnel (blending with legitimate traffic).</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive — Highest Priority):</strong> Scope connector host firewall (iptables/nftables) to <strong>only</strong> allow outbound connections to <code>&lt;app-host-IP&gt;:&lt;specific-port&gt;</code>. Zero routes to AD domain controllers, other app subnets, or management networks. This is the single most important control — even successful RCE yields no lateral movement without network reachability.</li>
+<li><strong>Control 2 (Preventive):</strong> Deploy connector in an isolated VLAN with NSX-T distributed firewall rules; connector VLAN should have no east-west reachability to any subnet not explicitly listed in its application group policy.</li>
+<li><strong>Control 3 (Preventive):</strong> Automated connector version patching via fleet management (Ansible playbook triggered on CVE publish); SLA: connector patched within 48 hours of CVSS ≥ 7.0 advisory.</li>
+<li><strong>Control 4 (Detective):</strong> NSX-T/VPC Flow Logs alert: <code>src_ip = &lt;connector_host_ip&gt; AND dst_ip NOT IN &lt;approved_app_subnet_list&gt;</code> — any connection to out-of-scope subnet is instant high-fidelity indicator of compromise.</li>
+<li><strong>Control 5 (Detective):</strong> EDR on connector host (CrowdStrike Falcon) — process creation from connector service account (e.g., <code>ztna-connector</code> spawning <code>bash</code>, <code>python3</code>, or <code>cmd.exe</code> child processes) is anomalous and should alert immediately.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>NSX-T Distributed Firewall Logs:</strong> <code>src_vm = connector-host, dst_ip NOT IN app_subnet_whitelist, action = DENY</code> — confirms microsegmentation is enforced; absence of DENY logs when testing out-of-scope traffic indicates gap.</li>
+<li><strong>CrowdStrike Falcon Insight:</strong> Process creation event: <code>ParentProcessName = ztna-connector.exe, ChildProcessName IN [cmd.exe, powershell.exe, bash, python3]</code> — immediate critical alert.</li>
+<li><strong>ZTNA Vendor CVE Feed:</strong> Chronicle/Splunk lookup table <code>connector_version</code> vs <code>nvd_cve_database</code> — alert when deployed version matches unpatched CVSS ≥ 7.0 CVE.</li>
+<li><strong>Connector Heartbeat Logs:</strong> Connector going offline or heartbeat gap &gt; 5 minutes during business hours — potential compromise indicator.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate connector host firewall blocks out-of-scope subnet connections (run on connector host in authorized lab)
+# Attempt connection to AD domain controller IP — must be blocked
+timeout 5 bash -c &quot;echo '' &gt; /dev/tcp/&lt;ad-dc-ip&gt;/445&quot; 2&gt;&amp;1
+# Expected: Connection timed out or refused — confirms iptables/nftables block is in place
+
+# List current iptables rules to verify scope
+sudo iptables -L OUTPUT -v -n | grep -E &quot;(ACCEPT|DROP|REJECT)&quot;
+# Expected: Only ACCEPT rules for specific app IPs/ports; all other traffic DROPped
+</code></pre>
+<pre><code class="language-kql">// Detect connector host communicating with out-of-scope internal subnets
+// Assumes NSX-T flow logs ingested to SIEM
+AzureNetworkAnalytics_CL
+| where FlowType_s == &quot;IntraVNet&quot;
+| where SrcIP_s == &quot;&lt;connector-host-ip&gt;&quot;
+| where DstIP_s !in (&quot;&lt;sap-app-ip&gt;&quot;, &quot;&lt;internal-saas-ip&gt;&quot;)
+| where DstIP_s startswith &quot;10.&quot; or DstIP_s startswith &quot;172.&quot;
+| project TimeGenerated, SrcIP_s, DstIP_s, DestPort_d, FlowStatus_s
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[CVE identified in deployed connector version]:::attack --> A2[Exploit delivered to connector via internal network or broker tunnel]:::attack
+    A2 --> C1{Connector patched within 48h of CVE disclosure?}:::control
+    C1 -->|Yes - patched| B1[Exploit fails against patched connector binary]:::blocked
+    C1 -->|No - unpatched| A3[RCE achieved on connector host]:::attack
+    A3 --> C2{Connector host firewall limits outbound to app IP-port only?}:::control
+    C2 -->|Yes - microsegmentation enforced| B2[Lateral movement blocked - attacker trapped on connector host]:::blocked
+    C2 -->|No - broad subnet routes| A4[Attacker enumerates and pivots to SAP, AD, cloud GW subnets]:::attack
+    A4 --> C3{EDR on connector host detects anomalous child processes?}:::control
+    C3 -->|Yes - Falcon alerts fires| B3[IR team isolates connector VLAN within minutes]:::blocked
+    C3 -->|No - EDR absent or bypassed| A5[Persistent internal foothold - ransomware or exfil]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-byod-info-stealer-token-theft-redline-raccoon">T4 — BYOD Info-Stealer Token Theft (Redline / Raccoon)</h3>
+<p><strong>STRIDE category:</strong> Spoofing, Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Deploy an info-stealer on a BYOD device to extract ZTNA session tokens, IdP session cookies, or device certificates from browser memory/storage, then replay them from an attacker-controlled machine to impersonate the victim.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker distributes Redline Stealer or Raccoon malware via drive-by download, malicious browser extension, cracked software, or targeted email. BYOD devices running personal software are high-risk targets.</li>
+<li><strong>Initial action:</strong> Malware executes on BYOD device. Redline Stealer calls <code>CryptUnprotectData</code> (Windows DPAPI) to decrypt browser-stored cookies from Chrome's <code>Cookies</code> SQLite database and credential files from <code>%LOCALAPPDATA%\Google\Chrome\User Data\Default\Network\Cookies</code>.</li>
+<li><strong>Core exploitation:</strong> Stolen cookies include IdP session cookies (<code>ESTSAUTH</code>, <code>sid</code>) and potentially ZTNA broker session tokens stored in browser local storage. These are exfiltrated to attacker C2 server over HTTPS.</li>
+<li><strong>Escalation:</strong> Attacker imports cookies into a browser on a VPS, navigates to the ZTNA application portal, and is recognized as authenticated. If the ZTNA broker validates device posture at session establishment only (not continuously), the attacker's VPS passes with the victim's stolen device cert (if also extracted).</li>
+<li><strong>Impact realization:</strong> Attacker session under victim identity with all their ZTNA-authorized application permissions for the stolen session's remaining lifetime.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Require MDM enrollment for BYOD devices to access sensitive apps; unenrolled BYOD restricted to low-sensitivity apps only. MDM enrollment enables EDR deployment (CrowdStrike Falcon), which detects info-stealers at execution.</li>
+<li><strong>Control 2 (Preventive):</strong> Short ZTNA session lifetimes (4-hour max for BYOD, 8-hour max for managed) — limits replay window even if tokens are stolen.</li>
+<li><strong>Control 3 (Preventive):</strong> ZTNA continuous posture evaluation — re-check device compliance at 30-minute intervals, not only at session establishment. Zscaler ZPA supports "continuous posture checks" via ZCC agent.</li>
+<li><strong>Control 4 (Detective):</strong> EDR process telemetry: <code>ProcessName IN [redline.exe, raccoon.exe] OR process accesses Chrome cookie path AND parent process is not chrome.exe</code> — CrowdStrike Prevent should quarantine on first execution.</li>
+<li><strong>Control 5 (Detective):</strong> ZTNA session anomaly — same user session appearing from a new device fingerprint or a non-enrolled device ID that was not present at session start.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>CrowdStrike Falcon Prevent:</strong> Detection alert <code>CookieTheft</code> or <code>CredentialTheft</code> — Falcon ML model flags browser credential access patterns from non-browser processes.</li>
+<li><strong>MDM Compliance Logs (Intune):</strong> <code>device_id</code> in ZTNA access logs cross-referenced against Intune enrolled device inventory — session from unrecognized <code>device_id</code> is high-fidelity alert.</li>
+<li><strong>ZTNA Access Logs:</strong> <code>device_id</code> field changing mid-session, or <code>device_id</code> not present in MDM enrollment database while <code>user_id</code> matches an enrolled user.</li>
+<li><strong>SIEM UEBA:</strong> Baseline per-user session geography; session from new country or ASN (attacker VPS) on stolen token triggers alert.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that CrowdStrike Falcon Prevent is active and cookie-theft prevention is enabled on BYOD
+# (Run from CrowdStrike Falcon console API — read-only query)
+# Check that prevention policy for BYOD device group includes CredentialTheft prevention
+Invoke-WebRequest -Uri &quot;https://api.crowdstrike.com/policy/entities/prevention-policies/v1?ids=&lt;byod-policy-id&gt;&quot; `
+  -Headers @{Authorization=&quot;Bearer &lt;api-token&gt;&quot;} | ConvertFrom-Json |
+  Select-Object -ExpandProperty resources | Select-Object name, enabled,
+  @{N=&quot;CredTheftEnabled&quot;;E={$_.prevention_settings.credential_theft_protection.enabled}}
+# Expected: enabled = true, CredTheftEnabled = true
+</code></pre>
+<pre><code class="language-kql">// Detect ZTNA access from device IDs not in MDM enrollment database
+// Assumes ZTNA logs and Intune device inventory both ingested to SIEM
+let enrolledDevices = IntuneDevices
+  | distinct DeviceId;
+ZscalerZPALogs
+| where isnotempty(DeviceId)
+| where DeviceId !in (enrolledDevices)
+| project TimeGenerated, UserName, DeviceId, Application, SrcIP
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Redline Stealer deployed on BYOD device via malicious download]:::attack --> A2[Browser cookie database decrypted via DPAPI]:::attack
+    A2 --> C1{EDR on BYOD device detects credential theft process?}:::control
+    C1 -->|Yes - Falcon quarantines stealer| B1[Malware stopped before exfil - cookies intact]:::blocked
+    C1 -->|No - no EDR or BYOD not enrolled| A3[Session cookies and ZTNA tokens exfiltrated to attacker C2]:::attack
+    A3 --> C2{ZTNA session lifetime less than 4 hours?}:::control
+    C2 -->|Yes - token already expired| B2[Stolen token useless - replay fails]:::blocked
+    C2 -->|No - long-lived session| A4[Attacker replays token from VPS]:::attack
+    A4 --> C3{Continuous posture check rejects non-enrolled attacker device?}:::control
+    C3 -->|Yes - posture check fires| B3[Session dropped - attacker evicted]:::blocked
+    C3 -->|No - posture only checked at session start| A5[Attacker operates as victim in ZTNA session]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-ztna-policy-misconfiguration-wildcard-or-overly-broad-rule">T5 — ZTNA Policy Misconfiguration (Wildcard or Overly Broad Rule)</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit an overly broad ZTNA access policy (wildcard source, wildcard destination, or missing device-posture requirement) to access applications the attacker should not be authorized for, or to access the application without meeting security requirements.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has a legitimate low-privilege ZTNA account, or has compromised a low-privilege user's credentials. Alternatively, an insider already has access and discovers a misconfigured rule that grants more than intended.</li>
+<li><strong>Initial action:</strong> Attacker authenticates to ZTNA with their (limited) credentials and attempts to access a high-sensitivity application (SAP ERP) that should require specific group membership or a device posture check.</li>
+<li><strong>Core exploitation:</strong> A misconfigured wildcard rule (e.g., <code>source = ALL USERS</code>, <code>destination = ALL APPS</code>, or <code>device_posture_check = DISABLED</code>) grants access without the expected restrictions. The ZTNA policy engine evaluates rules top-down and may match a permissive catch-all rule instead of the intended restrictive rule.</li>
+<li><strong>Escalation:</strong> Attacker discovers they can access SAP ERP or the cloud management console from a non-compliant BYOD device. Begins data exfiltration or further reconnaissance of internal topology through the ZTNA access grants.</li>
+<li><strong>Impact realization:</strong> Unauthorized access to high-sensitivity applications; potential for insider data theft, financial fraud, or reconnaissance enabling follow-on attacks.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> ZTNA policy as code — all policy rules stored in Git (Terraform + OPA Rego), with mandatory PR review by at least two security engineers before any rule change is applied. No ad-hoc changes via console.</li>
+<li><strong>Control 2 (Preventive):</strong> OPA rego-lint or Zscaler ZPA policy analyzer run in CI/CD pipeline — automatically rejects any rule where <code>source = *</code> or <code>destination = *</code> or <code>posture_profile = none</code> for high-sensitivity application groups.</li>
+<li><strong>Control 3 (Detective):</strong> ZTNA management audit log alert: <code>change_type = rule_add AND (rule.source CONTAINS wildcard OR rule.destination CONTAINS wildcard)</code> → immediate critical alert to security team, independent of change management.</li>
+<li><strong>Control 4 (Detective):</strong> Quarterly ZTNA access review (automated entitlement review via Saviynt or SailPoint IQ) — cross-reference ZTNA app grants against HR role matrix; flag any grant where user's HR role does not justify app access.</li>
+<li><strong>Control 5 (Response):</strong> Automated GitOps rollback — if a policy change fails OPA lint post-deployment, rollback to last known good Git commit within 5 minutes via Ansible/Terraform destroy + apply.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>ZTNA Management Audit Log:</strong> <code>actor, change_type = rule_add, rule_content</code> — all rule additions must have an associated change ticket ID in the <code>comment</code> field; absence = unauthorized change.</li>
+<li><strong>OPA Lint CI Pipeline Logs:</strong> Pass/fail status for every policy PR — any merged PR that bypassed lint is a control gap.</li>
+<li><strong>ZTNA Access Logs:</strong> Unexpected cross-group access patterns (user in <code>finance</code> group accessing <code>engineering</code> apps) detected by UEBA baseline rule.</li>
+<li><strong>Entitlement Review Reports:</strong> SailPoint or Saviynt quarterly certification report — count of over-provisioned access grants that were revoked.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate OPA rego policy rejects wildcard source rules (run in CI pipeline or local lab)
+cat &gt; /tmp/test_policy.rego &lt;&lt; 'EOF'
+package ztna.policy
+test_wildcard_source_rejected {
+  not allow with input as {&quot;source&quot;: &quot;*&quot;, &quot;destination&quot;: &quot;sap-erp&quot;, &quot;posture&quot;: &quot;none&quot;}
+}
+EOF
+opa test /tmp/test_policy.rego -v
+# Expected: PASS — wildcard source is rejected by policy
+</code></pre>
+<pre><code class="language-kql">// Detect ZTNA policy rule additions with wildcard source or destination
+ZTNAManagementAuditLog
+| where EventType == &quot;rule_add&quot; or EventType == &quot;rule_modify&quot;
+| where RuleSource == &quot;*&quot; or RuleDestination == &quot;*&quot; or PostureProfile == &quot;none&quot;
+| project TimeGenerated, Actor, EventType, RuleSource, RuleDestination, PostureProfile, ChangeTicketId
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker authenticates with low-privilege ZTNA account]:::attack --> A2[Attempts access to SAP ERP via ZTNA portal]:::attack
+    A2 --> C1{Is policy-as-code enforced with no wildcard rules?}:::control
+    C1 -->|Yes - restrictive rules only| B1[Access denied - policy correctly restricts to authorized group]:::blocked
+    C1 -->|No - wildcard or catch-all rule present| A3[Policy engine matches permissive rule - access granted]:::attack
+    A3 --> C2{Access review detects over-provisioning?}:::control
+    C2 -->|Yes - revoked in quarterly review| B2[Access removed - attacker loses unauthorized grant]:::blocked
+    C2 -->|No - review not run or stale| A4[Attacker exfiltrates SAP data under broad access grant]:::attack
+    A4 --> C3{UEBA detects cross-group access anomaly?}:::control
+    C3 -->|Yes - alert fires| B3[SOC investigates and revokes access]:::blocked
+    C3 -->|No - baseline missing| A5[Extended unauthorized access - data theft or fraud]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-idp-admin-account-takeover">T6 — IdP Admin Account Takeover</h3>
+<p><strong>STRIDE category:</strong> Tampering, Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise an IdP administrator account to modify MFA policies, create backdoor users, weaken conditional access, or forge identity assertions — collapsing the entire ZTNA trust model.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker identifies IdP admins via LinkedIn (titles like "Identity Engineer", "Okta Admin") or via OSINT on corporate IT job postings. IdP admin accounts are high-value targets for spearphishing.</li>
+<li><strong>Initial action:</strong> Targeted spearphish at IdP admin; credential harvesting page mimics Okta Admin Console or Azure AD portal login. Alternatively, admin credential found in dark web credential dump from a third-party breach.</li>
+<li><strong>Core exploitation:</strong> With IdP admin credentials, attacker logs into Okta Admin Console or Azure AD portal. Key actions: (1) Add a backdoor Okta API service app with <code>okta.users.read</code> and <code>okta.apps.manage</code> scopes. (2) Modify MFA enrollment policy to allow SMS as fallback — downgrades enforcement for all users. (3) Create a shadow admin user with a non-corporate email in a low-scrutiny OU.</li>
+<li><strong>Escalation:</strong> Backdoor service app's API token used to generate SAML assertions for any user, presented to ZTNA broker. ZTNA unconditionally trusts IdP assertions — no secondary verification of assertion origin.</li>
+<li><strong>Impact realization:</strong> Attacker can impersonate any user, including SAP system admins, accessing all ZTNA-protected applications. Can also disable all MFA enforcement, turning the entire 20,000-user deployment into an unprotected target.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Enforce FIDO2/WebAuthn for all IdP admin accounts, stored on hardware security keys (YubiKey 5 FIPS) kept physically separate from workstations. IdP admin console access must fail without hardware key.</li>
+<li><strong>Control 2 (Preventive):</strong> Privileged Identity Management (PIM) for IdP admin roles in Azure AD — just-in-time activation with 4-hour max duration; all activations require approval from a second admin; no standing admin roles for humans.</li>
+<li><strong>Control 3 (Detective):</strong> IdP admin change alert: <code>okta_system_log: event_type = policy.rule.update OR user.account.privilege.grant AND actor NOT IN change_management_service_accounts</code> → PagerDuty page to identity team lead within 2 minutes.</li>
+<li><strong>Control 4 (Detective):</strong> SIEM rule on <code>mfa_policy_change</code> or <code>conditional_access_policy_weakening</code> — any change that reduces MFA strength or expands exemptions triggers critical alert.</li>
+<li><strong>Control 5 (Response):</strong> CyberArk PAM vaulting for IdP break-glass admin credentials; regular rotation (90 days); access requires dual approval; session recording for all administrative sessions.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Okta System Log:</strong> <code>event_type = security.threat.detected</code> or <code>policy.rule.update</code> with actor context — all admin actions timestamped with MFA method used; confirm FIDO2 was the MFA method for the admin session.</li>
+<li><strong>Azure AD Audit Logs:</strong> <code>ActivityDisplayName = Add member to role</code> targeting <code>Global Administrator</code> or <code>Privileged Role Administrator</code>; alert on any such event not initiated from PIM activation workflow.</li>
+<li><strong>PIM Audit Trail:</strong> <code>AuditLogs | where ActivityDisplayName == "Add eligible member to role"</code> — all role activations should have corresponding change ticket.</li>
+<li><strong>ZTNA Policy Engine Logs:</strong> Any policy update that modifies the IdP trust configuration (certificate, issuer URL, assertion binding) is a critical indicator — should require two-person authorization.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that all Global Admins have FIDO2 registered (no password-only admins)
+Connect-MgGraph -Scopes &quot;RoleManagement.Read.Directory&quot;,&quot;UserAuthenticationMethod.Read.All&quot;
+$gaRoleId = (Get-MgDirectoryRole | Where-Object DisplayName -eq &quot;Global Administrator&quot;).Id
+$gaMembers = Get-MgDirectoryRoleMember -DirectoryRoleId $gaRoleId
+foreach ($member in $gaMembers) {
+    $methods = Get-MgUserAuthenticationMethod -UserId $member.Id
+    $hasFido2 = $methods | Where-Object { $_.AdditionalProperties.'@odata.type' -eq &quot;#microsoft.graph.fido2AuthenticationMethod&quot; }
+    [PSCustomObject]@{
+        UPN = $member.AdditionalProperties.userPrincipalName
+        HasFIDO2 = [bool]$hasFido2
+    }
+}
+# Expected: HasFIDO2 = True for ALL admins
+</code></pre>
+<pre><code class="language-kql">// Detect MFA policy weakening events in Azure AD
+AuditLogs
+| where OperationName in (&quot;Update authentication methods policy&quot;, &quot;Update conditional access policy&quot;, &quot;Update policy&quot;)
+| where TargetResources has_any (&quot;MFA&quot;, &quot;AuthenticationMethods&quot;, &quot;ConditionalAccess&quot;)
+| where InitiatedBy.user.userPrincipalName !endswith &quot;&lt;approved-admin-domain&gt;&quot;
+| project TimeGenerated, OperationName, InitiatedBy, TargetResources, Result
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Spearphish targets IdP admin - credential harvested]:::attack --> C1{Does IdP admin console require FIDO2 hardware key?}:::control
+    C1 -->|Yes - origin-bound hardware key| B1[Phished credential useless without hardware key]:::blocked
+    C1 -->|No - password and soft MFA| A2[Attacker logs into Okta or Azure AD admin console]:::attack
+    A2 --> C2{PIM limits admin role duration and requires approval?}:::control
+    C2 -->|Yes - attacker activation rejected| B2[Admin action blocked - PIM workflow not satisfied]:::blocked
+    C2 -->|No - standing admin role| A3[Attacker modifies MFA policy - creates backdoor user]:::attack
+    A3 --> C3{Admin change alert fires in under 2 minutes?}:::control
+    C3 -->|Yes - SOC reverts policy immediately| B3[Policy change reversed - backdoor user deleted]:::blocked
+    C3 -->|No - alert delayed or missed| A4[All user MFA weakened - attacker impersonates any user via forged SAML]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-session-token-replay-from-stolen-token">T7 — Session Token Replay from Stolen Token</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Replay a stolen ZTNA access token or IdP session token from an attacker-controlled IP to gain authenticated application access without repeating the authentication ceremony.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has obtained a valid ZTNA access token via T1 (phishing), T2 (AiTM), or T4 (info-stealer). Token is a bearer token (JWT or opaque) with a non-trivial remaining lifetime.</li>
+<li><strong>Initial action:</strong> Attacker uses <code>curl</code> or a scripted HTTP client on a VPS to call the ZTNA broker's application access endpoint with the stolen token in the <code>Authorization: Bearer</code> header.</li>
+<li><strong>Core exploitation:</strong> If the ZTNA broker validates the token cryptographically (signature valid, not expired) but does not check that the requesting IP or device fingerprint matches the original session, the token replays successfully from any IP.</li>
+<li><strong>Escalation:</strong> Attacker enumerates accessible applications by calling the ZTNA broker's app list API, then accesses high-value targets (SAP, internal SaaS admin panels) using the victim's token.</li>
+<li><strong>Impact realization:</strong> Full impersonation of victim user for the token's remaining lifetime; data exfiltration, account manipulation, or use of victim identity as pivot for further social engineering.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Implement DPoP (Demonstration of Proof-of-Possession, RFC 9449) token binding — ZTNA access tokens bound to the client's ephemeral key pair; token cannot be replayed from a different client without the private key.</li>
+<li><strong>Control 2 (Preventive):</strong> Short token lifetimes — ZTNA access tokens max 1 hour, IdP session cookies max 4 hours for BYOD; forces re-authentication frequently, reducing replay window.</li>
+<li><strong>Control 3 (Detective):</strong> ZTNA access log alert: same <code>session_id</code> or <code>token_hash</code> appearing from two distinct <code>src_ip</code> values within a 10-minute window — immediate session revocation triggered via SOAR.</li>
+<li><strong>Control 4 (Detective):</strong> IP geolocation anomaly — token being used from a country or ASN (data center/VPS ASN) inconsistent with the user's historical access pattern.</li>
+<li><strong>Control 5 (Response):</strong> SOAR playbook: on multi-IP session alert → call ZTNA admin API to revoke the specific session token; call IdP API to invalidate the user's session; require full re-authentication with FIDO2.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>ZTNA Access Logs (ZPA):</strong> <code>session_id</code> field — query for sessions where <code>count(distinct src_ip) &gt; 1</code> within a 10-minute window for the same session.</li>
+<li><strong>IdP Sign-In Logs:</strong> <code>CorrelationId</code> tied to session — verify token was issued to <code>device_id = X</code> but accessed from <code>device_id != X</code> (device fingerprint mismatch).</li>
+<li><strong>SIEM:</strong> Chronicle detection rule <code>ZTNA_TOKEN_MULTIIP_REPLAY</code> — fires when same session token appears from two IPs where <code>geoip(ip1).country != geoip(ip2).country</code>.</li>
+<li><strong>SOAR Execution Log:</strong> Automated revocation action <code>SessionRevoke</code> — confirm action completed within 5 minutes of detection.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-kql">// Detect session token replay — same session from two distinct source IPs
+ZscalerZPALogs
+| where isnotempty(SessionID)
+| summarize
+    IPList = make_set(SrcIP),
+    IPCount = dcount(SrcIP),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+  by SessionID, UserName, bin(TimeGenerated, 10m)
+| where IPCount &gt; 1
+| project FirstSeen, LastSeen, UserName, SessionID, IPList, IPCount
+| order by FirstSeen desc
+</code></pre>
+<pre><code class="language-powershell"># Validate session revocation API is functional (authorized lab test against test user)
+# Revoke all sessions for a test user via Microsoft Graph
+Connect-MgGraph -Scopes &quot;User.ReadWrite.All&quot;
+Invoke-MgRevokeUserSignInSession -UserId &quot;&lt;test-user-upn&gt;&quot;
+# Then verify in Sign-In Logs that subsequent requests from old token receive 401
+# Expected: HTTP 401 for any request using the old session cookie after revocation
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[ZTNA bearer token obtained via phishing or info-stealer]:::attack --> A2[Attacker replays token from VPS different IP]:::attack
+    A2 --> C1{DPoP or mTLS token binding enforced?}:::control
+    C1 -->|Yes - token bound to original client key| B1[Replay fails - proof of possession check fails]:::blocked
+    C1 -->|No - bearer token only| A3[ZTNA broker validates token signature - grants access]:::attack
+    A3 --> C2{Session multi-IP detection rule fires within 5 min?}:::control
+    C2 -->|Yes - SOAR revokes session| B2[Token revoked - attacker evicted]:::blocked
+    C2 -->|No - no detection| A4[Attacker accesses apps for full token lifetime]:::attack
+    A4 --> C3{Token lifetime less than 1 hour?}:::control
+    C3 -->|Yes - token expires quickly| B3[Damage window limited to under 1 hour]:::blocked
+    C3 -->|No - 8-hour token| A5[Extended unauthorized application access and data exfil]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-ztna-vendor-supply-chain-compromise-malicious-connector-update">T8 — ZTNA Vendor Supply Chain Compromise (Malicious Connector Update)</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise the ZTNA vendor's software update pipeline to deliver a backdoored connector binary to all customer deployments, gaining persistent internal network access across all affected tenants simultaneously.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Nation-state level attacker (similar to SolarWinds Orion, XZ Utils) targets the ZTNA vendor's build pipeline, code signing infrastructure, or software distribution CDN. This requires significant capability but the blast radius justifies the investment for a high-value target.</li>
+<li><strong>Initial action:</strong> Attacker compromises the vendor's CI/CD pipeline (e.g., GitHub Actions, Jenkins) and injects a malicious build step that adds a backdoor to the connector binary — a reverse shell, C2 beacon, or credential harvester. The malicious binary is signed with the vendor's legitimate code-signing certificate.</li>
+<li><strong>Core exploitation:</strong> All customers with auto-update enabled receive the backdoored connector binary. Upon startup, the connector establishes a C2 channel back to the attacker's infrastructure alongside legitimate ZTNA broker communication. The attacker now has code execution on every connector host across all affected customer networks.</li>
+<li><strong>Escalation:</strong> From each compromised connector, attacker pivots to internal networks per T3 lateral movement path. Because the compromise is fleet-wide, the attacker can coordinate simultaneous operations across hundreds of organizations.</li>
+<li><strong>Impact realization:</strong> Catastrophic — simultaneous internal network access at thousands of enterprises; SAP credential harvesting, ransomware deployment, or espionage across all affected tenants.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Disable automatic connector auto-update; require explicit IT approval for each update after staging environment validation. Update pipeline: vendor releases → IT staging lab → binary hash verification → production deployment via Ansible.</li>
+<li><strong>Control 2 (Preventive):</strong> Verify connector binary hash against vendor-published SHA-256 manifest before deployment. Script the verification: <code>sha256sum connector_installer.exe</code> compared against hash in vendor's signed security advisory.</li>
+<li><strong>Control 3 (Preventive):</strong> Request and verify the SBOM (Software Bill of Materials) for each connector release — track upstream dependencies for newly introduced packages or version changes.</li>
+<li><strong>Control 4 (Detective):</strong> EDR behavioral detection on connector host — if the connector process starts making network connections to IPs outside the known ZTNA broker IP ranges, alert immediately. CrowdStrike Falcon network connection monitoring: <code>ProcessName = ztna-connector AND DstIP NOT IN ztna_broker_ip_ranges</code>.</li>
+<li><strong>Control 5 (Detective):</strong> Binary integrity monitoring (CrowdStrike Falcon FIM or Tripwire) on connector installation directory — any binary modification outside a scheduled patching window triggers critical alert.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>CrowdStrike Falcon NetEvents:</strong> <code>ProcessName = ztna-connector-service, NetworkConnection.RemoteIP NOT IN [&lt;ztna-broker-ip-list&gt;]</code> — any outbound connection to unexpected IP is immediate IOC.</li>
+<li><strong>FIM (File Integrity Monitoring) Logs:</strong> Alert when <code>connector.exe</code> or associated DLLs are modified outside approved maintenance windows.</li>
+<li><strong>SBOM Diff Log:</strong> Automated comparison of SBOM between previous and new connector release — new packages or version jumps without accompanying CVE fix are suspect.</li>
+<li><strong>Vendor Security Advisory Log:</strong> Tracking record of vendor-published SHA-256 hashes per release versus deployed binary hashes.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate connector binary hash matches vendor-published manifest (run before every deployment)
+$vendorHash = &quot;&lt;sha256-from-vendor-signed-advisory&gt;&quot;
+$localHash = (Get-FileHash -Path &quot;C:\Program Files\ZTNAConnector\connector.exe&quot; -Algorithm SHA256).Hash
+if ($vendorHash -eq $localHash) {
+    Write-Host &quot;PASS: Binary hash matches vendor manifest&quot; -ForegroundColor Green
+} else {
+    Write-Host &quot;FAIL: Binary hash mismatch — DO NOT DEPLOY&quot; -ForegroundColor Red
+    Write-Host &quot;Expected: $vendorHash&quot;
+    Write-Host &quot;Actual:   $localHash&quot;
+}
+</code></pre>
+<pre><code class="language-kql">// Detect connector process making connections to non-broker IPs
+// Requires CrowdStrike Falcon EDR telemetry in SIEM
+DeviceNetworkEvents
+| where InitiatingProcessFileName has &quot;ztna-connector&quot;
+| where RemoteIP !in (&quot;&lt;broker-ip-1&gt;&quot;, &quot;&lt;broker-ip-2&gt;&quot;, &quot;&lt;broker-ip-3&gt;&quot;)
+| where RemoteIP !startswith &quot;10.&quot; // Exclude internal health checks
+| project Timestamp, DeviceName, InitiatingProcessFileName, RemoteIP, RemotePort, RemoteUrl
+| order by Timestamp desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Vendor build pipeline compromised - backdoor injected in connector binary]:::attack --> A2[Signed malicious connector update pushed to customers]:::attack
+    A2 --> C1{Auto-update disabled - manual hash verification required?}:::control
+    C1 -->|Yes - hash verified before deploy| B1[Malicious binary detected before installation]:::blocked
+    C1 -->|No - auto-update enabled| A3[Backdoored connector installed on all connector hosts]:::attack
+    A3 --> C2{EDR detects connector making non-broker network connections?}:::control
+    C2 -->|Yes - Falcon alerts on unknown outbound IP| B2[IR isolates connector host before C2 established]:::blocked
+    C2 -->|No - EDR not on connector host| A4[C2 channel established - attacker has persistent connector access]:::attack
+    A4 --> C3{FIM detects binary modification outside patch window?}:::control
+    C3 -->|Yes - alert triggers rollback| B3[Connector rolled back to last known good version]:::blocked
+    C3 -->|No - no FIM| A5[Fleet-wide internal access - simultaneous multi-tenant compromise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-lateral-movement-from-compromised-connector-to-adjacent-subnets">T9 — Lateral Movement from Compromised Connector to Adjacent Subnets</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use code execution on the ZTNA connector host (gained via T3 or T8) to pivot from the connector VLAN into application subnets, AD domain controllers, cloud gateways, or other high-value targets that the ZTNA policy was supposed to protect.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has RCE on the ZTNA connector host (via T3 CVE exploit or T8 supply chain). Connector host has OS-level network routes to internal subnets.</li>
+<li><strong>Initial action:</strong> From connector OS shell, attacker runs <code>ip route show</code> (Linux) or <code>route print</code> (Windows) to enumerate reachable subnets. Runs <code>nmap -sn 10.0.0.0/16</code> to discover live hosts.</li>
+<li><strong>Core exploitation:</strong> Connector host may have routes to SAP application subnet (10.10.5.0/24), AD domain controllers (10.10.1.0/24), and cloud gateway (10.10.20.0/24) — all needed for it to "proxy" application traffic. Attacker uses <code>impacket-psexec</code> or <code>CrackMapExec</code> to attempt SMB authentication to discovered hosts using extracted local credentials or Kerberos tickets from connector OS memory.</li>
+<li><strong>Escalation:</strong> Compromise of an AD domain controller gives attacker a Kerberos TGT for any user, enabling DCSync attack with <code>impacket-secretsdump</code> to extract all domain credentials. Compromise of SAP host enables direct database access bypassing all ZTNA policy.</li>
+<li><strong>Impact realization:</strong> Full Active Directory compromise; SAP database exfiltration; ransomware deployment across entire corporate network.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive — Critical):</strong> Connector host iptables/nftables rule: <code>OUTPUT -d &lt;sap-app-ip&gt; -p tcp --dport 8080 -j ACCEPT; OUTPUT -j DROP</code> — all other outbound traffic dropped at OS level. The connector needs a route to the app host and port, nothing else.</li>
+<li><strong>Control 2 (Preventive):</strong> NSX-T distributed firewall microsegmentation — connector VLAN-to-VLAN traffic blocked except for explicitly defined app flows. AD domain controllers must be in a separate VLAN with no inbound access from connector VLAN.</li>
+<li><strong>Control 3 (Preventive):</strong> Connector deployed as a non-privileged service account (Linux: dedicated UID with no shell, no sudo; Windows: virtual service account with no local admin). RCE yields minimal OS privileges.</li>
+<li><strong>Control 4 (Detective):</strong> NSX-T flow log alert: <code>src = connector_vlan AND dst NOT IN [sap_app_host]</code> — any flow from connector VLAN to a non-app host is immediate critical IOC.</li>
+<li><strong>Control 5 (Detective):</strong> AD domain controller Windows Event Log: Event ID 4624 (logon) or 4768 (Kerberos TGT request) from connector subnet IP — connection originating from connector VLAN to DC is anomalous.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>NSX-T Distributed Firewall Logs:</strong> <code>DENY</code> log entries from connector VLAN to non-app VLANs — absence means microsegmentation gap exists.</li>
+<li><strong>AD DC Security Event Log:</strong> Event ID 4625 (failed logon) or 4776 (credential validation failure) from <code>src_ip</code> in connector VLAN IP range.</li>
+<li><strong>CrowdStrike Falcon EDR (on connector host):</strong> Process creation from service account UID spawning <code>nmap</code>, <code>ssh</code>, <code>python3</code>, <code>impacket</code> — immediate high-fidelity indicator.</li>
+<li><strong>ZTNA Connector Heartbeat:</strong> Connector stops sending heartbeats to broker — potential compromise indicator.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate connector host cannot reach AD domain controller (authorized lab — run on connector host)
+# Should fail if microsegmentation is correctly enforced
+nc -zv &lt;ad-dc-ip&gt; 445 -w 3
+# Expected: Connection refused or timed out — PASS
+nc -zv &lt;ad-dc-ip&gt; 389 -w 3
+# Expected: Connection refused or timed out — PASS (LDAP to DC must be blocked from connector)
+
+# Verify connector outbound iptables rules
+sudo iptables -L OUTPUT -n -v | grep -E &quot;ACCEPT|DROP&quot;
+# Expected: ACCEPT only for &lt;sap-app-ip&gt;:8080; everything else DROP
+</code></pre>
+<pre><code class="language-kql">// Detect lateral movement attempts from connector host to non-app subnets
+// Using NSX-T or Azure NSG flow logs
+AzureNetworkAnalytics_CL
+| where SubType_s == &quot;FlowLog&quot;
+| where SrcIP_s == &quot;&lt;connector-host-ip&gt;&quot;
+| where DstIP_s != &quot;&lt;sap-app-ip&gt;&quot;
+| where FlowDirection_s == &quot;O&quot;
+| where FlowStatus_s == &quot;A&quot; // Allowed flows — these should not exist
+| project TimeGenerated, SrcIP_s, DstIP_s, DestPort_d, Protocol_s
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[RCE obtained on connector host via CVE exploit]:::attack --> A2[Attacker enumerates reachable subnets from connector OS]:::attack
+    A2 --> C1{Connector host firewall limits outbound to app IP-port only?}:::control
+    C1 -->|Yes - iptables DROP all else| B1[No reachability to AD, SAP, or cloud GW - attack stalls]:::blocked
+    C1 -->|No - broad routes exist| A3[Attacker pivots to SAP and AD subnets via SMB and Kerberos]:::attack
+    A3 --> C2{NSX-T flow alert fires on connector-to-non-app traffic?}:::control
+    C2 -->|Yes - VLAN isolation triggered by SOAR| B2[Connector VLAN quarantined before DC reached]:::blocked
+    C2 -->|No - no flow alert| A4[AD domain controller compromised via impacket-psexec]:::attack
+    A4 --> C3{DC Security Event 4624 from connector VLAN IP triggers alert?}:::control
+    C3 -->|Yes - SOC response| B3[Incident declared - DC isolated]:::blocked
+    C3 -->|No - DC logs not monitored| A5[DCSync - all domain credentials extracted - total AD compromise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-device-certificate-extraction-and-replay">T10 — Device Certificate Extraction and Replay</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Extract a device certificate from a compromised managed endpoint and replay it from a non-compliant or attacker-controlled device to pass ZTNA device posture checks, impersonating an authorized managed device.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has OS-level access to a compromised managed endpoint (via malware, physical access, or insider). The device has a valid MDM-issued X.509 certificate stored in the Windows Certificate Store or macOS Keychain.</li>
+<li><strong>Initial action:</strong> On Windows, attacker uses <code>certutil -exportPFX</code> or accesses the certificate via <code>CertMgr.msc</code> if the private key is marked exportable. On macOS, Keychain access to the certificate if not hardware-bound. Alternative: if the MDM certificate is backed by TPM/Secure Enclave, direct extraction is infeasible — attacker must instead abuse the live enrolled device.</li>
+<li><strong>Core exploitation:</strong> Extracted PFX file (certificate + private key) imported into attacker's device. When ZTNA posture check requests a device certificate for authentication, attacker's device presents the stolen cert — ZTNA sees a valid MDM-issued certificate and considers the device "trusted."</li>
+<li><strong>Escalation:</strong> Attacker bypasses device posture tier restrictions, gaining access to applications restricted to managed devices (e.g., SAP ERP inaccessible from BYOD but accessible from managed device certificate holder).</li>
+<li><strong>Impact realization:</strong> Attacker's non-managed device accesses high-sensitivity applications that ZTNA should only allow from managed endpoints.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Require device certificates to be stored in hardware TPM (TPM 2.0) or Apple Secure Enclave — mark private key as non-exportable and hardware-bound. Configure Intune enrollment profile: <code>SCEP certificate profile → Key storage provider: TPM KSP, only if TPM is present</code>.</li>
+<li><strong>Control 2 (Preventive):</strong> Short device certificate lifetime (90 days maximum, not 1 year) — reduces the replay window for any extracted certificate.</li>
+<li><strong>Control 3 (Preventive):</strong> OCSP stapling and short CRL validity (&lt; 4-hour freshness) — enables near-real-time device certificate revocation when a device is reported compromised.</li>
+<li><strong>Control 4 (Detective):</strong> Intune/JAMF device certificate issuance log vs ZTNA access log cross-correlation — if <code>device_cert_serial</code> in ZTNA log appears from an IP address not associated with the enrolled device's known network location, alert.</li>
+<li><strong>Control 5 (Response):</strong> On device compromise report, immediately revoke device certificate via NDES/SCEP CA CRL update and push OCSP invalidation; ZTNA connector respects OCSP check and denies the revoked cert at next use.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>PKI OCSP Responder Logs:</strong> <code>cert_serial=&lt;X&gt;, status=REVOKED, requester_ip=&lt;Y&gt;</code> — ZTNA connector called OCSP for this cert and received REVOKED response; confirm ZTNA then denied the session.</li>
+<li><strong>Intune SCEP Certificate Log:</strong> Issuance event for <code>device_id=&lt;X&gt;, cert_serial=&lt;N&gt;</code> — cross-reference with ZTNA access logs to confirm <code>device_id=&lt;X&gt;</code> maps to expected IP range.</li>
+<li><strong>ZTNA Access Logs:</strong> <code>device_cert_serial</code> field — any cert serial that has been revoked (per CRL) appearing in an ALLOW decision = control gap.</li>
+<li><strong>Windows Security Event Log (on managed device):</strong> Event ID 4673 (sensitive privilege use) for certificate export operations using <code>certutil</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Verify that MDM device certificate private key is hardware-bound (non-exportable TPM key)
+# Run on managed Windows endpoint
+$certs = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -like &quot;*MDM*&quot; -or $_.Issuer -like &quot;*Intune*&quot; }
+foreach ($cert in $certs) {
+    $key = $cert.PrivateKey
+    if ($key) {
+        $providerName = $key.CspKeyContainerInfo.ProviderName
+        $isExportable = $key.CspKeyContainerInfo.Exportable
+        [PSCustomObject]@{
+            Subject     = $cert.Subject
+            Thumbprint  = $cert.Thumbprint
+            Provider    = $providerName
+            Exportable  = $isExportable
+        }
+    }
+}
+# Expected: Provider = &quot;Microsoft Platform Crypto Provider&quot; (TPM), Exportable = False
+</code></pre>
+<pre><code class="language-kql">// Detect ZTNA access using a device certificate serial that has been revoked
+// Assumes OCSP responder logs and ZTNA logs both in SIEM
+let revokedCerts = PKIOCSPLog
+  | where Status == &quot;REVOKED&quot;
+  | distinct CertSerial;
+ZscalerZPALogs
+| where DeviceCertSerial in (revokedCerts)
+| where Action == &quot;ALLOW&quot;
+| project TimeGenerated, UserName, DeviceCertSerial, Application, SrcIP
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Managed endpoint compromised - attacker has OS access]:::attack --> A2[Attempt to export MDM device certificate and private key]:::attack
+    A2 --> C1{Private key hardware-bound in TPM - non-exportable?}:::control
+    C1 -->|Yes - TPM prevents export| B1[Certificate extraction impossible - attack blocked at this step]:::blocked
+    C1 -->|No - software key storage| A3[Device cert exported as PFX - imported on attacker device]:::attack
+    A3 --> C2{ZTNA performs OCSP check on device cert at each session?}:::control
+    C2 -->|Yes - cert revoked promptly on compromise report| B2[OCSP returns REVOKED - attacker device denied by ZTNA]:::blocked
+    C2 -->|No - OCSP not enforced or stale CRL| A4[Attacker device passes posture check using stolen cert]:::attack
+    A4 --> C3{ZTNA cross-checks device cert serial against known device IPs?}:::control
+    C3 -->|Yes - cert serial from unexpected IP alerts| B3[Alert fires - attacker session flagged and revoked]:::blocked
+    C3 -->|No - no IP correlation| A5[Attacker accesses managed-device-only apps from non-compliant device]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-ztna-management-plane-credential-compromise">T11 — ZTNA Management Plane Credential Compromise</h3>
+<p><strong>STRIDE category:</strong> Tampering, Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Compromise ZTNA administrator console credentials to silently modify access policies, disable MFA enforcement, suppress audit logging, or add a persistent backdoor rule — while avoiding detection in the policy audit trail.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker identifies ZTNA admin console URL (Zscaler Admin Portal, BeyondCorp Enterprise console) via OSINT or from employee email signatures/LinkedIn. Credential harvested via phishing or credential stuffing against the admin's personal email reuse.</li>
+<li><strong>Initial action:</strong> Attacker authenticates to ZTNA admin console. If MFA is not enforced for the admin console (a common misconfiguration), password alone suffices.</li>
+<li><strong>Core exploitation:</strong> Attacker adds a new ZTNA policy rule: <code>source = ANY, destination = SAP_ERP, posture_check = DISABLED, priority = 1 (highest)</code>. This rule overrides all other rules and grants access to SAP ERP to any authenticated user from any device without posture check. The rule is named something innocuous like <code>"temp-admin-bypass-20240601"</code>.</li>
+<li><strong>Escalation:</strong> Attacker also navigates to the admin console's audit log settings and disables log export to SIEM (if the ZTNA product allows this — a product selection criterion). This suppresses evidence of the policy change from the centralized SIEM.</li>
+<li><strong>Impact realization:</strong> All authenticated users (including attacker with any compromised user credential) can now access SAP ERP from any device. SIEM cannot detect the attack because log streaming was disabled.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> ZTNA admin console SSO via IdP — admin console must use the same IdP with FIDO2 enforcement. No local admin accounts on the ZTNA console; all admin access via IdP SSO with FIDO2 hardware key.</li>
+<li><strong>Control 2 (Preventive):</strong> ZTNA audit log streaming must be write-only from the ZTNA platform's perspective — configure log streaming target (SIEM/log management) to use a write-only API key. The ZTNA admin console cannot disable or modify log streaming configuration without a separate privileged action requiring a second admin's approval.</li>
+<li><strong>Control 3 (Detective):</strong> ZTNA management audit log monitored by SIEM with a real-time alert on any policy rule modification — rule: <code>ztna_audit: change_type = [rule_add, rule_modify, rule_delete] within 2 minutes → PagerDuty</code>.</li>
+<li><strong>Control 4 (Detective):</strong> Out-of-band verification: SIEM compares ZTNA policy rule count and content hash every 15 minutes against Git-committed baseline. Drift from baseline = immediate alert.</li>
+<li><strong>Control 5 (Response):</strong> GitOps rollback — Terraform <code>plan</code> and <code>apply</code> from last known good Git commit reverts ZTNA policy to baseline within 5 minutes. SOAR triggers rollback automatically on policy drift detection.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>ZTNA Management Audit Log:</strong> <code>actor, event_type = rule_add, rule_priority = 1, rule_source = ANY</code> — highest-priority catch-all rule is always suspicious.</li>
+<li><strong>SIEM Heartbeat Monitor:</strong> ZTNA log stream health check — if SIEM stops receiving ZTNA logs (gap &gt; 5 minutes during business hours), alert immediately regardless of cause.</li>
+<li><strong>Git Policy Baseline Diff:</strong> Terraform state drift detection — <code>terraform plan</code> output showing unmanaged changes indicates out-of-band console modification.</li>
+<li><strong>IdP Admin Audit Log:</strong> ZTNA admin console SSO login events — admin login outside business hours or from new geography triggers step-up.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that ZTNA admin console requires FIDO2 via IdP SSO (read-only check of Conditional Access)
+Connect-MgGraph -Scopes &quot;Policy.Read.All&quot;
+Get-MgIdentityConditionalAccessPolicy |
+  Where-Object { $_.Conditions.Applications.IncludeApplications -contains &quot;&lt;ztna-admin-app-id&gt;&quot; } |
+  Select-Object DisplayName,
+    @{N=&quot;GrantStrength&quot;;E={$_.GrantControls.AuthenticationStrength.DisplayName}},
+    @{N=&quot;MFARequired&quot;;E={$_.GrantControls.BuiltInControls}}
+# Expected: GrantStrength = &quot;Phishing-resistant MFA&quot; or BuiltInControls includes &quot;mfa&quot;
+</code></pre>
+<pre><code class="language-kql">// Detect ZTNA policy rules added outside of change management window or by non-service-account actors
+ZTNAManagementAuditLog
+| where EventType in (&quot;rule_add&quot;, &quot;rule_modify&quot;, &quot;rule_delete&quot;, &quot;logging_config_change&quot;)
+| where Actor !in (&quot;&lt;terraform-service-account&gt;&quot;, &quot;&lt;approved-ztna-admin-1&gt;&quot;)
+| project TimeGenerated, Actor, EventType, PolicyName, RuleDetails, SourceIP
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[ZTNA admin credentials compromised via phishing]:::attack --> A2[Attacker logs into ZTNA admin console]:::attack
+    A2 --> C1{Admin console requires FIDO2 via IdP SSO?}:::control
+    C1 -->|Yes - FIDO2 required| B1[Phished password useless without FIDO2 hardware key]:::blocked
+    C1 -->|No - password only MFA| A3[Attacker gains admin console access]:::attack
+    A3 --> A4[Adds wildcard bypass rule - disables log streaming to SIEM]:::attack
+    A4 --> C2{SIEM detects log stream gap within 5 min?}:::control
+    C2 -->|Yes - SIEM heartbeat alert| B2[SOC investigates - admin session revoked - logs restored]:::blocked
+    C2 -->|No - no heartbeat monitor| A5[Policy change hidden - all users access SAP without posture check]:::attack
+    A5 --> C3{Git policy drift detection fires within 15 min?}:::control
+    C3 -->|Yes - Terraform rollback triggered| B3[Policy reverted to baseline - backdoor rule removed]:::blocked
+    C3 -->|No - no GitOps baseline| A6[Persistent backdoor rule - ongoing unauthorized SAP access]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-byod-posture-drop-not-detected-mid-session">T12 — BYOD Posture Drop Not Detected Mid-Session</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit the gap between ZTNA posture check frequency to maintain an active session on a device that has become non-compliant or infected after session establishment, bypassing the device trust guarantee.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker delivers malware to a BYOD device. The malware executes after the user has already established an authenticated ZTNA session that passed the initial posture check.</li>
+<li><strong>Initial action:</strong> Malware disables or tampers with the MDM compliance agent (e.g., kills the Zscaler Client Connector process, removes the Intune MAM enrollment, or modifies the compliance evaluation registry key to return "compliant").</li>
+<li><strong>Core exploitation:</strong> If ZTNA posture is only checked at session start, the ZTNA broker continues to consider the device compliant for the entire session duration (up to 8 hours). The malware can exfiltrate data through the active ZTNA tunnel using the same TLS session that was legitimately established.</li>
+<li><strong>Escalation:</strong> The infected BYOD device now acts as a C2 relay — attacker's C2 server communicates through the ZTNA tunnel to internal applications. Because the session is already authenticated, ZTNA policy allows the traffic.</li>
+<li><strong>Impact realization:</strong> Exfiltration of data from ZTNA-protected applications through a legitimate-looking ZTNA session. Internal applications receive malicious traffic from what appears to be a compliant managed device.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Configure ZTNA continuous posture re-evaluation — Zscaler ZPA supports posture re-check at 30-minute intervals via the Zscaler Client Connector (ZCC) agent health check. Policy: session remains active only while ZCC reports compliant.</li>
+<li><strong>Control 2 (Preventive):</strong> MDM compliance check triggered by EDR alert — CrowdStrike Falcon detects malware → signals Intune via Microsoft Defender for Endpoint API → Intune marks device non-compliant → ZTNA policy re-evaluates → session drops.</li>
+<li><strong>Control 3 (Detective):</strong> MDM compliance state change log (Intune Audit Log): <code>compliance_state = NON_COMPLIANT</code> for <code>device_id = X</code> while <code>device_id = X</code> has active ZTNA session → alert and auto-revoke.</li>
+<li><strong>Control 4 (Detective):</strong> ZTNA UEBA — sudden spike in bytes_transferred from a BYOD device during off-hours, or data transfer to applications outside the user's normal access pattern, triggers anomaly alert.</li>
+<li><strong>Control 5 (Response):</strong> SOAR playbook: MDM non-compliance event for active ZTNA session → call Zscaler ZPA API to revoke user session → push MDM remediation command → notify user.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Intune Audit Logs:</strong> <code>DeviceComplianceStatus</code> change event: <code>old_state = COMPLIANT, new_state = NON_COMPLIANT, device_id = &lt;X&gt;</code> with timestamp.</li>
+<li><strong>ZTNA Access Logs:</strong> Active session for <code>device_id = &lt;X&gt;</code> continuing after MDM non-compliance event — this should not occur if continuous posture is enabled.</li>
+<li><strong>CrowdStrike Falcon:</strong> Detection of MDM agent process being killed or tampered: <code>ProcessName = zdaemon OR IntuneManagementExtension.exe, EventType = ProcessTerminate, Initiator != SYSTEM</code>.</li>
+<li><strong>SOAR Execution Log:</strong> <code>SessionRevoke</code> action for <code>device_id = &lt;X&gt;</code> triggered by MDM non-compliance event — confirm action executed within 10 minutes.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Validate that Intune marks device non-compliant when MDM agent is killed (authorized lab test)
+# 1. Kill ZCC agent on test device
+Stop-Process -Name &quot;ZSATray&quot; -Force  # Zscaler Client Connector
+# 2. Wait 30 minutes (or force Intune sync)
+Invoke-WebRequest -Uri &quot;https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/&lt;device-id&gt;/syncDevice&quot; `
+  -Method POST -Headers @{Authorization=&quot;Bearer &lt;access-token&gt;&quot;}
+# 3. Check compliance state
+Get-MgDeviceManagementManagedDevice -ManagedDeviceId &quot;&lt;device-id&gt;&quot; |
+  Select-Object ComplianceState, LastSyncDateTime
+# Expected: ComplianceState changes to nonCompliant after ZCC is killed
+</code></pre>
+<pre><code class="language-kql">// Detect active ZTNA sessions from devices that became non-compliant
+let nonCompliantEvents = IntuneAuditLogs
+  | where OperationName == &quot;DeviceComplianceStatusChange&quot;
+  | where Properties has &quot;NonCompliant&quot;
+  | extend DeviceId = tostring(parse_json(Properties).DeviceId)
+  | project NonCompliantTime = TimeGenerated, DeviceId;
+ZscalerZPALogs
+| join kind=inner nonCompliantEvents on $left.DeviceId == $right.DeviceId
+| where TimeGenerated &gt; NonCompliantTime
+| where Action == &quot;ALLOW&quot;
+| project TimeGenerated, UserName, DeviceId, Application, NonCompliantTime, SrcIP
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Malware delivered to BYOD device after ZTNA session established]:::attack --> A2[Malware kills MDM compliance agent - device becomes non-compliant]:::attack
+    A2 --> C1{ZTNA performs continuous posture re-check every 30 min?}:::control
+    C1 -->|Yes - non-compliance detected at next check| B1[ZTNA session revoked - attacker loses tunnel access]:::blocked
+    C1 -->|No - posture only at session start| A3[ZTNA session continues despite non-compliance]:::attack
+    A3 --> C2{EDR detects malware and signals MDM within 5 min?}:::control
+    C2 -->|Yes - MDM marks non-compliant - ZTNA drops session| B2[Session evicted - malware C2 tunnel broken]:::blocked
+    C2 -->|No - EDR not on BYOD| A4[Malware exfiltrates data through active ZTNA tunnel]:::attack
+    A4 --> C3{UEBA detects abnormal data volume from BYOD?}:::control
+    C3 -->|Yes - exfil alert fires| B3[Session throttled or revoked - IR investigates]:::blocked
+    C3 -->|No - no UEBA baseline| A5[Silent exfiltration via legitimate ZTNA session for hours]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t13-impossible-travel-not-correlated-geo-hop-in-stolen-token">T13 — Impossible Travel Not Correlated (Geo Hop in Stolen Token)</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use a stolen token or session cookie from a geographically distant IP without triggering impossible travel detection, because the SIEM does not correlate IdP authentication geo with ZTNA access geo in real time.</p>
+<h4 id="how-the-attacker-would-exploit-it_12">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> Attacker has stolen a valid ZTNA session token or IdP cookie via T2 (AiTM) or T4 (info-stealer). The attacker is operating from a VPS in a country different from the victim's home location.</li>
+<li><strong>Initial action:</strong> Attacker connects a VPS in, say, Romania to the ZTNA broker using the stolen session token. The victim user is simultaneously connected from their home location (US East Coast).</li>
+<li><strong>Core exploitation:</strong> If the SIEM only monitors IdP authentication logs but not ZTNA access logs, or if IdP geo and ZTNA access geo are not correlated in a single rule, the impossible travel condition (same session from US and Romania within 30 minutes) goes undetected. The ZTNA broker issues an access token based on the valid (but stolen) session.</li>
+<li><strong>Escalation:</strong> Attacker accesses SAP ERP, downloads financial reports, or exfiltrates customer data through the ZTNA tunnel. The victim user may notice an unusual slowdown but not immediately report it.</li>
+<li><strong>Impact realization:</strong> Undetected data exfiltration; forensic investigation only begins when downstream data appears on dark web or when the victim notices unauthorized access in their application history.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_12">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Detective):</strong> SIEM impossible travel rule correlating <strong>both</strong> IdP sign-in logs (geo_1 = user authentication location) <strong>and</strong> ZTNA access logs (geo_2 = access request location) within the same 60-minute window. Chronicle/Splunk ES rule: <code>user A has IdP auth from geo_1 AND ZTNA access from geo_2 where great_circle_distance(geo_1, geo_2) &gt; 500km within 60min</code>.</li>
+<li><strong>Control 2 (Detective):</strong> ZTNA platform's built-in impossible travel feature (Zscaler Advanced Threat Protection or Okta ThreatInsight) — enable and tune to fire on &gt; 200km/hour impossible speed.</li>
+<li><strong>Control 3 (Preventive):</strong> IdP IP-based conditional access restricting access to expected geolocations — block authentications from known VPS/data-center ASNs (e.g., Hetzner, OVH, Vultr) unless user is on approved travel list.</li>
+<li><strong>Control 4 (Detective):</strong> Threat intelligence feed enrichment of ZTNA and IdP access logs — tag source IPs from known VPS/bulletproof hosting ASNs automatically; alert on any successful auth from these ranges.</li>
+<li><strong>Control 5 (Response):</strong> Auto-revoke on impossible travel alert (SOAR playbook) — revoke IdP session within 5 minutes; require full FIDO2 re-authentication; page security analyst.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_12">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Chronicle UDM / Splunk ES:</strong> Impossible travel rule — <code>rule_name = ZTNA_IMPOSSIBLE_TRAVEL, event_count, user, geo_1, geo_2, distance_km, time_delta_min</code> — confirm rule is deployed and has fired at least once in test/red-team exercises.</li>
+<li><strong>Okta System Log / Azure AD Sign-In Log:</strong> <code>RiskEventType = impossibleTravel</code> or <code>RiskDetail = unfamiliarFeatures</code> — confirm IdP's own risk engine is enabled and generating events.</li>
+<li><strong>Threat Intel Enrichment Log:</strong> <code>src_ip enriched with asn_org = Hetzner/OVH/Vultr AND access_result = ALLOW</code> — these should trigger immediate review.</li>
+<li><strong>SOAR Execution Log:</strong> Session revocation action count per month — baseline expected volume; spikes indicate active threat.</li>
+</ul>
+<h4 id="purple-team-validation-commands_12">Purple-team validation commands</h4>
+<pre><code class="language-kql">// Impossible travel detection — correlate IdP auth geo with ZTNA access geo
+let idpAuths = SigninLogs
+  | where ResultType == 0
+  | project AuthTime = TimeGenerated, UserPrincipalName,
+      AuthIP = IPAddress, AuthCountry = LocationDetails.countryOrRegion;
+let ztnaAccess = ZscalerZPALogs
+  | project AccessTime = TimeGenerated, UserName,
+      AccessIP = SrcIP, AccessCountry = GeoCountry;
+idpAuths
+| join kind=inner ztnaAccess on $left.UserPrincipalName == $right.UserName
+| where abs(datetime_diff('minute', AuthTime, AccessTime)) &lt; 60
+| where AuthCountry != AccessCountry
+| extend DistanceIndicator = strcat(AuthCountry, &quot; -&gt; &quot;, AccessCountry)
+| project AuthTime, AccessTime, UserPrincipalName, AuthIP, AccessIP, DistanceIndicator
+| order by AuthTime desc
+</code></pre>
+<pre><code class="language-powershell"># Validate Okta ThreatInsight impossible travel detection is enabled
+Connect-OktaAPI -OktaUrl &quot;https://&lt;tenant&gt;.okta.com&quot; -ApiToken &quot;&lt;read-only-api-token&gt;&quot;
+Invoke-RestMethod -Uri &quot;https://&lt;tenant&gt;.okta.com/api/v1/threats/configuration&quot; `
+  -Headers @{&quot;Authorization&quot;=&quot;SSWS &lt;read-only-api-token&gt;&quot;; &quot;Content-Type&quot;=&quot;application/json&quot;} |
+  Select-Object action, excludeZones
+# Expected: action = &quot;block&quot; or &quot;audit&quot;, excludeZones empty or only known corporate ranges
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_12">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker replays stolen ZTNA token from foreign VPS]:::attack --> C1{ZTNA access geo cross-correlated with IdP auth geo in SIEM?}:::control
+    C1 -->|Yes - impossible travel rule fires| B1[Session revoked within 5 minutes - attacker evicted]:::blocked
+    C1 -->|No - logs not correlated| A2[ZTNA session accepted from foreign country]:::attack
+    A2 --> C2{Threat intel tags VPS ASN as known hosting range?}:::control
+    C2 -->|Yes - ASN-based block or alert| B2[Alert fires - attacker IP flagged and blocked]:::blocked
+    C2 -->|No - ASN not in threat intel| A3[Attacker browses ZTNA-protected apps undetected]:::attack
+    A3 --> C3{UEBA detects abnormal access pattern from new country?}:::control
+    C3 -->|Yes - UEBA alert on new geo| B3[Analyst investigates - session terminated]:::blocked
+    C3 -->|No - no UEBA geo baseline| A4[Silent data exfiltration from SAP or internal SaaS apps]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t14-dns-rebinding-via-ztna-tunnel-to-internal-services">T14 — DNS Rebinding via ZTNA Tunnel to Internal Services</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Low likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Use a DNS rebinding attack to redirect ZTNA-tunneled browser traffic from an attacker-controlled web page to internal non-ZTNA-protected services, bypassing application-layer access controls.</p>
+<h4 id="how-the-attacker-would-exploit-it_13">How the attacker would exploit it</h4>
+<ul>
+<li><strong>Prerequisite:</strong> User has an active ZTNA session from a browser. User visits an attacker-controlled web page (via phishing or malvertising). ZTNA split-tunnel configuration allows the browser to resolve both internal and external DNS.</li>
+<li><strong>Initial action:</strong> Attacker's malicious web page registers a DNS name (e.g., <code>attack.example.com</code>) with a very short TTL (1 second). Initial DNS response returns a public IP (passing browser Same-Origin Policy checks). After the TTL expires, the DNS record is changed to an internal IP address (e.g., <code>10.10.5.10</code> — the SAP ERP host).</li>
+<li><strong>Core exploitation:</strong> Browser's subsequent requests to <code>attack.example.com</code> now resolve to the internal SAP ERP IP. Since the browser makes the request from the user's device (which has ZTNA tunnel active), and the ZTNA connector proxies all internal traffic, the request reaches SAP ERP as if originating from an authorized ZTNA session.</li>
+<li><strong>Escalation:</strong> Attacker's JavaScript running in the browser makes API calls to <code>attack.example.com</code>, which now routes to SAP ERP's internal API — reading financial data, querying the database, or triggering operations.</li>
+<li><strong>Impact realization:</strong> Unauthorized access to internal services that ZTNA was supposed to protect, via browser-side DNS manipulation.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_13">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li><strong>Control 1 (Preventive):</strong> Configure ZTNA with full-tunnel DNS (all DNS queries through ZTNA broker) rather than split-tunnel DNS — prevents browser from receiving DNS responses pointing to internal IPs for external domains.</li>
+<li><strong>Control 2 (Preventive):</strong> ZTNA policy scoping: the ZTNA connector should only proxy requests for explicitly listed application hostnames/IPs. Wildcard or subnet-based ZTNA rules enable DNS rebinding; named-application rules (specific FQDN per app) do not.</li>
+<li><strong>Control 3 (Preventive):</strong> Enterprise DNS resolver (Infoblox, Cisco Umbrella) filtering — block DNS responses where public domain resolves to RFC 1918 private IP address (DNS rebinding defense built into modern resolvers).</li>
+<li><strong>Control 4 (Detective):</strong> DNS query logs (Umbrella/Infoblox) — alert on any external FQDN resolving to a private RFC 1918 IP address within corporate DNS infrastructure.</li>
+<li><strong>Control 5 (Detective):</strong> ZTNA access logs — requests to named applications arriving via unexpected source FQDNs (domain mismatch between expected app hostname and request Host header) should alert.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_13">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><strong>Cisco Umbrella DNS Logs:</strong> <code>query_type = A, response_ip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) AND query_domain NOT IN internal_domains_allowlist</code> — DNS rebinding defense rule firing.</li>
+<li><strong>ZTNA Access Logs:</strong> HTTP <code>Host</code> header in ZTNA-proxied request does not match the configured application FQDN — indicates DNS manipulation.</li>
+<li><strong>Enterprise DNS Resolver Logs:</strong> Short-TTL queries (&lt; 30 seconds) from workstation IPs for external domains followed by resolution changes — pattern consistent with rebinding setup.</li>
+<li><strong>Browser Security Policy:</strong> CSP headers on internal applications — <code>Content-Security-Policy: default-src 'self'</code> prevents cross-origin JS from exfiltrating data even after rebinding.</li>
+</ul>
+<h4 id="purple-team-validation-commands_13">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate that DNS resolver blocks RFC1918 responses for external domains (authorized lab test)
+# Configure test DNS entry on internal resolver: external-test.attacker.lab -&gt; 10.10.5.10
+# Attempt resolution from corporate workstation — should be blocked
+nslookup external-test.attacker.lab &lt;corporate-dns-resolver-ip&gt;
+# Expected: NXDOMAIN or REFUSED — RFC1918 response filtering blocks the rebinding attempt
+# If actual 10.x.x.x IP returned: FAIL — DNS rebinding defense not active
+</code></pre>
+<pre><code class="language-kql">// Detect DNS rebinding attempts — external domain resolving to private IP
+UmbrellaQueryLog
+| where DnsResponseCode == &quot;NOERROR&quot;
+| where isnotempty(ResolvedIp)
+| where ipv4_is_private(ResolvedIp) == true
+| where DomainName !endswith &quot;.internal.&lt;corp-domain&gt;&quot;
+| where DomainName !endswith &quot;.corp.&lt;corp-domain&gt;&quot;
+| project TimeGenerated, ClientIp, DomainName, ResolvedIp, QueryType
+| order by TimeGenerated desc
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_13">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Attacker serves malicious page with DNS rebinding payload]:::attack --> A2[Browser resolves attacker domain - initially public IP]:::attack
+    A2 --> C1{Full-tunnel DNS via ZTNA broker enforced?}:::control
+    C1 -->|Yes - all DNS through broker| B1[Broker-resolved DNS cannot return internal IPs for external domains]:::blocked
+    C1 -->|No - split-tunnel DNS| A3[After TTL expiry - DNS rebinds to internal app IP]:::attack
+    A3 --> C2{Enterprise DNS resolver blocks RFC1918 responses for external domains?}:::control
+    C2 -->|Yes - Umbrella blocks rebind response| B2[Resolution fails - rebinding attempt defeated]:::blocked
+    C2 -->|No - no rebind protection on resolver| A4[Browser JS makes requests to internal SAP IP via rebind]:::attack
+    A4 --> C3{ZTNA policy scoped to named app FQDN only - wildcard disabled?}:::control
+    C3 -->|Yes - Host header mismatch rejected| B3[ZTNA connector rejects request - internal app not reached]:::blocked
+    C3 -->|No - wildcard subnet rule| A5[Browser-side JS reads internal app data - exfiltrates via attacker domain]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Run <code>Get-MgUserAuthenticationMethod</code> on all IdP admins; check FIDO2 registered for all. Attempt phish simulation via KnowBe4 — verify FIDO2 users do not fall.</td>
+<td>All high-risk users show FIDO2 method registered; no simulated phish delivers credentials</td>
+<td>Users found with only TOTP/SMS; phish simulation delivers credentials for non-FIDO2 users</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Query Conditional Access policies for ZTNA app — confirm <code>authenticationStrength = PhishingResistantMFA</code>. Check CAE is enabled.</td>
+<td>Policy shows phishing-resistant MFA enforced; CAE audit log shows <code>MigrateToMicrosoft = true</code></td>
+<td>Policy shows only <code>mfa</code> (any MFA) or no requirement; CAE disabled</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>From connector host in lab, attempt <code>nc -zv &lt;ad-dc-ip&gt; 445</code>; verify blocked. Check <code>iptables -L OUTPUT</code>.</td>
+<td>Connection timed out/refused; OUTPUT chain shows DROP-all except app IP:port</td>
+<td>Connection succeeds; OUTPUT chain shows broad ACCEPT rules</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Deploy CrowdStrike Falcon on BYOD device; simulate browser cookie access by non-browser process; verify detection fires.</td>
+<td>Falcon <code>CredentialTheft</code> detection event generated within 2 minutes</td>
+<td>No detection; MDM enrollment not required for ZTNA access</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Attempt to add wildcard rule <code>source=*</code> via ZTNA admin console in lab; verify OPA lint rejects it in CI.</td>
+<td>OPA lint fails PR; SIEM alert fires on wildcard rule addition; GitOps blocks deployment</td>
+<td>Rule accepted; no alert; policy deployed with wildcard</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Run <code>Get-MgDirectoryRoleMember</code> for Global Admin; verify all have FIDO2. Check PIM activation policy requires approval.</td>
+<td>All GAs have FIDO2; PIM shows approval required + 4-hour max duration</td>
+<td>GA found with only password+TOTP; PIM not enabled (standing admin)</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>In lab, capture a ZTNA session token; replay from second IP; verify SIEM alert fires within 5 minutes.</td>
+<td><code>ZTNA_TOKEN_MULTIIP_REPLAY</code> alert in SIEM; SOAR auto-revocation executes</td>
+<td>No alert; token accepted from second IP without challenge</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Compute SHA-256 of deployed connector binary; compare to vendor-signed manifest hash.</td>
+<td>Hashes match; deployment pipeline enforces hash check before install</td>
+<td>Hash mismatch undetected; auto-update deploys without verification</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>From connector host in lab, attempt <code>nmap -sn &lt;ad-subnet&gt;</code>; verify NSX-T flow alert fires.</td>
+<td>NSX-T DENY logs for connector-to-non-app flows; SIEM alert fires; probe returns no hosts</td>
+<td>Nmap returns live hosts; no flow alert; broad subnet routes confirmed</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Export test device cert from non-TPM device (lab only); attempt ZTNA access with exported cert; verify OCSP revocation blocks it.</td>
+<td>ZTNA denies session after cert revoked; OCSP log shows <code>REVOKED</code> response</td>
+<td>ZTNA accepts revoked cert; OCSP not checked</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Add test wildcard rule via admin console in lab; verify SIEM alert fires in under 2 minutes; verify Git drift detection fires.</td>
+<td>SIEM alert within 2 minutes; Terraform plan shows drift; rollback executes</td>
+<td>No alert within 5 minutes; drift not detected; rule persists</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Kill ZCC agent on test BYOD device; wait for Intune compliance state change; verify ZTNA session drops within 30 minutes.</td>
+<td>Session drops after compliance state changes to <code>NON_COMPLIANT</code>; SOAR revocation logged</td>
+<td>Session continues after ZCC kill; posture not re-evaluated</td>
+</tr>
+<tr>
+<td>T13</td>
+<td>In lab, authenticate user from geo_1 (US); replay session from geo_2 (EU VPS); verify SIEM impossible travel alert fires.</td>
+<td>Impossible travel alert fires within 5 minutes; session revoked</td>
+<td>No alert; session accepted from both geos simultaneously</td>
+</tr>
+<tr>
+<td>T14</td>
+<td>Configure test DNS entry mapping external domain to internal RFC1918 IP; verify DNS resolver blocks or ZTNA rejects request.</td>
+<td>DNS resolver returns NXDOMAIN for rebind attempt; or ZTNA Host header mismatch rejects request</td>
+<td>DNS resolution succeeds with internal IP; ZTNA proxies request to internal app</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity and authentication</td>
+<td>T1, T2, T6, T7, T13</td>
+<td>BYOD users transitioning to FIDO2 remain vulnerable to T1/T2 during rollout period</td>
+</tr>
+<tr>
+<td>Network segmentation and access control</td>
+<td>T3, T9, T14</td>
+<td>Connector microsegmentation requires per-connector host-firewall configuration — operational discipline gap</td>
+</tr>
+<tr>
+<td>Endpoint and workload protection</td>
+<td>T4, T12</td>
+<td>BYOD without EDR enrollment remains vulnerable; info-stealer on unenrolled BYOD undetected</td>
+</tr>
+<tr>
+<td>Logging, detection, and SIEM</td>
+<td>T7, T13, T11</td>
+<td>ZTNA + IdP geo correlation must be explicitly built; not available out-of-box in most SIEMs</td>
+</tr>
+<tr>
+<td>Incident response and containment</td>
+<td>T1, T2, T3, T6, T7, T12</td>
+<td>SOAR playbooks for each threat must be built and tested; MTTD targets require tuning</td>
+</tr>
+<tr>
+<td>Secrets and cryptographic material protection</td>
+<td>T8, T10</td>
+<td>TPM-backed device certs not universally available on older BYOD hardware</td>
+</tr>
+<tr>
+<td>Supply chain and third-party risk</td>
+<td>T8</td>
+<td>Vendor SOC 2 and SBOM review is annual — too slow for supply chain attack detection; no real-time binary integrity check on vendor side</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<blockquote>
+<p>Ordered by risk reduction per implementation effort.</p>
+</blockquote>
+<ol>
+<li>
+<p><strong>Enforce FIDO2/WebAuthn hardware keys for all users accessing high-sensitivity apps (SAP, cloud management consoles)</strong> — closes T1, T2, T6. Implementation: Azure AD Conditional Access → Authentication Strength → <code>Phishing-resistant MFA</code> → apply to <code>SAP_ERP_AppID</code> and <code>ZTNA_Admin_Console_AppID</code>. Roll out YubiKey 5 NFC to all employees via IT asset program; target 100% coverage within 90 days.</p>
+</li>
+<li>
+<p><strong>Implement per-application connector microsegmentation with host-based iptables/nftables rules</strong> — closes T3, T9. Implementation: for each ZTNA connector, configure <code>iptables OUTPUT -d &lt;app-ip&gt; -p tcp --dport &lt;app-port&gt; -j ACCEPT; OUTPUT -j DROP</code>. Complement with NSX-T distributed firewall rules at VLAN boundary. This single change reduces the blast radius of a connector compromise from full internal network access to a single application host.</p>
+</li>
+<li>
+<p><strong>Deploy SIEM impossible travel correlation rule (IdP geo + ZTNA access geo) and session-token multi-IP replay detection</strong> — closes T13, T7. Implementation: Chronicle/Splunk ES rule <code>ZTNA_IMPOSSIBLE_TRAVEL</code> correlating <code>SigninLogs.Location</code> with <code>ZscalerZPALogs.GeoCountry</code> within 60-minute window; <code>ZTNA_TOKEN_MULTIIP_REPLAY</code> rule on same <code>session_id</code> from two <code>src_ip</code> within 10 minutes. Wire alerts to SOAR for automated session revocation.</p>
+</li>
+<li>
+<p><strong>Enable ZTNA continuous posture re-evaluation (30-minute interval) and MDM-to-ZTNA non-compliance signaling</strong> — closes T12, T4. Implementation: Zscaler ZPA → App Segment posture profile → set <code>re-evaluation interval = 30 minutes</code>; configure Microsoft Defender for Endpoint → Intune connector → Conditional Access compliance enforcement so that any Falcon detection marks device non-compliant and triggers ZTNA session revocation within 10 minutes.</p>
+</li>
+<li>
+<p><strong>Implement ZTNA policy as code with OPA rego-lint in CI/CD and GitOps rollback</strong> — closes T5, T11. Implementation: Terraform Zscaler provider to manage all ZPA app segments, policies, and posture profiles; OPA rego policy library enforcing <code>deny if source == "*"</code> and <code>deny if posture_profile == "none"</code>; Atlantis or GitHub Actions CD pipeline applies Terraform only after OPA lint passes and two-engineer approval; <code>terraform plan</code> drift detection runs every 15 minutes and alerts on unmanaged state changes.</p>
+</li>
+</ol>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

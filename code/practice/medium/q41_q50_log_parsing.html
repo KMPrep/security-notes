@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q41_q50_log_parsing.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q41_q50_log_parsing.py</h1>
+  <p class="file-path">Source: code\practice\medium\q41_q50_log_parsing.py</p>
+  <p class="line-count">790 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q41–Q50
+Topic: Log Parsing — Apache / NGINX / CloudTrail / AWS Security Events
+&quot;&quot;&quot;
+
+from collections import Counter, defaultdict
+from typing import List, Dict, Optional, Set
+import re
+import json
+from datetime import datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q41 — Parse Apache Access Logs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse Apache Combined Log Format lines into structured dicts.
+  Format: 127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] &quot;GET /apache HTTP/1.1&quot; 200 2326
+
+Clarifying questions:
+  1. Are log lines guaranteed to be in Combined Log Format, or may they vary?
+  2. Should malformed lines be skipped silently or raise an error?
+  3. Is the referrer/agent field needed for the use case?
+
+Security angle:
+  Parsing is the foundation for all web log analytics. Malformed lines can
+  indicate log injection attempts — an attacker inserting newlines into a
+  URL to inject fake log entries. A robust parser skips or flags unparseable
+  lines rather than crashing.
+&quot;&quot;&quot;
+
+APACHE_LOG_RE = re.compile(
+    r&#x27;(?P&lt;src_ip&gt;\S+)&#x27;           # remote host
+    r&#x27;\s+\S+&#x27;                    # ident (usually -)
+    r&#x27;\s+(?P&lt;user&gt;\S+)&#x27;          # auth user
+    r&#x27;\s+\[(?P&lt;ts&gt;[^\]]+)\]&#x27;     # timestamp [dd/Mon/yyyy:HH:MM:SS ±HHMM]
+    r&#x27;\s+&quot;(?P&lt;request&gt;[^&quot;]*)&quot;&#x27;   # request line
+    r&#x27;\s+(?P&lt;status&gt;\d+)&#x27;        # status code
+    r&#x27;\s+(?P&lt;bytes&gt;\S+)&#x27;         # bytes sent (- if none)
+    r&#x27;(?:\s+&quot;(?P&lt;referrer&gt;[^&quot;]*)&quot;)?&#x27; # optional referrer
+    r&#x27;(?:\s+&quot;(?P&lt;ua&gt;[^&quot;]*)&quot;)?&#x27;   # optional user agent
+)
+
+
+def parse_apache_log_naive(line: str) -&gt; Optional[Dict]:
+    &quot;&quot;&quot;Simple regex match and split.&quot;&quot;&quot;
+    m = APACHE_LOG_RE.match(line)
+    if not m:
+        return None
+    d = m.groupdict()
+    d[&quot;status&quot;] = int(d[&quot;status&quot;])
+    d[&quot;bytes&quot;] = int(d[&quot;bytes&quot;]) if d[&quot;bytes&quot;] != &quot;-&quot; else 0
+    return d
+
+
+def parse_apache_logs(lines: List[str]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: compile regex once (done at module level), parse all lines,
+    silently skip malformed entries.
+    O(n) time where n = number of lines.
+    &quot;&quot;&quot;
+    records = []
+    for line in lines:
+        m = APACHE_LOG_RE.match(line.strip())
+        if not m:
+            continue
+        d = m.groupdict()
+        d[&quot;status&quot;] = int(d[&quot;status&quot;])
+        d[&quot;bytes&quot;] = int(d[&quot;bytes&quot;]) if d[&quot;bytes&quot;] != &quot;-&quot; else 0
+        # Split request into method, path, protocol
+        parts = d[&quot;request&quot;].split(&quot; &quot;)
+        d[&quot;method&quot;] = parts[0] if len(parts) &gt;= 1 else &quot;&quot;
+        d[&quot;path&quot;]   = parts[1] if len(parts) &gt;= 2 else &quot;&quot;
+        records.append(d)
+    return records
+
+
+def test_q41():
+    lines = [
+        &#x27;127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] &quot;GET /apache_pb.gif HTTP/1.1&quot; 200 2326&#x27;,
+        &#x27;10.0.0.1 - - [11/Oct/2000:09:12:00 +0000] &quot;POST /login HTTP/1.1&quot; 401 512 &quot;-&quot; &quot;Mozilla/5.0&quot;&#x27;,
+        &quot;this is a malformed line&quot;,
+    ]
+    records = parse_apache_logs(lines)
+    assert len(records) == 2
+    assert records[0][&quot;src_ip&quot;] == &quot;127.0.0.1&quot;
+    assert records[0][&quot;method&quot;] == &quot;GET&quot;
+    assert records[0][&quot;status&quot;] == 200
+    assert records[1][&quot;status&quot;] == 401
+    assert records[1][&quot;method&quot;] == &quot;POST&quot;
+    print(&quot;Q41 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q42 — Parse NGINX Logs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse NGINX default log format lines. NGINX default format:
+  $remote_addr - $remote_user [$time_local] &quot;$request&quot; $status $body_bytes_sent
+  &quot;$http_referer&quot; &quot;$http_user_agent&quot;
+
+Clarifying questions:
+  1. Is the log format the default NGINX format or a custom one?
+  2. Should we parse combined (with referrer/UA) or main format only?
+  3. Should the request line be broken into method/path/protocol?
+
+Security angle:
+  Same as Apache — parsing is foundational. NGINX logs can also carry
+  real user IPs if X-Forwarded-For is configured via $proxy_add_x_forwarded_for.
+  Injected newlines in URLs can corrupt log files — parsers should handle
+  unexpected tokens gracefully.
+&quot;&quot;&quot;
+
+# NGINX default format is identical in structure to Apache Combined Log Format
+NGINX_LOG_RE = APACHE_LOG_RE   # Reuse the same regex
+
+
+def parse_nginx_logs(lines: List[str]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: reuse the same compiled regex as Apache — both formats are
+    structurally identical in their common configuration.
+    O(n) time.
+    &quot;&quot;&quot;
+    records = []
+    for line in lines:
+        m = NGINX_LOG_RE.match(line.strip())
+        if not m:
+            continue
+        d = m.groupdict()
+        d[&quot;status&quot;] = int(d[&quot;status&quot;])
+        d[&quot;bytes&quot;] = int(d[&quot;bytes&quot;]) if d[&quot;bytes&quot;] != &quot;-&quot; else 0
+        parts = d[&quot;request&quot;].split(&quot; &quot;)
+        d[&quot;method&quot;] = parts[0] if len(parts) &gt;= 1 else &quot;&quot;
+        d[&quot;path&quot;]   = parts[1] if len(parts) &gt;= 2 else &quot;&quot;
+        records.append(d)
+    return records
+
+
+def test_q42():
+    lines = [
+        &#x27;192.168.1.5 - - [29/May/2026:08:00:01 +0000] &quot;GET /index.html HTTP/2.0&quot; 200 4096 &quot;-&quot; &quot;curl/7.85&quot;&#x27;,
+        &#x27;192.168.1.6 - - [29/May/2026:08:00:02 +0000] &quot;DELETE /admin HTTP/1.1&quot; 403 0 &quot;-&quot; &quot;sqlmap/1.7&quot;&#x27;,
+    ]
+    records = parse_nginx_logs(lines)
+    assert len(records) == 2
+    assert records[0][&quot;method&quot;] == &quot;GET&quot;
+    assert records[1][&quot;status&quot;] == 403
+    assert records[1][&quot;ua&quot;] == &quot;sqlmap/1.7&quot;
+    print(&quot;Q42 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q43 — Parse CloudTrail JSON Events
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  CloudTrail delivers JSON files with a top-level &quot;Records&quot; array.
+  Parse and return the list of event dicts with key fields: eventTime,
+  eventName, eventSource, userIdentity, sourceIPAddress, errorCode.
+
+Clarifying questions:
+  1. Are we processing a single JSON blob or a stream of JSON Lines?
+  2. Should nested fields (userIdentity.principalId) be flattened?
+  3. Are errors (errorCode present) worth flagging immediately?
+
+Security angle:
+  CloudTrail is the audit log for all AWS control-plane actions. Parsing it
+  correctly is the prerequisite for every AWS detection (Q44–Q50).
+  Key fields: errorCode (failed API calls), eventName (what happened),
+  userIdentity (who), sourceIPAddress (from where).
+&quot;&quot;&quot;
+
+
+def parse_cloudtrail_json(raw: str) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: parse JSON, extract &#x27;Records&#x27; list, normalise key fields.
+    Handles both single-record and multi-record responses.
+    O(n) time where n = number of records.
+    &quot;&quot;&quot;
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    records = data.get(&quot;Records&quot;, [])
+    if not isinstance(records, list):
+        return []
+
+    normalised = []
+    for rec in records:
+        normalised.append({
+            &quot;ts&quot;:           rec.get(&quot;eventTime&quot;),
+            &quot;event_name&quot;:  rec.get(&quot;eventName&quot;),
+            &quot;event_source&quot;: rec.get(&quot;eventSource&quot;),
+            &quot;principal&quot;:   (rec.get(&quot;userIdentity&quot;) or {}).get(&quot;arn&quot;)
+                           or (rec.get(&quot;userIdentity&quot;) or {}).get(&quot;principalId&quot;),
+            &quot;principal_type&quot;: (rec.get(&quot;userIdentity&quot;) or {}).get(&quot;type&quot;),
+            &quot;src_ip&quot;:      rec.get(&quot;sourceIPAddress&quot;),
+            &quot;region&quot;:      rec.get(&quot;awsRegion&quot;),
+            &quot;error_code&quot;:  rec.get(&quot;errorCode&quot;),
+            &quot;error_msg&quot;:   rec.get(&quot;errorMessage&quot;),
+            &quot;raw&quot;:         rec,
+        })
+    return normalised
+
+
+def test_q43():
+    sample = json.dumps({
+        &quot;Records&quot;: [
+            {
+                &quot;eventTime&quot;: &quot;2026-05-29T08:00:00Z&quot;,
+                &quot;eventName&quot;: &quot;DescribeInstances&quot;,
+                &quot;eventSource&quot;: &quot;ec2.amazonaws.com&quot;,
+                &quot;awsRegion&quot;: &quot;us-east-1&quot;,
+                &quot;sourceIPAddress&quot;: &quot;203.0.113.1&quot;,
+                &quot;userIdentity&quot;: {&quot;type&quot;: &quot;IAMUser&quot;, &quot;arn&quot;: &quot;arn:aws:iam::123:user/alice&quot;},
+            },
+            {
+                &quot;eventTime&quot;: &quot;2026-05-29T08:01:00Z&quot;,
+                &quot;eventName&quot;: &quot;GetSecretValue&quot;,
+                &quot;eventSource&quot;: &quot;secretsmanager.amazonaws.com&quot;,
+                &quot;awsRegion&quot;: &quot;us-east-1&quot;,
+                &quot;sourceIPAddress&quot;: &quot;203.0.113.2&quot;,
+                &quot;userIdentity&quot;: {&quot;type&quot;: &quot;IAMUser&quot;, &quot;arn&quot;: &quot;arn:aws:iam::123:user/bob&quot;},
+                &quot;errorCode&quot;: &quot;AccessDenied&quot;,
+                &quot;errorMessage&quot;: &quot;User is not authorized&quot;,
+            },
+        ]
+    })
+    records = parse_cloudtrail_json(sample)
+    assert len(records) == 2
+    assert records[0][&quot;event_name&quot;] == &quot;DescribeInstances&quot;
+    assert records[1][&quot;error_code&quot;] == &quot;AccessDenied&quot;
+    assert records[1][&quot;principal&quot;] == &quot;arn:aws:iam::123:user/bob&quot;
+    print(&quot;Q43 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q44 — Find Failed AWS API Calls
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  From parsed CloudTrail events, return those with a non-null errorCode.
+
+Clarifying questions:
+  1. Should we distinguish AccessDenied from throttling errors?
+  2. Are repeated AccessDenied on sensitive APIs (GetSecretValue, AssumeRole)
+     higher priority?
+  3. Should we group by (principal, error_code)?
+
+Security angle:
+  Repeated AccessDenied events on high-value APIs indicate:
+  - Privilege escalation probing (trying forbidden actions).
+  - Compromised low-privilege credentials testing their boundaries.
+  - Automated scanners enumerating IAM permissions.
+  AWS GuardDuty &#x27;PenTest&#x27; and &#x27;UnauthorizedAccess&#x27; findings use this signal.
+&quot;&quot;&quot;
+
+SENSITIVE_APIS = frozenset({
+    &quot;GetSecretValue&quot;, &quot;GetParameter&quot;, &quot;GetParameters&quot;,
+    &quot;AssumeRole&quot;, &quot;AssumeRoleWithSAML&quot;, &quot;AssumeRoleWithWebIdentity&quot;,
+    &quot;CreateUser&quot;, &quot;AttachUserPolicy&quot;, &quot;PutUserPolicy&quot;,
+    &quot;CreateAccessKey&quot;, &quot;UpdateAccessKey&quot;,
+    &quot;DeleteTrail&quot;, &quot;StopLogging&quot;, &quot;DeleteLogGroup&quot;,
+    &quot;PutBucketPolicy&quot;, &quot;PutBucketAcl&quot;,
+})
+
+
+def find_failed_aws_calls(
+    events: List[Dict],
+    sensitive_only: bool = False,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single pass filter on error_code presence.
+    Optional sensitive_only flag restricts to high-value API names.
+    O(n) time.
+    &quot;&quot;&quot;
+    results = []
+    for e in events:
+        if not e.get(&quot;error_code&quot;):
+            continue
+        if sensitive_only and e.get(&quot;event_name&quot;) not in SENSITIVE_APIS:
+            continue
+        results.append(e)
+    return results
+
+
+def test_q44():
+    events = [
+        {&quot;event_name&quot;: &quot;DescribeInstances&quot;,  &quot;principal&quot;: &quot;alice&quot;, &quot;error_code&quot;: None},
+        {&quot;event_name&quot;: &quot;GetSecretValue&quot;,     &quot;principal&quot;: &quot;bob&quot;,   &quot;error_code&quot;: &quot;AccessDenied&quot;},
+        {&quot;event_name&quot;: &quot;AssumeRole&quot;,         &quot;principal&quot;: &quot;eve&quot;,   &quot;error_code&quot;: &quot;AccessDenied&quot;},
+        {&quot;event_name&quot;: &quot;ListBuckets&quot;,        &quot;principal&quot;: &quot;eve&quot;,   &quot;error_code&quot;: &quot;AccessDenied&quot;},
+    ]
+    # All failures
+    all_failed = find_failed_aws_calls(events)
+    assert len(all_failed) == 3
+    # Sensitive only
+    sensitive_failed = find_failed_aws_calls(events, sensitive_only=True)
+    assert len(sensitive_failed) == 2
+    names = {e[&quot;event_name&quot;] for e in sensitive_failed}
+    assert &quot;GetSecretValue&quot; in names
+    assert &quot;AssumeRole&quot; in names
+    assert &quot;ListBuckets&quot; not in names
+    print(&quot;Q44 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q45 — Count CloudTrail Events by Principal
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Aggregate CloudTrail events and return per-principal event counts,
+  sorted descending. Useful for spotting unusually active principals.
+
+Clarifying questions:
+  1. Should we count all events or only failed ones?
+  2. Should service roles (e.g., Lambda execution roles) be excluded?
+  3. What time window should we aggregate over?
+
+Security angle:
+  An IAM principal with 10x more API calls than baseline may indicate:
+  - Compromised credential being used by an attacker for reconnaissance.
+  - Over-privileged automation that is misbehaving.
+  - An insider abusing their access.
+&quot;&quot;&quot;
+
+
+def count_events_by_principal(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: Counter over principal field. O(n) time.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    for e in events:
+        p = e.get(&quot;principal&quot;) or &quot;unknown&quot;
+        counts[p] += 1
+
+    return [
+        {&quot;principal&quot;: p, &quot;event_count&quot;: c}
+        for p, c in counts.most_common()
+    ]
+
+
+def test_q45():
+    events = [
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;event_name&quot;: &quot;DescribeInstances&quot;},
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;event_name&quot;: &quot;ListBuckets&quot;},
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;event_name&quot;: &quot;GetObject&quot;},
+        {&quot;principal&quot;: &quot;bob&quot;,   &quot;event_name&quot;: &quot;DescribeInstances&quot;},
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;event_name&quot;: &quot;GetSecretValue&quot;},
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;event_name&quot;: &quot;GetSecretValue&quot;},
+        {&quot;principal&quot;: &quot;eve&quot;,   &quot;event_name&quot;: &quot;AssumeRole&quot;},
+    ]
+    results = count_events_by_principal(events)
+    assert results[0][&quot;principal&quot;] in (&quot;eve&quot;, &quot;alice&quot;)   # both have 3
+    totals = {r[&quot;principal&quot;]: r[&quot;event_count&quot;] for r in results}
+    assert totals[&quot;alice&quot;] == 3
+    assert totals[&quot;bob&quot;] == 1
+    assert totals[&quot;eve&quot;] == 3
+    print(&quot;Q45 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q46 — Detect Root Account Usage
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag any CloudTrail event made by the AWS root account.
+
+Clarifying questions:
+  1. Is the root account identifiable by type=&quot;Root&quot; in userIdentity?
+  2. Should we also flag root access key usage?
+  3. Should any root usage immediately page on-call?
+
+Security angle:
+  AWS best practice: the root account should NEVER be used for routine
+  operations. Root has unrestricted access and cannot be restricted by IAM
+  policies. Any root activity is high-severity and could indicate:
+  - Account takeover.
+  - An attacker who obtained the root password.
+  - An insider bypassing controls.
+  CIS AWS Benchmark 1.1: Avoid the use of the root account.
+&quot;&quot;&quot;
+
+
+def detect_root_account_usage(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: O(1) check on principal_type field per event.
+    Supports both normalized events (from parse_cloudtrail_json) and raw dicts.
+    O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for e in events:
+        ptype = (
+            e.get(&quot;principal_type&quot;)
+            or (e.get(&quot;userIdentity&quot;) or {}).get(&quot;type&quot;)
+            or &quot;&quot;
+        )
+        if ptype == &quot;Root&quot;:
+            alerts.append({
+                &quot;severity&quot;: &quot;CRITICAL&quot;,
+                &quot;event_name&quot;: e.get(&quot;event_name&quot;) or e.get(&quot;eventName&quot;),
+                &quot;ts&quot;:         e.get(&quot;ts&quot;) or e.get(&quot;eventTime&quot;),
+                &quot;src_ip&quot;:     e.get(&quot;src_ip&quot;) or e.get(&quot;sourceIPAddress&quot;),
+                &quot;region&quot;:     e.get(&quot;region&quot;) or e.get(&quot;awsRegion&quot;),
+            })
+    return alerts
+
+
+def test_q46():
+    events = [
+        {&quot;event_name&quot;: &quot;ConsoleLogin&quot;,    &quot;principal_type&quot;: &quot;Root&quot;,    &quot;ts&quot;: &quot;T1&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;},
+        {&quot;event_name&quot;: &quot;DeleteTrail&quot;,     &quot;principal_type&quot;: &quot;Root&quot;,    &quot;ts&quot;: &quot;T2&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;},
+        {&quot;event_name&quot;: &quot;DescribeInstances&quot;,&quot;principal_type&quot;: &quot;IAMUser&quot;, &quot;ts&quot;: &quot;T3&quot;, &quot;src_ip&quot;: &quot;2.2.2.2&quot;},
+    ]
+    alerts = detect_root_account_usage(events)
+    assert len(alerts) == 2
+    names = {a[&quot;event_name&quot;] for a in alerts}
+    assert &quot;ConsoleLogin&quot; in names
+    assert &quot;DeleteTrail&quot; in names
+    print(&quot;Q46 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q47 — Detect Console Login Without MFA
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag ConsoleLogin events where additionalEventData.MFAUsed == &quot;No&quot;.
+
+Clarifying questions:
+  1. Is this alert for all users or only privileged/admin users?
+  2. Should federated logins (SSO) also be checked?
+  3. Is there a grace period for newly provisioned users?
+
+Security angle:
+  MFA prevents account takeover even when passwords are phished or leaked.
+  Console logins without MFA are a compliance violation (CIS AWS 1.10,
+  SOC2, ISO 27001). An attacker who phishes an IAM user&#x27;s password can
+  log in without MFA if it is not enforced at the policy level.
+&quot;&quot;&quot;
+
+
+def detect_console_login_without_mfa(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: filter on eventName == ConsoleLogin AND MFAUsed != &#x27;Yes&#x27;.
+    additionalEventData is nested in the raw CloudTrail record.
+    O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for e in events:
+        name = e.get(&quot;event_name&quot;) or e.get(&quot;eventName&quot;) or &quot;&quot;
+        if name != &quot;ConsoleLogin&quot;:
+            continue
+        raw = e.get(&quot;raw&quot;) or e
+        add_data = raw.get(&quot;additionalEventData&quot;) or {}
+        mfa_used = add_data.get(&quot;MFAUsed&quot;, &quot;No&quot;)
+        if mfa_used != &quot;Yes&quot;:
+            alerts.append({
+                &quot;severity&quot;: &quot;HIGH&quot;,
+                &quot;principal&quot;: e.get(&quot;principal&quot;) or (raw.get(&quot;userIdentity&quot;) or {}).get(&quot;arn&quot;),
+                &quot;ts&quot;:        e.get(&quot;ts&quot;) or raw.get(&quot;eventTime&quot;),
+                &quot;src_ip&quot;:    e.get(&quot;src_ip&quot;) or raw.get(&quot;sourceIPAddress&quot;),
+            })
+    return alerts
+
+
+def test_q47():
+    events = [
+        {
+            &quot;event_name&quot;: &quot;ConsoleLogin&quot;, &quot;principal&quot;: &quot;alice&quot;, &quot;ts&quot;: &quot;T1&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;,
+            &quot;raw&quot;: {&quot;additionalEventData&quot;: {&quot;MFAUsed&quot;: &quot;No&quot;}},
+        },
+        {
+            &quot;event_name&quot;: &quot;ConsoleLogin&quot;, &quot;principal&quot;: &quot;bob&quot;, &quot;ts&quot;: &quot;T2&quot;, &quot;src_ip&quot;: &quot;2.2.2.2&quot;,
+            &quot;raw&quot;: {&quot;additionalEventData&quot;: {&quot;MFAUsed&quot;: &quot;Yes&quot;}},
+        },
+        {
+            &quot;event_name&quot;: &quot;DescribeInstances&quot;, &quot;principal&quot;: &quot;alice&quot;, &quot;ts&quot;: &quot;T3&quot;,
+            &quot;raw&quot;: {},
+        },
+    ]
+    alerts = detect_console_login_without_mfa(events)
+    assert len(alerts) == 1
+    assert alerts[0][&quot;principal&quot;] == &quot;alice&quot;
+    print(&quot;Q47 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q48 — Detect Security Group Opened to Internet
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag CloudTrail AuthorizeSecurityGroupIngress events where the CIDR is
+  0.0.0.0/0 or ::/0 (open to all internet traffic).
+
+Clarifying questions:
+  1. Should any port opened to 0.0.0.0/0 trigger an alert, or only sensitive ports?
+  2. Should &quot;update&quot; events (ModifyNetworkInterfaceAttribute) also be checked?
+  3. Are there exceptions for load balancer security groups?
+
+Security angle:
+  An overly permissive security group can expose internal services to the
+  internet (databases, admin consoles, internal APIs). This is a common
+  misconfiguration that attackers exploit within minutes of it going live.
+  CIS AWS Benchmark 4.1-4.4, AWS Config rule restricted-ssh.
+&quot;&quot;&quot;
+
+OPEN_CIDR = frozenset({&quot;0.0.0.0/0&quot;, &quot;::/0&quot;})
+
+
+def detect_sg_opened_to_internet(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: filter on eventName + walk requestParameters.ipPermissions
+    to find any ingress rule with an open CIDR.
+    O(n * p) where p = permissions per event (small constant).
+    &quot;&quot;&quot;
+    alerts = []
+    for e in events:
+        name = e.get(&quot;event_name&quot;) or e.get(&quot;eventName&quot;) or &quot;&quot;
+        if name not in (&quot;AuthorizeSecurityGroupIngress&quot;, &quot;ModifySecurityGroupRules&quot;):
+            continue
+        raw = e.get(&quot;raw&quot;) or e
+        params = raw.get(&quot;requestParameters&quot;) or {}
+        ip_perms = params.get(&quot;ipPermissions&quot;) or {}
+        items = ip_perms.get(&quot;items&quot;) or []
+
+        for perm in items:
+            port_from = perm.get(&quot;fromPort&quot;)
+            port_to   = perm.get(&quot;toPort&quot;)
+            for ip_range in (perm.get(&quot;ipRanges&quot;) or {}).get(&quot;items&quot;) or []:
+                cidr = ip_range.get(&quot;cidrIp&quot;) or ip_range.get(&quot;cidrIpv6&quot;) or &quot;&quot;
+                if cidr in OPEN_CIDR:
+                    alerts.append({
+                        &quot;severity&quot;: &quot;HIGH&quot;,
+                        &quot;event_name&quot;: name,
+                        &quot;principal&quot;: e.get(&quot;principal&quot;),
+                        &quot;sg_id&quot;: params.get(&quot;groupId&quot;),
+                        &quot;cidr&quot;: cidr,
+                        &quot;port_range&quot;: f&quot;{port_from}-{port_to}&quot;,
+                        &quot;ts&quot;: e.get(&quot;ts&quot;) or raw.get(&quot;eventTime&quot;),
+                    })
+                    break
+    return alerts
+
+
+def test_q48():
+    events = [
+        {
+            &quot;event_name&quot;: &quot;AuthorizeSecurityGroupIngress&quot;,
+            &quot;principal&quot;: &quot;admin&quot;,
+            &quot;ts&quot;: &quot;T1&quot;,
+            &quot;raw&quot;: {
+                &quot;requestParameters&quot;: {
+                    &quot;groupId&quot;: &quot;sg-12345&quot;,
+                    &quot;ipPermissions&quot;: {
+                        &quot;items&quot;: [{
+                            &quot;fromPort&quot;: 22, &quot;toPort&quot;: 22,
+                            &quot;ipRanges&quot;: {&quot;items&quot;: [{&quot;cidrIp&quot;: &quot;0.0.0.0/0&quot;}]},
+                        }]
+                    }
+                }
+            },
+        },
+        {
+            &quot;event_name&quot;: &quot;AuthorizeSecurityGroupIngress&quot;,
+            &quot;principal&quot;: &quot;admin&quot;,
+            &quot;ts&quot;: &quot;T2&quot;,
+            &quot;raw&quot;: {
+                &quot;requestParameters&quot;: {
+                    &quot;groupId&quot;: &quot;sg-99999&quot;,
+                    &quot;ipPermissions&quot;: {
+                        &quot;items&quot;: [{
+                            &quot;fromPort&quot;: 443, &quot;toPort&quot;: 443,
+                            &quot;ipRanges&quot;: {&quot;items&quot;: [{&quot;cidrIp&quot;: &quot;10.0.0.0/8&quot;}]},
+                        }]
+                    }
+                }
+            },
+        },
+    ]
+    alerts = detect_sg_opened_to_internet(events)
+    assert len(alerts) == 1
+    assert alerts[0][&quot;cidr&quot;] == &quot;0.0.0.0/0&quot;
+    assert alerts[0][&quot;sg_id&quot;] == &quot;sg-12345&quot;
+    print(&quot;Q48 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q49 — Detect CloudTrail StopLogging
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag any StopLogging or DeleteTrail event in CloudTrail.
+  These events indicate an attacker trying to cover their tracks.
+
+Clarifying questions:
+  1. Should UpdateTrail (changing log destination) also alert?
+  2. Should we alert immediately or batch with a short window?
+  3. Is there a legitimate use case for StopLogging? (e.g., account deprecation)
+
+Security angle:
+  Attackers who gain sufficient IAM privileges will attempt to disable
+  logging before proceeding with destructive actions. This is a classic
+  defence evasion technique (MITRE ATT&amp;CK T1562.008).
+  AWS GuardDuty: Stealth:IAMUser/CloudTrailLoggingDisabled.
+  Any StopLogging or DeleteTrail should be treated as CRITICAL.
+&quot;&quot;&quot;
+
+ANTI_LOGGING_EVENTS = frozenset({
+    &quot;StopLogging&quot;,
+    &quot;DeleteTrail&quot;,
+    &quot;UpdateTrail&quot;,
+    &quot;PutEventSelectors&quot;,          # can reduce what is logged
+    &quot;DeleteLogGroup&quot;,
+    &quot;DeleteLogStream&quot;,
+})
+
+
+def detect_cloudtrail_stop_logging(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: frozenset lookup per event. O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for e in events:
+        name = e.get(&quot;event_name&quot;) or e.get(&quot;eventName&quot;) or &quot;&quot;
+        if name in ANTI_LOGGING_EVENTS:
+            alerts.append({
+                &quot;severity&quot;: &quot;CRITICAL&quot;,
+                &quot;event_name&quot;: name,
+                &quot;principal&quot;: e.get(&quot;principal&quot;),
+                &quot;ts&quot;:        e.get(&quot;ts&quot;) or e.get(&quot;eventTime&quot;),
+                &quot;src_ip&quot;:    e.get(&quot;src_ip&quot;) or e.get(&quot;sourceIPAddress&quot;),
+            })
+    return alerts
+
+
+def test_q49():
+    events = [
+        {&quot;event_name&quot;: &quot;StopLogging&quot;,       &quot;principal&quot;: &quot;attacker&quot;, &quot;ts&quot;: &quot;T1&quot;, &quot;src_ip&quot;: &quot;5.5.5.5&quot;},
+        {&quot;event_name&quot;: &quot;DeleteTrail&quot;,        &quot;principal&quot;: &quot;attacker&quot;, &quot;ts&quot;: &quot;T2&quot;, &quot;src_ip&quot;: &quot;5.5.5.5&quot;},
+        {&quot;event_name&quot;: &quot;DescribeInstances&quot;,  &quot;principal&quot;: &quot;alice&quot;,    &quot;ts&quot;: &quot;T3&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;},
+    ]
+    alerts = detect_cloudtrail_stop_logging(events)
+    names = {a[&quot;event_name&quot;] for a in alerts}
+    assert &quot;StopLogging&quot; in names
+    assert &quot;DeleteTrail&quot; in names
+    assert &quot;DescribeInstances&quot; not in names
+    print(&quot;Q49 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q50 — Detect S3 Bucket Public Policy Change
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag PutBucketPolicy or PutBucketAcl CloudTrail events that grant public
+  access (Principal == &quot;*&quot; in the policy, or canned ACL &quot;public-read&quot; / &quot;public-read-write&quot;).
+
+Clarifying questions:
+  1. Should we parse the full bucket policy JSON to confirm the Statement grants &#x27;*&#x27;?
+  2. Should &quot;authenticated users&quot; (arn:aws:iam::*) also be flagged?
+  3. Are Block Public Access settings captured in these events?
+
+Security angle:
+  Public S3 buckets have caused some of the largest data breaches in history
+  (Capital One, GoDaddy, FBi/DHS). Detecting PutBucketPolicy that grants
+  public access in real time is essential for any AWS environment.
+  AWS Config rule s3-bucket-public-read-prohibited catches this at config
+  evaluation time; CloudTrail detection catches it at the moment of change.
+&quot;&quot;&quot;
+
+PUBLIC_ACLS = frozenset({&quot;public-read&quot;, &quot;public-read-write&quot;, &quot;authenticated-read&quot;})
+
+
+def _policy_grants_public(policy_json_str: str) -&gt; bool:
+    &quot;&quot;&quot;Return True if any Statement has Principal == &#x27;*&#x27; or {&#x27;AWS&#x27;: &#x27;*&#x27;}.&quot;&quot;&quot;
+    try:
+        policy = json.loads(policy_json_str)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    for stmt in policy.get(&quot;Statement&quot;) or []:
+        principal = stmt.get(&quot;Principal&quot;)
+        if principal == &quot;*&quot;:
+            return True
+        if isinstance(principal, dict):
+            aws = principal.get(&quot;AWS&quot;) or principal.get(&quot;Service&quot;)
+            if aws == &quot;*&quot; or aws == [&quot;*&quot;]:
+                return True
+    return False
+
+
+def detect_s3_public_policy_change(events: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: filter on eventName, then inspect requestParameters for
+    public ACL or parse embedded policy JSON.
+    O(n) time; JSON parsing is bounded by policy size.
+    &quot;&quot;&quot;
+    BUCKET_EVENTS = frozenset({&quot;PutBucketPolicy&quot;, &quot;PutBucketAcl&quot;})
+    alerts = []
+
+    for e in events:
+        name = e.get(&quot;event_name&quot;) or e.get(&quot;eventName&quot;) or &quot;&quot;
+        if name not in BUCKET_EVENTS:
+            continue
+        raw = e.get(&quot;raw&quot;) or e
+        params = raw.get(&quot;requestParameters&quot;) or {}
+        bucket = params.get(&quot;bucketName&quot;) or params.get(&quot;BucketName&quot;)
+
+        # Check canned ACL
+        acl = (params.get(&quot;AccessControlPolicy&quot;) or {}).get(&quot;CannedACL&quot;) or \
+              params.get(&quot;x-amz-acl&quot;) or &quot;&quot;
+        if acl.lower() in PUBLIC_ACLS:
+            alerts.append({
+                &quot;severity&quot;: &quot;CRITICAL&quot;,
+                &quot;event_name&quot;: name,
+                &quot;bucket&quot;: bucket,
+                &quot;principal&quot;: e.get(&quot;principal&quot;),
+                &quot;reason&quot;: f&quot;public_acl:{acl}&quot;,
+                &quot;ts&quot;: e.get(&quot;ts&quot;),
+            })
+            continue
+
+        # Check bucket policy for wildcard principal
+        policy_str = params.get(&quot;bucketPolicy&quot;) or params.get(&quot;policy&quot;) or &quot;&quot;
+        if isinstance(policy_str, dict):
+            policy_str = json.dumps(policy_str)
+        if _policy_grants_public(policy_str):
+            alerts.append({
+                &quot;severity&quot;: &quot;CRITICAL&quot;,
+                &quot;event_name&quot;: name,
+                &quot;bucket&quot;: bucket,
+                &quot;principal&quot;: e.get(&quot;principal&quot;),
+                &quot;reason&quot;: &quot;policy_principal_wildcard&quot;,
+                &quot;ts&quot;: e.get(&quot;ts&quot;),
+            })
+
+    return alerts
+
+
+def test_q50():
+    public_policy = json.dumps({
+        &quot;Version&quot;: &quot;2012-10-17&quot;,
+        &quot;Statement&quot;: [{&quot;Effect&quot;: &quot;Allow&quot;, &quot;Principal&quot;: &quot;*&quot;, &quot;Action&quot;: &quot;s3:GetObject&quot;,
+                       &quot;Resource&quot;: &quot;arn:aws:s3:::my-bucket/*&quot;}],
+    })
+    events = [
+        {
+            &quot;event_name&quot;: &quot;PutBucketPolicy&quot;, &quot;principal&quot;: &quot;admin&quot;, &quot;ts&quot;: &quot;T1&quot;,
+            &quot;raw&quot;: {&quot;requestParameters&quot;: {&quot;bucketName&quot;: &quot;my-bucket&quot;, &quot;bucketPolicy&quot;: public_policy}},
+        },
+        {
+            &quot;event_name&quot;: &quot;PutBucketAcl&quot;, &quot;principal&quot;: &quot;alice&quot;, &quot;ts&quot;: &quot;T2&quot;,
+            &quot;raw&quot;: {&quot;requestParameters&quot;: {&quot;bucketName&quot;: &quot;my-bucket&quot;,
+                                          &quot;AccessControlPolicy&quot;: {&quot;CannedACL&quot;: &quot;public-read&quot;}}},
+        },
+        {
+            &quot;event_name&quot;: &quot;PutBucketPolicy&quot;, &quot;principal&quot;: &quot;bob&quot;, &quot;ts&quot;: &quot;T3&quot;,
+            &quot;raw&quot;: {&quot;requestParameters&quot;: {&quot;bucketName&quot;: &quot;private-bucket&quot;,
+                                          &quot;bucketPolicy&quot;: json.dumps({
+                                              &quot;Statement&quot;: [{&quot;Principal&quot;: {&quot;AWS&quot;: &quot;arn:aws:iam::123:root&quot;}}]
+                                          })}},
+        },
+    ]
+    alerts = detect_s3_public_policy_change(events)
+    assert len(alerts) == 2
+    reasons = {a[&quot;reason&quot;] for a in alerts}
+    assert &quot;policy_principal_wildcard&quot; in reasons
+    assert any(&quot;public_acl&quot; in r for r in reasons)
+    print(&quot;Q50 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q41()
+    test_q42()
+    test_q43()
+    test_q44()
+    test_q45()
+    test_q46()
+    test_q47()
+    test_q48()
+    test_q49()
+    test_q50()
+    print(&quot;\nAll Q41–Q50 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 21 — Network Access Control (NAC) for Hospital IoT — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario21-nac-hospital-iot-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-21-network-access-control-nac-for-hospital-iot-threat-exploitation-and-blue-team-control-review">Scenario 21 — Network Access Control (NAC) for Hospital IoT — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario21-nac-hospital-iot.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario21-nac-hospital-iot-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Deploy 802.1X NAC for wired/wireless access on a hospital campus with clinical IoT, imaging VLANs, staff workstations, and guest Wi-Fi; some medical devices lack 802.1X support.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This review enumerates attacker paths from guest or vendor access to life-critical clinical devices, maps each threat to specific controls and telemetry (event IDs, log fields), provides safe purple-team validation queries and a prioritized remediation list. Emphasis: patient safety impact, detection signals, and compensating controls for legacy IoMT devices.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>Allowing legacy medical devices onto the Clinical IoT VLAN using MAC Authentication Bypass (MAB) without strong multi-signal profiling is the single highest-risk design choice. MAB provides admission based on easily spoofable identifiers (MAC), so placing life-critical devices on the same VLAN without cryptographic identity or additional isolation creates a root cause that enables MAC spoofing, VLAN pivoting, and immediate patient-impacting attacks. The safe alternative: minimize MAB admission, enforce isolated management VLANs, and require compensating post-admit behavioral enforcement (Claroty/Medigate) and strict ACLs.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or safety impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>MAC spoofing to impersonate medical device</td>
+<td>High, Critical</td>
+<td>Cisco ISE auth logs, switch port-security</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>VLAN hopping via DTP or misconfigured trunks</td>
+<td>Medium, Critical</td>
+<td>Switch syslog (DTP events), config audits</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>802.1Q double-tagging</td>
+<td>Medium, High</td>
+<td>NetFlow/firewall logs, switch syslog</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>RADIUS/Cisco ISE compromise</td>
+<td>Low, Critical</td>
+<td>RADIUS accounting logs, authentication errors</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Rogue AP bridging guest and clinical networks</td>
+<td>Medium, High</td>
+<td>WLC rogue AP events, wireless controller logs</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Unpatched medical device worm/ransomware</td>
+<td>High, Critical</td>
+<td>Claroty/Medigate alerts, IDS signatures</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Vendor remote maintenance abuse</td>
+<td>Medium, High</td>
+<td>PAM logs (CyberArk), vendor session logs</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>DICOM protocol exploitation (PACS write abuse)</td>
+<td>Low, High</td>
+<td>PACS audit, DICOM transfer logs</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Physical patch-panel recabling (insider)</td>
+<td>Medium, Critical</td>
+<td>Badge logs, CCTV, wiring-closet access logs</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>EHR credential theft via phishing/ransomware</td>
+<td>Medium, Critical</td>
+<td>EHR access logs, auth logs, EDR alerts</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>DNS/firmware update poisoning</td>
+<td>Low, High</td>
+<td>Proxy logs, update server logs</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Bluetooth/RF side-channel on infusion pumps</td>
+<td>Low, Critical</td>
+<td>Physical-layer sensors, Claroty RF anomalies</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker gains foothold on Guest Wi‑Fi]:::attack --> A1[Recon: sniff MACs, ARP, mDNS]:::attack
+    A1 --> C1{Port security & ISE profiling enforced?}:::control
+    C1 -->|Yes| B1[Admission blocked / quarantined]:::blocked
+    C1 -->|No| A2[Spoof MAC or re-cable to wired port]:::attack
+    A2 --> C2{Inter-VLAN firewall ACLs strict?}:::control
+    C2 -->|Yes| B2[Blocked at firewall]:::blocked
+    C2 -->|No| A3[Access clinical device management]:::attack
+    A3 --> C3{Behavioral IoMT monitor detects anomaly?}:::control
+    C3 -->|Yes| B3[Isolate device & alert Biomed]:::blocked
+    C3 -->|No| A4[Patient safety impact / data theft]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-mac-spoofing-to-impersonate-medical-device">T1 — MAC Spoofing to Impersonate Medical Device</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Impersonate an infusion pump or monitor to gain admission to Clinical IoT VLAN and issue malicious commands.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Passive network visibility (sniffing on Guest VLAN) or access to broadcast domain exposing device MACs.</li>
+<li>Initial action: Capture target device MAC via ARP/mDNS/LLDP responses.</li>
+<li>Core exploitation: Disconnect legitimate device, connect attacker host with spoofed MAC to a port or wireless.</li>
+<li>Escalation: Use management interfaces to change dosing or push malicious firmware links.</li>
+<li>Impact realization: Patient safety incident or persistent backdoor in clinical VLAN.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Multi-signal NAC profiling (ISE): require OUI, DHCP fingerprint, TTL/HTTP UA match — not MAC-only.</li>
+<li>Control 2: Port-security with <code>violation shutdown</code> and re-auth timer; restrict <code>switchport port-security maximum 1</code> on clinical ports.</li>
+<li>Control 3: Post-admit Claroty behavioral baseline: detect protocol deviations (DICOM/HL7 unexpected ports).</li>
+<li>Control 4: Physical tamper controls: badge access + CCTV on wiring closets and patch panels.</li>
+<li>Control 5: Maintain CMDB of device MAC: automated reconciliation with ISE and quarantine unknown devices.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Cisco ISE auth logs: <code>endpoint_mac</code>, <code>vlan_assigned</code>, <code>auth_result</code>, <code>port_id</code>.</li>
+<li>Switch syslog port-security events: <code>event=PORT_SECURITY_VIOLATION</code>, <code>port_id</code>, <code>mac_addr</code>.</li>
+<li>Claroty/Medigate alert: <code>device_id</code>, <code>protocol_deviation</code>, <code>risk_score</code>.</li>
+<li>NetFlow showing new host IP using medical device ports to unexpected destinations.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Detect same MAC observed on multiple ports within 5 minutes
+ISELogs | where EventTime &gt; ago(1h) | summarize ports = dcount(PortId) by EndpointMAC | where ports &gt; 1
+</code></pre>
+<pre><code class="language-powershell"># Check for recent port-security violations on clinical ports
+Get-SwitchSyslog | where { $_.Event -eq 'PORT_SECURITY_VIOLATION' -and $_.Port -in $ClinicalPorts }
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T1_A1[Sniff target MAC]:::attack --> T1_A2[Spoof MAC on attacker device]:::attack
+    T1_A2 --> T1_C1{ISE multi-signal match?}:::control
+    T1_C1 -->|Yes| T1_B1[Admit blocked]:::blocked
+    T1_C1 -->|No| T1_A3[Attacker admitted to clinical VLAN]:::attack
+    T1_A3 --> T1_C2{Claroty detects protocol mismatch?}:::control
+    T1_C2 -->|Yes| T1_B2[Isolate device & alert]:::blocked
+    T1_C2 -->|No| T1_A4[Modify device config]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-vlan-hopping-via-dtp-or-misconfigured-trunks">T2 — VLAN Hopping via DTP or Misconfigured Trunks</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Negotiate trunk or exploit misconfigured trunking to access multiple VLANs from a guest-facing port.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Access to switch port capable of DTP negotiation (auto trunking enabled) or a misconfigured trunk.</li>
+<li>Initial action: Send DTP frames to trigger trunk negotiation or craft 802.1Q frames to exploit native VLAN.</li>
+<li>Core exploitation: Receive traffic from clinical VLAN or inject frames to reach devices.</li>
+<li>Escalation: Lateral movement into staff VLAN and EHR access.</li>
+<li>Impact realization: Broad cross-VLAN compromise including patient-impacting devices.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Disable DTP on all switch ports (<code>switchport nonegotiate</code>) and explicitly configure trunk/access modes.</li>
+<li>Control 2: Set native VLAN to unused ID and drop native VLAN traffic on access ports.</li>
+<li>Control 3: Configuration compliance scanning (Cisco DNA Center / Ansible) to detect unexpected trunk configs.</li>
+<li>Control 4: VLAN change detection alerts from syslog and change-management enforcement.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Switch config inventory and nightly compliance reports showing <code>switchport mode</code> per port.</li>
+<li>Syslog DTP negotiation events: <code>event=DTP_TRUNK_NEGOTIATED</code>, <code>port_id</code>.</li>
+<li>Firewall NetFlow showing guest subnet traffic to clinical IPs.</li>
+<li>Change-management tickets correlated to VLAN config changes.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find ports configured for DTP/trunking unexpectedly
+SwitchConfigs | where SwitchportMode != 'access' and PortType == 'edge'
+</code></pre>
+<pre><code class="language-kql"># Detect DTP negotiation events on access ports
+SwitchSyslog
+| where Event == 'DTP_TRUNK_NEGOTIATED' and Port in AccessPortList
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T2_A1[Attacker sends DTP frames]:::attack --> T2_A2[Switch negotiates trunk]:::attack
+    T2_A2 --> T2_C1{DTP disabled on port?}:::control
+    T2_C1 -->|Yes| T2_B1[Negotiation fails]:::blocked
+    T2_C1 -->|No| T2_A3[Attacker gains trunk access to VLANs]:::attack
+    T2_A3 --> T2_C2{Firewall blocks cross-VLAN?}:::control
+    T2_C2 -->|Yes| T2_B2[Traffic blocked]:::blocked
+    T2_C2 -->|No| T2_A4[Lateral movement]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-8021q-double-tagging-vlan-hop">T3 — 802.1Q Double-Tagging VLAN Hop</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use double-tagging to bypass VLAN filtering and reach clinical VLAN from an access port.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Access to a port with native VLAN configured that maps to clinical VLAN or misaligned native VLAN.</li>
+<li>Initial action: Craft 802.1Q double-tagged frames to present inner tag as clinical VLAN.</li>
+<li>Core exploitation: Frames forwarded to clinical VLAN devices.</li>
+<li>Escalation: Execute commands on management interfaces or exfiltrate PHI.</li>
+<li>Impact realization: Device compromise and patient harm.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Set native VLAN to an unused ID and drop native VLAN on access ports.</li>
+<li>Control 2: Enforce explicit VLAN tagging on all trunks; restrict access ports to single VLAN.</li>
+<li>Control 3: IPS/IDS signatures for double-tagging anomalies and unknown tag lengths.</li>
+<li>Control 4: Config drift detection and nightly audits for native VLAN misconfiguration.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Firewall logs showing unexpected tagged frames or traffic originating from access ports.</li>
+<li>Switch syslog for native VLAN mismatches and tag anomalies.</li>
+<li>IDS/IPS alerts for malformed 802.1Q frames.</li>
+<li>Claroty detection of unexpected source IPs initiating new protocols.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Generate double-tagged frames in lab to verify native VLAN drop
+scapy -c &quot;send(Ether()/Dot1Q(vlan=999)/Dot1Q(vlan=300)/IP()/TCP())&quot; --count 100
+</code></pre>
+<pre><code class="language-kql"># SIEM: detect malformed 802.1Q frames or unknown tag events
+SwitchSyslog | where Message contains '802.1Q' and Message contains 'double-tag'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T3_A1[Attacker sends double-tagged frames]:::attack --> T3_A2[Frames reach switch]:::attack
+    T3_A2 --> T3_C1{Native VLAN set to unused?}:::control
+    T3_C1 -->|Yes| T3_B1[Frame dropped]:::blocked
+    T3_C1 -->|No| T3_A3[Frame forwarded to clinical VLAN]:::attack
+    T3_A3 --> T3_C2{ACLs restrict management access?}:::control
+    T3_C2 -->|Yes| T3_B2[Management access blocked]:::blocked
+    T3_C2 -->|No| T3_A4[Device compromised]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-radius-cisco-ise-compromise">T4 — RADIUS / Cisco ISE Compromise</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise NAC control plane to admit arbitrary devices to any VLAN.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Admin credential theft, vulnerability in RADIUS/Ise, or lateral movement into NAC management network.</li>
+<li>Initial action: Modify policies, add MAC allow-lists, or create backdoor access tokens.</li>
+<li>Core exploitation: Admit attacker devices into clinical VLAN and disable port-security alarms.</li>
+<li>Escalation: Persist by creating new admin accounts and removing logs.</li>
+<li>Impact realization: Global fleet admission, mass patient safety impact, system-wide outage.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Harden NAC management plane: separate management network, MFA for admin access, limited admin accounts.</li>
+<li>Control 2: Immutable logging and SIEM ingestion for RADIUS admin actions; frequent integrity checks of policy bundles.</li>
+<li>Control 3: RADIUS clustering with signed policy bundles and offline verification.</li>
+<li>Control 4: Backup/restore policy validation and emergency fail-closed mode to quarantine unknown devices.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>RADIUS admin audit logs: <code>admin_user</code>, <code>change_type</code>, <code>timestamp</code>.</li>
+<li>SIEM alerts for configuration changes pushed outside maintenance windows.</li>
+<li>ISE accounting logs: sudden spike in <code>Access-Accept</code> events for Clinical VLAN.</li>
+<li>Management network flows showing unusual connections to NAC controllers.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Verify admin MFA and recent policy changes on ISE
+Get-IseAdminPolicyChanges -Since (Get-Date).AddDays(-7)
+</code></pre>
+<pre><code class="language-kql"># Detect spike in Access-Accept for clinical VLAN
+ISEAccounting | where Vlan == 'clinical_iot' | summarize count() by bin(TimeGenerated,1h)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T4_A1[Attacker compromises NAC admin account]:::attack --> T4_A2[Modify admission policies]:::attack
+    T4_A2 --> T4_C1{Immutable audit of admin changes?}:::control
+    T4_C1 -->|Yes| T4_B1[Alert & rollback]:::blocked
+    T4_C1 -->|No| T4_A3[Admit attacker devices]:::attack
+    T4_A3 --> T4_C2{Fail-closed NAC configured?}:::control
+    T4_C2 -->|Yes| T4_B2[Quarantine unknown devices]:::blocked
+    T4_C2 -->|No| T4_A4[Mass admission & impact]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-rogue-ap-bridging-guest-and-clinical-networks">T5 — Rogue AP Bridging Guest and Clinical Networks</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Deploy a rogue wireless AP that bridges guest traffic into clinical VLAN or backdoor into wired network.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Physical proximity to hospital; access to a power outlet or hidden device placement.</li>
+<li>Initial action: Deploy rogue AP configured with SSID similar to guest or create bridge to wired patch port.</li>
+<li>Core exploitation: Bridge guest clients into clinical VLAN or capture traffic for MACs to spoof.</li>
+<li>Escalation: Use bridge to launch lateral attacks into staff VLAN.</li>
+<li>Impact realization: Unrestricted lateral movement and device compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: WLC rogue AP detection with automated RF triangulation and immediate AP containment.</li>
+<li>Control 2: AP allowed-listing and 802.11w management protection; block ad-hoc bridging behaviors.</li>
+<li>Control 3: Periodic RF sweeps and physical site inspections for hidden APs.</li>
+<li>Control 4: Port security on switch ports to prevent unknown AP uplinks.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Wireless controller logs: <code>rogue_ap_detected</code>, <code>ap_mac</code>, <code>rssi</code>, <code>first_seen</code>.</li>
+<li>NAC logs showing unusual client associations or new SSIDs.</li>
+<li>Switch port-link up events correlated with unknown AP MACs.</li>
+<li>Physical security camera footage aligned to rogue AP timelines.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-kql"># List rogue APs detected in last 24h
+WLCLogs | where Event == 'ROGUE_AP_DETECTED' | project TimeGenerated, ApMac, Ssid, Rssi
+</code></pre>
+<pre><code class="language-bash"># Simulate AP containment in lab: bring up rogue SSID and verify WLC blocks client associations
+simulate_rogue_ap.sh --ssid 'Guest-Test' --duration 60
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T5_A1[Attacker deploys rogue AP]:::attack --> T5_A2[Clients connect to rogue AP]:::attack
+    T5_A2 --> T5_C1{WLC rogue detection active?}:::control
+    T5_C1 -->|Yes| T5_B1[Contain AP & alert]:::blocked
+    T5_C1 -->|No| T5_A3[Bridge to clinical VLAN]:::attack
+    T5_A3 --> T5_C2{Port security on uplink?}:::control
+    T5_C2 -->|Yes| T5_B2[Uplink blocked]:::blocked
+    T5_C2 -->|No| T5_A4[Traffic reaches clinical devices]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-unpatched-medical-device-worm-ransomware">T6 — Unpatched Medical Device Worm / Ransomware</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege / Denial of Service<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Exploit known OS vulnerabilities on legacy devices to propagate worm/ransomware across clinical VLAN.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Vulnerable device OS (WinXP, embedded Linux) reachable on clinical VLAN; initial code execution via exposed service.</li>
+<li>Initial action: Exploit known CVE to gain shell and deploy payload.</li>
+<li>Core exploitation: Lateral movement to other devices using same vuln or default creds.</li>
+<li>Escalation: Encrypt PACS/EHR or modify device behavior (alarm suppression, dosage changes).</li>
+<li>Impact realization: Patient safety incidents, diagnostic outages, mass downtime.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Network segmentation with allow-list firewall rules — limit protocols and destinations per device type.</li>
+<li>Control 2: Passive IoMT monitoring (Claroty/Medigate) to detect lateral propagation and unusual SMB/SMBv1 or RPC traffic.</li>
+<li>Control 3: Backup &amp; rapid recovery playbooks for PACS/EHR with air-gapped backups.</li>
+<li>Control 4: Device replacement roadmap and compensating controls until vendor patches are available.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Claroty alerts: <code>suspicious_scan</code>, <code>new_connection_pattern</code>.</li>
+<li>IDS signatures for known exploit payloads (EternalBlue, SMB exploit indicators).</li>
+<li>Firewall logs showing unexpected lateral flows within clinical VLAN.</li>
+<li>EDR events if agentable on workstations adjacent to devices.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-kql"># Detect SMBv1 or unusual lateral SMB connections within clinical VLAN
+NetFlow | where SrcZone == 'clinical_iot' and DstPort in (139,445) | summarize count() by SrcIp, DstIp
+</code></pre>
+<pre><code class="language-bash"># Simulate worm propagation in isolated lab (placeholder)
+python simulate_worm.py --network lab_clinical --vuln 'CVE-XXXX'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T6_A1[Exploit unpatched device]:::attack --> T6_A2[Gain code execution]:::attack
+    T6_A2 --> T6_C1{Network allow-listing blocks lateral calls?}:::control
+    T6_C1 -->|Yes| T6_B1[Propagation halted]:::blocked
+    T6_C1 -->|No| T6_A3[Propagate to other devices]:::attack
+    T6_A3 --> T6_C2{Claroty detects lateral anomaly?}:::control
+    T6_C2 -->|Yes| T6_B2[Isolate segment]:::blocked
+    T6_C2 -->|No| T6_A4[Mass device compromise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-vendor-remote-maintenance-abuse">T7 — Vendor Remote Maintenance Abuse</h3>
+<p><strong>STRIDE category:</strong> Trusted Relationship / Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use vendor remote access to pivot into clinical VLAN outside maintenance scope.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Vendor VPN credentials or compromised vendor workstation.</li>
+<li>Initial action: Initiate remote maintenance session with broad scope.</li>
+<li>Core exploitation: Access additional devices or pivot to adjacent systems via vendor access token reuse.</li>
+<li>Escalation: Create persistent access, modify device configs.</li>
+<li>Impact realization: Device misconfiguration, data exfiltration, or introduction of malicious firmware.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Use PAM for vendor access (CyberArk): JIT, session recording, target-specific access, and automatic revocation.</li>
+<li>Control 2: Network micro-segmentation: vendor VPN only allowed to management VLAN with no direct path to clinical VLAN.</li>
+<li>Control 3: Vendor session monitoring with SOAR triggers on post-maintenance anomalous commands.</li>
+<li>Control 4: Enforce vendor MFA and device posture checks before granting access.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PAM logs showing <code>vendor_id</code>, <code>target_ip</code>, <code>commands_executed</code>, <code>session_duration</code>.</li>
+<li>VPN logs for vendor IPs and session endpoints.</li>
+<li>Claroty logs for unusual management commands or firmware pushes.</li>
+<li>SIEM correlation between vendor session and subsequent device anomalies.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Verify vendor sessions only target management VLAN addresses
+Get-PAMSessions | where { $_.TargetIp -notin $ManagementVlanRange }
+</code></pre>
+<pre><code class="language-kql"># Detect vendor sessions followed by device config changes
+PAMLogs | join (DeviceConfigLogs) on SessionId | where DeviceConfigLogs.TimeGenerated between (PAMLogs.TimeGenerated .. PAMLogs.TimeGenerated + 1h)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T7_A1[Vendor logs into PAM session]:::attack --> T7_A2[Execute maintenance tasks]:::attack
+    T7_A2 --> T7_C1{PAM target scoping enforced?}:::control
+    T7_C1 -->|Yes| T7_B1[Restricted access only]:::blocked
+    T7_C1 -->|No| T7_A3[Vendor pivots to clinical VLAN]:::attack
+    T7_A3 --> T7_C2{Session recording and review?}:::control
+    T7_C2 -->|Yes| T7_B2[Post-session review flags abuse]:::blocked
+    T7_C2 -->|No| T7_A4[Malicious change persists]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-dicom-protocol-exploitation-pacs-write-abuse">T8 — DICOM Protocol Exploitation (PACS Write Abuse)</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Abuse unauthenticated DICOM transfers to write or replace imaging data on PACS or inject malicious study files.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Network path to PACS server and knowledge of DICOM endpoints.</li>
+<li>Initial action: Send crafted DICOM objects or malformed headers to PACS.</li>
+<li>Core exploitation: Overwrite imaging files, corrupt studies, or attach metadata that exfiltrates PHI.</li>
+<li>Escalation: Disrupt diagnosis by corrupting critical images.</li>
+<li>Impact realization: Misdiagnosis, delayed treatment, regulatory breach.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Isolate PACS behind strict firewall with only known modality sources allowed by IP and DICOM AE title.</li>
+<li>Control 2: DICOM-aware inspection (if available) to validate study integrity and origin.</li>
+<li>Control 3: PACS WORM backup and integrity checks to restore altered studies.</li>
+<li>Control 4: Monitor for unusual DICOM C-STORE/C-FIND activity and large writes from unknown senders.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>PACS audit logs: <code>source_ae</code>, <code>study_uid</code>, <code>operation</code>, <code>file_hash</code>.</li>
+<li>Firewall logs: denied connections to PACS from non-allowlisted IPs.</li>
+<li>DICOM proxy logs showing malformed or unexpected C-STORE attempts.</li>
+<li>Claroty or IDS alerts for unexpected DICOM traffic patterns.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List recent DICOM C-STORE attempts from non-approved senders
+PACSLogs | where Operation == 'C-STORE' and SourceIp notin (ApprovedModalities)
+</code></pre>
+<pre><code class="language-kql"># Detect PACS file hash changes indicating tampering
+PACSFileInventory | join (PACSFileHashes) on FileId | where CurrentHash != BaselineHash
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T8_A1[Attacker sends crafted DICOM C-STORE]:::attack --> T8_A2[PACS accepts file]:::attack
+    T8_A2 --> T8_C1{Firewall allow-list enforced?}:::control
+    T8_C1 -->|Yes| T8_B1[Connection blocked]:::blocked
+    T8_C1 -->|No| T8_A3[File written to PACS]:::attack
+    T8_A3 --> T8_C2{PACS integrity checks?}:::control
+    T8_C2 -->|Yes| T8_B2[Corruption detected & restored]:::blocked
+    T8_C2 -->|No| T8_A4[Imaging corrupted]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-physical-patch-panel-recabling-insider-mispatch">T9 — Physical Patch-Panel Recabling / Insider Mispatch</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Physically rewire patch panels to move clinical device port into a guest or staff VLAN, or vice versa, enabling unauthorized access.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Physical access to wiring closet or collusion with staff; ability to patch cables.</li>
+<li>Initial action: Re-patch cable to different switch or port, changing VLAN exposure.</li>
+<li>Core exploitation: Device now reachable from guest/staff VLAN and is attacked remotely.</li>
+<li>Escalation: Use new path to pivot to other devices or administrative consoles.</li>
+<li>Impact realization: Device compromise, patient harm, or data theft.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Locked wiring closets with badge access and CCTV; require change ticket for any patch changes.</li>
+<li>Control 2: Daily/weekly automated switch-port inventory checks comparing physical port mapping with CMDB.</li>
+<li>Control 3: Set re-auth timer for 802.1X and enforce automatic port-level re-auth on link change.</li>
+<li>Control 4: Physical tamper alarms for unauthorized cabinet opening outside scheduled maintenance.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Badge access logs correlated to wiring closet door events and switch link-up times.</li>
+<li>Switch LLDP/CDP neighbor changes and interface flap logs.</li>
+<li>CMDB mismatch alerts when new MAC appears on different port than inventory.</li>
+<li>CCTV footage for suspicious activity in wiring closets.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-kql"># Detect MAC observed on different port than CMDB expected
+SwitchSyslog | where Event == 'PortChange' | join CMDB on MacAddr | where Port != ExpectedPort
+</code></pre>
+<pre><code class="language-powershell"># Verify wiring closet badge access outside maintenance hours
+Get-BadgeAccessEvents | where { $_.Door -eq 'WiringCloset1' -and $_.Time -notin $MaintenanceWindow }
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T9_A1[Insider re-cables patch panel]:::attack --> T9_A2[Device now on different VLAN]:::attack
+    T9_A2 --> T9_C1{Wiring closet access logged?}:::control
+    T9_C1 -->|Yes| T9_B1[Physical security intervenes]:::blocked
+    T9_C1 -->|No| T9_A3[Device reachable from guest VLAN]:::attack
+    T9_A3 --> T9_C2{Port re-auth triggers?}:::control
+    T9_C2 -->|Yes| T9_B2[Port re-auth detects mismatch]:::blocked
+    T9_C2 -->|No| T9_A4[Exploit device]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-ehr-credential-theft-via-phishing-ransomware">T10 — EHR Credential Theft via Phishing / Ransomware</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise clinician credentials, access EHR, deploy ransomware affecting clinical workflows or exfiltrate PHI.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Successful phishing or malware on staff workstation; weak endpoint protection.</li>
+<li>Initial action: Harvest credentials or escalate to domain admin; deploy ransomware.</li>
+<li>Core exploitation: Use valid EHR credentials to export PHI or encrypt critical systems.</li>
+<li>Escalation: Lateral movement to imaging/PACS and medical devices.</li>
+<li>Impact realization: HIPAA breach, patient care disruption.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: EHR conditional access: require compliant device, MFA (FIDO2), and Geo-IP restrictions for privileged access.</li>
+<li>Control 2: EDR (CrowdStrike) with ransomware prevention and rapid IOC blocking.</li>
+<li>Control 3: Email security with attachment sandboxing and URL rewriting to block credential harvesting.</li>
+<li>Control 4: Monitor EHR exports for unusual patterns and require approvals for bulk exports.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>IdP logs: <code>SigninLogs</code> with DeviceCompliance, MFA used, ClientAppUsed.</li>
+<li>EDR telemetry: process creation, suspicious command lines, IOCs.</li>
+<li>EHR audit: bulk export operations, IP of access, user agent.</li>
+<li>Mail gateway logs showing blocked phishing campaigns.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-kql"># Detect EHR bulk exports by a single user within 24h
+EHRAudit | where Operation == 'Export' | summarize cnt=count() by User | where cnt &gt; 10
+</code></pre>
+<pre><code class="language-powershell"># Verify conditional access check exists for EHR app
+Get-ConditionalAccessPolicy -AppId '&lt;EHR-App-Id&gt;' | select Name, Conditions, GrantControls
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T10_A1[Phishing yields credentials]:::attack --> T10_A2[Login to EHR with stolen creds]:::attack
+    T10_A2 --> T10_C1{Conditional access requires MFA/device compliance?}:::control
+    T10_C1 -->|Yes| T10_B1[Access blocked or step-up required]:::blocked
+    T10_C1 -->|No| T10_A3[Export PHI / deploy ransomware]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-dns-firmware-update-poisoning">T11 — DNS / Firmware Update Poisoning</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, High impact<br />
+<strong>Attacker objective:</strong> Poison DNS or compromise firmware update server to serve malicious firmware to devices.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Ability to influence DNS responses (on-path) or compromise update server credentials.</li>
+<li>Initial action: Serve malicious firmware or redirect update checks to attacker-controlled host.</li>
+<li>Core exploitation: Devices fetch and install compromised firmware.</li>
+<li>Escalation: Persistent implant in large fleet of devices.</li>
+<li>Impact realization: Widespread device compromise and persistent exfiltration.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: Validate firmware signatures on-device; enforce code signing for updates.</li>
+<li>Control 2: Restrict update servers behind firewall, use allow-list to corporate update endpoints only.</li>
+<li>Control 3: DNS security: use DNSSEC, or enforce resolver policies that prevent spoofed responses for internal update domains.</li>
+<li>Control 4: Monitor proxy logs for unusual download endpoints and anomalous TLS certs.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Proxy/download server logs: <code>dst_domain</code>, <code>file_hash</code>, <code>user_agent</code>.</li>
+<li>Firmware signature verification logs and device update history.</li>
+<li>DNS logs showing anomalous NXDOMAIN or unexpected authoritative response changes.</li>
+<li>Claroty alert for devices fetching updates from unexpected destinations.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Check for devices fetching updates from non-approved domains
+ProxyLogs | where Url notin (ApprovedUpdateDomains) and TimeGenerated &gt; ago(7d)
+</code></pre>
+<pre><code class="language-kql"># Detect DNS changes for internal update domains
+DNSLogs | where QueryName contains 'updates.medvendor' and ResponseAuthority != ExpectedAuthority
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T11_A1[Attacker poisons DNS / compromises update server]:::attack --> T11_A2[Devices download malicious firmware]:::attack
+    T11_A2 --> T11_C1{Firmware signature validation?}:::control
+    T11_C1 -->|Yes| T11_B1[Reject firmware]:::blocked
+    T11_C1 -->|No| T11_A3[Device compromised at scale]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-bluetooth-rf-side-channel-on-infusion-pumps">T12 — Bluetooth / RF Side-Channel on Infusion Pumps</h3>
+<p><strong>STRIDE category:</strong> Tampering / Information Disclosure<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use Bluetooth or RF vulnerabilities to communicate with medical device interfaces lacking authentication.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Proximity to device (patient room) and device implementing insecure RF protocols.</li>
+<li>Initial action: Probe device for open Bluetooth services or debug ports.</li>
+<li>Core exploitation: Send commands or alter parameters via RF interface.</li>
+<li>Escalation: Cause dosage adjustments or disable alarms.</li>
+<li>Impact realization: Immediate patient safety incident.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Control 1: RF reconnaissance and shielding in critical care areas; disable Bluetooth radios on devices that do not require them.</li>
+<li>Control 2: Claroty RF anomaly detection and physical sensor integration for unusual RF signatures.</li>
+<li>Control 3: Clinical procedures: cover devices, lock physical access to debug ports, and restrict device pairing.</li>
+<li>Control 4: Device vendor hardening: firmware updates that disable insecure RF services.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>RF detection logs showing new Bluetooth pair attempts or unknown service advertisements.</li>
+<li>Claroty alerts for unexpected remote control commands.</li>
+<li>Physical access logs and room occupancy sensors correlated to RF anomalies.</li>
+<li>Device debug logs showing pairing attempts.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Scan for Bluetooth advertisements in patient rooms (lab simulation)
+hcitool lescan --duplicates --passive
+</code></pre>
+<pre><code class="language-kql"># Detect Bluetooth pairing attempts from managed endpoints
+EndpointEvents | where EventType == 'BluetoothPairRequest' and TimeGenerated &gt; ago(24h)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T12_A1[Attacker probes RF/Bluetooth]:::attack --> T12_A2[Pairing attempt succeeds]:::attack
+    T12_A2 --> T12_C1{RF shielding & pair restrictions enforced?}:::control
+    T12_C1 -->|Yes| T12_B1[Pairing blocked]:::blocked
+    T12_C1 -->|No| T12_A3[Send commands to device]:::attack
+    T12_A3 --> T12_C2{Device auth for commands?}:::control
+    T12_C2 -->|Yes| T12_B2[Commands rejected]:::blocked
+    T12_C2 -->|No| T12_A4[Patient safety incident]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Simulate MAC spoof on isolated lab port</td>
+<td>ISE rejects or Claroty flags mismatch</td>
+<td>Attacker admitted with spoofed MAC</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Attempt DTP negotiation on access port in lab</td>
+<td>Switch rejects negotiation</td>
+<td>DTP trunk negotiated on access port</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Send crafted double-tagged frames in lab</td>
+<td>Frames dropped by access port</td>
+<td>Frames forwarded to clinical VLAN</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Simulate NAC policy change via test admin account</td>
+<td>SIEM records change and triggers alert</td>
+<td>Admin policy changed without audit</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Deploy test rogue AP and verify WLC containment</td>
+<td>WLC contains and isolates AP</td>
+<td>Rogue AP remains up and clients join</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Trigger SMB/SMBv1 scan from device in lab</td>
+<td>Claroty/IDS detects lateral attempts</td>
+<td>No IDS/Claroty alerts</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Run vendor session and attempt access outside scope</td>
+<td>PAM terminates session and alerts</td>
+<td>Vendor session performs out-of-scope actions</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Send malformed DICOM file to test PACS in lab</td>
+<td>PACS rejects or logs anomaly</td>
+<td>PACS accepts and stores malformed file</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Re-cable test port in lab and observe re-auth behavior</td>
+<td>Port re-authentication and CMDB alert</td>
+<td>Device mapped to new VLAN without alert</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Simulate EHR phishing and verify conditional access</td>
+<td>Step-up/MFA prompts block access</td>
+<td>EHR login succeeds with stolen creds</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Serve fake firmware from test mirror and check signature</td>
+<td>Device rejects unsigned firmware</td>
+<td>Device installs unsigned firmware</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>RF scan in patient rooms to locate unauthorized devices</td>
+<td>RF alerts and physical investigation</td>
+<td>No detection of rogue RF activity</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NAC + Multi-signal profiling</td>
+<td>T1, T4, T11</td>
+<td>Legacy devices without cryptographic identity</td>
+</tr>
+<tr>
+<td>Network segmentation + firewall</td>
+<td>T2, T3, T6, T8</td>
+<td>ACL maintenance required at scale</td>
+</tr>
+<tr>
+<td>IoMT behavioral monitoring (Claroty/Medigate)</td>
+<td>T1, T6, T8, T12</td>
+<td>Coverage depends on sensor placement</td>
+</tr>
+<tr>
+<td>PAM &amp; vendor controls</td>
+<td>T7</td>
+<td>PAM is high-value target; monitoring needed</td>
+</tr>
+<tr>
+<td>Physical security (wiring closets, CCTV)</td>
+<td>T9, T5</td>
+<td>Operational discipline required</td>
+</tr>
+<tr>
+<td>Email &amp; EDR</td>
+<td>T10</td>
+<td>Phishing resilience and EDR tuning required</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Disable DTP and enforce explicit port mode across all switches</strong> — closes T2 and T3. Implementation: deploy Ansible playbook to set <code>switchport nonegotiate</code> and validate nightly.</li>
+<li><strong>Enforce multi-signal NAC profiling and quarantine unknown devices</strong> — closes T1 and T11. Implementation: Cisco ISE profiling + CMDB auto-sync + quarantine policy.</li>
+<li><strong>Deploy Claroty/Medigate sensors on clinical VLAN and PACS segments</strong> — closes T6, T8, T12. Implementation: phased sensor rollout and prioritized device baselining.</li>
+<li><strong>Implement PAM for all vendor sessions with JIT and session recording</strong> — closes T7. Implementation: CyberArk onboarding and enforcement of target IP allowlists.</li>
+<li><strong>Lock wiring closets and automate port-to-CMDB reconciliation</strong> — closes T9. Implementation: badge-required access + nightly port mapping validation and alerting.</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario21-nac-hospital-iot.md</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

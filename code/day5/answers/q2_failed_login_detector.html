@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q2_failed_login_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q2_failed_login_detector.py</h1>
+  <p class="file-path">Source: code\day5\answers\q2_failed_login_detector.py</p>
+  <p class="line-count">328 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q2. Failed Login Detector
+==========================
+Parse an auth log, count consecutive failures per user before a success
+resets the counter, flag any user who hits &gt;= 5 consecutive failures.
+
+Log format:
+  2024-01-15T10:30:00Z auth: user=alice result=FAIL src=10.0.0.1
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Detect brute-force attempts from an auth log.
+Count consecutive failures per user; a success resets the counter.
+Flag anyone who hits &gt;= 5 consecutive failures.&quot;
+
+--- CANDIDATE FIRST RESPONSE (naive — reads entire file into memory, no regex) ---
+&quot;I&#x27;d loop through lines, split on spaces, track a per-user counter in a dict.
+When I see FAIL I increment; when I see OK I reset to 0.&quot;
+
+Follow-ups:
+  - &quot;What if a user has multiple bursts — 4 fails, then success, then 6 fails?&quot;
+    → Need to track MAX consecutive failures seen, not just current.
+  - &quot;What source IPs did those failures come from?&quot;
+    → Need a per-user set of IPs seen during failure bursts.
+  - &quot;What if the log format is slightly inconsistent (extra spaces)?&quot;
+    → Use regex instead of naive split.
+
+--- CANDIDATE SECOND RESPONSE (regex + proper state tracking) ---
+Uses regex, tracks current_streak and max_streak per user.
+Still no error handling.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Regex parsing, full state machine per user, graceful error handling,
+memory-efficient streaming, clear report.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-01-15T10:30:00Z auth: user=alice result=FAIL src=10.0.0.1
+2024-01-15T10:30:05Z auth: user=alice result=FAIL src=10.0.0.1
+2024-01-15T10:30:08Z auth: user=bob   result=FAIL src=10.0.0.2
+2024-01-15T10:30:10Z auth: user=alice result=FAIL src=10.0.0.1
+2024-01-15T10:30:11Z auth: user=alice result=FAIL src=10.0.0.3
+2024-01-15T10:30:12Z auth: user=alice result=FAIL src=10.0.0.1
+2024-01-15T10:30:15Z auth: user=alice result=OK   src=10.0.0.1
+2024-01-15T10:30:20Z auth: user=alice result=FAIL src=10.0.0.4
+2024-01-15T10:30:22Z auth: user=bob   result=FAIL src=10.0.0.2
+2024-01-15T10:30:25Z auth: user=alice result=FAIL src=10.0.0.4
+2024-01-15T10:30:30Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:31Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:32Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:33Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:34Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:35Z auth: user=carol result=FAIL src=172.16.0.5
+2024-01-15T10:30:36Z auth: user=carol result=OK   src=172.16.0.5
+2024-01-15T10:30:40Z auth: user=bob   result=OK   src=10.0.0.2
+MALFORMED LINE — no fields here
+2024-01-15T10:30:45Z auth: user=dave  result=FAIL src=192.168.1.1
+2024-01-15T10:30:46Z auth: user=dave  result=FAIL src=192.168.1.1
+2024-01-15T10:30:47Z auth: user=dave  result=FAIL src=192.168.1.1
+2024-01-15T10:30:48Z auth: user=dave  result=FAIL src=192.168.1.2
+2024-01-15T10:30:49Z auth: user=dave  result=FAIL src=192.168.1.2
+&quot;&quot;&quot;
+
+THRESHOLD = 5  # flag if consecutive failures reach this
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSE HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LINE_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)&#x27;
+    r&#x27;\s+auth:\s+&#x27;
+    r&#x27;user=(?P&lt;user&gt;\S+)&#x27;
+    r&#x27;\s+result=(?P&lt;result&gt;FAIL|OK)&#x27;
+    r&#x27;\s+src=(?P&lt;src&gt;\S+)&#x27;
+)
+
+
+def parse_auth_line(raw: str):
+    &quot;&quot;&quot;Return dict or None for malformed lines.&quot;&quot;&quot;
+    raw = raw.strip()
+    if not raw:
+        return None
+    m = LINE_RE.search(raw)
+    if not m:
+        return None
+    return {
+        &quot;ts&quot;:     m.group(&quot;ts&quot;),
+        &quot;user&quot;:   m.group(&quot;user&quot;),
+        &quot;result&quot;: m.group(&quot;result&quot;),
+        &quot;src&quot;:    m.group(&quot;src&quot;),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (no defaultdict, no set — use plain dicts and lists, manual deduplication)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_without_builtins(lines):
+    &quot;&quot;&quot;
+    State per user (all plain dicts/lists):
+      current_streak  : int  — consecutive failures in current run
+      max_streak      : int  — highest streak seen for this user
+      streak_ips      : list — IPs seen during the CURRENT failure streak
+      all_fail_ips    : list — all IPs ever seen during ANY failure streak
+      flagged         : bool — did this user ever hit &gt;= THRESHOLD?
+    &quot;&quot;&quot;
+    # user_state[user] = { current_streak, max_streak, streak_ips, all_fail_ips, flagged }
+    user_state = {}
+    malformed = 0
+
+    def _add_unique(lst, item):
+        &quot;&quot;&quot;Append item to list only if not already present (manual set).&quot;&quot;&quot;
+        for existing in lst:
+            if existing == item:
+                return
+        lst.append(item)
+
+    for raw in lines:
+        entry = parse_auth_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        user   = entry[&quot;user&quot;]
+        result = entry[&quot;result&quot;]
+        src    = entry[&quot;src&quot;]
+
+        # Initialise state for new user
+        if user not in user_state:
+            user_state[user] = {
+                &quot;current_streak&quot;: 0,
+                &quot;max_streak&quot;:     0,
+                &quot;streak_ips&quot;:     [],
+                &quot;all_fail_ips&quot;:   [],
+                &quot;flagged&quot;:        False,
+            }
+
+        state = user_state[user]
+
+        if result == &quot;FAIL&quot;:
+            state[&quot;current_streak&quot;] += 1
+            _add_unique(state[&quot;streak_ips&quot;],   src)
+            _add_unique(state[&quot;all_fail_ips&quot;], src)
+
+            if state[&quot;current_streak&quot;] &gt; state[&quot;max_streak&quot;]:
+                state[&quot;max_streak&quot;] = state[&quot;current_streak&quot;]
+
+            if state[&quot;current_streak&quot;] &gt;= THRESHOLD:
+                state[&quot;flagged&quot;] = True
+
+        else:  # result == &quot;OK&quot;
+            # Reset current streak; preserve historical data
+            state[&quot;current_streak&quot;] = 0
+            state[&quot;streak_ips&quot;]     = []   # fresh streak IPs for next burst
+
+    # Collect flagged users
+    flagged_users = []
+    for user, state in user_state.items():
+        if state[&quot;flagged&quot;]:
+            flagged_users.append({
+                &quot;user&quot;:       user,
+                &quot;max_streak&quot;: state[&quot;max_streak&quot;],
+                &quot;src_ips&quot;:    state[&quot;all_fail_ips&quot;],
+            })
+
+    return flagged_users, malformed, user_state
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (cleaner)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_with_builtins(lines):
+    &quot;&quot;&quot;
+    Same logic using defaultdict and set for brevity.
+    &quot;&quot;&quot;
+    current_streak = defaultdict(int)
+    max_streak     = defaultdict(int)
+    streak_ips     = defaultdict(set)   # IPs in the CURRENT burst
+    all_fail_ips   = defaultdict(set)   # all IPs across all failure bursts
+    flagged        = set()
+    malformed      = 0
+
+    for raw in lines:
+        entry = parse_auth_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        user   = entry[&quot;user&quot;]
+        result = entry[&quot;result&quot;]
+        src    = entry[&quot;src&quot;]
+
+        if result == &quot;FAIL&quot;:
+            current_streak[user] += 1
+            streak_ips[user].add(src)
+            all_fail_ips[user].add(src)
+
+            if current_streak[user] &gt; max_streak[user]:
+                max_streak[user] = current_streak[user]
+
+            if current_streak[user] &gt;= THRESHOLD:
+                flagged.add(user)
+
+        else:  # OK — reset
+            current_streak[user] = 0
+            streak_ips[user]     = set()
+
+    flagged_users = [
+        {
+            &quot;user&quot;:       u,
+            &quot;max_streak&quot;: max_streak[u],
+            &quot;src_ips&quot;:    sorted(all_fail_ips[u]),
+        }
+        for u in sorted(flagged)
+    ]
+    return flagged_users, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(flagged_users, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;  FAILED LOGIN DETECTION REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;Malformed lines skipped: {malformed}&quot;)
+    print(f&quot;Threshold for flagging : {THRESHOLD} consecutive failures\n&quot;)
+
+    if not flagged_users:
+        print(&quot;  No users flagged.\n&quot;)
+        return
+
+    print(f&quot;Flagged users ({len(flagged_users)}):&quot;)
+    for rec in flagged_users:
+        ips_str = &quot;, &quot;.join(rec[&quot;src_ips&quot;])
+        print(f&quot;  {rec[&#x27;user&#x27;]:&lt;15} max_consecutive={rec[&#x27;max_streak&#x27;]}  &quot;
+              f&quot;src_ips=[{ips_str}]&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stream_lines(filepath: str):
+    &quot;&quot;&quot;Generator — line-by-line, does not load entire file into memory.&quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            for line in fh:
+                yield line
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+    except OSError as exc:
+        print(f&quot;[ERROR] OS error reading {filepath}: {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        filepath = sys.argv[1]
+        lines = list(stream_lines(filepath))
+        if not lines:
+            print(&quot;[WARN] No lines read. Exiting.&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No log file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    flagged_manual, malformed_manual, _ = detect_without_builtins(lines)
+    flagged_builtin, malformed_builtin  = detect_with_builtins(lines)
+
+    print_report(flagged_manual,  malformed_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(flagged_builtin, malformed_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check
+    manual_names  = sorted(r[&quot;user&quot;] for r in flagged_manual)
+    builtin_names = sorted(r[&quot;user&quot;] for r in flagged_builtin)
+    assert manual_names == builtin_names, \
+        f&quot;Mismatch! manual={manual_names}  builtin={builtin_names}&quot;
+    print(&quot;[OK] Both approaches agree on flagged users.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(L)  — single pass over L log lines
+# Space : O(U)  — U = unique users; stores state per user
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;What if events are out-of-order by timestamp?&quot;
+#     → Sort by timestamp first (add ts parsing), then replay.
+#       Or use an event-time window with a bounded late-arrival buffer.
+# - &quot;How would you scale this to 100M auth events/day?&quot;
+#     → Partition by user in a distributed system (Kafka partition key = user).
+#       Each partition is processed independently; state lives in a KV store.
+# - &quot;What if we need to detect failures across separate sessions?&quot;
+#     → Keep a rolling 24-hour window per user; don&#x27;t reset on success
+#       if the policy says &quot;5 fails in any 1-hour window&quot;.
+# - &quot;Should a success always reset the counter?&quot;
+#     → Depends on policy. Some orgs count lifetime failures within a window,
+#       not just streaks. This solution implements the streak model as specified.
+# =============================================================================
+</code></pre>
+</body>
+</html>

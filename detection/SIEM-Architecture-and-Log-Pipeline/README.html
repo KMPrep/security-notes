@@ -1,0 +1,1433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIEM Architecture and the Security Log Pipeline at Scale</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: detection\SIEM-Architecture-and-Log-Pipeline\README.md</p>
+<h1 id="siem-architecture-and-the-security-log-pipeline-at-scale">SIEM Architecture and the Security Log Pipeline at Scale</h1>
+<p><strong>Category:</strong> Detection Engineering — Log Pipeline, Data Modeling, SIEM/Data-Lake Architecture<br />
+<strong>Related notes:</strong> <a href="../README.md">Detection Engineering overview</a> · <a href="../IDS-SIEM/README.md">IDS and SIEM</a> · <a href="../Anomaly-Detection/README.md">Anomaly and Behaviour Detection</a> · <a href="../YARA-Snort/README.md">YARA and Snort Rules</a> · <a href="../../auth_authz/Governance/Audit-Logging/README.md">Audit Logging (auth/authz governance)</a><br />
+<strong>GCP cross-refs (planned/companion):</strong> <code>gcp/Chronicle-SecOps/README.md</code> (Chronicle/Google SecOps, UDM, YARA-L) · <code>gcp/Cloud-Audit-Logs/README.md</code> (Admin Activity / Data Access / System Event / Policy Denied audit streams)<br />
+<strong>Standards anchored:</strong> OCSF 1.x · Elastic Common Schema (ECS) · Chronicle UDM · MITRE ATT&amp;CK · NIST SP 800-92 (Log Management) · Sigma</p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>A SIEM (Security Information and Event Management) is the system that turns raw, heterogeneous log exhaust from thousands of sources into normalized, enriched, queryable security events, then runs detection logic over that stream to produce alerts. At scale the interesting engineering problem is <em>not</em> the correlation engine — it is the <strong>pipeline</strong> in front of it: collecting from agents, syslog, and cloud-native sinks; parsing and normalizing to a common data model; enriching with asset/identity/threat-intel context; and tiering storage across hot/warm/cold so that ingest cost does not become unbounded. A modern platform ingests <strong>tens of terabytes to petabytes per day</strong>, and roughly 60–80% of every SIEM engineering conversation is about <em>what you can afford to ingest, index, and retain</em> versus <em>what you need to detect on</em>.</p>
+<p>The industry has bifurcated into two architectures. <strong>Traditional SIEMs</strong> (Splunk, IBM QRadar, Elastic) index everything into their own store and charge on ingest volume (Splunk) or EPS/FlexPoints (QRadar). <strong>Cloud-native SIEMs</strong> (Google Chronicle/SecOps, Microsoft Sentinel, Amazon Security Lake + Athena/OpenSearch) decouple storage from compute, normalize to a fixed schema (UDM, ASIM, OCSF), and price on ingest + query compute. The current best-practice pattern — <strong>"SIEM + data lake + detection-as-code"</strong> — routes cheap-but-voluminous logs to a lake (S3/GCS/BigQuery) and routes high-signal logs to the SIEM, with detections managed as version-controlled code (Sigma, YARA-L, Sentinel <code>.yaml</code>) in CI/CD.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- A SIEM is a <strong>pipeline</strong>, not a product: collect → parse/normalize → enrich → store (tiered) → detect → alert → respond. The hard parts are normalization drift and ingest economics, not the correlation engine.<br />
+- <strong>Normalization to a common data model</strong> (OCSF/ECS/UDM) is what makes cross-source detections possible — you write one rule against <code>src_endpoint.ip</code>, not five per-vendor rules.<br />
+- <strong>Garbage-in-garbage-out is the #1 failure mode</strong>: missing logs, broken parsers, and silent source outages cause more misses than bad detection logic. Monitor <em>log-source health</em> as a first-class SLO.<br />
+- <strong>Storage tiering + a data lake</strong> is how you control cost: hot index for 30–90 days of high-signal data, cold/lake object storage for 1+ years of everything at ~1/10th the cost.<br />
+- <strong>Detection-as-code</strong> (rules in Git, tested in CI, deployed via pipeline) is the difference between a SOC that scales and one that rots.</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works-deep">2. How It Works (deep)</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>The pipeline is a directed flow of stages, each with distinct failure modes and cost characteristics. Think of it as an ETL/streaming system whose payload happens to be security telemetry.</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Function</th>
+<th>Key objects / concepts</th>
+<th>Primary failure mode</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Collection</strong></td>
+<td>Get events off the source</td>
+<td>Agents, forwarders, syslog, API pollers, cloud sinks</td>
+<td>Silent source outage, agent death, dropped UDP</td>
+</tr>
+<tr>
+<td><strong>Transport / buffering</strong></td>
+<td>Reliable delivery, backpressure</td>
+<td>Kafka/Pub/Sub, disk queues, TLS</td>
+<td>Backpressure → drop; unencrypted transit</td>
+</tr>
+<tr>
+<td><strong>Parsing</strong></td>
+<td>Raw bytes → structured fields</td>
+<td>Grok, regex, JSON/CEF/LEEF decoders</td>
+<td>Parsing drift on format change</td>
+</tr>
+<tr>
+<td><strong>Normalization</strong></td>
+<td>Structured fields → common schema</td>
+<td>OCSF, ECS, UDM, ASIM field mapping</td>
+<td>Wrong field mapping; unmapped events</td>
+</tr>
+<tr>
+<td><strong>Enrichment</strong></td>
+<td>Add context</td>
+<td>Asset DB, identity/CMDB, GeoIP, threat intel</td>
+<td>Stale enrichment; join latency</td>
+</tr>
+<tr>
+<td><strong>Routing</strong></td>
+<td>Decide destination + tier</td>
+<td>Ingest-time filters, index routing</td>
+<td>Over-ingest of low-value data</td>
+</tr>
+<tr>
+<td><strong>Storage</strong></td>
+<td>Persist for search/retention</td>
+<td>Hot index, warm, cold/lake object store</td>
+<td>Cost blowout; retention gaps</td>
+</tr>
+<tr>
+<td><strong>Detection execution</strong></td>
+<td>Run rules/analytics</td>
+<td>Streaming rules, scheduled search, UEBA</td>
+<td>Rule silently disabled; latency</td>
+</tr>
+<tr>
+<td><strong>Alerting / response</strong></td>
+<td>Notify + orchestrate</td>
+<td>Case mgmt, SOAR playbooks</td>
+<td>Alert fatigue, no runbook</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Control plane vs data plane.</strong> The <em>data plane</em> is the high-throughput event flow (Kafka topics, forwarders, indexers). The <em>control plane</em> is configuration: parser definitions, normalization mappings, detection rules, routing policy, retention policy. A mature platform manages the control plane as code (Git) and treats parser/mapping changes with the same rigor as application deploys, because a bad parser push can blind detections silently.</p>
+<p><strong>Push vs pull collection.</strong> Agents and syslog <em>push</em>; cloud APIs are often <em>pulled</em> (poll CloudTrail/S3, GCP Pub/Sub sinks, Graph API for M365). Cloud-native sinks (AWS Kinesis Firehose → S3, GCP Log Router → Pub/Sub, Azure Diagnostic Settings → Event Hub) are the scalable path because they push structured JSON with delivery guarantees rather than relying on you to poll.</p>
+<p><strong>Schema-on-write vs schema-on-read.</strong> Traditional SIEMs and cloud-native SIEMs largely normalize at ingest (<strong>schema-on-write</strong>): parse and map before storage, fast query, but reprocessing history requires re-ingest. Data lakes favor <strong>schema-on-read</strong>: store raw, apply schema at query time (Athena/BigQuery views), cheap storage and reparse-friendly, but slower/more expensive queries. The modern pattern uses both.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>(a) Cloud-native sink — GCP Log Router to Pub/Sub → data lake + SIEM.</strong> This is the canonical GCP export path; the Pub/Sub topic fans out to both BigQuery (lake) and Chronicle (SIEM).</p>
+<pre><code class="language-bash"># Create an aggregated org-level sink for all Data Access + Admin Activity audit logs
+gcloud logging sinks create secops-audit-sink \
+  pubsub.googleapis.com/projects/sec-logging-prj/topics/audit-events \
+  --organization=123456789012 \
+  --include-children \
+  --log-filter='logName:&quot;cloudaudit.googleapis.com&quot; AND
+    (protoPayload.methodName:&quot;SetIamPolicy&quot; OR
+     resource.type=&quot;gcs_bucket&quot; OR
+     protoPayload.serviceName=&quot;storage.googleapis.com&quot;)'
+
+# Grant the sink's writer identity publish rights (returned service account)
+gcloud pubsub topics add-iam-policy-binding audit-events \
+  --member=&quot;serviceAccount:o123456789012-987654@gcp-sa-logging.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/pubsub.publisher&quot;
+</code></pre>
+<p>Commentary: the <code>--log-filter</code> is your <strong>ingest-time cost control</strong> — Data Access logs are enormous, so you route only IAM changes and GCS access, not every read. <code>--include-children</code> makes it org-wide. The Pub/Sub topic decouples producers from consumers so a SIEM outage does not lose logs (Pub/Sub retains for up to 7 days).</p>
+<p><strong>(b) AWS Security Lake — OCSF-normalized lake.</strong> Security Lake auto-normalizes CloudTrail, VPC Flow, Route 53, and findings into <strong>OCSF Parquet</strong> in your S3, partitioned by source/region/date.</p>
+<pre><code class="language-bash">aws securitylake create-data-lake \
+  --configurations '[{&quot;region&quot;:&quot;us-east-1&quot;,
+     &quot;encryptionConfiguration&quot;:{&quot;kmsKeyId&quot;:&quot;alias/security-lake&quot;},
+     &quot;lifecycleConfiguration&quot;:{
+        &quot;transitions&quot;:[{&quot;storageClass&quot;:&quot;STANDARD_IA&quot;,&quot;days&quot;:30},
+                       {&quot;storageClass&quot;:&quot;GLACIER&quot;,&quot;days&quot;:180}],
+        &quot;expiration&quot;:{&quot;days&quot;:730}}}]' \
+  --meta-store-manager-role-arn arn:aws:iam::111122223333:role/AmazonSecurityLakeMetaStoreManager
+
+# Register CloudTrail management events as an OCSF source
+aws securitylake create-aws-log-source \
+  --sources '[{&quot;regions&quot;:[&quot;us-east-1&quot;],
+     &quot;sourceName&quot;:&quot;CLOUD_TRAIL_MGMT&quot;,&quot;sourceVersion&quot;:&quot;2.0&quot;}]'
+</code></pre>
+<p>Commentary: the <code>lifecycleConfiguration</code> <em>is</em> your storage tiering — hot in <code>STANDARD</code>, warm in <code>STANDARD_IA</code> at 30 days, cold in <code>GLACIER</code> at 180, expire at 2 years. Because the output is OCSF Parquet, Athena/OpenSearch/Splunk/any consumer reads one schema.</p>
+<p><strong>(c) Splunk Universal Forwarder + ingest-time filtering (traditional SIEM, license = ingest).</strong> Because Splunk bills on GB/day indexed, you drop noise at the forwarder/heavy-forwarder.</p>
+<pre><code class="language-ini"># inputs.conf — collect Windows Security + Sysmon
+[WinEventLog://Security]
+disabled = 0
+index = wineventlog
+renderXml = true
+
+# props.conf + transforms.conf — DROP verbose 4662/5156 noise before indexing
+# props.conf
+[WinEventLog:Security]
+TRANSFORMS-drop = drop_noise_4662
+
+# transforms.conf
+[drop_noise_4662]
+REGEX = EventCode=(4662|5156|4663)
+DEST_KEY = queue
+FORMAT = nullQueue
+</code></pre>
+<p>Commentary: <code>nullQueue</code> routing is the classic Splunk cost lever — you can cut 30–50% of Windows volume by dropping high-volume, low-detection-value events <em>before</em> they count against license. The trade-off: if a future detection needs 4663 (object access), you have no history. Decide with a data-value review, not by gut.</p>
+<p><strong>(d) Sentinel — data collection rule (DCR) with KQL transform at ingest.</strong> Sentinel's DCRs let you transform/filter in the pipeline and route to the cheap <strong>Auxiliary/Basic Logs</strong> tier vs <strong>Analytics</strong> tier.</p>
+<pre><code class="language-json">{
+  &quot;properties&quot;: {
+    &quot;dataFlows&quot;: [{
+      &quot;streams&quot;: [&quot;Microsoft-SecurityEvent&quot;],
+      &quot;destinations&quot;: [&quot;sentinelWorkspace&quot;],
+      &quot;transformKql&quot;: &quot;source | where EventID in (4624,4625,4672,4688,4720,4732) | project TimeGenerated, Computer, EventID, Account, IpAddress&quot;,
+      &quot;outputStream&quot;: &quot;Microsoft-SecurityEvent&quot;
+    }]
+  }
+}
+</code></pre>
+<p>Commentary: <code>transformKql</code> filters to detection-relevant EventIDs and projects only needed columns — reducing GB ingested into the expensive Analytics tier. Route the rest to Basic Logs (cheaper, query-limited, 8-day interactive retention) or archive.</p>
+<p><strong>(e) Detection-as-code — Sigma rule compiled to backend.</strong> One vendor-neutral rule, compiled to Splunk SPL, Sentinel KQL, or Chronicle YARA-L via <code>sigma convert</code>.</p>
+<pre><code class="language-yaml">title: Suspicious GCP Service Account Key Creation
+id: 7c8f2e10-3a4b-4c9d-9e21-abc123def456
+status: experimental
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  selection:
+    data.protoPayload.methodName: google.iam.admin.v1.CreateServiceAccountKey
+  filter_ci:
+    data.protoPayload.authenticationInfo.principalEmail|endswith: '@terraform-ci.iam.gserviceaccount.com'
+  condition: selection and not filter_ci
+level: high
+tags:
+  - attack.persistence
+  - attack.t1098.001   # Account Manipulation: Additional Cloud Credentials
+</code></pre>
+<p>Commentary: this rule lives in Git, is unit-tested against sample events in CI, then <code>sigma convert -t chronicle</code> (or <code>-t splunk</code>) emits the deployable artifact. The <code>filter_ci</code> excludes the known CI service account — an allowlist expressed as code and reviewed in PR, not a click in a console that no one can audit later.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>End-to-end pipeline (collection → tiered storage + detection):</strong></p>
+<pre class="mermaid">
+flowchart LR
+    A1[Agents and Forwarders] --> B[Transport Bus Kafka or PubSub]
+    A2[Syslog CEF LEEF] --> B
+    A3[Cloud Native Sinks] --> B
+    B --> P[Parse and Normalize to Common Model]
+    P --> E[Enrich Asset Identity ThreatIntel]
+    E --> R{Route by Value}
+    R -->|High signal| H[Hot Index SIEM]
+    R -->|Everything| L[Cold Data Lake Object Store]
+    H --> D[Detection Execution]
+    L -.->|schema on read| D
+    D --> AL[Alerts and Cases]
+    AL --> SOAR[SOAR and Response]
+</pre>
+<p><strong>Normalization decision flow (why an event might not fire a rule):</strong></p>
+<pre class="mermaid">
+flowchart TD
+    RAW[Raw Event Arrives] --> PARSED{Parser Matched}
+    PARSED -->|No| DLQ[Dead Letter Unparsed]
+    PARSED -->|Yes| MAP{Mapped to Common Model}
+    MAP -->|No| GENERIC[Stored as Generic Only Full Text]
+    MAP -->|Yes| ENR{Enrichment Joined}
+    ENR -->|Stale or Missing| PARTIAL[Detection Runs Blind on Context]
+    ENR -->|Fresh| READY[Normalized Enriched Event]
+    READY --> RULE[Detection Rule Evaluates]
+</pre>
+<p><strong>Log-source health as a control loop (detecting silence):</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Degraded: EPS drops below baseline
+    Degraded --> Silent: No events for threshold window
+    Silent --> Alerting: Fire source outage alert
+    Alerting --> Investigating: SOC pages source owner
+    Investigating --> Healthy: Collection restored
+    Degraded --> Healthy: Volume recovers
+</pre>
+<p><strong>Traditional SIEM vs cloud-native + lake (data flow contrast):</strong></p>
+<pre class="mermaid">
+flowchart LR
+    subgraph Traditional
+      T1[Sources] --> T2[Index Everything]
+      T2 --> T3[Proprietary Store bills on ingest]
+      T3 --> T4[Search and Correlate]
+    end
+    subgraph CloudNativeLake
+      C1[Sources] --> C2[Normalize to OCSF or UDM]
+      C2 --> C3[Cheap Object Lake]
+      C2 --> C4[SIEM Detection Compute]
+      C3 -.->|federated query| C4
+    end
+</pre>
+<p><strong>Detection-as-code CI/CD lifecycle:</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant Eng as Detection Engineer
+    participant Git as Git Repo
+    participant CI as CI Pipeline
+    participant SIEM as SIEM Platform
+    participant SOC as SOC Analyst
+    Eng->>Git: Open PR with Sigma rule and test events
+    Git->>CI: Trigger validation
+    CI->>CI: Lint schema and run unit tests
+    CI->>CI: Compile to backend KQL or YARA-L
+    CI->>SIEM: Deploy rule to staging
+    SIEM->>CI: Backtest against 30 days of data
+    CI->>Git: Report false positive rate
+    Eng->>Git: Merge on green
+    CI->>SIEM: Promote to production
+    SIEM->>SOC: Alerts with linked runbook
+</pre>
+<hr />
+<h3 id="normalization-example-raw-log-normalized-fields">Normalization example: raw log → normalized fields</h3>
+<p>A raw GCP Cloud Audit Log (<code>SetIamPolicy</code> granting <code>roles/owner</code>) arrives as nested JSON. The pipeline maps it into a common data model. Below, the <em>same</em> event is shown as raw, then as ECS, then as Chronicle UDM.</p>
+<p><strong>Raw (GCP audit log, abbreviated):</strong></p>
+<pre><code class="language-json">{
+  &quot;protoPayload&quot;: {
+    &quot;@type&quot;: &quot;type.googleapis.com/google.cloud.audit.AuditLog&quot;,
+    &quot;authenticationInfo&quot;: {&quot;principalEmail&quot;: &quot;eve@contoso.com&quot;},
+    &quot;requestMetadata&quot;: {&quot;callerIp&quot;: &quot;203.0.113.44&quot;,
+      &quot;callerSuppliedUserAgent&quot;: &quot;google-cloud-sdk gcloud/458.0.1&quot;},
+    &quot;methodName&quot;: &quot;SetIamPolicy&quot;,
+    &quot;serviceName&quot;: &quot;cloudresourcemanager.googleapis.com&quot;,
+    &quot;resourceName&quot;: &quot;projects/prod-payments&quot;,
+    &quot;serviceData&quot;: {&quot;policyDelta&quot;: {&quot;bindingDeltas&quot;:
+      [{&quot;action&quot;: &quot;ADD&quot;, &quot;role&quot;: &quot;roles/owner&quot;,
+        &quot;member&quot;: &quot;user:mallory@gmail.com&quot;}]}}
+  },
+  &quot;severity&quot;: &quot;NOTICE&quot;,
+  &quot;timestamp&quot;: &quot;2026-07-06T14:22:07Z&quot;
+}
+</code></pre>
+<p><strong>Normalized to ECS (Elastic Common Schema):</strong></p>
+<table>
+<thead>
+<tr>
+<th>ECS field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@timestamp</code></td>
+<td><code>2026-07-06T14:22:07Z</code></td>
+</tr>
+<tr>
+<td><code>event.category</code></td>
+<td><code>iam</code></td>
+</tr>
+<tr>
+<td><code>event.action</code></td>
+<td><code>SetIamPolicy</code></td>
+</tr>
+<tr>
+<td><code>event.outcome</code></td>
+<td><code>success</code></td>
+</tr>
+<tr>
+<td><code>cloud.provider</code></td>
+<td><code>gcp</code></td>
+</tr>
+<tr>
+<td><code>cloud.project.id</code></td>
+<td><code>prod-payments</code></td>
+</tr>
+<tr>
+<td><code>user.email</code></td>
+<td><code>eve@contoso.com</code></td>
+</tr>
+<tr>
+<td><code>source.ip</code></td>
+<td><code>203.0.113.44</code></td>
+</tr>
+<tr>
+<td><code>user_agent.original</code></td>
+<td><code>google-cloud-sdk gcloud/458.0.1</code></td>
+</tr>
+<tr>
+<td><code>gcp.audit.iam.role_added</code> (custom)</td>
+<td><code>roles/owner</code></td>
+</tr>
+<tr>
+<td><code>related.user</code></td>
+<td><code>[eve@contoso.com, mallory@gmail.com]</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Normalized to Chronicle UDM (event fragment):</strong></p>
+<pre><code>metadata.event_type = &quot;USER_RESOURCE_UPDATE_PERMISSIONS&quot;
+metadata.product_name = &quot;Google Cloud Platform&quot;
+principal.user.email_addresses = &quot;eve@contoso.com&quot;
+principal.ip = &quot;203.0.113.44&quot;
+target.resource.name = &quot;projects/prod-payments&quot;
+target.user.email_addresses = &quot;mallory@gmail.com&quot;
+security_result.summary = &quot;Added roles/owner to external user&quot;
+</code></pre>
+<p>The payoff: a single detection ("external Gmail user granted <code>roles/owner</code> on a prod project") is now writable against <code>target.user.email_addresses</code> in UDM or <code>user.email</code> in ECS — regardless of whether the source was GCP, AWS <code>AttachUserPolicy</code>, or Azure role assignment, because all three normalize to the same category (<code>iam</code> / permission update).</p>
+<hr />
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson for the pipeline</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Log4Shell (CVE-2021-44228)</strong></td>
+<td>2021</td>
+<td>JNDI lookup in Log4j; malicious strings in <em>log messages</em></td>
+<td>Log <strong>ingestion/parsing layers themselves</strong> were vulnerable — a SIEM parser can be an attack surface. Sanitize/validate on parse.</td>
+</tr>
+<tr>
+<td><strong>SolarWinds SUNBURST</strong></td>
+<td>2020</td>
+<td>Supply-chain implant; C2 disguised as Orion telemetry</td>
+<td>Attackers evade by <em>blending with normal telemetry</em>; needed baseline/UEBA, not just IOC match. Log integrity + anomaly detection matter.</td>
+</tr>
+<tr>
+<td><strong>Capital One (SSRF)</strong></td>
+<td>2019</td>
+<td>SSRF → IMDS creds → S3 exfil</td>
+<td>The <strong>CloudTrail/VPC-Flow evidence existed</strong> but detections/alerting were absent. Having logs ≠ detecting.</td>
+</tr>
+<tr>
+<td><strong>Splunk RCE CVE-2023-46214</strong></td>
+<td>2023</td>
+<td>Unsafe XSLT in Splunk allowed RCE via crafted upload</td>
+<td>Your SIEM is a crown-jewel target; patch and segment it.</td>
+</tr>
+<tr>
+<td><strong>Sentinel/M365 "logging gap" (Storm-0558)</strong></td>
+<td>2023</td>
+<td>Forged tokens; many orgs lacked the (then-paid) MailItemsAccessed logs</td>
+<td><strong>Missing logs = invisible breach.</strong> Log availability is a security control; don't let licensing gate forensic logs.</td>
+</tr>
+<tr>
+<td><strong>Elastic/Kibana CVE-2019-7609</strong></td>
+<td>2019</td>
+<td>Timelion prototype pollution → RCE</td>
+<td>SIEM UI components are exploitable; restrict access.</td>
+</tr>
+<tr>
+<td><strong>Chronicle/Mandiant UNC-attributed dwell time</strong></td>
+<td>ongoing</td>
+<td>Median dwell time historically weeks</td>
+<td>Justifies the whole pipeline: faster normalize+detect = lower dwell.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — Capital One (2019).</strong> An SSRF flaw in a WAF let the attacker reach the EC2 Instance Metadata Service (IMDSv1), retrieve the instance role's temporary credentials, and use them to <code>ListBuckets</code> and <code>sync</code> ~100M records from S3. Crucially, <strong>the telemetry to catch this existed</strong>: CloudTrail recorded the anomalous <code>s3:ListBuckets</code> and mass <code>GetObject</code> from an unusual role, and VPC Flow Logs recorded the exfil volume. What was missing was the <em>detection</em> — no rule flagged a role suddenly enumerating buckets it never touched, and no baseline of per-role S3 access existed. The pipeline control that would have stopped it: enrichment tying the credential to its normal identity/asset behavior, plus a UEBA/threshold detection on "role accessing new bucket set + high egress." (See also <code>../../infra/Lateral-Movement/Cloud-Service-Accounts/README.md</code>.)</p>
+<p><strong>Case study 2 — Storm-0558 / M365 (2023).</strong> A stolen Microsoft consumer signing key was used to forge Azure AD tokens and access Exchange Online mailboxes. Many victims could not confirm scope because the <code>MailItemsAccessed</code> audit event was behind a premium (E5/Purview) license — the log simply <em>did not exist</em> for them. This is the purest form of <strong>garbage-in via missing logs</strong>: your detections and forensics are bounded by what you collect. The lesson drove Microsoft to make more audit logs free by default in 2023–2024, and it is the strongest argument for treating <strong>log availability as a first-class security requirement</strong>, not a cost line to trim.</p>
+<p><strong>Case study 3 — SUNBURST (2020).</strong> The implant beaconed to C2 through domains and traffic patterns crafted to resemble legitimate Orion Improvement Program telemetry, and it checked for security tooling before activating. Signature/IOC detection failed because the IOCs were novel and short-lived. What could have helped: normalized network + process telemetry feeding <strong>behavioral baselines</strong> (new outbound domains from a server that historically only talked to update servers; unusual parent-child process trees), i.e., detection at the top of the Pyramid of Pain (TTPs), which the pipeline must be able to feed with enriched, long-retained data.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Failure</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>Missing log source</strong> (never onboarded)</td>
+<td>Detection gap</td>
+<td>No collection configured</td>
+<td>Whole attack class invisible</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Silent source outage</strong> (agent died)</td>
+<td>Detection gap</td>
+<td>No log-source health monitoring</td>
+<td>Blind spot until next incident</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Parsing drift</strong> (vendor changed format)</td>
+<td>Detection gap</td>
+<td>Brittle regex/grok, no contract test</td>
+<td>Fields go null; rules silently miss</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>Unmapped events</strong> (no normalization)</td>
+<td>Data quality</td>
+<td>New source not modeled to CDM</td>
+<td>Cross-source rules skip the source</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Log tampering / deletion</strong></td>
+<td>T1070 Indicator Removal</td>
+<td>Attacker clears logs at source</td>
+<td>Evidence destroyed</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>Ingest backpressure → drop</strong></td>
+<td>Data quality</td>
+<td>Under-provisioned bus/indexers</td>
+<td>Events silently lost under load</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>Timestamp/timezone skew</strong></td>
+<td>Data quality</td>
+<td>Mixed TZ, clock drift, ingest-time vs event-time</td>
+<td>Correlation windows break</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Alert fatigue</strong> (too many FPs)</td>
+<td>Process</td>
+<td>Untuned rules, no risk scoring</td>
+<td>Real alerts missed in noise</td>
+<td>High</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>SIEM ingest cost blowout</strong></td>
+<td>Cost/scale</td>
+<td>Ingest-everything, no tiering</td>
+<td>Budget forces log cutbacks → gaps</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Stale enrichment</strong> (old asset/identity data)</td>
+<td>Data quality</td>
+<td>CMDB not synced</td>
+<td>Wrong severity, blind context</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td><strong>Detection disabled/rot</strong></td>
+<td>T1562 Impair Defenses</td>
+<td>Rule broken by schema change, unnoticed</td>
+<td>Coverage silently lost</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td><strong>SIEM RCE / compromise</strong></td>
+<td>T1190 Exploit Public App</td>
+<td>Unpatched SIEM (Log4Shell, CVE-2023-46214)</td>
+<td>Attacker owns the detection plane</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td><strong>Log injection / forged fields</strong></td>
+<td>T1036 Masquerading</td>
+<td>Unsanitized user input in logs</td>
+<td>Poisoned parsers, spoofed events</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>14</td>
+<td><strong>Encryption gaps in transit</strong></td>
+<td>T1040 Sniffing</td>
+<td>Plaintext syslog/UDP 514</td>
+<td>Logs read/altered on the wire</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td><strong>Retention too short for slow attacks</strong></td>
+<td>Detection gap</td>
+<td>Cost-driven short retention</td>
+<td>Long-dwell threats never correlated</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td><strong>No sensitive-data redaction</strong></td>
+<td>Compliance/privacy</td>
+<td>Secrets/PII ingested raw</td>
+<td>Secondary breach of the log store</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td><strong>Over-broad ingest filter drops signal</strong></td>
+<td>Detection gap</td>
+<td><code>nullQueue</code>/DCR filter too aggressive</td>
+<td>Needed events never stored</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td><strong>Schema-on-read query cost surprise</strong></td>
+<td>Cost/scale</td>
+<td>Unbounded lake scans</td>
+<td>Investigations throttled by budget</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>19</td>
+<td><strong>Duplicate/looping ingestion</strong></td>
+<td>Cost/scale</td>
+<td>Misconfigured fan-out</td>
+<td>Inflated cost, skewed counts</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>20</td>
+<td><strong>UEBA baseline poisoning</strong></td>
+<td>T1562 / model attack</td>
+<td>Attacker slowly normalizes bad behavior</td>
+<td>Anomaly detection blinded</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Missing source</td>
+<td>Source-coverage matrix mapped to ATT&amp;CK (DeTT&amp;CT)</td>
+<td>Collection design</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Silent outage</td>
+<td><strong>Log-source health SLO + "detect silence" alert</strong></td>
+<td>Pipeline monitoring</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Parsing drift</td>
+<td>Parser contract tests + sample-event CI</td>
+<td>Control plane / CI</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Unmapped events</td>
+<td>Normalization coverage metric; unparsed dead-letter review</td>
+<td>Normalization stage</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Log tampering</td>
+<td>Immutable/WORM store, forward logs off-host in real time</td>
+<td>Storage + transport</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Backpressure drop</td>
+<td>Buffered bus (Kafka/Pub/Sub) with disk queue + autoscale</td>
+<td>Transport</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Timestamp skew</td>
+<td>NTP everywhere, store event-time + ingest-time, normalize TZ to UTC</td>
+<td>Parsing/normalization</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Alert fatigue</td>
+<td>Risk-based alerting, dedup/suppression, tuning loop</td>
+<td>Detection/alerting</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Cost blowout</td>
+<td><strong>Tiered storage + data lake routing by value</strong></td>
+<td>Routing/storage</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Stale enrichment</td>
+<td>Scheduled CMDB/identity sync, TTL on context</td>
+<td>Enrichment</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Detection rot</td>
+<td><strong>Detection-as-code + CI backtests + coverage dashboards</strong></td>
+<td>Control plane</td>
+</tr>
+<tr>
+<td>12</td>
+<td>SIEM RCE</td>
+<td>Patch SLA, network-segment the SIEM, least-priv service accounts</td>
+<td>SIEM platform</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Log injection</td>
+<td>Validate/encode on parse, treat log fields as untrusted</td>
+<td>Parsing</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Transit sniffing</td>
+<td>TLS/mTLS for all transport, deprecate UDP 514</td>
+<td>Transport</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Short retention</td>
+<td>Cheap cold/lake retention 1–2 yr, hot only for high-signal</td>
+<td>Storage tiering</td>
+</tr>
+<tr>
+<td>16</td>
+<td>PII/secrets in logs</td>
+<td>Ingest-time redaction/DLP, tokenization</td>
+<td>Parsing/routing</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Over-broad filter</td>
+<td>Data-value review before dropping; sample before nullQueue</td>
+<td>Routing governance</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Query cost</td>
+<td>Partitioned/columnar lake (Parquet), query quotas</td>
+<td>Lake design</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Duplicate ingest</td>
+<td>Idempotent keys, fan-out audit</td>
+<td>Routing</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Baseline poisoning</td>
+<td>Slow-drift detection, human-reviewed baseline changes</td>
+<td>UEBA governance</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Log-source health monitoring ("detect the silence").</strong> The most damaging failures are silent — an agent stops, a firewall rotates a syslog target, a cloud sink loses IAM permission — and nobody notices until an incident needs those logs. The control: for every source, compute a rolling baseline of events-per-second/day and alert when volume drops below a floor (e.g., &lt;20% of 7-day median for &gt;N minutes). In Splunk this is a <code>metadata</code>/<code>tstats</code> search on <code>latest(_time)</code> per <code>host</code>/<code>sourcetype</code>; in Sentinel a scheduled KQL over <code>Heartbeat</code>/<code>Usage</code>; in Chronicle the <em>Data Ingestion</em> dashboards. Trade-off: sources with legitimately bursty/low volume (a DR site) generate false "silence" alerts, so per-source baselines and business-hours awareness are required. This is arguably the single highest-ROI detection you can build because it protects <em>every other detection</em>.</p>
+<p><strong>2. Normalization to a common data model + parser contract tests.</strong> Normalization is what lets one rule cover many sources, and parser drift is what silently breaks it. Implement mapping to OCSF/ECS/UDM as versioned config, and in CI run each parser against a corpus of real sample events asserting that key fields (<code>src_ip</code>, <code>user.email</code>, <code>event.action</code>) are populated and typed correctly. When a vendor changes format, the contract test fails in CI <em>before</em> the change blinds production. Trade-off: schema-on-write normalization is rigid — reprocessing history after a mapping fix requires re-ingest or lake reparse; mitigate by keeping raw payloads in the lake so you can replay. Measure a <strong>normalization coverage %</strong> (events mapped to a real event_type vs "generic") as an ongoing quality SLO.</p>
+<p><strong>3. Tiered storage + data-lake routing by value.</strong> Ingest cost is the constraint that quietly forces every other bad decision (short retention, dropped sources). Split logs into <em>high-signal</em> (auth, IAM, EDR, DNS, proxy) → hot SIEM index for 30–90 days, and <em>high-volume/low-signal</em> (verbose flow, debug, full packet) → cheap object lake (S3/GCS/BigQuery) as Parquet for 1–2 years, queried on demand (Athena/BigQuery/<code>| from datamodel</code>). Implementation: ingest-time routing (GCP Log Router filters, Sentinel Basic vs Analytics tiers, Cribl/logstash pipelines). Trade-off: lake queries are slower and schema-on-read, so a live investigation may need to "rehydrate" cold data into the SIEM — acceptable because incidents are rare relative to steady-state ingest. This pattern typically cuts SIEM license/ingest cost 40–70% while <em>increasing</em> retention.</p>
+<p><strong>4. Detection-as-code with CI/CD and backtesting.</strong> Rules stored in a console are unversioned, untested, and rot when schemas change. Manage detections as code: Sigma (portable) or native (KQL/<code>.yaml</code>, YARA-L) in Git; PRs run schema lint, unit tests against sample events, and a <strong>backtest</strong> against 30–90 days of real data to estimate false-positive rate before merge; a pipeline deploys to staging then production. This gives you auditability (who changed what, why), rollback, peer review of allowlists, and a coverage dashboard mapped to ATT&amp;CK. Trade-off: upfront tooling/CI investment and a culture shift for analysts used to clicking; the payoff is a SOC whose detection quality compounds instead of decays. Tools: Sigma + <code>sigma-cli</code>, Panther, Chronicle rules API, Sentinel <code>az sentinel</code>/Bicep, Splunk <code>Security Content</code>/<code>detection-testing</code>.</p>
+<p><strong>5. Immutable, off-host, encrypted log storage.</strong> T1070 (Indicator Removal) is defeated by getting logs off the host <em>in real time</em> to a store the attacker cannot reach or alter. Controls: stream to a buffered bus immediately (so on-host deletion is too late), store in WORM/immutable buckets (S3 Object Lock, GCS retention policy/bucket lock), and TLS/mTLS all transport. Cloud audit logs help here because Admin Activity logs are Google/AWS-controlled and can't be disabled by a tenant admin. Trade-off: immutability + long retention raises storage cost and complicates GDPR "right to erasure" (mitigate with tokenization/field-level redaction at ingest). This control is what makes your logs <em>trustworthy evidence</em>, not just operational data.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<p>Detecting attacks <em>on the pipeline itself</em>, plus feeding detections, requires:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Key fields</th>
+<th>Detection use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIEM ingest metrics</td>
+<td><code>sourcetype</code>, <code>host</code>, events/sec, <code>latest(_time)</code></td>
+<td>Source silence, backpressure, cost spikes</td>
+</tr>
+<tr>
+<td>Cloud audit logs</td>
+<td><code>methodName</code>, <code>principalEmail</code>, <code>callerIp</code>, <code>resourceName</code></td>
+<td>IAM changes, log-config tampering</td>
+</tr>
+<tr>
+<td>Log-router/sink config changes</td>
+<td>sink filter edits, disabled sinks</td>
+<td>Attacker disabling telemetry (T1562.008)</td>
+</tr>
+<tr>
+<td>Parser/detection deploy audit</td>
+<td>rule id, author, diff, deploy time</td>
+<td>Unauthorized rule disable/change</td>
+</tr>
+<tr>
+<td>Agent/forwarder health</td>
+<td>agent status, last checkin</td>
+<td>Silent agent death</td>
+</tr>
+<tr>
+<td>SIEM access logs</td>
+<td>user, query, export, admin action</td>
+<td>Insider misuse of the SIEM itself</td>
+</tr>
+<tr>
+<td>Windows/Sysmon, DNS, proxy, EDR</td>
+<td>(per §IDS-SIEM note)</td>
+<td>Core attacker-activity detections</td>
+</tr>
+</tbody>
+</table>
+<p>Specifically monitor <strong>"defense evasion via the pipeline"</strong>: <code>DeleteSink</code>/<code>UpdateSink</code> (GCP), <code>StopLogging</code>/<code>DeleteTrail</code>/<code>PutEventSelectors</code> (AWS CloudTrail), diagnostic-setting deletion (Azure), and disabling of detection rules.</p>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>(a) Sigma — attacker disables CloudTrail logging (defense evasion, T1562.008):</strong></p>
+<pre><code class="language-yaml">title: CloudTrail Logging Disabled or Trail Deleted
+id: 2b9a41c7-88de-4f0a-b1e2-9f0c1d2e3a4b
+status: stable
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: cloudtrail.amazonaws.com
+    eventName:
+      - StopLogging
+      - DeleteTrail
+      - UpdateTrail
+      - PutEventSelectors
+  condition: selection
+falsepositives:
+  - Legitimate trail maintenance by CloudOps change ticket
+level: high
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+</code></pre>
+<p><strong>(b) SQL (data-lake / BigQuery over normalized audit logs) — log-source went silent:</strong></p>
+<pre><code class="language-sql">-- Alert when a source that normally reports has produced no events in 60 min
+WITH baseline AS (
+  SELECT source_host,
+         APPROX_QUANTILES(events_per_hour, 100)[OFFSET(50)] AS median_eph
+  FROM `sec.log_volume_hourly`
+  WHERE event_hour BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+                       AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+  GROUP BY source_host
+),
+current_vol AS (
+  SELECT source_host, COUNTIF(TRUE) AS eph
+  FROM `sec.normalized_events`
+  WHERE event_time &gt;= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 60 MINUTE)
+  GROUP BY source_host
+)
+SELECT b.source_host, b.median_eph, IFNULL(c.eph, 0) AS last_hour
+FROM baseline b
+LEFT JOIN current_vol c USING (source_host)
+WHERE b.median_eph &gt; 100                       -- normally chatty source
+  AND IFNULL(c.eph, 0) &lt; 0.2 * b.median_eph;   -- dropped below 20% of normal
+</code></pre>
+<p><strong>(c) KQL (Sentinel) — external identity granted a privileged cloud role:</strong></p>
+<pre><code class="language-kql">GCPAuditLogs
+| where methodName == &quot;SetIamPolicy&quot;
+| mv-expand delta = serviceData.policyDelta.bindingDeltas
+| where delta.action == &quot;ADD&quot;
+    and delta.role in (&quot;roles/owner&quot;,&quot;roles/editor&quot;,&quot;roles/iam.securityAdmin&quot;)
+    and tostring(delta.member) endswith &quot;@gmail.com&quot;
+| project TimeGenerated, principalEmail = authenticationInfo.principalEmail,
+          callerIp = requestMetadata.callerIp,
+          resourceName, addedMember = delta.member, role = delta.role
+</code></pre>
+<h3 id="response-playbook-pipeline-integrity-incident">Response playbook (pipeline-integrity incident)</h3>
+<ol>
+<li><strong>Detect &amp; validate.</strong> Confirm the trigger (silence alert, CloudTrail-disabled, rule-disabled). Rule out a legitimate change ticket. Snapshot the current pipeline config.</li>
+<li><strong>Contain.</strong> If an attacker disabled logging/sinks: re-enable the trail/sink immediately, or fail over to the redundant sink you maintain in a separate account/project. Revoke the credential that made the change. Freeze detection-rule config changes.</li>
+<li><strong>Preserve evidence.</strong> Pull the audit trail of <em>who</em> changed the config from the cloud provider's own immutable Admin Activity log (attacker usually can't alter that). Export to the immutable/WORM store.</li>
+<li><strong>Eradicate.</strong> Remove attacker access (rotate keys, revoke sessions/tokens), close the initial vector (SSRF, exposed key), and delete any malicious IAM bindings.</li>
+<li><strong>Assess blind window.</strong> Determine the time range the pipeline was blind. Backfill from any surviving source (cloud-side logs, lake, redundant collector). Explicitly document what <em>cannot</em> be recovered.</li>
+<li><strong>Recover.</strong> Restore normal routing/retention, re-run affected detections over the backfilled window, verify normalization coverage returned to baseline.</li>
+<li><strong>Post-incident hardening.</strong> Add/repair the "detect silence" and "logging-disabled" detections, make the disabled config immutable where possible, add alerting on the specific change API, and run a purple-team test that the blind spot is now covered.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What are the stages of a security log pipeline, end to end?</strong><br />
+Collection (agents, syslog, cloud sinks) → transport/buffering (Kafka/Pub/Sub) → parsing (raw to structured) → normalization (structured to a common data model like OCSF/ECS/UDM) → enrichment (asset, identity, GeoIP, threat intel) → routing (by value/tier) → storage (hot/warm/cold + lake) → detection execution → alerting/response. The hard engineering is in normalization consistency and ingest economics, not the correlation engine.<br />
+<em>Signal:</em> do they see SIEM as a pipeline vs a magic box.</p>
+<p><strong>Q2. Why normalize logs to a common data model? Name some models.</strong><br />
+Because attackers cross sources: one intrusion touches VPN, endpoint, cloud IAM, and proxy. Normalization maps every source's fields into one schema (<code>user.email</code>, <code>source.ip</code>, <code>event.action</code>) so you write <em>one</em> detection instead of N vendor-specific ones, and analysts learn one field set. Models: <strong>OCSF</strong> (open, vendor-neutral, backed by AWS/Splunk), <strong>ECS</strong> (Elastic), <strong>Chronicle UDM</strong> (Google), <strong>ASIM</strong> (Sentinel). Without it, cross-source correlation is brittle and rules multiply.<br />
+<em>Signal:</em> understands normalization as the enabler of correlation.</p>
+<p><strong>Q3. What is the difference between a SIEM and a data lake, and why use both?</strong><br />
+A SIEM optimizes for fast, indexed search and real-time detection but is expensive per GB; a data lake (S3/GCS/BigQuery) optimizes for cheap, durable, schema-on-read storage at scale but slower/costlier per query. You route high-signal logs to the SIEM for detection and everything to the lake for retention/forensics, federating queries when an investigation needs cold data. This controls cost while extending retention.<br />
+<em>Signal:</em> grasps cost/scale tradeoff, not "SIEM = everything."</p>
+<p><strong>Q4. What does "garbage in, garbage out" mean here, and what's the most common form?</strong><br />
+Detections and forensics are bounded by data quality and completeness. The most common failures: <strong>missing logs</strong> (source never onboarded), <strong>silent source outages</strong> (agent died, nobody noticed), and <strong>parsing drift</strong> (vendor changed format, fields go null). All three cause <em>silent</em> misses — the rule runs but sees nothing. That's why log-source health monitoring is foundational.<br />
+<em>Signal:</em> prioritizes data quality over fancy analytics.</p>
+<p><strong>Q5. What is detection-as-code and why does it matter?</strong><br />
+Managing detection rules as version-controlled code (Sigma/KQL/YARA-L in Git) with CI tests, backtesting, peer review, and pipelined deploys — instead of clicking rules into a console. It brings auditability, rollback, review of allowlists, and coverage dashboards, and prevents rule rot when schemas change. It's the practice that lets detection quality compound rather than decay.<br />
+<em>Signal:</em> engineering maturity, treats detections like software.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design a log pipeline for an org generating 50 TB/day. How do you keep it affordable without going blind?</strong><br />
+Start by classifying sources by detection value: auth/IAM/EDR/DNS/proxy are high-signal (maybe 5–10 TB) and go to the hot SIEM index for 30–90 days; verbose VPC flow, debug, and full-packet (the other 40 TB) go to a Parquet data lake for 1–2 years, queried on demand. Put a buffered bus (Kafka/Pub/Sub) in front so spikes don't drop events, and do ingest-time filtering/redaction (drop known-noise EventIDs, redact secrets) before the expensive tier. Normalize once to OCSF/UDM so both SIEM and lake share a schema and detections are portable. Add log-source health monitoring and a normalization-coverage SLO so cost cuts don't silently create blind spots. The result: high-signal real-time detection + long cheap retention, typically cutting SIEM cost 40–70%.<br />
+<em>Signal:</em> balances cost, coverage, and reliability with concrete tiering.</p>
+<p><strong>Q7. Traditional SIEM (Splunk) vs cloud-native (Chronicle/Sentinel/Security Lake) — when do you pick which?</strong><br />
+Traditional SIEMs give a mature query language (SPL), huge app ecosystem, and deployment flexibility, but bill on ingest volume, which punishes scale and pressures teams to under-collect. Cloud-native SIEMs decouple storage/compute, fix a normalization schema (UDM/ASIM/OCSF), scale to petabytes, and often price on flat ingest or query compute — better economics at large volume and less infra to run, but less flexible and cloud-lock-in. I'd pick Chronicle/SecOps for very high volume + Google ecosystem, Sentinel for Microsoft/M365-heavy shops (native AAD/Defender integration), Security Lake+OCSF when I want an open lake feeding multiple tools, and keep Splunk where deep SPL/app investment and on-prem/regulated data dominate. Many mature orgs run a hybrid: cloud-native/lake for volume, Splunk for specific high-value analytics.<br />
+<em>Signal:</em> nuanced, ecosystem-aware, not a fanboy answer.</p>
+<p><strong>Q8. How do you handle timestamps and ordering across thousands of sources?</strong><br />
+Distinguish <strong>event-time</strong> (when it happened at the source) from <strong>ingest-time</strong> (when the pipeline received it) and store both; correlation windows must key on event-time or clock skew and delayed batches break them. Enforce NTP everywhere, normalize all timestamps to UTC at parse, and handle late-arriving data with watermarking (like stream processing) so a detection window can tolerate bounded lateness. For sources with unreliable clocks, flag skew and prefer ingest-time with a documented caveat. Without this, "N failures in 60s" rules produce both false negatives (spread across skewed windows) and false positives.<br />
+<em>Signal:</em> understands distributed-systems reality of logging.</p>
+<p><strong>Q9. Where do you enrich, and what are the trade-offs of ingest-time vs query-time enrichment?</strong><br />
+Enrichment adds asset criticality, identity/CMDB context, GeoIP, and threat-intel matches. <strong>Ingest-time</strong> enrichment bakes context into the stored event (fast queries, stable point-in-time context — good for "was this host a prod DB <em>at the time</em>"), but bloats storage and can't be corrected retroactively. <strong>Query-time</strong> enrichment joins against current lookup tables (always fresh, cheap storage, retroactively correctable), but slower queries and loses historical accuracy if the asset changed. I default to ingest-time for slow-changing high-value context (asset criticality, data classification) and query-time for volatile data (current threat intel, current owner). Always TTL enrichment sources so stale CMDB doesn't silently misclassify severity.<br />
+<em>Signal:</em> depth on a subtle, real design choice.</p>
+<p><strong>Q10. How do you prevent detection coverage from silently rotting as sources and schemas change?</strong><br />
+Three loops: (1) <strong>parser contract tests</strong> in CI that assert key fields populate against real sample events, so a vendor format change fails the build, not production; (2) <strong>detection-as-code with backtesting</strong> so every rule is versioned, tested, and its FP rate measured before deploy, with alerts on rules that stop firing entirely; (3) <strong>coverage dashboards</strong> mapping active detections and available log sources to ATT&amp;CK (DeTT&amp;CT/attack-navigator) to surface gaps. Add log-source health monitoring so a dead source is caught in minutes. Together these turn silent decay into loud, actionable signals.<br />
+<em>Signal:</em> systemic thinking about maintainability, not one-off rules.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. An attacker with cloud admin creds disables your log sink for 3 hours, then re-enables it. Walk through detection, blast-radius assessment, and hardening.</strong><br />
+Detection: the <code>DeleteSink</code>/<code>UpdateSink</code>/<code>StopLogging</code> API call is itself recorded in the provider's <strong>Admin Activity</strong> audit log, which a tenant admin cannot disable — a high-severity detection should fire on it; independently, the log-source-silence monitor should fire within minutes of volume dropping. Blast radius: the 3-hour window is a blind spot for <em>tenant-controlled</em> logs, but provider-side Admin Activity logs and any redundant sink (in a separate security project/account) survive — pull those to reconstruct what happened, and backfill from the lake if it fed from a different path. Rotate the abused credential, revoke sessions, and remove malicious IAM. Hardening: maintain a redundant sink in an isolated account the workload identity can't touch; make the sink config immutable/locked; alert specifically on logging-config-change APIs; and run a purple-team test confirming both the API-change detection and the silence detection now fire. Document precisely what data is unrecoverable.<br />
+<em>Signal:</em> understands the meta-game of logs as an attack surface and provider-side immutability.</p>
+<p><strong>Q12. Compare OCSF, ECS, and Chronicle UDM. Why did OCSF emerge and what problem does it solve that ECS didn't?</strong><br />
+ECS is Elastic's schema — excellent and widely used, but <em>governed by one vendor</em> and centered on the Elastic Stack, so cross-vendor adoption meant depending on a competitor's roadmap. Chronicle UDM is Google-specific, purpose-built for Chronicle's detection engine (YARA-L operates over UDM). <strong>OCSF</strong> (launched 2022, backed by AWS, Splunk, IBM, CrowdStrike, and many others) emerged to be a <em>vendor-neutral, governed-in-the-open</em> taxonomy with a formal class/attribute model and event categories, so any producer/consumer can interoperate without picking a vendor's side — Amazon Security Lake outputs OCSF Parquet natively. The practical difference: ECS/UDM optimize for their own platforms; OCSF optimizes for a multi-tool ecosystem and a data-lake-centric world. In practice you may normalize to OCSF in the lake and map into UDM/ASIM at the SIEM. All three share the same core idea — categories, normalized field names, typed values — the politics of governance is the differentiator.<br />
+<em>Signal:</em> current-events awareness + understands schema governance economics.</p>
+<p><strong>Q13. Design detection execution for both streaming (low-latency) and batch (retrospective) over the same data. What's the architecture?</strong><br />
+Use a <strong>Lambda/Kappa-style</strong> split. Streaming path: events on the bus (Kafka/Pub/Sub) are evaluated by a low-latency engine (Flink, Chronicle's real-time rules, Sentinel near-real-time rules) for detections needing minutes-level response (impossible travel, C2 beaconing) — stateful windowing handles "N in T." Batch/retrospective path: normalized data lands in the lake, and scheduled queries (BigQuery, Athena, Splunk scheduled search) run heavier analytics, ML/UEBA baselines, and <strong>retro-hunts</strong> when new IOCs/TTPs emerge (e.g., re-scan 90 days after a new CVE). Critical design points: both paths consume the <em>same normalized schema</em> so a rule is portable; you keep raw + normalized in the lake to replay history after a mapping fix; and you reconcile so a streaming detection and its batch equivalent don't double-alert. Retrospective execution is what turns fresh threat intel into detection over historical data — the streaming path alone can't catch what you didn't yet know to look for.<br />
+<em>Signal:</em> mature architecture thinking, knows retro-hunt matters.</p>
+<p><strong>Q14. Your SIEM ingest bill just doubled with no obvious cause. How do you diagnose and remediate without creating blind spots?</strong><br />
+Diagnose by volume attribution: break ingest down by source/sourcetype/index over time (<code>| tstats count by sourcetype</code> / Sentinel <code>Usage</code> table / Chronicle ingestion metrics) to find the delta — common causes are a newly-verbose source (debug logging left on after a deploy), a misconfigured duplicate/looping sink, a chatty new app, or a security event storm (which might itself be an incident). Correlate the spike start with change tickets and deploys. Remediate by <em>value</em>, not by blindly cutting: if it's debug noise, turn off debug at the source or drop it at ingest; if it's a loop, fix the fan-out; if it's genuinely useful high-volume data, route it to the cheap lake tier instead of the hot index rather than dropping it. Before any <code>nullQueue</code>/DCR drop, do a data-value review (does any detection use these fields?) and sample-retain for a period. Guardrail: put budget/anomaly alerts on ingest volume itself so this is caught in hours, and never let a cost panic silently delete a security-relevant source.<br />
+<em>Signal:</em> operational maturity — cost control without coverage loss.</p>
+<p><strong>Q15. How would you architect the pipeline to defend the SIEM itself as a crown-jewel target, given Log4Shell and Splunk/Elastic CVEs?</strong><br />
+Treat the SIEM as tier-0 infrastructure. Attack surface reduction: keep it in a segmented network with strict ingress/egress (it should talk to sources and analysts, not the internet); patch on an aggressive SLA and subscribe to vendor advisories (Log4Shell taught us the <em>parsing</em> layer is exploitable via crafted log content, so sanitize/validate fields on parse and disable dangerous features like JNDI lookups). Identity: least-privilege service accounts for collectors, MFA + SSO + RBAC for analysts, and separate admin from read/search roles. Data protection: TLS/mTLS all transport, encrypt at rest, and store logs immutably (WORM) off-host so a SIEM compromise can't erase the evidence of it. Detection on the SIEM itself: log and alert on admin actions, rule/parser changes, bulk exports, and anomalous queries (insider misuse). Resilience: a redundant collection path in a separate trust domain so compromising the primary SIEM doesn't blind you. The principle: the system that watches everything must itself be watched, patched, segmented, and unable to destroy its own evidence.<br />
+<em>Signal:</em> thinks adversarially about the defensive infrastructure itself.</p>
+<hr />
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>AWS</th>
+<th>Azure</th>
+<th>GCP</th>
+<th>Splunk / Elastic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cloud-native SIEM</td>
+<td>Security Lake + OpenSearch/Athena</td>
+<td>Microsoft Sentinel</td>
+<td>Chronicle / Google SecOps</td>
+<td>Splunk ES / Elastic SIEM</td>
+</tr>
+<tr>
+<td>Log routing/sink</td>
+<td>Kinesis Firehose, EventBridge</td>
+<td>Diagnostic Settings → Event Hub</td>
+<td>Log Router (sinks) → Pub/Sub</td>
+<td>HEC, forwarders, Cribl</td>
+</tr>
+<tr>
+<td>Common data model</td>
+<td><strong>OCSF</strong> (native)</td>
+<td><strong>ASIM</strong></td>
+<td><strong>UDM</strong></td>
+<td>ECS (Elastic), CIM (Splunk)</td>
+</tr>
+<tr>
+<td>Audit log source</td>
+<td>CloudTrail</td>
+<td>Azure Monitor / Activity Log</td>
+<td>Cloud Audit Logs</td>
+<td>(ingested from all)</td>
+</tr>
+<tr>
+<td>Object/lake storage</td>
+<td>S3 (+ Object Lock)</td>
+<td>ADLS Gen2 / Blob</td>
+<td>GCS / BigQuery</td>
+<td>SmartStore (S3), frozen</td>
+</tr>
+<tr>
+<td>Detection language</td>
+<td>Athena SQL / OpenSearch DSL</td>
+<td>KQL</td>
+<td>YARA-L 2.0</td>
+<td>SPL / EQL</td>
+</tr>
+<tr>
+<td>SOAR</td>
+<td>Security Hub + Lambda</td>
+<td>Sentinel Playbooks (Logic Apps)</td>
+<td>SOAR (Siemplify)</td>
+<td>Splunk SOAR (Phantom)</td>
+</tr>
+<tr>
+<td>Immutable retention</td>
+<td>S3 Object Lock (WORM)</td>
+<td>Immutable Blob (WORM)</td>
+<td>Bucket Lock / retention policy</td>
+<td>Frozen archive + WORM store</td>
+</tr>
+<tr>
+<td>Threat intel enrichment</td>
+<td>GuardDuty + TI sets</td>
+<td>MDTI / TI indicators</td>
+<td>Applied Threat Intelligence</td>
+<td>ES Threat Intel / MISP feeds</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>SIEM = pipeline, not product.</strong> Value and failure both live in collection → normalize → enrich → tier → detect. Interviewers reward candidates who reason about the pipeline, not the console.</li>
+<li><strong>Normalization to a common data model (OCSF/ECS/UDM/ASIM) is the multiplier</strong> — it turns N vendor-specific rules into one portable detection and makes cross-source correlation possible.</li>
+<li><strong>Garbage-in dominates missed detections:</strong> missing logs, silent source outages, and parsing drift cause more misses than weak rule logic. Monitor log-source health as a first-class SLO.</li>
+<li><strong>Cost is the real constraint.</strong> Tiered storage + a data lake (hot SIEM for high-signal, cheap Parquet lake for everything, long retention) is how you avoid the "cut logs to save money → go blind" trap.</li>
+<li><strong>Detection-as-code is the maturity line.</strong> Rules in Git, tested and backtested in CI, deployed via pipeline — this is what makes detection quality compound instead of rot.</li>
+<li><strong>Logs are an attack surface and an attacker target.</strong> T1562/T1070: adversaries disable sinks and clear logs. Provider-side immutable audit logs, redundant sinks, and WORM off-host storage are what preserve evidence.</li>
+<li><strong>Having logs ≠ detecting</strong> (Capital One): telemetry without detection logic and baselines is just storage cost.</li>
+<li><strong>Missing logs = invisible breach</strong> (Storm-0558): treat log <em>availability</em> as a security requirement, not a line-item to trim.</li>
+<li><strong>Traditional vs cloud-native is an economics + ecosystem choice</strong>, not a quality ranking; large-volume, cloud-centric orgs increasingly favor cloud-native + lake + OCSF, often hybridized with Splunk for deep analytics.</li>
+<li><strong>Distinguish event-time from ingest-time</strong> and normalize to UTC — correlation windows silently break on clock skew and late data otherwise.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li><strong>OCSF</strong> — Open Cybersecurity Schema Framework: schema.ocsf.io and github.com/ocsf (event classes, categories, mapping guide).</li>
+<li><strong>Elastic Common Schema (ECS)</strong> — elastic.co/guide (field reference, categorization fields).</li>
+<li><strong>Chronicle / Google SecOps UDM</strong> — cloud.google.com/chronicle/docs (Unified Data Model field list, YARA-L 2.0 language, data ingestion).</li>
+<li><strong>Microsoft Sentinel / ASIM</strong> — learn.microsoft.com/azure/sentinel (Advanced SIEM Information Model, Data Collection Rules, log tiers).</li>
+<li><strong>Amazon Security Lake</strong> — docs.aws.amazon.com/security-lake (OCSF output, sources, lifecycle/lake config).</li>
+<li><strong>NIST SP 800-92</strong> — Guide to Computer Security Log Management.</li>
+<li><strong>NIST SP 800-53</strong> — AU (Audit and Accountability) control family.</li>
+<li><strong>MITRE ATT&amp;CK</strong> — T1562 (Impair Defenses, incl. .008 Disable Cloud Logs), T1070 (Indicator Removal), T1098.001 (Additional Cloud Credentials).</li>
+<li><strong>Sigma</strong> — github.com/SigmaHQ/sigma and sigma-cli (generic rule format + backend conversion).</li>
+<li><strong>DeTT&amp;CT / ATT&amp;CK Navigator</strong> — data-source and detection-coverage mapping to ATT&amp;CK.</li>
+<li><strong>Splunk CIM / Data Models</strong> — docs.splunk.com (Common Information Model).</li>
+<li><strong>Incident references</strong> — Capital One (2019, CFPB/DOJ filings), Microsoft Storm-0558 (2023, MSRC + CISA CSRB report), SolarWinds SUNBURST (2020, FireEye/Mandiant), Log4Shell CVE-2021-44228.</li>
+<li><strong>Repo cross-refs</strong> — <a href="../IDS-SIEM/README.md">IDS and SIEM</a>, <a href="../Anomaly-Detection/README.md">Anomaly Detection</a>, <a href="../README.md">Detection Engineering overview</a>, <a href="../../infra/Lateral-Movement/Cloud-Service-Accounts/README.md">Cloud Service Accounts / lateral movement</a>.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

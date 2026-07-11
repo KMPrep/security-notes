@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q3_zeek_c2_beaconing.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q3_zeek_c2_beaconing.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q3_zeek_c2_beaconing.py</p>
+  <p class="line-count">257 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q3. Zeek HTTP Log C2 Beaconing Detector
+=========================================
+Detect periodic outbound C2 communications by computing jitter coefficient
+on inter-arrival times per (src_ip, dst_ip, dst_port) connection tuple.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Flag any IP that connects to the same external host more than N times.
+  Problem: Legitimate services (telemetry, health checks) also do this.
+  No temporal analysis — completely useless as a detector.
+
+BETTER: Compute mean inter-arrival time. Flag low variance.
+  Problem: Using raw variance without normalising by mean causes large-interval
+  beacons (hourly) to look more &quot;stable&quot; than short ones. Need the coefficient
+  of variation (CV = stddev / mean) to normalize.
+
+GOOGLE-LEVEL (this file):
+  - Parse Zeek TSV with proper header-driven field mapping.
+  - Compute CV (jitter coefficient) per (src, dst, port) tuple.
+  - Require minimum connection count before flagging (statistical significance).
+  - Ignore internal-to-internal traffic (RFC 1918 → RFC 1918).
+  - Sort candidates by ascending CV (most periodic = most suspicious).
+
+Complexity: O(N) parse + O(C × K log K) sort where C = connection tuples,
+            K = connections per tuple.  Space: O(N).
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import math
+import ipaddress
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (Zeek TSV format, tab-separated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+#separator \\x09
+#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tmethod\thost\turi\tresp_mime_type\tresponse_body_len
+1700000000.0\tCabc01\t10.0.0.5\t54321\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000060.1\tCabc02\t10.0.0.5\t54322\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000120.0\tCabc03\t10.0.0.5\t54323\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000180.2\tCabc04\t10.0.0.5\t54324\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000240.1\tCabc05\t10.0.0.5\t54325\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000300.0\tCabc06\t10.0.0.5\t54326\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000360.1\tCabc07\t10.0.0.5\t54327\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000420.2\tCabc08\t10.0.0.5\t54328\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000480.0\tCabc09\t10.0.0.5\t54329\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000540.3\tCabc10\t10.0.0.5\t54330\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000600.1\tCabc11\t10.0.0.5\t54331\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000660.0\tCabc12\t10.0.0.5\t54332\t185.1.2.3\t443\tGET\tc2.evil.com\t/check\ttext/plain\t32
+1700000000.0\tCdef01\t10.0.0.6\t60001\t8.8.8.8\t53\tGET\tdns.google.com\t/resolve\tapplication/json\t256
+1700000120.5\tCdef02\t10.0.0.6\t60002\t8.8.8.8\t53\tGET\tdns.google.com\t/resolve\tapplication/json\t256
+1700000450.0\tCdef03\t10.0.0.6\t60003\t8.8.8.8\t53\tGET\tdns.google.com\t/resolve\tapplication/json\t256
+1700000900.0\tCdef04\t10.0.0.6\t60004\t8.8.8.8\t53\tGET\tdns.google.com\t/resolve\tapplication/json\t256
+1700000000.0\tCghi01\t10.0.0.7\t61000\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000030.0\tCghi02\t10.0.0.7\t61001\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000060.0\tCghi03\t10.0.0.7\t61002\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000090.0\tCghi04\t10.0.0.7\t61003\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000120.0\tCghi05\t10.0.0.7\t61004\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000150.0\tCghi06\t10.0.0.7\t61005\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000180.0\tCghi07\t10.0.0.7\t61006\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000210.0\tCghi08\t10.0.0.7\t61007\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000240.0\tCghi09\t10.0.0.7\t61008\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+1700000270.0\tCghi10\t10.0.0.7\t61009\t203.0.113.9\t4444\tPOST\t203.0.113.9\t/upload\tapplication/octet-stream\t1024
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+MIN_CONNECTIONS   = 10     # need at least this many connections to compute statistics
+JITTER_THRESHOLD  = 0.20   # CV below this → periodic (suspicious)
+
+# Private address ranges to filter internal-to-internal noise
+PRIVATE_RANGES = [
+    ipaddress.ip_network(&quot;10.0.0.0/8&quot;),
+    ipaddress.ip_network(&quot;172.16.0.0/12&quot;),
+    ipaddress.ip_network(&quot;192.168.0.0/16&quot;),
+    ipaddress.ip_network(&quot;127.0.0.0/8&quot;),
+]
+
+
+def is_private(ip_str: str) -&gt; bool:
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return any(addr in net for net in PRIVATE_RANGES)
+    except ValueError:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_zeek_log(lines: list[str]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Parse Zeek TSV log.
+    Respects #fields header for column mapping; skips all other # directives.
+    &quot;&quot;&quot;
+    fields = None
+    records = []
+
+    for line in lines:
+        line = line.rstrip(&quot;\n&quot;)
+        if line.startswith(&quot;#fields&quot;):
+            # Tab-separated after the directive tag
+            fields = line.split(&quot;\t&quot;)[1:]
+            continue
+        if line.startswith(&quot;#&quot;):
+            continue
+        if not line.strip():
+            continue
+        if fields is None:
+            continue  # No header seen yet — skip
+
+        parts = line.split(&quot;\t&quot;)
+        if len(parts) != len(fields):
+            continue  # Mismatched column count — skip gracefully
+
+        row = dict(zip(fields, parts))
+        try:
+            records.append({
+                &quot;ts&quot;:       float(row[&quot;ts&quot;]),
+                &quot;src_ip&quot;:   row[&quot;id.orig_h&quot;],
+                &quot;src_port&quot;: int(row[&quot;id.orig_p&quot;]),
+                &quot;dst_ip&quot;:   row[&quot;id.resp_h&quot;],
+                &quot;dst_port&quot;: int(row[&quot;id.resp_p&quot;]),
+                &quot;method&quot;:   row.get(&quot;method&quot;, &quot;-&quot;),
+                &quot;host&quot;:     row.get(&quot;host&quot;, &quot;-&quot;),
+                &quot;uri&quot;:      row.get(&quot;uri&quot;, &quot;-&quot;),
+            })
+        except (KeyError, ValueError):
+            continue
+
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATISTICS HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mean(values: list[float]) -&gt; float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def stddev(values: list[float]) -&gt; float:
+    if len(values) &lt; 2:
+        return 0.0
+    mu = mean(values)
+    variance = sum((x - mu) ** 2 for x in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def coefficient_of_variation(values: list[float]) -&gt; float:
+    &quot;&quot;&quot;CV = stddev / mean.  Lower = more periodic = more suspicious.&quot;&quot;&quot;
+    mu = mean(values)
+    if mu == 0:
+        return float(&quot;inf&quot;)
+    return stddev(values) / mu
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BEACON DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_beaconing(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Group connections by (src_ip, dst_ip, dst_port).
+    Compute inter-arrival CV; flag low-jitter, high-frequency tuples.
+    Skip internal→internal traffic.
+    &quot;&quot;&quot;
+    # Aggregate timestamps per connection tuple
+    tuple_ts: dict[tuple, list[float]] = defaultdict(list)
+
+    for r in records:
+        if is_private(r[&quot;src_ip&quot;]) and is_private(r[&quot;dst_ip&quot;]):
+            continue  # Ignore internal-to-internal
+        key = (r[&quot;src_ip&quot;], r[&quot;dst_ip&quot;], r[&quot;dst_port&quot;])
+        tuple_ts[key].append(r[&quot;ts&quot;])
+
+    candidates = []
+    for (src, dst, port), timestamps in tuple_ts.items():
+        if len(timestamps) &lt; MIN_CONNECTIONS:
+            continue
+        timestamps.sort()
+
+        # Inter-arrival times
+        intervals = [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))]
+        if not intervals:
+            continue
+
+        cv      = coefficient_of_variation(intervals)
+        avg_int = mean(intervals)
+
+        if cv &lt; JITTER_THRESHOLD:
+            candidates.append({
+                &quot;src_ip&quot;:      src,
+                &quot;dst_ip&quot;:      dst,
+                &quot;dst_port&quot;:    port,
+                &quot;connections&quot;: len(timestamps),
+                &quot;mean_interval_s&quot;: round(avg_int, 2),
+                &quot;jitter_cv&quot;:   round(cv, 4),
+                &quot;first_seen&quot;:  timestamps[0],
+                &quot;last_seen&quot;:   timestamps[-1],
+            })
+
+    # Most periodic first
+    candidates.sort(key=lambda x: x[&quot;jitter_cv&quot;])
+    return candidates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(candidates: list[dict]) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;ZEEK HTTP LOG — C2 BEACONING DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+    if not candidates:
+        print(&quot;  No beaconing candidates detected.&quot;)
+    for c in candidates:
+        print(f&quot;\n  [BEACON CANDIDATE]&quot;)
+        print(f&quot;    src={c[&#x27;src_ip&#x27;]}  dst={c[&#x27;dst_ip&#x27;]}:{c[&#x27;dst_port&#x27;]}&quot;)
+        print(f&quot;    connections={c[&#x27;connections&#x27;]}&quot;)
+        print(f&quot;    mean_interval={c[&#x27;mean_interval_s&#x27;]}s&quot;)
+        print(f&quot;    jitter_cv={c[&#x27;jitter_cv&#x27;]}  (threshold &lt; {JITTER_THRESHOLD})&quot;)
+        from datetime import datetime
+        print(f&quot;    first_seen={datetime.utcfromtimestamp(c[&#x27;first_seen&#x27;]).isoformat()}Z&quot;)
+        print(f&quot;    last_seen ={datetime.utcfromtimestamp(c[&#x27;last_seen&#x27;]).isoformat()}Z&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records    = parse_zeek_log(raw_lines)
+    candidates = detect_beaconing(records)
+    print(f&quot;Parsed {len(records)} Zeek records.  &quot;
+          f&quot;Found {len(candidates)} beacon candidate(s).\n&quot;)
+    print_report(candidates)
+</code></pre>
+</body>
+</html>

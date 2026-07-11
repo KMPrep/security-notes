@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GKE Security — Google Kubernetes Engine Hardening Deep-Dive</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Compute\GKE-Security\README.md</p>
+<h1 id="gke-security-google-kubernetes-engine-hardening-deep-dive">GKE Security — Google Kubernetes Engine Hardening Deep-Dive</h1>
+<p><strong>Domain:</strong> Cloud / Managed Kubernetes (GCP Compute)<br />
+<strong>Frameworks:</strong> CIS GKE Benchmark, NSA/CISA Kubernetes Hardening Guide, Google Safe/Secure GKE guidance, Pod Security Standards, MITRE ATT&amp;CK for Containers<br />
+<strong>Related notes:</strong> <code>cloud/Kubernetes-Security</code> (generic k8s — this note extends it for GKE), <code>cloud/AWS/Compute/EKS</code>, <code>cloud/Azure/Compute/AKS</code>, <code>infra/Virtualization/Escape-Techniques</code></p>
+<blockquote>
+<p>This note assumes the generic Kubernetes control-plane, RBAC, admission, NetworkPolicy, and secrets material in <code>cloud/Kubernetes-Security</code>. It does <strong>not</strong> re-teach RBAC verbs, the API-server pipeline, or Pod Security Standards from scratch. It focuses on the <strong>GCP-specific layer</strong>: the shared-responsibility split GKE gives you, Workload Identity Federation, private clusters and control-plane authorized networks, Shielded/Confidential nodes, GKE Sandbox (gVisor), Binary Authorization, Dataplane V2 network policy, and the metadata/node-service-account attack surface that is unique to running Kubernetes on Google Cloud.</p>
+</blockquote>
+<h2 id="1-overview">1. Overview</h2>
+<p>GKE is Google Cloud's managed Kubernetes offering. Google runs and secures the control plane (API server, etcd, controller-manager, scheduler) inside a Google-owned project; you consume it through a regional or zonal endpoint. GKE ships in two operational modes — <strong>Standard</strong> (you manage node pools, machine types, and node-level config) and <strong>Autopilot</strong> (Google manages nodes and enforces a hardened baseline you cannot weaken). The security implication is that GKE moves the shared-responsibility line: the control plane is Google's problem, but node configuration, IAM, Workload Identity, network exposure, admission policy, and workload posture remain yours. Most real GKE breaches are not control-plane CVEs — they are an over-permissioned node service account plus a pod that can reach the GCE metadata server, converting one pod RCE into full project compromise.</p>
+<p>At scale, GKE security is about closing the <em>cloud pivot</em>: a Kubernetes cluster is a soft target sitting inside a Google Cloud project, and the crown jewels are the IAM permissions the cluster's identity can reach. GKE gives you purpose-built controls for exactly this — Workload Identity Federation (per-pod GCP identity instead of node credentials), metadata concealment, private clusters, Shielded/Confidential nodes, Binary Authorization, and GKE Sandbox — but almost none are on by default in Standard mode. Autopilot flips many defaults to secure. A senior engineer must know which controls are default-on in each mode, which attack path each closes, and the operational trade-offs.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- <strong>Workload Identity Federation is the single most important GKE control</strong> — it binds a Kubernetes ServiceAccount (KSA) to a Google ServiceAccount (GSA) via GKE's OIDC/metadata layer, so pods get short-lived, per-workload GCP credentials instead of stealing the node's over-broad service account. Enabling it also flips the metadata server to a concealing GKE Metadata Server.<br />
+- <strong>The GKE cloud-pivot chain:</strong> pod RCE → reach <code>169.254.169.254</code> metadata → steal the <strong>node service account</strong> token (often <code>Editor</code>) → own the whole project. Break it with Workload Identity + Metadata Concealment + least-privilege node SA + NetworkPolicy egress deny.<br />
+- <strong>Autopilot &gt; Standard for security posture:</strong> Autopilot enforces Shielded nodes, Workload Identity, no privileged pods, no host namespaces, and a restricted-like admission baseline by default; you trade node flexibility for a hardened floor.<br />
+- <strong>Private cluster + control-plane authorized networks</strong> removes the public API endpoint and restricts who can even reach the control plane.<br />
+- <strong>Defense in depth is layered on:</strong> Binary Authorization (only signed images run), GKE Sandbox/gVisor (untrusted workloads), Confidential GKE Nodes (memory encryption), node auto-upgrade (patch the escape CVEs), Dataplane V2 (eBPF NetworkPolicy + logging).</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>GKE reshapes the standard Kubernetes trust model by taking ownership of the control plane and layering GCP identity and networking primitives underneath the cluster. The security-relevant objects:</p>
+<table>
+<thead>
+<tr>
+<th>GKE Concept</th>
+<th>What It Is</th>
+<th>Primary Security Concern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Autopilot mode</td>
+<td>Google manages nodes; hardened baseline enforced, per-pod billing</td>
+<td>Cannot run privileged/hostPath pods; secure-by-default floor</td>
+</tr>
+<tr>
+<td>Standard mode</td>
+<td>You own node pools, machine types, node config</td>
+<td>Every hardening flag is opt-in; easy to misconfigure</td>
+</tr>
+<tr>
+<td>Node service account</td>
+<td>GCE service account attached to worker VMs</td>
+<td>Over-permissioning (<code>Editor</code>) = project takeover on escape</td>
+</tr>
+<tr>
+<td>Workload Identity Federation</td>
+<td>Maps KSA → GSA via GKE metadata + OIDC</td>
+<td>Correct binding removes need for node-SA credentials</td>
+</tr>
+<tr>
+<td>GKE Metadata Server</td>
+<td>Per-node concealing proxy in front of GCE metadata</td>
+<td>Prevents pods reading the raw node SA token</td>
+</tr>
+<tr>
+<td>Private cluster</td>
+<td>Nodes (and optionally control plane) have no public IP</td>
+<td>Reduces internet-facing attack surface</td>
+</tr>
+<tr>
+<td>Control-plane authorized networks</td>
+<td>CIDR allow-list for who can reach the API endpoint</td>
+<td>Stops internet-wide API brute force / exploit</td>
+</tr>
+<tr>
+<td>Shielded GKE Nodes</td>
+<td>Secure Boot + vTPM + integrity monitoring on node VMs</td>
+<td>Rootkit/boot-level tamper detection</td>
+</tr>
+<tr>
+<td>Confidential GKE Nodes</td>
+<td>AMD SEV / Intel TDX memory encryption for node VMs</td>
+<td>Protects data-in-use from host/hypervisor</td>
+</tr>
+<tr>
+<td>GKE Sandbox</td>
+<td>gVisor userspace kernel via RuntimeClass</td>
+<td>Contains container escape for untrusted workloads</td>
+</tr>
+<tr>
+<td>Binary Authorization</td>
+<td>Admission gate requiring image attestations/signatures</td>
+<td>Blocks unsigned/untrusted images at deploy</td>
+</tr>
+<tr>
+<td>Dataplane V2</td>
+<td>Cilium/eBPF datapath; enforces NetworkPolicy + flow logs</td>
+<td>Enables policy + observability without kube-proxy</td>
+</tr>
+<tr>
+<td>Node auto-upgrade</td>
+<td>Auto-patches node OS and kubelet to fix CVEs</td>
+<td>Unpatched nodes = escape/CVE exposure</td>
+</tr>
+<tr>
+<td>GKE audit logs</td>
+<td>Admin Activity + Data Access via Cloud Audit Logs</td>
+<td>Detection source for API abuse</td>
+</tr>
+</tbody>
+</table>
+<p>Two GKE-specific facts drive most of the threat model. <strong>First</strong>, every GKE node is a Compute Engine VM, so it exposes the GCE metadata server at <code>http://metadata.google.internal</code> (<code>169.254.169.254</code>), which by default returns the node's attached service-account access token. Any pod that can make an HTTP request to that address inherits the node's IAM — this is the crux of GKE's attack surface. <strong>Second</strong>, GKE historically shipped nodes with the <strong>default Compute Engine service account</strong>, which carries the project <code>Editor</code> role. On a cluster with default settings, a single pod RCE that can reach the metadata endpoint yields project-<code>Editor</code> credentials. Workload Identity plus Metadata Concealment plus a minimal-scope node SA is the canonical fix.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete Configuration</h3>
+<p><strong>A. A hardened Standard cluster in one <code>gcloud</code> command.</strong> Each flag closes a specific attack path (commented):</p>
+<pre><code class="language-bash">gcloud container clusters create prod-hardened \
+  --project my-prod-project \
+  --region us-central1 \
+  --release-channel regular \                       # managed, tested auto-upgrades
+  --enable-private-nodes \                           # nodes have no public IP
+  --enable-private-endpoint \                        # control plane is private-only
+  --master-ipv4-cidr 172.16.0.32/28 \               # control-plane peering range
+  --enable-master-authorized-networks \             # restrict who can hit the API
+  --master-authorized-networks 10.8.0.0/24 \        # e.g. bastion/CI CIDR only
+  --workload-pool my-prod-project.svc.id.goog \     # ENABLE Workload Identity Federation
+  --enable-shielded-nodes \                          # Secure Boot + vTPM + integrity
+  --shielded-secure-boot \
+  --shielded-integrity-monitoring \
+  --enable-dataplane-v2 \                            # eBPF datapath (NetworkPolicy + logs)
+  --enable-network-policy \                          # enforce NetworkPolicy objects
+  --binauthz-evaluation-mode=PROJECT_SINGLETON_POLICY_ENFORCE \  # Binary Authorization
+  --enable-intra-node-visibility \                  # log intra-node pod traffic
+  --no-enable-legacy-authorization \                # RBAC only, no ABAC
+  --metadata disable-legacy-endpoints=true \        # kill /0.1/ &amp; /v1beta1/ metadata
+  --service-account gke-node-minimal@my-prod-project.iam.gserviceaccount.com \  # least-priv node SA
+  --enable-secret-manager \                          # Secret Manager CSI add-on
+  --enable-master-global-access=false \
+  --logging=SYSTEM,WORKLOAD --monitoring=SYSTEM
+</code></pre>
+<p>The key security flags: <code>--workload-pool</code> turns on Workload Identity (and switches nodes to the concealing GKE Metadata Server); <code>--enable-private-nodes</code> + <code>--enable-private-endpoint</code> + <code>--enable-master-authorized-networks</code> remove public exposure of both nodes and the API; <code>--enable-shielded-nodes</code> gives verified boot; <code>--metadata disable-legacy-endpoints=true</code> kills the <code>v1beta1</code> metadata paths that ignored the required <code>Metadata-Flavor: Google</code> header (the old SSRF-friendly ones); and <code>--service-account</code> swaps the dangerous default <code>Editor</code>-scoped SA for a minimal one.</p>
+<p><strong>B. Create a least-privilege node service account</strong> (never reuse the default Compute Engine SA):</p>
+<pre><code class="language-bash">gcloud iam service-accounts create gke-node-minimal \
+  --display-name &quot;GKE minimal node SA&quot;
+
+# Only the three roles nodes genuinely need to function:
+for R in roles/logging.logWriter roles/monitoring.metricWriter \
+         roles/monitoring.viewer; do
+  gcloud projects add-iam-policy-binding my-prod-project \
+    --member &quot;serviceAccount:gke-node-minimal@my-prod-project.iam.gserviceaccount.com&quot; \
+    --role &quot;$R&quot;
+done
+# Add roles/artifactregistry.reader ONLY if pulling from Artifact Registry.
+</code></pre>
+<p><strong>C. Bind a Kubernetes ServiceAccount to a Google ServiceAccount (Workload Identity).</strong> This is the canonical example every senior candidate should be able to reproduce. The goal: pods using KSA <code>analytics-ksa</code> in namespace <code>data</code> can call BigQuery as GSA <code>bq-reader</code>, and <em>nothing else in the cluster</em> gets that permission.</p>
+<pre><code class="language-bash"># 1. Create the GSA that carries the ACTUAL app permissions (scoped tight)
+gcloud iam service-accounts create bq-reader
+gcloud projects add-iam-policy-binding my-prod-project \
+  --member &quot;serviceAccount:bq-reader@my-prod-project.iam.gserviceaccount.com&quot; \
+  --role roles/bigquery.dataViewer
+
+# 2. Allow the specific KSA to impersonate the GSA via the workload pool.
+#    The member string is the magic: it encodes cluster workload-pool + ns + KSA name.
+gcloud iam service-accounts add-iam-policy-binding \
+  bq-reader@my-prod-project.iam.gserviceaccount.com \
+  --role roles/iam.workloadIdentityUser \
+  --member &quot;serviceAccount:my-prod-project.svc.id.goog[data/analytics-ksa]&quot;
+</code></pre>
+<pre><code class="language-yaml"># 3. Create the KSA and annotate it with the target GSA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: analytics-ksa
+  namespace: data
+  annotations:
+    iam.gke.io/gcp-service-account: bq-reader@my-prod-project.iam.gserviceaccount.com
+---
+# 4. Pods that reference the KSA now get short-lived bq-reader tokens from the
+#    GKE Metadata Server. They CANNOT read the node SA or any other GSA.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics
+  namespace: data
+spec:
+  template:
+    spec:
+      serviceAccountName: analytics-ksa       # binds the identity
+      containers:
+        - name: app
+          image: us-docker.pkg.dev/my-prod-project/apps/analytics@sha256:abc123...
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [&quot;ALL&quot;] }
+            seccompProfile: { type: RuntimeDefault }
+</code></pre>
+<p><strong>D. Metadata Concealment / block the raw metadata path</strong> (belt-and-suspenders even with Workload Identity). A NetworkPolicy egress deny to the metadata IP, plus for legacy clusters the <code>--workload-metadata=GKE_METADATA</code> node-pool config:</p>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-metadata-egress
+  namespace: data
+spec:
+  podSelector: {}
+  policyTypes: [&quot;Egress&quot;]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32    # block GCE metadata server
+    - to:                             # still allow kube-dns
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+</code></pre>
+<p><strong>E. GKE Sandbox (gVisor) for an untrusted workload</strong> via RuntimeClass on a sandboxed node pool:</p>
+<pre><code class="language-bash">gcloud container node-pools create sandbox-pool \
+  --cluster prod-hardened --region us-central1 \
+  --sandbox type=gvisor --machine-type e2-standard-4
+</code></pre>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata: { name: untrusted-plugin, namespace: tenant-x }
+spec:
+  runtimeClassName: gvisor        # syscalls intercepted in userspace
+  containers:
+    - name: plugin
+      image: us-docker.pkg.dev/my-prod-project/apps/plugin@sha256:def456...
+</code></pre>
+<p><strong>F. Binary Authorization policy</strong> — only images signed by the prod attestor may deploy, and GKE system images are exempted:</p>
+<pre><code class="language-yaml"># gcloud container binauthz policy import policy.yaml
+defaultAdmissionRule:
+  evaluationMode: REQUIRE_ATTESTATION
+  enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG
+  requireAttestationsBy:
+    - projects/my-prod-project/attestors/prod-attestor
+globalPolicyEvaluationMode: ENABLE          # trust Google-managed system images
+admissionWhitelistPatterns:
+  - namePattern: us-docker.pkg.dev/my-prod-project/apps/*
+clusterAdmissionRules:
+  us-central1.prod-hardened:
+    evaluationMode: REQUIRE_ATTESTATION
+    enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG
+    requireAttestationsBy:
+      - projects/my-prod-project/attestors/prod-attestor
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<h4 id="diagram-a-gke-architecture-and-trust-boundaries">Diagram A — GKE Architecture and Trust Boundaries</h4>
+<pre class="mermaid">
+flowchart TD
+    subgraph Google[Google Managed Project]
+        API[kube apiserver]
+        ETCD[etcd encrypted with Cloud KMS]
+        API --> ETCD
+    end
+    subgraph Customer[Customer Project]
+        subgraph NodeVM[GKE Node is a GCE VM]
+            Kubelet[kubelet]
+            MDS[GKE Metadata Server]
+            subgraph Pod[Pod]
+                App[Workload container]
+                KSA[Kubernetes ServiceAccount]
+            end
+        end
+        NodeSA[Node Service Account]
+        WI[Workload Identity Pool]
+        GSA[Google ServiceAccount scoped]
+        Meta[GCE Metadata 169.254.169.254]
+    end
+    Operator[Operator or CI] -->|authorized networks TLS| API
+    API -->|command| Kubelet
+    App -->|token request| MDS
+    MDS -->|federate KSA to GSA| WI
+    WI --> GSA
+    App -.blocked SSRF.-> Meta
+    Kubelet -->|only node ops| NodeSA
+</pre>
+<h4 id="diagram-b-workload-identity-token-exchange">Diagram B — Workload Identity Token Exchange</h4>
+<pre class="mermaid">
+sequenceDiagram
+    participant Pod as Pod using analytics ksa
+    participant MDS as GKE Metadata Server
+    participant IAM as GCP IAM Credentials
+    participant BQ as BigQuery API
+    Pod->>MDS: GET token from metadata endpoint
+    MDS->>MDS: Identify KSA namespace and name
+    MDS->>IAM: Federate workload pool identity to bq reader GSA
+    IAM-->>MDS: Short lived access token for bq reader
+    MDS-->>Pod: Return scoped token
+    Pod->>BQ: Query with bq reader token
+    BQ-->>Pod: Rows if dataViewer allows
+</pre>
+<h4 id="diagram-c-the-gke-cloud-pivot-attack-path-and-where-controls-break-it">Diagram C — The GKE Cloud-Pivot Attack Path and Where Controls Break It</h4>
+<pre class="mermaid">
+flowchart LR
+    Start[Attacker gains RCE in a pod] --> Q1{Workload Identity enabled}
+    Q1 -->|GKE Metadata Server conceals node SA| Safe[No node credentials reachable]
+    Q1 -->|Legacy metadata exposed| Q2{NetworkPolicy egress deny metadata}
+    Q2 -->|Blocked| Safe
+    Q2 -->|Reachable| Q3{Node SA least privilege}
+    Q3 -->|Minimal scope SA| Limited[Small blast radius]
+    Q3 -->|Default Editor SA| Take[Project wide Editor credentials]
+    Take --> Pwn[Full project compromise]
+</pre>
+<h4 id="diagram-d-autopilot-vs-standard-enforcement-decision">Diagram D — Autopilot vs Standard Enforcement Decision</h4>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> ChooseMode
+    ChooseMode --> Autopilot: Want secure by default floor
+    ChooseMode --> Standard: Need node level control
+    Autopilot --> Enforced: Shielded WI no privileged no hostPath
+    Standard --> OptIn: Every control is a flag you must set
+    OptIn --> Risk: Miss a flag equals exposure
+    Enforced --> [*]
+    Risk --> [*]
+</pre>
+<h4 id="diagram-e-binary-authorization-admission-flow">Diagram E — Binary Authorization Admission Flow</h4>
+<pre class="mermaid">
+flowchart TD
+    Deploy[kubectl apply Deployment] --> Adm[GKE admission]
+    Adm --> BA{Binary Authorization enabled}
+    BA -->|No| Run[Pod scheduled]
+    BA -->|Yes| Att{Image has valid attestation}
+    Att -->|Signed by prod attestor| Run
+    Att -->|Unsigned or untrusted| Block[Deny and audit log]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name / CVE</th>
+<th>Year</th>
+<th>Root Cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Default node SA = <code>Editor</code> (industry-wide misconfig)</td>
+<td>ongoing</td>
+<td>GKE historically attached the default Compute Engine SA (project Editor) to nodes</td>
+<td>Always create a minimal node SA; enable Workload Identity</td>
+</tr>
+<tr>
+<td>Shopify GKE SSRF bug bounty</td>
+<td>2018</td>
+<td>App SSRF let attacker reach node metadata and pull the node SA token → Kubelet creds → cluster</td>
+<td>Conceal metadata, enable Workload Identity, block egress to 169.254.169.254</td>
+</tr>
+<tr>
+<td>Legacy metadata endpoints (<code>/0.1/</code>, <code>/v1beta1/</code>)</td>
+<td>pre-2020</td>
+<td>Old GCE metadata paths did not require the <code>Metadata-Flavor</code> header, easing SSRF</td>
+<td>Set <code>disable-legacy-endpoints=true</code>; use v1 + required header</td>
+</tr>
+<tr>
+<td>CVE-2020-8555 (kube-apiserver SSRF)</td>
+<td>2020</td>
+<td>SSRF in apiserver could read cloud metadata / internal endpoints</td>
+<td>Managed control plane patched by Google; keep release channel current</td>
+</tr>
+<tr>
+<td>CVE-2021-25741 (subPath symlink)</td>
+<td>2021</td>
+<td>Volume subPath symlink race allowed host file access / escape</td>
+<td>Node auto-upgrade patches kubelet; use restricted Pod Security</td>
+</tr>
+<tr>
+<td>CVE-2022-0492 (cgroups v1 release_agent escape)</td>
+<td>2022</td>
+<td><code>CAP_SYS_ADMIN</code> + cgroup v1 misuse to run code on host</td>
+<td>Drop capabilities, seccomp RuntimeDefault, GKE Sandbox for untrusted</td>
+</tr>
+<tr>
+<td>Siloscape (Windows container malware)</td>
+<td>2021</td>
+<td>Escaped Windows container to reach k8s cluster and cloud</td>
+<td>Node hardening + runtime detection; least-priv node identity</td>
+</tr>
+<tr>
+<td>CVE-2024-21626 (runc leaked fd / "Leaky Vessels")</td>
+<td>2024</td>
+<td>runc file-descriptor leak enabled container escape to host</td>
+<td>Auto-upgrade node runtime; gVisor sandbox contains the class</td>
+</tr>
+<tr>
+<td>Reported crypto-mining via exposed GKE dashboards/API</td>
+<td>2018–2021</td>
+<td>Public API endpoint / weak auth → attacker deploys miners</td>
+<td>Private endpoint + authorized networks; RBAC; Binary Authorization</td>
+</tr>
+<tr>
+<td>TeamTNT cloud worms</td>
+<td>2020–2021</td>
+<td>Scanned for exposed kubelet/API and metadata to steal cloud creds</td>
+<td>Metadata concealment, private nodes, network policy egress deny</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — The Shopify metadata SSRF (2018).</strong> A researcher found a server-side request forgery in a Shopify app running on GKE. Because the pod could reach the GCE metadata server and Workload Identity did not yet exist / was not enabled, the SSRF returned the <strong>node service account's access token</strong> and then Kubelet credentials, which were broad enough to pivot toward the cluster. The whole chain hinged on two GKE facts: nodes are GCE VMs with a metadata server, and the node SA was over-scoped. The controls that would have stopped it are precisely the ones this note centers on — <strong>Workload Identity + GKE Metadata Server concealment</strong> (so the raw node token is not returned to pods) and a <strong>least-privilege node SA</strong> (so even a leaked token is near-useless). A NetworkPolicy egress-deny to <code>169.254.169.254</code> is the third belt.</p>
+<p><strong>Case study 2 — Default-Editor node service account.</strong> For years the fastest path to owning a GCP project through GKE was: get code execution in any pod, <code>curl</code> the metadata server's <code>service-accounts/default/token</code> endpoint, and receive an OAuth token for the default Compute Engine SA — which holds project <code>Editor</code>. <code>Editor</code> can create service-account keys, modify firewall rules, read Cloud Storage, and spin up resources, so this is effective project takeover from a single pod. Google's own hardening guidance now tells you to create a custom node SA with only <code>logging.logWriter</code>, <code>monitoring.metricWriter</code>, <code>monitoring.viewer</code>, and (if needed) <code>artifactregistry.reader</code>, and to enable Workload Identity so pods never use the node SA at all. Autopilot enforces Workload Identity, which is why it is the safer default.</p>
+<p><strong>Case study 3 — "Leaky Vessels" runc escape (CVE-2024-21626, 2024).</strong> A file-descriptor leak in runc let a crafted image or <code>WORKDIR</code> escape the container into the host filesystem during <code>runc exec</code>/<code>run</code>. On a GKE Standard cluster with default runtime and no sandbox, a malicious image could break out to the node. The GKE-relevant mitigations layer up: <strong>node auto-upgrade</strong> on a release channel patched the runc version quickly; <strong>Binary Authorization</strong> would have prevented the untrusted image from ever deploying; and <strong>GKE Sandbox (gVisor)</strong> would have contained the whole class of runtime escapes by never exposing the host kernel/runtime to the workload in the first place.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK (Containers)</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Node SA over-permissioned (default Editor)</td>
+<td>T1552.005 Cloud Instance Metadata</td>
+<td>Default Compute Engine SA attached to nodes</td>
+<td>Full project takeover on metadata read</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SSRF / RCE reads GCE metadata token</td>
+<td>T1552.005</td>
+<td>Metadata reachable + no Workload Identity</td>
+<td>Steal node SA cloud credentials</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Workload Identity not enabled</td>
+<td>T1078.004 Valid Cloud Accounts</td>
+<td>Standard cluster left with node-SA auth</td>
+<td>Every pod shares node identity</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Public control-plane endpoint</td>
+<td>T1133 External Remote Services</td>
+<td>No private endpoint / authorized networks</td>
+<td>Internet-wide API attack surface</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Public node IPs</td>
+<td>T1133</td>
+<td><code>--enable-private-nodes</code> not set</td>
+<td>Direct internet exposure of nodes</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Privileged / hostPath pod (Standard)</td>
+<td>T1611 Escape to Host</td>
+<td>No Pod Security / policy enforcement</td>
+<td>Container escape to node</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Legacy metadata endpoints enabled</td>
+<td>T1552.005</td>
+<td><code>disable-legacy-endpoints</code> not set</td>
+<td>Header-less SSRF to metadata</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Unsigned / untrusted image deployed</td>
+<td>T1610 Deploy Container</td>
+<td>No Binary Authorization</td>
+<td>Supply-chain / backdoored workload</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Flat pod network, no NetworkPolicy</td>
+<td>T1046 Network Service Discovery</td>
+<td>Default allow-all east-west</td>
+<td>Unrestricted lateral movement</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Over-permissive RBAC / default KSA</td>
+<td>T1078 Valid Accounts</td>
+<td>Broad ClusterRoleBindings, default SA token</td>
+<td>Secret theft, pod creation, escalation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Unpatched nodes (escape CVEs)</td>
+<td>T1611 Escape to Host</td>
+<td>Auto-upgrade disabled</td>
+<td>runc/kubelet CVE exploitation</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>No node integrity (rootkit/boot tamper)</td>
+<td>T1542 Pre-OS Boot</td>
+<td>Shielded Nodes not enabled</td>
+<td>Persistent, stealthy node compromise</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Data-in-use exposure on node RAM</td>
+<td>T1005 Data from Local System</td>
+<td>No Confidential Nodes</td>
+<td>Host/hypervisor reads plaintext memory</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Secrets only base64 in etcd</td>
+<td>T1552.001 Credentials in Files</td>
+<td>Application-layer secret encryption off</td>
+<td>Credential disclosure at rest</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Exposed kubelet / read-only port</td>
+<td>T1613 Container Discovery</td>
+<td>Anonymous kubelet auth</td>
+<td>Pod exec, node data theft</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Long-lived / static GSA keys in pods</td>
+<td>T1552.001</td>
+<td>JSON key files baked into images</td>
+<td>Persistent stolen cloud credentials</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Cross-namespace / multi-tenant escape</td>
+<td>T1611 Escape to Host</td>
+<td>Shared kernel, no gVisor sandbox</td>
+<td>Tenant-to-tenant compromise</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Cloud Logging / audit disabled</td>
+<td>Defense Evasion</td>
+<td>Data Access logs off</td>
+<td>Attacker actions invisible</td>
+<td>High</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Overbroad master authorized networks</td>
+<td>T1133</td>
+<td><code>0.0.0.0/0</code> in allow-list</td>
+<td>Effectively public API endpoint</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Malicious admission/mutating webhook</td>
+<td>T1610 Deploy Container</td>
+<td>Unrestricted webhook creation</td>
+<td>Cluster-wide injection</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Control</th>
+<th>GKE-Specific Mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Node SA over-permissioned</td>
+<td>Least-privilege node identity</td>
+<td>Custom node SA with only logWriter/metricWriter/monitoring.viewer via <code>--service-account</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Metadata token theft</td>
+<td>Metadata concealment</td>
+<td><code>--workload-pool</code> → GKE Metadata Server; NetworkPolicy egress deny 169.254.169.254</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Workload Identity off</td>
+<td>Per-pod cloud identity</td>
+<td>Enable Workload Identity Federation; annotate KSA → GSA; <code>iam.workloadIdentityUser</code> binding</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Public control plane</td>
+<td>Private control plane + allow-list</td>
+<td><code>--enable-private-endpoint</code> + <code>--enable-master-authorized-networks</code> (tight CIDRs)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Public nodes</td>
+<td>Private nodes</td>
+<td><code>--enable-private-nodes</code>; egress via Cloud NAT only</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Privileged pod escape</td>
+<td>Admission enforcement</td>
+<td>Autopilot baseline, or Pod Security Admission <code>restricted</code> + Gatekeeper/Kyverno</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Legacy metadata SSRF</td>
+<td>Kill legacy endpoints</td>
+<td><code>--metadata disable-legacy-endpoints=true</code></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Untrusted images</td>
+<td>Deploy-time image gating</td>
+<td>Binary Authorization REQUIRE_ATTESTATION + Artifact Analysis scanning</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Flat network</td>
+<td>Default-deny segmentation</td>
+<td>Dataplane V2 (<code>--enable-dataplane-v2</code>) + NetworkPolicy default-deny ingress+egress</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Over-permissive RBAC</td>
+<td>Least-privilege authz</td>
+<td>Namespaced Roles, no wildcards, <code>automountServiceAccountToken: false</code>, GKE RBAC + IAM</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Unpatched nodes</td>
+<td>Automated patching</td>
+<td>Release channel + node auto-upgrade; COS (Container-Optimized OS) images</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Boot/rootkit tamper</td>
+<td>Verified boot</td>
+<td>Shielded GKE Nodes: Secure Boot + vTPM + integrity monitoring</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Data-in-use exposure</td>
+<td>Memory encryption</td>
+<td>Confidential GKE Nodes (AMD SEV / Intel TDX)</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Secrets at rest</td>
+<td>Application-layer encryption</td>
+<td>etcd DB encryption with Cloud KMS (<code>--database-encryption-key</code>); Secret Manager CSI</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Exposed kubelet</td>
+<td>Node hardening</td>
+<td>GKE disables anonymous kubelet auth; NodeRestriction; keep COS defaults</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Static GSA keys</td>
+<td>Eliminate long-lived keys</td>
+<td>Workload Identity removes need for key files; org policy to disable key creation</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Multi-tenant escape</td>
+<td>Workload sandboxing</td>
+<td>GKE Sandbox (gVisor) via <code>--sandbox type=gvisor</code> + <code>runtimeClassName: gvisor</code></td>
+</tr>
+<tr>
+<td>18</td>
+<td>No detection</td>
+<td>Full audit + runtime</td>
+<td>Cloud Audit Logs (Admin+Data Access), GKE audit, Security Command Center, Falco/GKE threat detection</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Overbroad allow-list</td>
+<td>Tighten authorized networks</td>
+<td>Restrict to bastion/CI CIDRs; disable <code>--enable-master-global-access</code></td>
+</tr>
+<tr>
+<td>20</td>
+<td>Malicious webhook</td>
+<td>Webhook governance</td>
+<td>RBAC on webhook creation; scope namespaceSelector; Binary Authorization on webhook images</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 In Depth</h3>
+<p><strong>1. Workload Identity Federation (the keystone control).</strong> Workload Identity is GKE's answer to "how does a pod call a Google API without a stolen node token or a static JSON key?" When you create a cluster with <code>--workload-pool=PROJECT.svc.id.goog</code>, GKE runs a per-node <strong>GKE Metadata Server</strong> that intercepts requests to the metadata endpoint. A pod requests a token; the metadata server identifies the pod's KSA (namespace + name), and — if an <code>iam.workloadIdentityUser</code> binding exists mapping that KSA to a GSA — federates the workload-pool identity into a <strong>short-lived</strong> access token for that GSA. Technically, the KSA's projected token is exchanged via GCP's Security Token Service for a GSA impersonation token. The critical security property: pods can only reach the GSA they are explicitly bound to, and <strong>the raw node service-account token is no longer returned to pods</strong> — the metadata server conceals it. This simultaneously kills the metadata-SSRF cloud-pivot and eliminates long-lived key files. Trade-offs: it requires the metadata server (small per-request latency), every workload needing GCP access must have a KSA→GSA binding (operational overhead), and legacy apps that hardcode <code>GOOGLE_APPLICATION_CREDENTIALS</code> to a key file must be migrated. Autopilot enforces it; on Standard you must set both the cluster <code>--workload-pool</code> and each node pool's <code>--workload-metadata=GKE_METADATA</code>.</p>
+<p><strong>2. Private clusters + control-plane authorized networks.</strong> Attack surface reduction is cheapest at the network edge. <code>--enable-private-nodes</code> removes public IPs from worker VMs (egress goes through Cloud NAT), so nodes cannot be scanned or hit directly from the internet. <code>--enable-private-endpoint</code> makes the Kubernetes API server reachable only over the internal VPC peering range (<code>--master-ipv4-cidr</code>), and <code>--enable-master-authorized-networks</code> adds an explicit CIDR allow-list of who may reach the control plane at all — typically just your bastion host and CI runner ranges. Together they mean an attacker on the internet cannot even initiate a TLS handshake with your API server, which neutralizes whole classes of API-exposure and unauthenticated-exploit risk (the crypto-mining-via-exposed-API incidents). Trade-offs: private endpoints complicate <code>kubectl</code> access (you need a bastion, Cloud VPN, IAP tunnel, or authorized-network entry), and you must provision Cloud NAT for image pulls and egress. A frequent misconfiguration is putting <code>0.0.0.0/0</code> in the authorized-networks list, which silently re-exposes the endpoint — audit for it.</p>
+<p><strong>3. Shielded and Confidential GKE Nodes.</strong> These protect the node VM itself. <strong>Shielded GKE Nodes</strong> enable UEFI <strong>Secure Boot</strong> (only signed bootloaders/kernels run), a <strong>virtual TPM (vTPM)</strong> for measured boot, and <strong>integrity monitoring</strong> that compares boot measurements against a known-good baseline and alerts on drift — defending against boot-level rootkits and kernel tampering that would otherwise survive reboots and evade in-guest tooling. <strong>Confidential GKE Nodes</strong> go further by encrypting node <strong>memory</strong> in use with AMD SEV (or Intel TDX on newer machine types), so even a compromised hypervisor or a malicious host operator cannot read the plaintext RAM of your pods — closing the data-in-use gap that at-rest and in-transit encryption leave open. Trade-offs: Shielded Nodes are essentially free and should always be on (Autopilot enforces them); Confidential Nodes carry a performance and machine-type cost and are reserved for genuinely sensitive workloads (regulated PII, keys, confidential compute requirements). Neither stops an application-layer compromise — they protect the platform beneath it.</p>
+<p><strong>4. GKE Sandbox (gVisor) for untrusted workloads.</strong> Standard containers share the host kernel through namespaces and cgroups, so a kernel or runtime CVE (CVE-2022-0492, CVE-2024-21626) can escape to the node. <strong>GKE Sandbox</strong> runs pods under <strong>gVisor</strong>, a userspace application kernel that intercepts syscalls and services them itself, presenting a tiny, hardened surface to the host kernel instead of the full Linux syscall table. You enable it per node pool (<code>--sandbox type=gvisor</code>) and opt workloads in via <code>runtimeClassName: gvisor</code>. This is the control you reach for when running genuinely untrusted or multi-tenant code — customer plugins, CI build jobs, code-execution sandboxes — where a shared-kernel escape is unacceptable. Trade-offs: gVisor adds syscall-interception overhead (noticeable for syscall- or IO-heavy workloads), has some compatibility gaps (a minority of syscalls/features are unsupported), and cannot host privileged or host-namespace pods. Use it selectively for the untrusted tier, not the whole cluster.</p>
+<p><strong>5. Binary Authorization + node auto-upgrade (supply chain + patch).</strong> Binary Authorization is a GKE admission gate that blocks any image lacking a valid <strong>attestation</strong> from a trusted attestor, so only images that passed your CI pipeline (built from trusted source, scanned, signed) can be deployed — <code>enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG</code> denies and logs violations, while <code>globalPolicyEvaluationMode: ENABLE</code> exempts Google-managed system images. Paired with Artifact Analysis vulnerability scanning and Cosign/Sigstore signing, it closes the "someone deployed a random Docker Hub image" path (ATT&amp;CK T1610). <strong>Node auto-upgrade</strong> on a release channel handles the other half of supply chain — the <em>platform</em> CVEs — by automatically patching the node OS (Container-Optimized OS), kubelet, and container runtime so runc/kubelet escape bugs are fixed within days of disclosure. Trade-offs: Binary Authorization requires disciplined CI to produce attestations (break-glass annotations exist for emergencies but are logged), and auto-upgrade means nodes drain and reschedule on Google's timeline, so you need PodDisruptionBudgets and maintenance windows to avoid availability surprises.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<p><strong>What to log / telemetry sources.</strong><br />
+- <strong>Cloud Audit Logs</strong> — <em>Admin Activity</em> (always on: cluster create/update, IAM binding changes, firewall changes) and <em>Data Access</em> (must be explicitly enabled: <code>container.googleapis.com</code> data-access reads/writes, secret access). These are your primary GKE control-plane detection source.<br />
+- <strong>GKE Kubernetes audit logs</strong> — API-server audit events (who ran <code>exec</code>, created privileged pods, read secrets) delivered into Cloud Logging under <code>k8s.io/...</code>.<br />
+- <strong>Security Command Center (SCC)</strong> — GKE Security Posture dashboard and Container Threat Detection surface misconfigurations (public endpoint, over-broad node SA) and runtime threats (reverse shell, added binary, suspicious <code>kubectl exec</code>).<br />
+- <strong>Dataplane V2 / Hubble flow logs</strong> — pod-to-pod and egress flows, essential for spotting metadata-endpoint access and lateral movement.<br />
+- <strong>VPC Flow Logs + Firewall Logs</strong> — node-level network telemetry, including attempts to reach <code>169.254.169.254</code>.<br />
+- <strong>Falco / eBPF runtime sensors</strong> — syscall-level detections (shell in container, sensitive mount) for teams wanting beyond-SCC coverage.</p>
+<p><strong>Sample detection 1 — Cloud Logging / MQL: a node SA token being minted for an unexpected caller or metadata scraping.</strong> Log-based metric query for pods hitting the metadata IP (from Dataplane V2 flow logs):</p>
+<pre><code class="language-sql">resource.type=&quot;k8s_cluster&quot;
+logName=~&quot;logs/networking.googleapis.com%2Fdataplane_flows&quot;
+jsonPayload.connection.dest_ip=&quot;169.254.169.254&quot;
+jsonPayload.connection.dest_port!=988   -- 988 is legit GKE metadata server
+-- Any pod talking to 169.254.169.254 on non-standard ports = SSRF/exfil attempt
+</code></pre>
+<p><strong>Sample detection 2 — Sigma rule: privileged pod or host-namespace pod created (Standard cluster escape prep).</strong></p>
+<pre><code class="language-yaml">title: GKE Privileged or HostNamespace Pod Created
+logsource:
+  product: gcp
+  service: gke.audit
+detection:
+  selection:
+    protoPayload.methodName: 'io.k8s.core.v1.pods.create'
+  privileged:
+    protoPayload.request.spec.containers.securityContext.privileged: true
+  hostns:
+    protoPayload.request.spec.hostPID: true
+    protoPayload.request.spec.hostNetwork: true
+  condition: selection and (privileged or hostns)
+level: high
+tags:
+  - attack.privilege_escalation
+  - attack.t1611
+</code></pre>
+<p><strong>Sample detection 3 — KQL/log query: IAM binding granting <code>workloadIdentityUser</code> or new SA key created (persistence).</strong></p>
+<pre><code class="language-sql">protoPayload.methodName=(&quot;SetIamPolicy&quot; OR &quot;google.iam.admin.v1.CreateServiceAccountKey&quot;)
+protoPayload.serviceName=&quot;iam.googleapis.com&quot;
+-- Alert on service-account key creation (Workload Identity should mean ZERO keys)
+-- and on new workloadIdentityUser bindings outside the CI pipeline principal.
+</code></pre>
+<p><strong>Response playbook — GKE workload compromise / suspected cloud pivot.</strong><br />
+1. <strong>Triage &amp; scope.</strong> Confirm from GKE audit logs which pod/KSA/namespace is involved and whether any GSA impersonation or metadata access occurred. Identify the node SA and its IAM roles (blast radius).<br />
+2. <strong>Contain the pod.</strong> Cordon and drain the node (<code>kubectl cordon</code> / <code>drain</code>), or apply a deny-all NetworkPolicy to the namespace to cut egress (especially to <code>169.254.169.254</code> and the internet). Scale the affected Deployment to zero if safe.<br />
+3. <strong>Contain the identity.</strong> If a GSA token may be leaked, remove the <code>iam.workloadIdentityUser</code> binding and, for any static key, disable/delete the key. Rotate the node SA and, if it was over-broad, strip roles immediately. Revoke active OAuth tokens where possible.<br />
+4. <strong>Eradicate.</strong> Delete the compromised pods/images; if a malicious image ran, purge it from Artifact Registry and add it to the Binary Authorization denylist. Patch the exploited CVE by forcing node upgrade on the pool.<br />
+5. <strong>Recover.</strong> Redeploy from a known-good, attested image; re-enable network policy in enforce mode; confirm Workload Identity and metadata concealment are active. Restore workloads to healthy nodes.<br />
+6. <strong>Harden &amp; post-incident.</strong> Enable any missing controls the incident exposed (Data Access audit logs, Binary Authorization, private endpoint, least-priv node SA, GKE Sandbox for the untrusted tier). Add SCC/Sigma detections for the observed technique. Review Terraform/IaC so the fix is codified, not manual.</p>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li>
+<p><strong>What is Workload Identity in GKE and why does it matter?</strong><br />
+It federates a Kubernetes ServiceAccount to a Google ServiceAccount so pods get short-lived, per-workload GCP credentials instead of using the node's service account or a static JSON key. You bind them with an <code>iam.workloadIdentityUser</code> policy on the GSA (member <code>PROJECT.svc.id.goog[namespace/ksa]</code>) and a <code>iam.gke.io/gcp-service-account</code> annotation on the KSA. It matters because it eliminates the metadata-SSRF cloud-pivot and removes long-lived keys — it is the single most important GKE control. <em>Signal: does the candidate know the flagship GKE identity mechanism, not just generic RBAC.</em></p>
+</li>
+<li>
+<p><strong>How does an attacker turn a pod compromise into a GCP project takeover on a default GKE cluster?</strong><br />
+By reaching the GCE metadata server at <code>169.254.169.254</code> and requesting the node service account's token; on legacy defaults that SA is the Compute Engine default with project <code>Editor</code>, so the token grants near-full project control. The fix chain is Workload Identity (conceals the node token), a least-privilege node SA, and a NetworkPolicy egress-deny to the metadata IP. <em>Signal: understands the GKE-specific cloud pivot, the crux of the whole topic.</em></p>
+</li>
+<li>
+<p><strong>What are the security differences between Autopilot and Standard mode?</strong><br />
+Autopilot has Google manage nodes and enforces a hardened baseline you cannot weaken: Shielded Nodes, Workload Identity, no privileged pods, no host namespaces/hostPath, and a restricted-like admission floor. Standard gives you node-level control but every hardening flag is opt-in, so misconfiguration is easy. For most teams Autopilot is the safer default; you pick Standard when you need specific machine types, GPUs, custom kernels, or DaemonSets Autopilot restricts. <em>Signal: knows the default-on vs opt-in distinction.</em></p>
+</li>
+<li>
+<p><strong>What does a private GKE cluster protect against, and what are its parts?</strong><br />
+It removes public IPs from nodes (<code>--enable-private-nodes</code>) and can make the API endpoint private (<code>--enable-private-endpoint</code>), while <code>--enable-master-authorized-networks</code> restricts which CIDRs may reach the control plane. This shrinks the internet-facing attack surface — nodes cannot be scanned directly and the API cannot be reached from the open internet. You need Cloud NAT for egress and a bastion/VPN/IAP for <code>kubectl</code>. <em>Signal: baseline GKE network-exposure literacy.</em></p>
+</li>
+<li>
+<p><strong>What are Shielded GKE Nodes?</strong><br />
+Node VMs with UEFI Secure Boot (only signed boot components run), a vTPM for measured boot, and integrity monitoring that alerts when boot measurements drift from the baseline. They defend against boot-level rootkits and kernel tampering. They are effectively free, Autopilot enforces them, and you should always enable them on Standard with <code>--enable-shielded-nodes</code>. <em>Signal: awareness of platform/boot integrity beyond the app layer.</em></p>
+</li>
+</ol>
+<h3 id="tier-2-design-trade-offs">Tier 2 — Design &amp; Trade-offs</h3>
+<ol>
+<li>
+<p><strong>Design a hardened GKE cluster for a regulated, multi-tenant SaaS. Walk through your choices.</strong><br />
+Start with Autopilot for the secure baseline, or Standard with the full hardening flag set if I need node control. Enable Workload Identity so each tenant workload has its own scoped GSA; private nodes + private endpoint + tight authorized networks to remove public exposure; Dataplane V2 with default-deny NetworkPolicy per tenant namespace (ingress and egress, blocking the metadata IP). Enforce Pod Security <code>restricted</code> plus Binary Authorization so only attested images run, and run untrusted tenant code under GKE Sandbox (gVisor). Add Confidential Nodes if the data-in-use requirement is regulatory. Wire Data Access audit logs, SCC Container Threat Detection, and Falco for runtime. The trade-offs: gVisor and Confidential Nodes cost performance, private endpoints complicate operator access, and Binary Authorization demands disciplined CI. <em>Signal: can compose GKE controls into a coherent multi-tenant design with stated trade-offs.</em></p>
+</li>
+<li>
+<p><strong>A pod is compromised via RCE. Trace how far the attacker gets and where each GKE control stops them.</strong><br />
+First they try the metadata server for cloud creds — Workload Identity's GKE Metadata Server conceals the node token, and a NetworkPolicy egress-deny to <code>169.254.169.254</code> blocks the request entirely. If they got a token anyway, a least-privilege node SA limits blast radius. They try to escape to the node — Pod Security <code>restricted</code> blocks privileged/hostPath, seccomp RuntimeDefault shrinks the syscall surface, and gVisor contains the escape class; node auto-upgrade has already patched runc CVEs. They try lateral movement — default-deny NetworkPolicy stops east-west traffic. Throughout, GKE audit logs + SCC detect the exec, privileged-pod attempt, and metadata access. <em>Signal: holistic GKE attack-path reasoning — this is Diagram C in words.</em></p>
+</li>
+<li>
+<p><strong>How do you give a pod BigQuery read access without any long-lived credentials, and how does it fail safe?</strong><br />
+Create a GSA with only <code>roles/bigquery.dataViewer</code>, bind the specific KSA to it with <code>roles/iam.workloadIdentityUser</code> on member <code>PROJECT.svc.id.goog[ns/ksa]</code>, annotate the KSA with the GSA, and set <code>serviceAccountName</code> on the pod. The pod then gets short-lived BigQuery tokens from the GKE Metadata Server; no other pod gets that identity, and there is no key file to leak. It fails safe because the token is short-lived and scoped — if the pod is compromised, the attacker gets only <code>dataViewer</code> on that dataset, not project-wide access, and revoking the binding cuts it immediately. <em>Signal: can reproduce the canonical Workload Identity binding and reason about least privilege.</em></p>
+</li>
+<li>
+<p><strong>When would you use GKE Sandbox (gVisor), and what does it cost?</strong><br />
+For untrusted or multi-tenant workloads where a shared-kernel escape is unacceptable — customer plugins, CI build jobs, code-execution sandboxes. gVisor intercepts syscalls in a userspace kernel, so the host kernel sees a tiny surface, containing whole classes of runtime/kernel escape CVEs. The cost is syscall-interception overhead (bad for syscall/IO-heavy apps), some feature/compat gaps, and no support for privileged or host-namespace pods. You apply it selectively to the untrusted tier via a sandboxed node pool and <code>runtimeClassName: gvisor</code>, not cluster-wide. <em>Signal: understands shared-kernel limits and when sandboxing is worth the tax.</em></p>
+</li>
+<li>
+<p><strong>Compare securing pod-to-cloud identity across GKE, EKS, and AKS.</strong><br />
+All three use OIDC-based workload identity federation to avoid static keys: GKE Workload Identity maps KSA→GSA via the <code>svc.id.goog</code> pool and a concealing metadata server; EKS uses IAM Roles for Service Accounts (IRSA) or the newer EKS Pod Identity, mapping KSA→IAM role via the cluster OIDC provider; AKS uses Microsoft Entra Workload Identity, mapping KSA→managed identity/app registration via federated credentials. The common threat they all address is the metadata-server node-credential theft — GKE's Metadata Server, EKS's IMDSv2 hop-limit, and AKS's managed-identity model each blunt it. <em>Signal: can translate the concept across clouds, a senior integration skill.</em></p>
+</li>
+</ol>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / Deep-Dive</h3>
+<ol>
+<li>
+<p><strong>Explain exactly what happens under the hood when a Workload-Identity pod requests a token, including why the node SA is not returned.</strong><br />
+The pod calls the metadata endpoint (<code>metadata.google.internal</code>). On a Workload-Identity cluster this is intercepted by the per-node <strong>GKE Metadata Server</strong>, not the raw GCE metadata service. It reads the pod's projected KSA token (namespace + KSA name), checks that an <code>iam.workloadIdentityUser</code> binding exists mapping that KSA to a GSA, and exchanges the identity through GCP's Security Token Service for a short-lived impersonation token of the bound GSA. Crucially, the GKE Metadata Server does <strong>not</strong> proxy the <code>service-accounts/default/token</code> path back to pods, so the node SA token is concealed — that concealment is what breaks the classic SSRF pivot. If no binding exists, the pod gets no GCP credentials. <em>Signal: deep understanding of the metadata-server concealment mechanism, not just "it uses OIDC."</em></p>
+</li>
+<li>
+<p><strong>Which GKE defaults have historically been dangerous, and how do you audit a fleet for them?</strong><br />
+The default Compute Engine node SA carrying project <code>Editor</code>; legacy metadata endpoints that ignored the <code>Metadata-Flavor</code> header; Workload Identity off; public control-plane endpoints and <code>0.0.0.0/0</code> in authorized networks; legacy ABAC. Audit with SCC's GKE Security Posture dashboard and CIS GKE Benchmark scans, plus IAM policy analysis to find nodes still on the default SA, <code>gcloud container clusters describe</code> to check <code>privateClusterConfig</code>, <code>masterAuthorizedNetworksConfig</code>, <code>workloadIdentityConfig</code>, and <code>shieldedNodes</code>, and Cloud Asset Inventory / Policy queries across projects. <em>Signal: knows the specific dangerous defaults and how to hunt them at fleet scale.</em></p>
+</li>
+<li>
+<p><strong>How does Binary Authorization actually enforce, how do you handle break-glass, and where are its limits?</strong><br />
+It is a GKE admission controller: at pod admission it evaluates the image digest against a policy requiring attestations from named attestors; <code>ENFORCED_BLOCK_AND_AUDIT_LOG</code> denies and logs unattested images, and <code>globalPolicyEvaluationMode: ENABLE</code> exempts Google system images. Attestations are cryptographic signatures (Cosign/PKIX/PGP) produced in CI after the image passes source, build, and scan gates. Break-glass is the <code>alpha.image-policy.k8s.io/break-glass: true</code> annotation, which lets a deploy bypass the policy but is recorded in audit logs for review. Limits: it verifies <em>provenance/signature</em>, not runtime behavior — a signed-but-vulnerable image still runs, so pair it with Artifact Analysis scanning and runtime detection; and it gates by digest, so <code>:latest</code> tag discipline still matters. <em>Signal: understands enforcement mechanics, the escape hatch, and that signing is not scanning.</em></p>
+</li>
+<li>
+<p><strong>What is the difference between Shielded and Confidential GKE Nodes, and when is each justified?</strong><br />
+Shielded Nodes protect <strong>boot integrity</strong> — Secure Boot ensures only signed boot components load, the vTPM provides measured boot, and integrity monitoring alerts on drift — defending against rootkits/boot tampering; they are essentially free and should always be on. Confidential Nodes protect <strong>data in use</strong> by encrypting node memory with AMD SEV / Intel TDX, so a compromised hypervisor or malicious host operator cannot read pod RAM. Confidential Nodes carry performance and machine-type costs, so they are justified for regulated PII, key-handling, or contractual confidential-compute requirements — not blanket use. Neither protects against an application-layer compromise; they harden the platform beneath the workload. <em>Signal: precise distinction between boot integrity and memory confidentiality with cost-aware judgment.</em></p>
+</li>
+<li>
+<p><strong>Design defense-in-depth for a shared multi-tenant GKE cluster running untrusted customer code, and justify each layer against a specific attack.</strong><br />
+Namespace-per-tenant with default-deny NetworkPolicy (blocks lateral movement, T1046) and metadata egress deny (blocks cloud-cred theft, T1552.005). Each tenant workload gets its own scoped GSA via Workload Identity, so a compromise cannot reach another tenant's data or the node SA (T1078). GKE Sandbox/gVisor for the customer code so a runc/kernel escape (T1611, CVE-2024-21626) is contained; Pod Security <code>restricted</code> + seccomp RuntimeDefault as the second escape barrier. Binary Authorization ensures only attested platform images run (T1610), and node auto-upgrade patches escape CVEs. Confidential Nodes if tenants require memory isolation from the host. SCC Container Threat Detection + GKE audit + Falco for runtime detection, and per-tenant resource quotas to blunt noisy-neighbor/DoS. The layering is deliberate: even if gVisor has a gap, network policy and least-priv identity still bound the blast radius. <em>Signal: senior-level, attack-mapped, layered design showing no single control is trusted alone.</em></p>
+</li>
+</ol>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>GKE (Google)</th>
+<th>EKS (AWS)</th>
+<th>AKS (Azure)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Managed control plane</td>
+<td>Fully managed, regional HA</td>
+<td>Managed, multi-AZ</td>
+<td>Managed (free tier or SLA tier)</td>
+</tr>
+<tr>
+<td>Secure-by-default mode</td>
+<td>Autopilot</td>
+<td>Auto Mode / Fargate profiles</td>
+<td>(no full equivalent; managed add-ons)</td>
+</tr>
+<tr>
+<td>Pod-to-cloud identity</td>
+<td>Workload Identity Federation (KSA→GSA)</td>
+<td>IRSA / EKS Pod Identity (KSA→IAM role)</td>
+<td>Entra Workload Identity (KSA→managed identity)</td>
+</tr>
+<tr>
+<td>Node credential concealment</td>
+<td>GKE Metadata Server</td>
+<td>IMDSv2 hop-limit 1</td>
+<td>IMDS + managed identity</td>
+</tr>
+<tr>
+<td>Private control plane</td>
+<td>Private endpoint + authorized networks</td>
+<td>Private API endpoint + endpoint access</td>
+<td>Private cluster + authorized IP ranges</td>
+</tr>
+<tr>
+<td>Verified boot</td>
+<td>Shielded GKE Nodes</td>
+<td>Nitro (implicit) / NitroTPM</td>
+<td>Trusted Launch VMs</td>
+</tr>
+<tr>
+<td>Confidential compute</td>
+<td>Confidential GKE Nodes (SEV/TDX)</td>
+<td>Nitro Enclaves / AMD SEV-SNP instances</td>
+<td>Confidential VM node pools (SEV-SNP)</td>
+</tr>
+<tr>
+<td>Workload sandbox</td>
+<td>GKE Sandbox (gVisor)</td>
+<td>Fargate isolation / Firecracker</td>
+<td>Kata / Pod Sandboxing (preview)</td>
+</tr>
+<tr>
+<td>Image admission signing</td>
+<td>Binary Authorization</td>
+<td>ECR + Signer + Kyverno/OPA</td>
+<td>Ratify + Azure Policy / Notation</td>
+</tr>
+<tr>
+<td>NetworkPolicy datapath</td>
+<td>Dataplane V2 (Cilium/eBPF)</td>
+<td>VPC CNI + network-policy add-on / Cilium</td>
+<td>Azure CNI + Calico/Cilium</td>
+</tr>
+<tr>
+<td>Vulnerability scanning</td>
+<td>Artifact Analysis / Artifact Registry</td>
+<td>ECR image scanning / Inspector</td>
+<td>Defender for Containers</td>
+</tr>
+<tr>
+<td>Posture / threat detection</td>
+<td>Security Command Center + GKE Posture</td>
+<td>GuardDuty EKS + Security Hub</td>
+<td>Defender for Cloud / Containers</td>
+</tr>
+<tr>
+<td>Auto node patching</td>
+<td>Release channels + node auto-upgrade</td>
+<td>Managed node group updates</td>
+<td>Node image auto-upgrade / channels</td>
+</tr>
+<tr>
+<td>Audit source</td>
+<td>Cloud Audit Logs + GKE audit</td>
+<td>CloudTrail + EKS audit (CloudWatch)</td>
+<td>Azure Monitor + AKS diagnostic logs</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Workload Identity Federation is the keystone GKE control</strong> — it binds each KSA to a scoped GSA, gives pods short-lived per-workload credentials, and (via the GKE Metadata Server) conceals the node service-account token, breaking the classic cloud pivot and eliminating static keys.</li>
+<li><strong>The GKE cloud-pivot chain is pod RCE → metadata server → node SA token → project takeover;</strong> break it with Workload Identity + a least-privilege custom node SA + a NetworkPolicy egress-deny to <code>169.254.169.254</code> + <code>disable-legacy-endpoints=true</code>.</li>
+<li><strong>Never run the default Compute Engine node SA</strong> (project <code>Editor</code>) — create a minimal SA with only logging/monitoring (and artifactregistry.reader if needed) and pass it via <code>--service-account</code>.</li>
+<li><strong>Autopilot is the safer default</strong> — it enforces Shielded Nodes, Workload Identity, no privileged/host-namespace pods, and a restricted admission floor you cannot weaken; choose Standard only when you need node-level control, and then set every hardening flag explicitly.</li>
+<li><strong>Remove public exposure</strong> with private nodes, a private control-plane endpoint, and tight master authorized networks (watch for the <code>0.0.0.0/0</code> misconfiguration).</li>
+<li><strong>Layer platform integrity:</strong> Shielded Nodes for verified boot (always on, free), Confidential Nodes for memory encryption when regulated, and node auto-upgrade on a release channel to patch runc/kubelet escape CVEs quickly.</li>
+<li><strong>Gate the supply chain and contain the untrusted tier:</strong> Binary Authorization so only attested images deploy, and GKE Sandbox (gVisor) for untrusted/multi-tenant code — signing is not scanning, so pair Binary Authorization with Artifact Analysis and runtime detection.</li>
+<li><strong>Enforce Dataplane V2 default-deny NetworkPolicy</strong> (ingress and egress) so a single pod compromise cannot pivot east-west or reach the metadata endpoint.</li>
+<li><strong>Turn on Data Access audit logs and SCC</strong> — Admin Activity logs are on by default but Data Access is not, and without it metadata scraping, secret reads, and GSA impersonation are invisible.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — Hardening your GKE cluster: https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster</li>
+<li>Google Cloud — Workload Identity Federation for GKE: https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity</li>
+<li>Google Cloud — GKE Autopilot overview &amp; security: https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview</li>
+<li>Google Cloud — Private clusters &amp; control-plane authorized networks: https://cloud.google.com/kubernetes-engine/docs/concepts/private-cluster-concept</li>
+<li>Google Cloud — Shielded GKE Nodes: https://cloud.google.com/kubernetes-engine/docs/how-to/shielded-gke-nodes</li>
+<li>Google Cloud — Confidential GKE Nodes: https://cloud.google.com/kubernetes-engine/docs/how-to/confidential-gke-nodes</li>
+<li>Google Cloud — GKE Sandbox (gVisor): https://cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods</li>
+<li>Google Cloud — Binary Authorization: https://cloud.google.com/binary-authorization/docs</li>
+<li>Google Cloud — Dataplane V2 &amp; network policy: https://cloud.google.com/kubernetes-engine/docs/concepts/dataplane-v2</li>
+<li>CIS Google Kubernetes Engine (GKE) Benchmark: https://www.cisecurity.org/benchmark/kubernetes</li>
+<li>NSA/CISA Kubernetes Hardening Guide: https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF</li>
+<li>MITRE ATT&amp;CK for Containers matrix: https://attack.mitre.org/matrices/enterprise/containers/</li>
+<li>CVE-2024-21626 (runc "Leaky Vessels"), CVE-2022-0492 (cgroups escape), CVE-2020-8555 (apiserver SSRF): https://nvd.nist.gov/</li>
+<li>gVisor project documentation: https://gvisor.dev/docs/</li>
+<li>Repo cross-reference: <code>cloud/Kubernetes-Security</code> (generic k8s hardening), <code>cloud/AWS/Compute/EKS</code>, <code>cloud/Azure/Compute/AKS</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

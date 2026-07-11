@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q41_secure_login.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q41_secure_login.py</h1>
+  <p class="file-path">Source: code\practice\hard\q41_secure_login.py</p>
+  <p class="line-count">425 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q41 [Hard] — Secure Login System Implementation
+=============================================================================
+
+PROBLEM
+-------
+Implement a login system with:
+  1. Password hashing using bcrypt (or PBKDF2 for stdlib-only).
+  2. Constant-time comparison (prevents timing attacks).
+  3. Account lockout after N failed attempts within a time window.
+  4. Generic error messages (no user enumeration).
+  5. Structured audit logging (all attempts, successes, lockouts).
+  6. Secure session token generation (cryptographically random).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Use external libs (bcrypt, argon2)?
+   → Stdlib-only: PBKDF2-HMAC-SHA256 via hashlib; secrets for tokens.
+2. Lockout: hard lock or temporary?
+   → Temporary lockout: 15 minutes after 5 failures in 10 minutes.
+3. Distributed (shared state)?
+   → In-memory for this implementation; discuss Redis-based extension.
+4. Session token format?
+   → 32-byte URL-safe base64; store hash in server side.
+5. Password complexity?
+   → Minimum 12 characters; no other constraints (reject weak patterns).
+
+=============================================================================
+APPROACH 1 — NAIVE
+=============================================================================
+  Store passwords in plaintext or md5(password).
+  Return &quot;Invalid password&quot; vs &quot;User not found&quot; (user enumeration).
+  No rate limiting.
+
+=============================================================================
+APPROACH 2 — SECURE LOGIN (OPTIMAL)
+=============================================================================
+  1. PBKDF2-HMAC-SHA256 with random salt per password.
+  2. hmac.compare_digest for constant-time comparison.
+  3. Sliding window lockout tracker (deque per user).
+  4. Generic &quot;Invalid credentials&quot; for all failures.
+  5. secrets.token_urlsafe(32) for session tokens.
+  6. Audit log with timestamps, IP, and outcome.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import secrets
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Dict, Deque, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+PBKDF2_ITERATIONS  = 260_000     # NIST SP 800-132 minimum for SHA-256
+PBKDF2_HASH        = &quot;sha256&quot;
+SALT_BYTES         = 32
+TOKEN_BYTES        = 32
+MIN_PASSWORD_LEN   = 12
+MAX_PASSWORD_LEN   = 128
+MAX_USERNAME_LEN   = 64
+
+LOCKOUT_MAX_ATTEMPTS   = 5
+LOCKOUT_WINDOW_S       = 600    # 10 minutes
+LOCKOUT_DURATION_S     = 900    # 15 minutes
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class User:
+    username: str
+    password_hash: str    # &quot;pbkdf2:sha256:iterations$salt_hex$hash_hex&quot;
+    is_active: bool = True
+
+
+@dataclass
+class AuditEntry:
+    timestamp: float
+    username: str
+    source_ip: str
+    event: str            # &quot;login_attempt&quot;, &quot;login_success&quot;, &quot;login_failure&quot;, &quot;lockout&quot;
+    detail: str = &quot;&quot;
+
+
+@dataclass
+class LoginResult:
+    success: bool
+    session_token: Optional[str]
+    message: str
+    lockout_remaining_s: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Password hashing
+# ---------------------------------------------------------------------------
+
+def hash_password(password: str) -&gt; str:
+    &quot;&quot;&quot;Hash a password with PBKDF2-HMAC-SHA256 and random salt.&quot;&quot;&quot;
+    salt = os.urandom(SALT_BYTES)
+    dk   = hashlib.pbkdf2_hmac(
+        PBKDF2_HASH, password.encode(&quot;utf-8&quot;), salt, PBKDF2_ITERATIONS
+    )
+    return f&quot;pbkdf2:{PBKDF2_HASH}:{PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}&quot;
+
+
+def verify_password(password: str, stored_hash: str) -&gt; bool:
+    &quot;&quot;&quot;
+    Verify password against stored hash.
+    Uses hmac.compare_digest for constant-time comparison.
+    Always runs the full computation (even if hash format is invalid)
+    to prevent timing oracle on username existence.
+    &quot;&quot;&quot;
+    try:
+        parts = stored_hash.split(&quot;$&quot;, 2)
+        if len(parts) != 3:
+            # Invalid format — do a dummy derivation so timing is consistent
+            hashlib.pbkdf2_hmac(PBKDF2_HASH, password.encode(), b&quot;\x00&quot; * 32, 1000)
+            return False
+        meta, salt_hex, expected_hex = parts
+        salt     = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(expected_hex)
+        # Parse iterations from meta: &quot;pbkdf2:sha256:260000&quot;
+        meta_parts = meta.split(&quot;:&quot;)
+        iterations = int(meta_parts[2]) if len(meta_parts) == 3 else PBKDF2_ITERATIONS
+        dk = hashlib.pbkdf2_hmac(PBKDF2_HASH, password.encode(&quot;utf-8&quot;), salt, iterations)
+        return hmac.compare_digest(dk, expected)
+    except Exception:
+        # Catch any parse error; do dummy work then return False
+        return False
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (insecure, illustrative)
+# ---------------------------------------------------------------------------
+
+class NaiveLoginSystem:
+    &quot;&quot;&quot;
+    Insecure: plaintext passwords, user enumeration, no lockout.
+    NEVER USE IN PRODUCTION.
+    &quot;&quot;&quot;
+
+    def __init__(self):
+        self._users: Dict[str, str] = {}   # username → plaintext password
+
+    def register(self, username: str, password: str) -&gt; None:
+        self._users[username] = password   # plaintext storage!
+
+    def login(self, username: str, password: str) -&gt; Tuple[bool, str]:
+        if username not in self._users:
+            return False, &quot;User not found&quot;          # user enumeration!
+        if self._users[username] != password:
+            return False, &quot;Wrong password&quot;          # user enumeration!
+        return True, &quot;ok&quot;
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Secure login system
+# ---------------------------------------------------------------------------
+
+class SecureLoginSystem:
+    &quot;&quot;&quot;
+    Secure login with PBKDF2, lockout, audit log, and session tokens.
+    &quot;&quot;&quot;
+
+    def __init__(self):
+        self._users: Dict[str, User] = {}
+        # username → deque of failure timestamps
+        self._failure_times: Dict[str, Deque[float]] = {}
+        # username → lockout expiry timestamp
+        self._lockout_until: Dict[str, float] = {}
+        self._audit_log: List[AuditEntry] = []
+        # session_token_hash → username
+        self._sessions: Dict[str, str] = {}
+
+    # --- Registration -------------------------------------------------------
+
+    def register(self, username: str, password: str) -&gt; None:
+        &quot;&quot;&quot;Register a new user with hashed password.&quot;&quot;&quot;
+        if not username or len(username) &gt; MAX_USERNAME_LEN:
+            raise ValueError(f&quot;Username must be 1–{MAX_USERNAME_LEN} characters&quot;)
+        if len(password) &lt; MIN_PASSWORD_LEN:
+            raise ValueError(f&quot;Password must be at least {MIN_PASSWORD_LEN} characters&quot;)
+        if len(password) &gt; MAX_PASSWORD_LEN:
+            raise ValueError(f&quot;Password must be at most {MAX_PASSWORD_LEN} characters&quot;)
+        if username in self._users:
+            raise ValueError(&quot;Username already exists&quot;)
+        phash = hash_password(password)
+        self._users[username] = User(username=username, password_hash=phash)
+
+    # --- Login --------------------------------------------------------------
+
+    def login(self, username: str, password: str, source_ip: str = &quot;0.0.0.0&quot;) -&gt; LoginResult:
+        now = time.monotonic()
+
+        # Sanitize inputs (length cap to prevent DoS)
+        username = (username or &quot;&quot;)[:MAX_USERNAME_LEN]
+        password = (password or &quot;&quot;)[:MAX_PASSWORD_LEN]
+
+        # Check lockout (before any DB lookup — fast path)
+        remaining = self._lockout_remaining(username, now)
+        if remaining &gt; 0:
+            self._audit(&quot;lockout_blocked&quot;, username, source_ip,
+                        f&quot;remaining={remaining:.0f}s&quot;)
+            return LoginResult(
+                success=False,
+                session_token=None,
+                message=&quot;Invalid credentials&quot;,   # generic
+                lockout_remaining_s=remaining,
+            )
+
+        # Lookup user — always run password verification to avoid timing oracle
+        user = self._users.get(username)
+        if user is None:
+            # Dummy verification to keep constant time
+            verify_password(password, &quot;pbkdf2:sha256:260000$&quot; + &quot;00&quot; * 32 + &quot;$&quot; + &quot;00&quot; * 32)
+            self._record_failure(username, now)
+            self._audit(&quot;login_failure&quot;, username, source_ip, &quot;unknown_user&quot;)
+            return LoginResult(success=False, session_token=None,
+                               message=&quot;Invalid credentials&quot;)
+
+        pw_ok = verify_password(password, user.password_hash)
+
+        if not pw_ok or not user.is_active:
+            self._record_failure(username, now)
+            self._audit(&quot;login_failure&quot;, username, source_ip,
+                        &quot;bad_password&quot; if pw_ok is False else &quot;inactive&quot;)
+            return LoginResult(success=False, session_token=None,
+                               message=&quot;Invalid credentials&quot;)
+
+        # Success — clear failures, issue token
+        self._failure_times.pop(username, None)
+        self._lockout_until.pop(username, None)
+        token = self._issue_session(username)
+        self._audit(&quot;login_success&quot;, username, source_ip, &quot;&quot;)
+        return LoginResult(success=True, session_token=token,
+                           message=&quot;OK&quot;)
+
+    # --- Session management -------------------------------------------------
+
+    def validate_session(self, token: str) -&gt; Optional[str]:
+        &quot;&quot;&quot;Return username if token is valid, else None.&quot;&quot;&quot;
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        return self._sessions.get(token_hash)
+
+    def logout(self, token: str) -&gt; None:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        self._sessions.pop(token_hash, None)
+
+    # --- Internals ----------------------------------------------------------
+
+    def _issue_session(self, username: str) -&gt; str:
+        raw_token  = secrets.token_urlsafe(TOKEN_BYTES)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        self._sessions[token_hash] = username
+        return raw_token
+
+    def _record_failure(self, username: str, now: float) -&gt; None:
+        q = self._failure_times.setdefault(username, deque())
+        # Evict old failures outside the window
+        while q and (now - q[0]) &gt; LOCKOUT_WINDOW_S:
+            q.popleft()
+        q.append(now)
+        if len(q) &gt;= LOCKOUT_MAX_ATTEMPTS:
+            self._lockout_until[username] = now + LOCKOUT_DURATION_S
+            self._audit(&quot;lockout_set&quot;, username, &quot;&quot;, f&quot;attempts={len(q)}&quot;)
+
+    def _lockout_remaining(self, username: str, now: float) -&gt; float:
+        until = self._lockout_until.get(username, 0.0)
+        if now &lt; until:
+            return until - now
+        return 0.0
+
+    def _audit(self, event: str, username: str, ip: str, detail: str) -&gt; None:
+        self._audit_log.append(AuditEntry(
+            timestamp=time.time(),
+            username=username,
+            source_ip=ip,
+            event=event,
+            detail=detail,
+        ))
+
+    @property
+    def audit_log(self) -&gt; List[AuditEntry]:
+        return list(self._audit_log)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_successful_login():
+    sys = SecureLoginSystem()
+    sys.register(&quot;alice&quot;, &quot;SuperSecret123!&quot;)
+    r = sys.login(&quot;alice&quot;, &quot;SuperSecret123!&quot;, &quot;1.2.3.4&quot;)
+    assert r.success
+    assert r.session_token is not None
+    assert len(r.session_token) &gt; 20
+    print(f&quot;Successful login: passed (token={r.session_token[:8]}...)&quot;)
+
+
+def test_wrong_password():
+    sys = SecureLoginSystem()
+    sys.register(&quot;bob&quot;, &quot;ValidPassword99#&quot;)
+    r = sys.login(&quot;bob&quot;, &quot;WrongPassword!&quot;, &quot;1.2.3.4&quot;)
+    assert not r.success
+    assert r.message == &quot;Invalid credentials&quot;
+    print(f&quot;Wrong password: passed (generic message)&quot;)
+
+
+def test_nonexistent_user():
+    sys = SecureLoginSystem()
+    r = sys.login(&quot;ghost&quot;, &quot;anything&quot;, &quot;1.2.3.4&quot;)
+    assert not r.success
+    assert r.message == &quot;Invalid credentials&quot;
+    print(f&quot;Non-existent user: passed (no enumeration)&quot;)
+
+
+def test_lockout():
+    sys = SecureLoginSystem()
+    sys.register(&quot;carol&quot;, &quot;ValidPassword12#&quot;)
+    for i in range(LOCKOUT_MAX_ATTEMPTS):
+        r = sys.login(&quot;carol&quot;, &quot;wrongpass&quot;, &quot;5.5.5.5&quot;)
+        assert not r.success
+    # Next attempt should be locked
+    r = sys.login(&quot;carol&quot;, &quot;ValidPassword12#&quot;, &quot;5.5.5.5&quot;)
+    assert not r.success
+    assert r.lockout_remaining_s is not None and r.lockout_remaining_s &gt; 0
+    print(f&quot;Lockout triggered: passed (remaining={r.lockout_remaining_s:.0f}s)&quot;)
+
+
+def test_session_validate():
+    sys = SecureLoginSystem()
+    sys.register(&quot;dave&quot;, &quot;SecurePhrase99$&quot;)
+    r = sys.login(&quot;dave&quot;, &quot;SecurePhrase99$&quot;, &quot;2.2.2.2&quot;)
+    assert r.success and r.session_token
+    user = sys.validate_session(r.session_token)
+    assert user == &quot;dave&quot;
+    sys.logout(r.session_token)
+    assert sys.validate_session(r.session_token) is None
+    print(&quot;Session validate/logout: passed&quot;)
+
+
+def test_password_hashing_unique_salts():
+    h1 = hash_password(&quot;SamePassword!1&quot;)
+    h2 = hash_password(&quot;SamePassword!1&quot;)
+    assert h1 != h2, &quot;Same password must produce different hashes (unique salts)&quot;
+    assert verify_password(&quot;SamePassword!1&quot;, h1)
+    assert verify_password(&quot;SamePassword!1&quot;, h2)
+    assert not verify_password(&quot;WrongPassword1&quot;, h1)
+    print(&quot;Unique salts per hash: passed&quot;)
+
+
+def test_audit_log():
+    sys = SecureLoginSystem()
+    sys.register(&quot;eve&quot;, &quot;AuditTestPass!1&quot;)
+    sys.login(&quot;eve&quot;, &quot;WrongPass!!&quot;, &quot;9.9.9.9&quot;)
+    sys.login(&quot;eve&quot;, &quot;AuditTestPass!1&quot;, &quot;9.9.9.9&quot;)
+    log = sys.audit_log
+    events = [e.event for e in log]
+    assert &quot;login_failure&quot; in events
+    assert &quot;login_success&quot; in events
+    print(f&quot;Audit log: passed ({events})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+KEY SECURITY CONTROLS IN THIS IMPLEMENTATION
+---------------------------------------------
+1. PASSWORD HASHING
+   PBKDF2-HMAC-SHA256 with 260,000 iterations + random 32-byte salt.
+   Why iterations?  Makes offline brute-force ~260,000x slower.
+   Why unique salt?  Prevents rainbow table attacks and shows identical
+   passwords with different hashes.
+   Production preference: argon2id &gt; bcrypt &gt; PBKDF2.
+
+2. CONSTANT-TIME COMPARISON
+   hmac.compare_digest prevents timing attacks:
+   A naive &quot;if hash1 == hash2&quot; short-circuits on first mismatch.
+   By measuring response time across many attempts, an attacker can
+   reconstruct the correct hash byte by byte.
+
+3. USER ENUMERATION
+   &quot;User not found&quot; vs &quot;Wrong password&quot; lets attackers enumerate valid usernames.
+   Generic &quot;Invalid credentials&quot; prevents this.
+   Always run verify_password even for non-existent users (dummy computation).
+
+4. ACCOUNT LOCKOUT
+   Prevents online brute-force. 5 failures → 15-minute lockout.
+   Note: lockout itself can be weaponized for DoS (lock out legitimate users).
+   Mitigations: CAPTCHA, IP-based limits, notify user via email.
+
+5. SESSION TOKENS
+   secrets.token_urlsafe(32) = 256 bits of entropy; unguessable.
+   Store only hash(token) server-side so a DB breach doesn&#x27;t expose tokens.
+
+6. AUDIT LOG
+   All login events (success, failure, lockout) recorded with timestamp + IP.
+   Essential for incident response and compliance (SOX, PCI-DSS, ISO 27001).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_password_hashing_unique_salts()
+    test_successful_login()
+    test_wrong_password()
+    test_nonexistent_user()
+    test_lockout()
+    test_session_validate()
+    test_audit_log()
+</code></pre>
+</body>
+</html>

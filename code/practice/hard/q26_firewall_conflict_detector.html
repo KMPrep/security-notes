@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q26_firewall_conflict_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q26_firewall_conflict_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q26_firewall_conflict_detector.py</p>
+  <p class="line-count">411 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q26 [Hard] — Firewall Rule Conflict Detector
+=============================================================================
+
+PROBLEM
+-------
+Given a list of firewall rules, detect the following conflict types:
+
+  1. Shadowed rules: Rule B is shadowed by Rule A if every packet that
+     would match B also matches A, and A appears before B in priority order.
+     Result: B never fires.
+
+  2. Redundant rules: Rule B is redundant if removing it does not change
+     any packet&#x27;s verdict (equivalent to shadowed for same-action pairs).
+
+  3. Contradictory rules: Two rules match exactly the same traffic but
+     have opposite actions (ALLOW vs DENY).
+
+  4. Overly-permissive rules: Rules with too many wildcards (e.g. allow
+     ANY → ANY on ANY port) that should be flagged for review.
+
+  5. Duplicate rules: Identical (src, dst, proto, port, action) tuples.
+
+Input: list of rule dicts in priority order (index 0 = highest priority).
+Each rule: {src_cidr, dst_cidr, proto, dst_port, action}
+
+CLARIFYING QUESTIONS
+--------------------
+1. What defines &quot;shadows&quot;?
+   → Rule A shadows Rule B if A&#x27;s src_cidr ⊇ B&#x27;s src_cidr AND
+     A&#x27;s dst_cidr ⊇ B&#x27;s dst_cidr AND proto/port of A is ≥ permissive than B.
+2. Does &quot;A appears before B&quot; mean lower rule_id or lower index?
+   → Lower index in the input list = higher priority.
+3. How to handle wildcards in CIDR comparison?
+   → &quot;*&quot; means 0.0.0.0/0 (covers everything) for IPv4 comparisons.
+4. Do we detect cross-protocol conflicts?
+   → Flag opposite-action rules with overlapping traffic.
+5. Return all conflicts or just count?
+   → Return list of conflict objects with details.
+
+=============================================================================
+APPROACH 1 — NAIVE (O(R²) pairwise comparison)
+=============================================================================
+  Compare every pair of rules.  Check containment.
+  O(R²) time.  Fine for small rule sets (&lt; 1000 rules).
+
+=============================================================================
+APPROACH 2 — INTERVAL + SET ALGEBRA (RECOMMENDED for large rule sets)
+=============================================================================
+  Represent each field as a set or interval:
+    - CIDR → integer range [first, last]
+    - proto, port → sets or singletons
+  Compute set overlap/containment using integer arithmetic.
+  O(R²) worst case but with early exit; O(R log R) with sorted ranges.
+
+  For very large sets: use BDD (Binary Decision Diagram) or SAT solver.
+  Here we implement the O(R²) approach with fast interval arithmetic.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import ipaddress
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import FrozenSet, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+class Action(Enum):
+    ALLOW = &quot;ALLOW&quot;
+    DENY = &quot;DENY&quot;
+
+
+@dataclass
+class Rule:
+    rule_id: int
+    src_cidr: str     # &quot;10.0.0.0/8&quot; or &quot;*&quot;
+    dst_cidr: str
+    proto: str        # &quot;tcp&quot; | &quot;udp&quot; | &quot;icmp&quot; | &quot;*&quot;
+    dst_port: str     # &quot;443&quot; | &quot;*&quot;
+    action: Action
+
+    def __post_init__(self) -&gt; None:
+        self._src_net = _parse_net(self.src_cidr)
+        self._dst_net = _parse_net(self.dst_cidr)
+
+    @property
+    def src_range(self) -&gt; Tuple[int, int]:
+        return _net_range(self._src_net)
+
+    @property
+    def dst_range(self) -&gt; Tuple[int, int]:
+        return _net_range(self._dst_net)
+
+    @property
+    def port_set(self) -&gt; Optional[int]:
+        &quot;&quot;&quot;None means wildcard; otherwise the integer port.&quot;&quot;&quot;
+        return None if self.dst_port == &quot;*&quot; else int(self.dst_port)
+
+    @property
+    def proto_lower(self) -&gt; Optional[str]:
+        return None if self.proto == &quot;*&quot; else self.proto.lower()
+
+    def wildcard_count(self) -&gt; int:
+        &quot;&quot;&quot;Count of wildcard fields (0–4).&quot;&quot;&quot;
+        return sum([
+            self.src_cidr == &quot;*&quot;,
+            self.dst_cidr == &quot;*&quot;,
+            self.proto == &quot;*&quot;,
+            self.dst_port == &quot;*&quot;,
+        ])
+
+
+@dataclass
+class Conflict:
+    conflict_type: str   # shadowed | redundant | contradictory | overpermissive | duplicate
+    severity: str        # high | medium | low
+    rule_a_id: int
+    rule_b_id: int = -1
+    detail: str = &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# IP Range Helpers
+# ---------------------------------------------------------------------------
+
+_ALL_IPV4 = ipaddress.IPv4Network(&quot;0.0.0.0/0&quot;)
+
+def _parse_net(cidr: str) -&gt; ipaddress.IPv4Network:
+    if cidr == &quot;*&quot;:
+        return _ALL_IPV4
+    return ipaddress.ip_network(cidr, strict=False)
+
+
+def _net_range(net: ipaddress.IPv4Network) -&gt; Tuple[int, int]:
+    return int(net.network_address), int(net.broadcast_address)
+
+
+def _range_contains(outer: Tuple[int, int], inner: Tuple[int, int]) -&gt; bool:
+    &quot;&quot;&quot;True if outer range fully contains inner range.&quot;&quot;&quot;
+    return outer[0] &lt;= inner[0] and outer[1] &gt;= inner[1]
+
+
+def _ranges_overlap(a: Tuple[int, int], b: Tuple[int, int]) -&gt; bool:
+    return a[0] &lt;= b[1] and b[0] &lt;= a[1]
+
+
+def _ranges_equal(a: Tuple[int, int], b: Tuple[int, int]) -&gt; bool:
+    return a == b
+
+
+def _field_a_covers_b(a_val: Optional[object], b_val: Optional[object]) -&gt; bool:
+    &quot;&quot;&quot;True if A&#x27;s field is at least as permissive as B&#x27;s (None = wildcard).&quot;&quot;&quot;
+    if a_val is None:
+        return True  # A wildcard covers everything
+    return a_val == b_val  # A specific field only covers same value
+
+
+def _traffic_overlap(a: Rule, b: Rule) -&gt; bool:
+    &quot;&quot;&quot;True if any packet could match both A and B.&quot;&quot;&quot;
+    if not _ranges_overlap(a.src_range, b.src_range):
+        return False
+    if not _ranges_overlap(a.dst_range, b.dst_range):
+        return False
+    if a.proto_lower and b.proto_lower and a.proto_lower != b.proto_lower:
+        return False
+    if a.port_set and b.port_set and a.port_set != b.port_set:
+        return False
+    return True
+
+
+def _a_shadows_b(a: Rule, b: Rule) -&gt; bool:
+    &quot;&quot;&quot;
+    True if every packet matching B also matches A
+    (A is a superset of B in traffic coverage).
+    A must appear before B in priority order (caller checks order).
+    &quot;&quot;&quot;
+    # A must cover B&#x27;s src range
+    if not _range_contains(a.src_range, b.src_range):
+        return False
+    # A must cover B&#x27;s dst range
+    if not _range_contains(a.dst_range, b.dst_range):
+        return False
+    # A must cover B&#x27;s proto
+    if not _field_a_covers_b(a.proto_lower, b.proto_lower):
+        return False
+    # A must cover B&#x27;s port
+    if not _field_a_covers_b(a.port_set, b.port_set):
+        return False
+    return True
+
+
+def _rules_are_identical_traffic(a: Rule, b: Rule) -&gt; bool:
+    return (a.src_range == b.src_range and
+            a.dst_range == b.dst_range and
+            a.proto_lower == b.proto_lower and
+            a.port_set == b.port_set)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive pairwise conflict detector
+# ---------------------------------------------------------------------------
+
+def detect_conflicts_naive(rules: List[Rule], overperms_threshold: int = 2) -&gt; List[Conflict]:
+    &quot;&quot;&quot;
+    O(R²) pairwise comparison.
+    `overperms_threshold`: rules with &gt;= this many wildcards are flagged.
+    &quot;&quot;&quot;
+    conflicts: List[Conflict] = []
+    seen_traffic: Set[Tuple] = set()
+
+    for i, a in enumerate(rules):
+        # Overly-permissive check (single-rule)
+        if a.wildcard_count() &gt;= overperms_threshold:
+            conflicts.append(Conflict(
+                conflict_type=&quot;overpermissive&quot;,
+                severity=&quot;medium&quot;,
+                rule_a_id=a.rule_id,
+                detail=f&quot;Rule {a.rule_id} has {a.wildcard_count()} wildcard fields&quot;,
+            ))
+
+        for j in range(i + 1, len(rules)):
+            b = rules[j]
+
+            # Duplicate
+            if (a.src_cidr == b.src_cidr and a.dst_cidr == b.dst_cidr and
+                    a.proto == b.proto and a.dst_port == b.dst_port and
+                    a.action == b.action):
+                conflicts.append(Conflict(
+                    conflict_type=&quot;duplicate&quot;,
+                    severity=&quot;low&quot;,
+                    rule_a_id=a.rule_id,
+                    rule_b_id=b.rule_id,
+                    detail=f&quot;Rules {a.rule_id} and {b.rule_id} are identical&quot;,
+                ))
+
+            # Contradictory (same traffic, opposite actions)
+            elif _rules_are_identical_traffic(a, b) and a.action != b.action:
+                conflicts.append(Conflict(
+                    conflict_type=&quot;contradictory&quot;,
+                    severity=&quot;high&quot;,
+                    rule_a_id=a.rule_id,
+                    rule_b_id=b.rule_id,
+                    detail=(f&quot;Rules {a.rule_id}({a.action.value}) and &quot;
+                            f&quot;{b.rule_id}({b.action.value}) match same traffic&quot;),
+                ))
+
+            # Shadowed: A (higher priority) shadows B
+            elif _a_shadows_b(a, b):
+                severity = &quot;high&quot; if a.action != b.action else &quot;low&quot;
+                conflict_type = &quot;shadowed&quot; if a.action != b.action else &quot;redundant&quot;
+                conflicts.append(Conflict(
+                    conflict_type=conflict_type,
+                    severity=severity,
+                    rule_a_id=a.rule_id,
+                    rule_b_id=b.rule_id,
+                    detail=(f&quot;Rule {a.rule_id} ({a.action.value}) shadows &quot;
+                            f&quot;rule {b.rule_id} ({b.action.value})&quot;),
+                ))
+
+    return conflicts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full detector with deduplication
+# ---------------------------------------------------------------------------
+
+def detect_conflicts(rules: List[Rule], overperms_threshold: int = 2) -&gt; List[Conflict]:
+    &quot;&quot;&quot;
+    Full conflict detector.
+    Same O(R²) algorithm as naive but deduplicates conflict pairs and
+    returns conflicts sorted by severity.
+    &quot;&quot;&quot;
+    all_conflicts = detect_conflicts_naive(rules, overperms_threshold)
+    # Deduplicate by (type, a_id, b_id)
+    seen = set()
+    deduped = []
+    for c in all_conflicts:
+        key = (c.conflict_type, c.rule_a_id, c.rule_b_id)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    # Sort: high severity first
+    severity_order = {&quot;high&quot;: 0, &quot;medium&quot;: 1, &quot;low&quot;: 2}
+    deduped.sort(key=lambda c: severity_order.get(c.severity, 3))
+    return deduped
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _rule(rid, src, dst, proto, port, action_str) -&gt; Rule:
+    return Rule(
+        rule_id=rid, src_cidr=src, dst_cidr=dst,
+        proto=proto, dst_port=port,
+        action=Action.ALLOW if action_str == &quot;ALLOW&quot; else Action.DENY,
+    )
+
+
+def test_shadowed():
+    rules = [
+        _rule(1, &quot;*&quot;, &quot;0.0.0.0/0&quot;, &quot;*&quot;, &quot;*&quot;, &quot;ALLOW&quot;),  # allow all
+        _rule(2, &quot;*&quot;, &quot;10.0.0.0/8&quot;, &quot;tcp&quot;, &quot;22&quot;, &quot;DENY&quot;),  # deny SSH to private
+    ]
+    # Rule 1 shadows rule 2 (allow-all comes first)
+    conflicts = detect_conflicts(rules)
+    shadow = [c for c in conflicts if c.conflict_type == &quot;shadowed&quot;]
+    assert shadow, f&quot;Expected shadowed conflict; got {[c.conflict_type for c in conflicts]}&quot;
+    assert shadow[0].rule_a_id == 1 and shadow[0].rule_b_id == 2
+    print(&quot;Shadowed: passed&quot;)
+
+
+def test_redundant():
+    rules = [
+        _rule(1, &quot;*&quot;, &quot;10.0.0.0/8&quot;, &quot;tcp&quot;, &quot;80&quot;, &quot;ALLOW&quot;),
+        _rule(2, &quot;*&quot;, &quot;10.1.0.0/16&quot;, &quot;tcp&quot;, &quot;80&quot;, &quot;ALLOW&quot;),  # redundant: same action, already covered
+    ]
+    conflicts = detect_conflicts(rules)
+    redundant = [c for c in conflicts if c.conflict_type == &quot;redundant&quot;]
+    assert redundant, f&quot;Expected redundant; got {[c.conflict_type for c in conflicts]}&quot;
+    print(&quot;Redundant: passed&quot;)
+
+
+def test_contradictory():
+    rules = [
+        _rule(1, &quot;10.0.0.0/8&quot;, &quot;192.168.1.0/24&quot;, &quot;tcp&quot;, &quot;443&quot;, &quot;ALLOW&quot;),
+        _rule(2, &quot;10.0.0.0/8&quot;, &quot;192.168.1.0/24&quot;, &quot;tcp&quot;, &quot;443&quot;, &quot;DENY&quot;),
+    ]
+    conflicts = detect_conflicts(rules)
+    contra = [c for c in conflicts if c.conflict_type == &quot;contradictory&quot;]
+    assert contra
+    print(&quot;Contradictory: passed&quot;)
+
+
+def test_duplicate():
+    rules = [
+        _rule(1, &quot;10.0.0.0/8&quot;, &quot;*&quot;, &quot;tcp&quot;, &quot;22&quot;, &quot;DENY&quot;),
+        _rule(2, &quot;10.0.0.0/8&quot;, &quot;*&quot;, &quot;tcp&quot;, &quot;22&quot;, &quot;DENY&quot;),
+    ]
+    conflicts = detect_conflicts(rules)
+    dups = [c for c in conflicts if c.conflict_type == &quot;duplicate&quot;]
+    assert dups
+    print(&quot;Duplicate: passed&quot;)
+
+
+def test_overpermissive():
+    rules = [
+        _rule(1, &quot;*&quot;, &quot;*&quot;, &quot;*&quot;, &quot;*&quot;, &quot;ALLOW&quot;),  # 4 wildcards
+    ]
+    conflicts = detect_conflicts(rules, overperms_threshold=2)
+    over = [c for c in conflicts if c.conflict_type == &quot;overpermissive&quot;]
+    assert over
+    print(&quot;Overpermissive: passed&quot;)
+
+
+def test_clean_rules():
+    rules = [
+        _rule(1, &quot;10.1.0.0/24&quot;, &quot;192.168.10.0/24&quot;, &quot;tcp&quot;, &quot;443&quot;, &quot;ALLOW&quot;),
+        _rule(2, &quot;10.2.0.0/24&quot;, &quot;192.168.10.0/24&quot;, &quot;tcp&quot;, &quot;443&quot;, &quot;ALLOW&quot;),
+    ]
+    conflicts = detect_conflicts(rules)
+    real = [c for c in conflicts if c.conflict_type not in (&quot;overpermissive&quot;,)]
+    assert len(real) == 0
+    print(&quot;Clean rules: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+FIREWALL RULE CONFLICTS IN PRACTICE
+
+Shadowing:
+  Most critical bug. An ALLOW * /* rule early in the chain means all
+  subsequent DENY rules are dead code.  Common in AWS security groups
+  where rules are evaluated &quot;most-permissive wins&quot;.
+
+Redundant rules:
+  Performance and maintenance burden; not a security risk by itself.
+
+Contradictory rules:
+  Often a sign of policy drift — two engineers added conflicting rules.
+  The one with higher priority wins; the other is dead code.
+
+Overly-permissive:
+  &quot;Allow * on *&quot; is the classic misconfiguration.  Principle of least
+  privilege demands explicit allow lists.
+
+AUDITING TOOLS
+  - iptables-save | iptables-xml for Linux.
+  - AWS Config + Macie rules for SG analysis.
+  - Firewall Audit Wizard (Tufin, AlgoSec, FireMon) for enterprise NGFWs.
+  - This detector is a simplified version of their core conflict-detection logic.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_shadowed()
+    test_redundant()
+    test_contradictory()
+    test_duplicate()
+    test_overpermissive()
+    test_clean_rules()
+</code></pre>
+</body>
+</html>

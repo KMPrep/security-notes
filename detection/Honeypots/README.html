@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Honeypots and Canary Tokens</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: detection\Honeypots\README.md</p>
+<h1 id="honeypots-and-canary-tokens">Honeypots and Canary Tokens</h1>
+<p><strong>Category:</strong> Detection Engineering — Deception Technology</p>
+<h2 id="overview">Overview</h2>
+<p>Honeypots and canary tokens are deception-based detection techniques. They work by placing fake assets — systems, credentials, files, tokens — that have no legitimate use. Any interaction with them is a high-confidence signal of malicious or unauthorized activity, because there is no benign reason to touch them.</p>
+<p>Deception technology has an extremely low false positive rate compared to signature or anomaly detection. The tradeoff is coverage: honeypots only catch attackers who touch the decoy, not all attackers.</p>
+<hr />
+<h2 id="honeypots">Honeypots</h2>
+<p>A honeypot is a system, service, or resource that mimics a real target but has no legitimate production use. Its sole purpose is to detect, log, and study unauthorized access.</p>
+<h3 id="honeypot-types-by-interaction-level">Honeypot Types by Interaction Level</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Low-interaction</strong></td>
+<td>Emulates a small set of services; limited attacker capability</td>
+<td>Network scanning detection, basic threat intel</td>
+</tr>
+<tr>
+<td><strong>Medium-interaction</strong></td>
+<td>More realistic service emulation; some command execution</td>
+<td>Malware capture, credential harvesting detection</td>
+</tr>
+<tr>
+<td><strong>High-interaction</strong></td>
+<td>Real OS/service; attacker can do nearly anything</td>
+<td>Detailed attacker behavior study; high risk of pivot</td>
+</tr>
+<tr>
+<td><strong>Pure honeypot</strong></td>
+<td>Real system fully monitored; no emulation</td>
+<td>Research; rarely used in production</td>
+</tr>
+</tbody>
+</table>
+<h3 id="honeypot-deployment-locations">Honeypot Deployment Locations</h3>
+<pre class="mermaid">
+flowchart TD
+    Internet --> Perimeter[Perimeter Honeypot]
+    Perimeter --> DMZ[DMZ Honeypot]
+    DMZ --> Internal[Internal Network Honeypot]
+    Internal --> Endpoint[Endpoint Honeypot File/Creds]
+    Internal --> Database[Honey Database Table]
+</pre>
+<table>
+<thead>
+<tr>
+<th>Location</th>
+<th>What It Detects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Internet-facing</td>
+<td>External scanning, exploitation attempts, credential stuffing</td>
+</tr>
+<tr>
+<td>DMZ</td>
+<td>Pivot attempts from compromised edge systems</td>
+</tr>
+<tr>
+<td>Internal network</td>
+<td>Lateral movement after initial compromise</td>
+</tr>
+<tr>
+<td>Endpoint (honey files/creds)</td>
+<td>Attacker enumerating file shares or stealing credentials</td>
+</tr>
+<tr>
+<td>Database (honey table)</td>
+<td>SQL injection, unauthorized data access, insider threat</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-honeypots-capture">What Honeypots Capture</h3>
+<ul>
+<li><strong>Credentials:</strong> Attackers often try default or common passwords; captured creds reveal attacker tooling</li>
+<li><strong>Exploits:</strong> Packets and payloads used in exploitation attempts</li>
+<li><strong>Malware:</strong> Droppers and payloads attackers deploy once they get shell access</li>
+<li><strong>TTPs:</strong> Commands run, files accessed, lateral movement attempts</li>
+<li><strong>Source IPs:</strong> Useful for threat intel (though often VPN/TOR exit nodes)</li>
+</ul>
+<h3 id="honeyd-and-opencanary">Honeyd and OpenCanary</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Honeyd</td>
+<td>Network honeypot</td>
+<td>Simulates multiple virtual hosts; configurable services</td>
+</tr>
+<tr>
+<td>OpenCanary</td>
+<td>Medium-interaction</td>
+<td>Easy deployment; supports SSH, HTTP, FTP, RDP, SMB canaries</td>
+</tr>
+<tr>
+<td>Cowrie</td>
+<td>SSH/Telnet honeypot</td>
+<td>Logs all commands; captures uploaded files</td>
+</tr>
+<tr>
+<td>Dionaea</td>
+<td>Malware-capturing honeypot</td>
+<td>Emulates SMB, HTTP, FTP to capture malware samples</td>
+</tr>
+<tr>
+<td>T-Pot</td>
+<td>Honeypot platform</td>
+<td>Runs multiple honeypots in Docker; central dashboard</td>
+</tr>
+<tr>
+<td>Canarytokens.org</td>
+<td>Token-based</td>
+<td>Web-hosted canary token service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="honeypot-risks">Honeypot Risks</h3>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attacker pivots from honeypot to real systems</td>
+<td>Strong network isolation; honeypot on separate VLAN or air-gapped</td>
+</tr>
+<tr>
+<td>Honeypot fingerprinting</td>
+<td>Attacker detects it's a honeypot and avoids it; change banner strings and response timing</td>
+</tr>
+<tr>
+<td>Legal issues with capturing attacker data</td>
+<td>Consult legal; do not actively interfere with attacker systems</td>
+</tr>
+<tr>
+<td>High-interaction honeypots used as attack launchpad</td>
+<td>Monitor outbound connections; rate-limit or block egress</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="canary-tokens">Canary Tokens</h2>
+<p>Canary tokens are lightweight, zero-maintenance tripwires that trigger an alert when accessed. They require no infrastructure — a token is a URL, file, or credential that, when used, calls home to a monitoring service.</p>
+<h3 id="types-of-canary-tokens">Types of Canary Tokens</h3>
+<table>
+<thead>
+<tr>
+<th>Token Type</th>
+<th>How It Works</th>
+<th>Alert Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>URL token</strong></td>
+<td>A URL embedded in a doc or web page</td>
+<td>HTTP GET request when loaded</td>
+</tr>
+<tr>
+<td><strong>DNS token</strong></td>
+<td>A domain that resolves to a monitoring server</td>
+<td>DNS query triggers alert with source IP</td>
+</tr>
+<tr>
+<td><strong>Document token (Word/PDF)</strong></td>
+<td>A Word or PDF with embedded tracking pixel</td>
+<td>Opened on any connected machine</td>
+</tr>
+<tr>
+<td><strong>AWS key token</strong></td>
+<td>Fake AWS access key ID + secret</td>
+<td>Alert fires when key is used to call AWS API</td>
+</tr>
+<tr>
+<td><strong>Azure key token</strong></td>
+<td>Fake Azure service principal credentials</td>
+<td>Alert fires on Azure auth attempt</td>
+</tr>
+<tr>
+<td><strong>Kubeconfig token</strong></td>
+<td>Fake Kubernetes config with token</td>
+<td>Alert fires on API server call</td>
+</tr>
+<tr>
+<td><strong>Windows directory token</strong></td>
+<td>Folder with tracking attribute</td>
+<td>Alert fires when folder is browsed</td>
+</tr>
+<tr>
+<td><strong>SQL canary table/row</strong></td>
+<td>Row with embedded URL in a BLOB</td>
+<td>Alert fires when data is read by an exfil tool</td>
+</tr>
+<tr>
+<td><strong>SSH key token</strong></td>
+<td>Fake private key that alerts on use</td>
+<td>Alert fires on SSH authentication attempt</td>
+</tr>
+</tbody>
+</table>
+<h3 id="canarytokensorg">Canarytokens.org</h3>
+<p>The simplest way to deploy canary tokens. Steps:</p>
+<ol>
+<li>Go to canarytokens.org (or self-host with the open-source project)</li>
+<li>Select token type, enter alert email</li>
+<li>Receive a unique token (URL, key, file, etc.)</li>
+<li>Place it in the environment (file share, email inbox, password manager, etc.)</li>
+<li>Receive email/webhook alert when token is triggered, including source IP and user agent</li>
+</ol>
+<h3 id="placement-strategy">Placement Strategy</h3>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Token Type</th>
+<th>What It Detects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>File server share</td>
+<td>Word doc with URL token</td>
+<td>Attacker browsing network shares</td>
+</tr>
+<tr>
+<td>Password manager / vault</td>
+<td>Fake AWS key or login credential</td>
+<td>Attacker reading stored secrets</td>
+</tr>
+<tr>
+<td>Source code repo</td>
+<td>AWS key in comments</td>
+<td>Developer pushing real secrets; exfil of repo</td>
+</tr>
+<tr>
+<td>Database</td>
+<td>SQL row with DNS token URL</td>
+<td>Data exfiltration queries</td>
+</tr>
+<tr>
+<td>Email inbox</td>
+<td>URL token in email signature</td>
+<td>Attacker reading email</td>
+</tr>
+<tr>
+<td>Employee workstation</td>
+<td>PDF with URL token (named "salary_2026.pdf")</td>
+<td>Attacker hunting valuable-looking files</td>
+</tr>
+<tr>
+<td>Admin account</td>
+<td>Fake admin credential that alerts on use</td>
+<td>Credential theft and reuse</td>
+</tr>
+</tbody>
+</table>
+<h3 id="honey-credentials">Honey Credentials</h3>
+<p>Honey credentials are fake usernames and passwords planted in likely credential-harvesting locations. They are useless for real authentication but alert when used.</p>
+<p>Deployment locations:</p>
+<ul>
+<li>Plain text files on file shares (e.g., <code>passwords_backup.txt</code>)</li>
+<li>Browser saved passwords (low-value account with tracking)</li>
+<li>Configuration files on developer machines</li>
+<li>Source code history (detect accidental secret commits)</li>
+</ul>
+<hr />
+<h2 id="deception-at-scale">Deception at Scale</h2>
+<p>At large organisations, deception can be systematized:</p>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Scale Benefit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auto-generate honey tokens in every new S3 bucket</td>
+<td>Immediate alert if bucket is misconfigured and accessed</td>
+</tr>
+<tr>
+<td>Honey accounts in every Active Directory OU</td>
+<td>Detect AD enumeration and lateral movement across the org</td>
+</tr>
+<tr>
+<td>Honey rows in every database table</td>
+<td>Detect data exfiltration from any database</td>
+</tr>
+<tr>
+<td>Honey DNS entries</td>
+<td>Detect internal reconnaissance</td>
+</tr>
+<tr>
+<td>Distributed honeypots per network segment</td>
+<td>Detect lateral movement within internal network</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="practice-questions">Practice Questions</h2>
+<ul>
+<li>Where would you place a honeypot in a large cloud environment to detect lateral movement?</li>
+<li>What is the difference between a honeypot and a canary token? When would you use each?</li>
+<li>An attacker is conducting slow, low-volume reconnaissance. Which detection method is most likely to catch them — IDS, SIEM correlation, or a honeypot? Why?</li>
+<li>You want to detect if your AWS credentials stored in a secrets manager are ever stolen and used. How would you use canary tokens to accomplish this?</li>
+<li>What are the risks of deploying a high-interaction honeypot in a production network?</li>
+<li>How would you use honey credentials to detect a pass-the-hash attack spreading through your internal network?</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

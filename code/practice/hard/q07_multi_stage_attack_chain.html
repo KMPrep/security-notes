@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q07_multi_stage_attack_chain.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q07_multi_stage_attack_chain.py</h1>
+  <p class="file-path">Source: code\practice\hard\q07_multi_stage_attack_chain.py</p>
+  <p class="line-count">582 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q07 [Hard] — Detect Multi-Stage Attack Chain
+=============================================================================
+
+PROBLEM
+-------
+Given a stream of mixed security events (email, proxy, process, DNS, network),
+detect the classic phishing-to-C2 attack chain:
+
+  Stage 1: Phishing email received           (type=email)
+  Stage 2: User clicked the phishing URL     (type=proxy, action=allowed)
+  Stage 3: Malware process spawned           (type=process, suspicious parent)
+  Stage 4: C2 DNS query / outbound C2 conn   (type=dns or type=network)
+
+The correlation key is the *user* and *host* involved.
+Stages must occur in order, and the entire chain must complete within a
+configurable time window (e.g. 30 minutes).
+
+CLARIFYING QUESTIONS
+--------------------
+1. What event types represent each stage?
+   → Stage 1: type=&quot;email&quot;   Stage 2: type=&quot;proxy&quot;
+     Stage 3: type=&quot;process&quot; Stage 4: type=&quot;dns&quot; or &quot;network&quot;
+2. How are events correlated across stages?
+   → By user (email stage) and by host (proxy/process/dns/network).
+   → email→proxy: share user AND phishing URL.
+   → proxy→process: share host AND temporal proximity.
+   → process→dns/network: share host AND temporal proximity.
+3. What defines a &quot;suspicious&quot; process event?
+   → Parent process in a known-suspicious set (chrome, outlook, winword, etc.)
+     launching a shell interpreter (powershell, cmd, wscript, etc.).
+     Also flag base64-encoded cmdlines (-enc flag).
+4. What defines a &quot;suspicious&quot; DNS/network event?
+   → High-entropy subdomain OR private/reserved dst port 4444/5555/1337/8080
+     on an external IP, OR known C2 patterns.
+5. Time window?
+   → Configurable; default 30 minutes from email receipt to last stage.
+6. Partial chains — should we alert on stage 1+2+3 even without C2?
+   → Yes; emit a partial alert with stage count and confidence.
+7. Multiple hosts per user?
+   → Track per (user, host) pair for stages 2–4.
+
+=============================================================================
+APPROACH 1 — NAIVE (nested loops / pandas-style join)
+=============================================================================
+Store all events in memory.  For each email event, scan all other events
+for matching user/host/URL and check ordering + timing.
+  Time : O(N²) — every email × every other event
+  Space: O(N)
+
+=============================================================================
+APPROACH 2 — STATE MACHINE per (user, host)  (RECOMMENDED)
+=============================================================================
+Model the attack chain as a finite-state machine (FSM):
+
+  IDLE → STAGE1_EMAIL → STAGE2_URL_CLICK → STAGE3_PROCESS → STAGE4_C2
+
+For each (user, host) pair, maintain current stage, last-transition timestamp,
+and evidence list.  On each incoming event:
+  - Update only the (user, host) combinations it could advance.
+  - If the time since stage1 exceeds the window, reset to IDLE.
+  - On reaching STAGE4_C2, emit an alert.
+
+  Time : O(1) per event (hash-map lookup + state transition)
+  Space: O(active (user,host) pairs)  — bounded by concurrent active users
+
+=============================================================================
+APPROACH 3 — COMPLEX EVENT PROCESSING (CEP) style with trie patterns
+=============================================================================
+Express detection as a pattern language:
+  WITHIN(1800s) SEQUENCE(email_recv, url_click, process_spawn, c2_connect)
+  WHERE user_matches AND host_matches
+
+For production, use Flink CEP, Esper, or a custom trie over event-type sequences.
+We implement a lightweight version here.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import IntEnum
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Stage Definitions
+# ---------------------------------------------------------------------------
+
+class Stage(IntEnum):
+    IDLE = 0
+    EMAIL_RECEIVED = 1
+    URL_CLICKED = 2
+    PROCESS_SPAWNED = 3
+    C2_ACTIVE = 4
+
+
+STAGE_NAMES = {
+    Stage.IDLE: &quot;Idle&quot;,
+    Stage.EMAIL_RECEIVED: &quot;Phishing Email Received&quot;,
+    Stage.URL_CLICKED: &quot;URL Clicked&quot;,
+    Stage.PROCESS_SPAWNED: &quot;Malware Process Spawned&quot;,
+    Stage.C2_ACTIVE: &quot;C2 Active&quot;,
+}
+
+# Suspicious parent processes that spawned a shell
+SUSPICIOUS_PARENTS = {
+    &quot;chrome.exe&quot;, &quot;firefox.exe&quot;, &quot;msedge.exe&quot;, &quot;outlook.exe&quot;, &quot;excel.exe&quot;,
+    &quot;winword.exe&quot;, &quot;powerpnt.exe&quot;, &quot;acrobat.exe&quot;, &quot;acrord32.exe&quot;,
+    &quot;teams.exe&quot;, &quot;slack.exe&quot;,
+}
+
+SUSPICIOUS_CHILDREN = {
+    &quot;powershell.exe&quot;, &quot;powershell&quot;, &quot;cmd.exe&quot;, &quot;cmd&quot;, &quot;wscript.exe&quot;,
+    &quot;cscript.exe&quot;, &quot;mshta.exe&quot;, &quot;regsvr32.exe&quot;, &quot;rundll32.exe&quot;,
+    &quot;wmic.exe&quot;, &quot;certutil.exe&quot;, &quot;bitsadmin.exe&quot;, &quot;bash&quot;, &quot;sh&quot;,
+}
+
+# Known C2 ports (common Metasploit/Cobalt Strike defaults)
+C2_PORTS = {4444, 5555, 1337, 8080, 8443, 4433, 2222, 9999, 6666}
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChainState:
+    user: str
+    host: str
+    stage: Stage = Stage.IDLE
+    chain_start_ts: Optional[float] = None
+    last_ts: Optional[float] = None
+    phishing_url: Optional[str] = None
+    evidence: List[dict] = field(default_factory=list)
+
+    def reset(self) -&gt; None:
+        self.stage = Stage.IDLE
+        self.chain_start_ts = None
+        self.last_ts = None
+        self.phishing_url = None
+        self.evidence = []
+
+
+@dataclass
+class ChainAlert:
+    user: str
+    host: str
+    stage_reached: Stage
+    stage_name: str
+    is_complete: bool           # True only if STAGE4_C2 reached
+    chain_start: float
+    chain_end: float
+    duration_seconds: float
+    evidence: List[dict]
+    confidence: float           # 0–1
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_suspicious_process(event: dict) -&gt; bool:
+    parent = (event.get(&quot;parent&quot;) or &quot;&quot;).lower()
+    child = (event.get(&quot;process&quot;) or &quot;&quot;).lower()
+    cmdline = (event.get(&quot;cmdline&quot;) or &quot;&quot;).lower()
+    if parent in SUSPICIOUS_PARENTS and child in SUSPICIOUS_CHILDREN:
+        return True
+    # Encoded PowerShell command (-enc / -encodedcommand)
+    if child in {&quot;powershell.exe&quot;, &quot;powershell&quot;} and &quot;-enc&quot; in cmdline:
+        return True
+    return False
+
+
+def _is_c2_event(event: dict) -&gt; bool:
+    event_type = event.get(&quot;type&quot;, &quot;&quot;)
+    if event_type == &quot;dns&quot;:
+        query = event.get(&quot;query&quot;, &quot;&quot;)
+        # High-entropy label check (simple: any label &gt; 20 chars is suspicious)
+        labels = query.split(&quot;.&quot;)
+        if any(len(label) &gt; 20 for label in labels):
+            return True
+        # Known bad domain patterns
+        if any(kw in query for kw in [&quot;c2.&quot;, &quot;badexample&quot;, &quot;evil.&quot;, &quot;malware.&quot;]):
+            return True
+    if event_type == &quot;network&quot;:
+        port = int(event.get(&quot;dst_port&quot;, 0))
+        bytes_out = int(event.get(&quot;bytes_out&quot;, 0))
+        if port in C2_PORTS:
+            return True
+        if bytes_out &gt; 1_000_000:  # large outbound → potential exfil / C2 traffic
+            return True
+    return False
+
+
+def _url_matches(event: dict, phishing_url: Optional[str]) -&gt; bool:
+    if phishing_url is None:
+        return True  # can&#x27;t correlate on URL — allow any
+    event_url = event.get(&quot;url&quot;) or event.get(&quot;host&quot;) or &quot;&quot;
+    return phishing_url in event_url or event_url in phishing_url
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (offline multi-pass correlation)
+# ---------------------------------------------------------------------------
+
+class NaiveAttackChainDetector:
+    &quot;&quot;&quot;
+    Stores all events then correlates in O(N²) passes.
+    Use only for offline forensic analysis on small datasets.
+    &quot;&quot;&quot;
+
+    def __init__(self, window_seconds: float = 1800) -&gt; None:
+        self.window = window_seconds
+        self._events: List[dict] = []
+        self.malformed = 0
+
+    def ingest(self, event: dict) -&gt; None:
+        ts = _parse_ts(event.get(&quot;ts&quot;))
+        if ts is None:
+            self.malformed += 1
+            return
+        self._events.append(dict(event, _ts=ts))
+
+    def detect(self) -&gt; List[ChainAlert]:
+        emails = [e for e in self._events if e.get(&quot;type&quot;) == &quot;email&quot;]
+        alerts = []
+
+        for email in emails:
+            user = email.get(&quot;user&quot;)
+            url = email.get(&quot;url&quot;)
+            ts0 = email[&quot;_ts&quot;]
+            if not user:
+                continue
+
+            # Find matching proxy click within window
+            clicks = [e for e in self._events
+                      if e.get(&quot;type&quot;) == &quot;proxy&quot;
+                      and e.get(&quot;user&quot;) == user
+                      and (e.get(&quot;url&quot;) or &quot;&quot;).startswith(url or &quot;&quot;)
+                      and 0 &lt;= e[&quot;_ts&quot;] - ts0 &lt;= self.window]
+
+            for click in clicks:
+                host = click.get(&quot;host&quot;)
+                ts1 = click[&quot;_ts&quot;]
+
+                # Find suspicious process on same host within window
+                procs = [e for e in self._events
+                         if e.get(&quot;type&quot;) == &quot;process&quot;
+                         and e.get(&quot;host&quot;) == host
+                         and 0 &lt;= e[&quot;_ts&quot;] - ts0 &lt;= self.window
+                         and _is_suspicious_process(e)]
+
+                for proc in procs:
+                    ts2 = proc[&quot;_ts&quot;]
+
+                    # Find C2 event on same host within window
+                    c2_events = [e for e in self._events
+                                 if e.get(&quot;type&quot;) in (&quot;dns&quot;, &quot;network&quot;)
+                                 and e.get(&quot;host&quot;) == host
+                                 and 0 &lt;= e[&quot;_ts&quot;] - ts0 &lt;= self.window
+                                 and _is_c2_event(e)]
+
+                    if c2_events:
+                        ts3 = c2_events[0][&quot;_ts&quot;]
+                        alerts.append(ChainAlert(
+                            user=user, host=host,
+                            stage_reached=Stage.C2_ACTIVE,
+                            stage_name=STAGE_NAMES[Stage.C2_ACTIVE],
+                            is_complete=True,
+                            chain_start=ts0, chain_end=ts3,
+                            duration_seconds=ts3 - ts0,
+                            evidence=[email, click, proc, c2_events[0]],
+                            confidence=1.0,
+                        ))
+                    else:
+                        alerts.append(ChainAlert(
+                            user=user, host=host,
+                            stage_reached=Stage.PROCESS_SPAWNED,
+                            stage_name=STAGE_NAMES[Stage.PROCESS_SPAWNED],
+                            is_complete=False,
+                            chain_start=ts0, chain_end=ts2,
+                            duration_seconds=ts2 - ts0,
+                            evidence=[email, click, proc],
+                            confidence=0.75,
+                        ))
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — State Machine per (user, host)  (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class StateMachineChainDetector:
+    &quot;&quot;&quot;
+    O(1) per event streaming attack chain detector using per-(user,host) FSM.
+
+    Events advance the FSM for the relevant (user, host) pairs.
+    If window_seconds expires since stage1, the FSM resets to IDLE.
+    &quot;&quot;&quot;
+
+    def __init__(self, window_seconds: float = 1800) -&gt; None:
+        self.window = window_seconds
+        # (user, host) → ChainState
+        self._states: Dict[Tuple[str, str], ChainState] = {}
+        self._alerts: List[ChainAlert] = []
+        self.malformed = 0
+
+    def _get_or_create(self, user: str, host: str) -&gt; ChainState:
+        key = (user, host)
+        if key not in self._states:
+            self._states[key] = ChainState(user=user, host=host)
+        return self._states[key]
+
+    def _is_expired(self, state: ChainState, now: float) -&gt; bool:
+        return (state.chain_start_ts is not None
+                and now - state.chain_start_ts &gt; self.window)
+
+    def process(self, event: dict) -&gt; Optional[ChainAlert]:
+        ts = _parse_ts(event.get(&quot;ts&quot;))
+        if ts is None:
+            self.malformed += 1
+            return None
+
+        etype = event.get(&quot;type&quot;, &quot;&quot;)
+
+        if etype == &quot;email&quot;:
+            return self._handle_email(event, ts)
+        elif etype == &quot;proxy&quot;:
+            return self._handle_proxy(event, ts)
+        elif etype == &quot;process&quot;:
+            return self._handle_process(event, ts)
+        elif etype in (&quot;dns&quot;, &quot;network&quot;):
+            return self._handle_c2(event, ts)
+        return None
+
+    def _handle_email(self, event: dict, ts: float) -&gt; None:
+        user = event.get(&quot;user&quot;)
+        if not user:
+            return None
+        # Email doesn&#x27;t know the host yet; seed state with placeholder host=&quot;&quot;
+        state = self._get_or_create(user, &quot;&quot;)
+        if state.stage == Stage.IDLE or self._is_expired(state, ts):
+            state.reset()
+            state.stage = Stage.EMAIL_RECEIVED
+            state.chain_start_ts = ts
+            state.last_ts = ts
+            state.phishing_url = event.get(&quot;url&quot;)
+            state.evidence.append(event)
+        return None
+
+    def _handle_proxy(self, event: dict, ts: float) -&gt; None:
+        user = event.get(&quot;user&quot;)
+        host = event.get(&quot;host&quot;)
+        if not user or not host:
+            return None
+
+        # Look for a pending email state for this user
+        email_state = self._states.get((user, &quot;&quot;))
+        if (email_state and email_state.stage == Stage.EMAIL_RECEIVED
+                and not self._is_expired(email_state, ts)
+                and _url_matches(event, email_state.phishing_url)):
+            # Migrate to (user, host) state
+            new_state = self._get_or_create(user, host)
+            new_state.stage = Stage.URL_CLICKED
+            new_state.chain_start_ts = email_state.chain_start_ts
+            new_state.last_ts = ts
+            new_state.phishing_url = email_state.phishing_url
+            new_state.evidence = list(email_state.evidence) + [event]
+            # Clean up the placeholder
+            del self._states[(user, &quot;&quot;)]
+        return None
+
+    def _handle_process(self, event: dict, ts: float) -&gt; Optional[ChainAlert]:
+        host = event.get(&quot;host&quot;)
+        user = event.get(&quot;user&quot;)
+        if not host:
+            return None
+
+        # Find any (*, host) state in URL_CLICKED
+        for key, state in list(self._states.items()):
+            if key[1] == host and state.stage == Stage.URL_CLICKED:
+                if self._is_expired(state, ts):
+                    state.reset()
+                    continue
+                if _is_suspicious_process(event):
+                    state.stage = Stage.PROCESS_SPAWNED
+                    state.last_ts = ts
+                    state.evidence.append(event)
+                    # Partial alert
+                    return self._emit(state, ts, complete=False, confidence=0.75)
+        return None
+
+    def _handle_c2(self, event: dict, ts: float) -&gt; Optional[ChainAlert]:
+        host = event.get(&quot;host&quot;)
+        if not host:
+            return None
+        for key, state in list(self._states.items()):
+            if key[1] == host and state.stage == Stage.PROCESS_SPAWNED:
+                if self._is_expired(state, ts):
+                    state.reset()
+                    continue
+                if _is_c2_event(event):
+                    state.stage = Stage.C2_ACTIVE
+                    state.last_ts = ts
+                    state.evidence.append(event)
+                    alert = self._emit(state, ts, complete=True, confidence=1.0)
+                    state.reset()
+                    return alert
+        return None
+
+    def _emit(self, state: ChainState, now: float,
+              complete: bool, confidence: float) -&gt; ChainAlert:
+        alert = ChainAlert(
+            user=state.user,
+            host=state.host,
+            stage_reached=state.stage,
+            stage_name=STAGE_NAMES[state.stage],
+            is_complete=complete,
+            chain_start=state.chain_start_ts,
+            chain_end=now,
+            duration_seconds=now - state.chain_start_ts,
+            evidence=list(state.evidence),
+            confidence=confidence,
+        )
+        self._alerts.append(alert)
+        return alert
+
+    def get_alerts(self) -&gt; List[ChainAlert]:
+        return self._alerts
+
+
+# ---------------------------------------------------------------------------
+# Test Cases (using the sample data from the problem statement)
+# ---------------------------------------------------------------------------
+
+SAMPLE_EVENTS = [
+    {&quot;ts&quot;: &quot;2026-05-29T08:00:00Z&quot;, &quot;type&quot;: &quot;email&quot;,   &quot;user&quot;: &quot;alice&quot;,
+     &quot;subject&quot;: &quot;Urgent payroll update&quot;, &quot;url&quot;: &quot;http://phish.example/login&quot;},
+    {&quot;ts&quot;: &quot;2026-05-29T08:02:00Z&quot;, &quot;type&quot;: &quot;proxy&quot;,   &quot;user&quot;: &quot;alice&quot;,
+     &quot;host&quot;: &quot;laptop-01&quot;, &quot;url&quot;: &quot;http://phish.example/login&quot;, &quot;action&quot;: &quot;allowed&quot;},
+    {&quot;ts&quot;: &quot;2026-05-29T08:04:00Z&quot;, &quot;type&quot;: &quot;process&quot;, &quot;user&quot;: &quot;alice&quot;,
+     &quot;host&quot;: &quot;laptop-01&quot;, &quot;parent&quot;: &quot;chrome.exe&quot;, &quot;process&quot;: &quot;powershell.exe&quot;,
+     &quot;cmdline&quot;: &quot;powershell -enc SQBFAFgA&quot;},
+    {&quot;ts&quot;: &quot;2026-05-29T08:04:30Z&quot;, &quot;type&quot;: &quot;dns&quot;,     &quot;host&quot;: &quot;laptop-01&quot;,
+     &quot;query&quot;: &quot;c2.badexample.net&quot;},
+    {&quot;ts&quot;: &quot;2026-05-29T08:05:00Z&quot;, &quot;type&quot;: &quot;network&quot;, &quot;host&quot;: &quot;laptop-01&quot;,
+     &quot;dst&quot;: &quot;198.51.100.200&quot;, &quot;dst_port&quot;: 443, &quot;bytes_out&quot;: 4_500_000},
+]
+
+
+def test_naive_chain():
+    det = NaiveAttackChainDetector(window_seconds=1800)
+    for e in SAMPLE_EVENTS:
+        det.ingest(e)
+    alerts = det.detect()
+    complete = [a for a in alerts if a.is_complete]
+    assert len(complete) &gt;= 1, f&quot;Expected complete chain alert; got {alerts}&quot;
+    print(f&quot;NaiveChain: {len(alerts)} alert(s), {len(complete)} complete&quot;)
+
+
+def test_state_machine_chain():
+    det = StateMachineChainDetector(window_seconds=1800)
+    last_alert = None
+    for e in SAMPLE_EVENTS:
+        a = det.process(e)
+        if a:
+            last_alert = a
+            print(f&quot;  Alert at stage={a.stage_name} complete={a.is_complete} &quot;
+                  f&quot;duration={a.duration_seconds:.0f}s&quot;)
+    complete_alerts = [a for a in det.get_alerts() if a.is_complete]
+    assert len(complete_alerts) &gt;= 1, f&quot;Expected complete chain; got {det.get_alerts()}&quot;
+    print(f&quot;StateMachineChain: complete alert detected ✓&quot;)
+
+
+def test_partial_chain():
+    &quot;&quot;&quot;Alert on stages 1+2+3 even without C2.&quot;&quot;&quot;
+    det = StateMachineChainDetector(window_seconds=1800)
+    events_no_c2 = SAMPLE_EVENTS[:3]  # email, proxy, process only
+    alerts = []
+    for e in events_no_c2:
+        a = det.process(e)
+        if a:
+            alerts.append(a)
+    partial = [a for a in alerts if not a.is_complete]
+    assert len(partial) &gt;= 1, f&quot;Expected partial alert; got {alerts}&quot;
+    print(f&quot;PartialChain: stage_reached={partial[0].stage_name}&quot;)
+
+
+def test_expired_chain():
+    &quot;&quot;&quot;Chain should not alert if outside the time window.&quot;&quot;&quot;
+    det = StateMachineChainDetector(window_seconds=60)  # only 60s window
+    # Email at T=0, proxy at T=5, but process at T=200 (expired)
+    events = [
+        {&quot;ts&quot;: 0.0,   &quot;type&quot;: &quot;email&quot;,   &quot;user&quot;: &quot;bob&quot;, &quot;url&quot;: &quot;http://evil.com/&quot;},
+        {&quot;ts&quot;: 5.0,   &quot;type&quot;: &quot;proxy&quot;,   &quot;user&quot;: &quot;bob&quot;, &quot;host&quot;: &quot;pc-01&quot;,
+         &quot;url&quot;: &quot;http://evil.com/&quot;, &quot;action&quot;: &quot;allowed&quot;},
+        {&quot;ts&quot;: 200.0, &quot;type&quot;: &quot;process&quot;, &quot;user&quot;: &quot;bob&quot;, &quot;host&quot;: &quot;pc-01&quot;,
+         &quot;parent&quot;: &quot;chrome.exe&quot;, &quot;process&quot;: &quot;powershell.exe&quot;, &quot;cmdline&quot;: &quot;powershell -enc x&quot;},
+    ]
+    alerts = []
+    for e in events:
+        a = det.process(e)
+        if a:
+            alerts.append(a)
+    assert len(alerts) == 0, f&quot;Should not alert after window expiry; got {alerts}&quot;
+    print(&quot;Expired chain: passed&quot;)
+
+
+def test_malformed():
+    det = StateMachineChainDetector()
+    det.process({&quot;type&quot;: &quot;email&quot;, &quot;ts&quot;: &quot;bad-date&quot;})
+    assert det.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  The phishing → click → process → C2 kill chain is the most common initial
+  access pattern for financially motivated and nation-state attackers.
+  Examples: APT28, Lazarus, Emotet, Qakbot.
+
+  Detection requires correlating events across data sources:
+  - Email gateway (spam filter logs)
+  - Proxy / web filter (URL click logs)
+  - EDR (process telemetry)
+  - DNS resolver / network tap (C2 communication)
+
+  Without cross-source correlation, each individual event looks benign.
+
+FSM ADVANTAGES
+  - O(1) per event: scales to millions of events/second.
+  - Partial-chain alerts: catch attackers who are interrupted mid-chain.
+  - Window-based reset: avoids false correlation of old events to new chains.
+  - Explainable evidence: each stage stores the triggering event for analyst review.
+
+FALSE POSITIVES
+  - Chrome spawning PowerShell legitimately (rare but possible via extensions).
+    Mitigate: require specific cmdline patterns (-enc, DownloadString, IEX).
+  - DNS queries to long subdomains (CDNs use long hostnames).
+    Mitigate: whitelist known CDN FQDNs; use entropy threshold (Shannon &gt; 3.5).
+
+FALSE NEGATIVES
+  - Attacker uses a browser exploit that doesn&#x27;t spawn a child process.
+  - C2 traffic on port 443 blends with HTTPS (looks like STAGE4 criteria absent).
+    Mitigate: add TLS JA3 fingerprinting for known C2 libraries.
+  - Multi-day attacks: extend chain window or persist state in a DB.
+
+PRODUCTION HARDENING
+  - Persist FSM state in Redis (key = (user, host), value = ChainState JSON).
+    TTL = window_seconds to auto-expire.
+  - Correlate with threat intel: enrich phishing URLs and C2 IPs at ingest time.
+  - Chain alerts should auto-open a SOAR playbook for triage and containment.
+  - Use MITRE ATT&amp;CK technique IDs in alert metadata for TTP tagging:
+    T1566 (phishing), T1204 (user execution), T1059 (scripting), T1071 (C2)
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_chain()
+    test_state_machine_chain()
+    test_partial_chain()
+    test_expired_chain()
+    test_malformed()
+</code></pre>
+</body>
+</html>

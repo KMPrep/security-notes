@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q6_json_normalizer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q6_json_normalizer.py</h1>
+  <p class="file-path">Source: code\day5\answers\q6_json_normalizer.py</p>
+  <p class="line-count">369 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q6. JSON Log Normalizer
+========================
+Given a JSONL file with inconsistent schemas, normalize every record to a
+canonical form: {&quot;timestamp&quot;: ..., &quot;src_ip&quot;: ..., &quot;action&quot;: ...}
+
+Known field aliases:
+  timestamp : &quot;ts&quot;, &quot;timestamp&quot;, &quot;time&quot;, &quot;date&quot;
+  src_ip    : &quot;src_ip&quot;, &quot;ip&quot;, &quot;source&quot;, &quot;client_ip&quot;, &quot;src&quot;
+  action    : &quot;action&quot;, &quot;event&quot;, &quot;type&quot;, &quot;verdict&quot;, &quot;result&quot;
+
+Missing fields → None in output.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;You have logs from 5 different products, all different schemas.
+Normalize them to one canonical schema.&quot;
+
+--- CANDIDATE FIRST RESPONSE (hardcoded if-else per variant) ---
+&quot;I&#x27;d check what keys are in the dict and pick the right one with if/elif.&quot;
+
+Follow-up: &quot;What if a 6th product is added?&quot;
+→ Hardcoded approach breaks. Better: define an alias mapping as data.
+
+--- CANDIDATE SECOND RESPONSE (alias map, dict.get cascade) ---
+&quot;Define a dict of canonical_name → [list of aliases].
+For each incoming record, try each alias in order until one matches.&quot;
+
+Follow-up: &quot;What if the value itself needs normalization? e.g. &#x27;BLOCK&#x27;
+vs &#x27;block&#x27; vs &#x27;deny&#x27; vs &#x27;DROP&#x27;?&quot;
+→ Add a value normalizer step after field extraction.
+
+Follow-up: &quot;What about lines that are not valid JSON at all?&quot;
+→ Wrap json.loads in try/except, skip with a warning.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Alias mapping as data, value normalization, full error handling,
+streaming JSONL reader, output to JSONL.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import sys
+import json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_JSONL = [
+    &#x27;{&quot;ts&quot;: &quot;2024-01-15&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;action&quot;: &quot;BLOCK&quot;}&#x27;,
+    &#x27;{&quot;timestamp&quot;: &quot;2024-01-15T10:00:00&quot;, &quot;ip&quot;: &quot;2.2.2.2&quot;, &quot;event&quot;: &quot;deny&quot;}&#x27;,
+    &#x27;{&quot;time&quot;: &quot;2024-01-15T11:00:00Z&quot;, &quot;source&quot;: &quot;3.3.3.3&quot;, &quot;verdict&quot;: &quot;allow&quot;}&#x27;,
+    &#x27;{&quot;date&quot;: &quot;2024-01-15&quot;, &quot;client_ip&quot;: &quot;4.4.4.4&quot;, &quot;type&quot;: &quot;ALLOW&quot;}&#x27;,
+    &#x27;{&quot;ts&quot;: &quot;2024-01-15T12:00:00Z&quot;, &quot;src&quot;: &quot;5.5.5.5&quot;, &quot;result&quot;: &quot;DROP&quot;}&#x27;,
+    &#x27;{&quot;timestamp&quot;: &quot;2024-01-15T13:00:00Z&quot;, &quot;ip&quot;: &quot;6.6.6.6&quot;}&#x27;,  # missing action
+    &#x27;{&quot;ts&quot;: &quot;2024-01-15T14:00:00Z&quot;}&#x27;,                           # missing ip and action
+    &#x27;THIS IS NOT VALID JSON {{{&#x27;,                                # malformed JSON
+    &#x27;&#x27;,                                                          # empty line
+    &#x27;{&quot;ts&quot;: &quot;2024-01-15T15:00:00Z&quot;, &quot;src_ip&quot;: &quot;7.7.7.7&quot;, &quot;action&quot;: &quot;ACCEPT&quot;}&#x27;,
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEMA CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Canonical field → list of known aliases (tried in order)
+FIELD_ALIASES = {
+    &quot;timestamp&quot;: [&quot;timestamp&quot;, &quot;ts&quot;, &quot;time&quot;, &quot;date&quot;],
+    &quot;src_ip&quot;:    [&quot;src_ip&quot;, &quot;ip&quot;, &quot;source&quot;, &quot;client_ip&quot;, &quot;src&quot;],
+    &quot;action&quot;:    [&quot;action&quot;, &quot;event&quot;, &quot;verdict&quot;, &quot;type&quot;, &quot;result&quot;],
+}
+
+# Value normalization for &#x27;action&#x27; field
+ACTION_MAP = {
+    &quot;block&quot;:  &quot;BLOCK&quot;,
+    &quot;deny&quot;:   &quot;BLOCK&quot;,
+    &quot;drop&quot;:   &quot;BLOCK&quot;,
+    &quot;reject&quot;: &quot;BLOCK&quot;,
+    &quot;allow&quot;:  &quot;ALLOW&quot;,
+    &quot;accept&quot;: &quot;ALLOW&quot;,
+    &quot;permit&quot;: &quot;ALLOW&quot;,
+    &quot;pass&quot;:   &quot;ALLOW&quot;,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual key lookup, no dict comprehension, no json module — parse manually)
+#
+# Note: truly parsing JSON without json.loads would require writing a full
+# JSON parser — that&#x27;s out of scope. The &quot;without builtins&quot; here means:
+# no dict comprehensions, no .get() chaining in one expression,
+# no str.lower() in a generator — do everything step-by-step.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_field_manual(record, aliases):
+    &quot;&quot;&quot;
+    Given a dict `record` and a list of `aliases`, return (found_value, True)
+    for the first alias that exists in the record.
+    Returns (None, False) if none found.
+    &quot;&quot;&quot;
+    for alias in aliases:
+        if alias in record:
+            return record[alias], True
+    return None, False
+
+
+def _normalize_action_manual(value):
+    &quot;&quot;&quot;Normalize action values to ALLOW/BLOCK. Return as-is if unknown.&quot;&quot;&quot;
+    if value is None:
+        return None
+    lowered = &quot;&quot;
+    for ch in str(value):
+        lowered += ch.lower()   # manual lower without str.lower()
+    if lowered in ACTION_MAP:
+        return ACTION_MAP[lowered]
+    return str(value).upper()  # best-effort uppercase
+
+
+def normalize_record_without_builtins(record):
+    &quot;&quot;&quot;
+    Normalize a single dict to canonical schema.
+    Returns a new dict with keys: timestamp, src_ip, action.
+    &quot;&quot;&quot;
+    canonical = {}
+
+    ts_val, _ = _find_field_manual(record, FIELD_ALIASES[&quot;timestamp&quot;])
+    canonical[&quot;timestamp&quot;] = ts_val
+
+    ip_val, _ = _find_field_manual(record, FIELD_ALIASES[&quot;src_ip&quot;])
+    canonical[&quot;src_ip&quot;] = ip_val
+
+    action_val, _ = _find_field_manual(record, FIELD_ALIASES[&quot;action&quot;])
+    canonical[&quot;action&quot;] = _normalize_action_manual(action_val)
+
+    return canonical
+
+
+def process_jsonl_without_builtins(lines):
+    &quot;&quot;&quot;
+    Process JSONL lines one at a time (generator pattern).
+    Yields normalized dicts.
+    Reports errors to stderr.
+    &quot;&quot;&quot;
+    stats = {&quot;parsed&quot;: 0, &quot;malformed&quot;: 0, &quot;empty&quot;: 0}
+
+    for line_num, raw in enumerate(lines, start=1):
+        raw = raw.strip()
+        if not raw:
+            stats[&quot;empty&quot;] += 1
+            continue
+
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f&quot;[WARN] Line {line_num}: JSON parse error — {exc}&quot;,
+                  file=sys.stderr)
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        if not isinstance(record, dict):
+            print(f&quot;[WARN] Line {line_num}: Expected JSON object, got {type(record).__name__}&quot;,
+                  file=sys.stderr)
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        stats[&quot;parsed&quot;] += 1
+        normalized = normalize_record_without_builtins(record)
+        yield normalized
+
+    return stats
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (dict.get, comprehensions, str.lower)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_field_builtin(record, aliases):
+    &quot;&quot;&quot;Return value of first matching alias, or None.&quot;&quot;&quot;
+    for alias in aliases:
+        val = record.get(alias)
+        if val is not None:
+            return val
+    return None
+
+
+def _normalize_action_builtin(value):
+    if value is None:
+        return None
+    return ACTION_MAP.get(str(value).lower(), str(value).upper())
+
+
+def normalize_record_with_builtins(record):
+    return {
+        &quot;timestamp&quot;: _find_field_builtin(record, FIELD_ALIASES[&quot;timestamp&quot;]),
+        &quot;src_ip&quot;:    _find_field_builtin(record, FIELD_ALIASES[&quot;src_ip&quot;]),
+        &quot;action&quot;:    _normalize_action_builtin(
+                         _find_field_builtin(record, FIELD_ALIASES[&quot;action&quot;])),
+    }
+
+
+def process_jsonl_with_builtins(lines):
+    stats = {&quot;parsed&quot;: 0, &quot;malformed&quot;: 0, &quot;empty&quot;: 0}
+
+    for line_num, raw in enumerate(lines, start=1):
+        raw = raw.strip()
+        if not raw:
+            stats[&quot;empty&quot;] += 1
+            continue
+
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f&quot;[WARN] Line {line_num}: JSON parse error — {exc}&quot;,
+                  file=sys.stderr)
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        if not isinstance(record, dict):
+            print(f&quot;[WARN] Line {line_num}: Expected JSON object.&quot;,
+                  file=sys.stderr)
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        stats[&quot;parsed&quot;] += 1
+        yield normalize_record_with_builtins(record)
+
+    return stats  # NOTE: generators can&#x27;t return values easily; use a wrapper
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WRAPPER to capture stats from generators
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_normalizer(lines, normalizer_func):
+    &quot;&quot;&quot;Run a normalizer generator and collect results + stats.&quot;&quot;&quot;
+    stats = {&quot;parsed&quot;: 0, &quot;malformed&quot;: 0, &quot;empty&quot;: 0}
+    results = []
+
+    for line_num, raw in enumerate(lines, start=1):
+        raw = raw.strip()
+        if not raw:
+            stats[&quot;empty&quot;] += 1
+            continue
+
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f&quot;[WARN] Line {line_num}: {exc}&quot;, file=sys.stderr)
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        if not isinstance(record, dict):
+            stats[&quot;malformed&quot;] += 1
+            continue
+
+        stats[&quot;parsed&quot;] += 1
+        results.append(normalizer_func(record))
+
+    return results, stats
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT + OUTPUT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(results, stats, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;  JSON LOG NORMALIZER  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;Lines processed : {stats[&#x27;parsed&#x27;] + stats[&#x27;malformed&#x27;] + stats[&#x27;empty&#x27;]}&quot;)
+    print(f&quot;  Parsed OK     : {stats[&#x27;parsed&#x27;]}&quot;)
+    print(f&quot;  Malformed JSON: {stats[&#x27;malformed&#x27;]}&quot;)
+    print(f&quot;  Empty lines   : {stats[&#x27;empty&#x27;]}&quot;)
+    print(f&quot;\nNormalized records ({len(results)}):&quot;)
+    for rec in results:
+        print(f&quot;  {json.dumps(rec)}&quot;)
+    print()
+
+
+def write_jsonl(results, filepath: str):
+    &quot;&quot;&quot;Write normalized records to a JSONL output file.&quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fh:
+            for rec in results:
+                fh.write(json.dumps(rec) + &quot;\n&quot;)
+        print(f&quot;[INFO] Output written to: {filepath}&quot;)
+    except (PermissionError, OSError) as exc:
+        print(f&quot;[ERROR] Could not write output: {exc}&quot;, file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_jsonl_file(filepath: str):
+    &quot;&quot;&quot;Read JSONL file lines. Returns empty list on error.&quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            return fh.readlines()
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+        return []
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+        return []
+    except OSError as exc:
+        print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        filepath = sys.argv[1]
+        lines = read_jsonl_file(filepath)
+        if not lines:
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_JSONL
+
+    results_manual, stats_manual   = run_normalizer(lines, normalize_record_without_builtins)
+    results_builtin, stats_builtin = run_normalizer(lines, normalize_record_with_builtins)
+
+    print_report(results_manual,  stats_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(results_builtin, stats_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Optionally write output
+    # write_jsonl(results_builtin, &quot;normalized_output.jsonl&quot;)
+
+    # Sanity check
+    assert len(results_manual) == len(results_builtin), &quot;Result count mismatch!&quot;
+    for r1, r2 in zip(results_manual, results_builtin):
+        assert r1 == r2, f&quot;Record mismatch: {r1} vs {r2}&quot;
+    print(&quot;[OK] Both approaches produce identical normalized records.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(L * A) where L = lines, A = max aliases per field (small constant)
+# Space : O(L) for output; O(1) if streaming to file instead of collecting
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;What if there are 50 source schemas and the alias list is huge?&quot;
+#     → Build the alias lookup as a flat reverse-map: { alias → canonical }.
+#       Lookup becomes O(1) per field instead of O(A).
+# - &quot;How would you handle type coercion? (e.g. timestamp as int epoch vs str)&quot;
+#     → Add a type normalizer per canonical field. For timestamp: try
+#       datetime.fromisoformat(), then int-as-epoch, etc.
+# - &quot;What if a record has BOTH &#x27;ts&#x27; and &#x27;timestamp&#x27; present (conflicting)?&quot;
+#     → Alias priority order resolves this: first alias wins. Document the
+#       priority explicitly. Or: collect all values and flag conflicts.
+# - &quot;How do you test this without real data?&quot;
+#     → Unit test with synthetic records covering every alias and edge case
+#       (None values, wrong types, extra fields, all-missing fields).
+# =============================================================================
+</code></pre>
+</body>
+</html>

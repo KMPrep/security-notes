@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CBC Padding Oracle Attack</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: crypto\CBC-Padding-Oracle-Attack.md</p>
+<h1 id="cbc-padding-oracle-attack">CBC Padding Oracle Attack</h1>
+<p><strong>Category:</strong> Cryptography<br />
+<strong>Parent:</strong> <a href="Block-Cipher-Modes.md">Block-Cipher-Modes.md</a></p>
+<h2 id="what-is-a-padding-oracle">What Is a Padding Oracle?</h2>
+<p>A <strong>padding oracle</strong> is any system behaviour that leaks whether the padding on a decrypted ciphertext is valid. The leak does not have to be an explicit error message. It can be:</p>
+<ul>
+<li>A different HTTP status code (<code>200</code> vs <code>403</code> vs <code>500</code>)</li>
+<li>A timing difference between a decryption error and a padding error</li>
+<li>A different error message body</li>
+<li>A redirect vs an inline error</li>
+<li>A database exception vs an application exception</li>
+</ul>
+<p>The attacker does not need the key. They only need a way to ask: <em>"Does this ciphertext decrypt to something with valid PKCS#7 padding?"</em> That single bit of information — valid or invalid — is enough to recover the entire plaintext, one byte at a time.</p>
+<hr />
+<h2 id="prerequisites-how-cbc-decryption-works">Prerequisites: How CBC Decryption Works</h2>
+<pre><code>               C0 (IV)     C1 (block 1)    C2 (block 2)
+                 │               │               │
+                 │          ┌────▼────┐     ┌────▼────┐
+                 │          │ Decrypt │     │ Decrypt │
+                 │          └────┬────┘     └────┬────┘
+                 │               │ D1            │ D2
+                 └──────XOR──────┘               │
+                        │                C1 ─── XOR
+                        P1                       │
+                                                 P2
+</code></pre>
+<p>The critical formula for block <code>i</code> is:</p>
+<p>$$P_i = \text{Decrypt}(C_i) \oplus C_{i-1}$$</p>
+<p>Let <code>D_i = Decrypt(C_i)</code> be the intermediate value after the block cipher decryption but <strong>before</strong> the XOR with the previous ciphertext block. We know <code>C_i</code> and <code>C_{i-1}</code>, but we do not know <code>D_i</code> directly.</p>
+<hr />
+<h2 id="pkcs7-padding">PKCS#7 Padding</h2>
+<p>PKCS#7 padding fills the last block to a multiple of the block size (16 bytes for AES). The padding byte value equals the number of padding bytes added.</p>
+<pre><code>Plaintext length 11 bytes → 5 bytes of padding (value 0x05):
+  48 65 6c 6c 6f 20 57 6f 72 6c 64 05 05 05 05 05
+  H  e  l  l  o     W  o  r  l  d  ↑  ↑  ↑  ↑  ↑
+                                   padding = 5×\x05
+
+Plaintext length 15 bytes → 1 byte of padding (value 0x01):
+  48 65 6c 6c 6f 20 57 6f 72 6c 64 21 21 21 21 01
+                                               ↑
+                                            padding = 1×\x01
+
+Plaintext exactly 16 bytes → full extra block of 0x10:
+  48 65 6c 6c 6f 20 57 6f 72 6c 64 20 57 6f 72 6c   ← original 16 bytes
+  10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10   ← padding block (16×\x10)
+</code></pre>
+<p>A valid padding check means: the last byte value is <code>n</code>, and the preceding <code>n-1</code> bytes are all also <code>n</code>, and <code>1 ≤ n ≤ block_size</code>.</p>
+<hr />
+<h2 id="how-the-attack-works-step-by-step">How the Attack Works — Step by Step</h2>
+<p>We have a ciphertext <code>C = C0 || C1</code> (IV + one ciphertext block) encrypting one block of plaintext <code>P1</code>.</p>
+<p>We want to recover <code>P1</code> without the key.</p>
+<h3 id="goal-recover-one-byte-of-d1">Goal: Recover One Byte of D1</h3>
+<p>We manufacture a fake ciphertext <code>C' = C'_prev || C1</code> where we control <code>C'_prev</code> byte by byte. We send this to the oracle. The oracle decrypts it as:</p>
+<p>$$P' = \text{Decrypt}(C_1) \oplus C'<em _text_prev="\text{prev">{\text{prev}} = D_1 \oplus C'</em>$$}</p>
+<p>The oracle tells us: is the padding of <code>P'</code> valid?</p>
+<h3 id="step-1-recover-the-last-byte-targeting-x01-padding">Step 1: Recover the Last Byte (targeting <code>\x01</code> padding)</h3>
+<p>We want <code>P'[15] = 0x01</code> (single-byte valid padding).</p>
+<p>$$P'[15] = D_1[15] \oplus C'_{\text{prev}}[15] = 0x01$$</p>
+<p>Therefore: $D_1[15] = 0x01 \oplus C'_{\text{prev}}[15]$</p>
+<p>We iterate <code>C'_prev[15]</code> through all 256 values (0x00 to 0xFF), keeping bytes 0–14 as zero (or any fixed value) and submit each to the oracle.</p>
+<p>Exactly one value of <code>C'_prev[15]</code> will cause the oracle to return "valid padding" — meaning <code>P'[15] = 0x01</code>. We now know <code>D_1[15]</code>.</p>
+<p>Then the actual plaintext byte is:</p>
+<p>$$P_1[15] = D_1[15] \oplus C_0[15]$$</p>
+<h3 id="step-2-recover-the-second-to-last-byte-targeting-x02x02-padding">Step 2: Recover the Second-to-Last Byte (targeting <code>\x02\x02</code> padding)</h3>
+<p>We now want <code>P'[14] = P'[15] = 0x02</code>.</p>
+<ul>
+<li>Fix <code>C'_prev[15] = D_1[15] \oplus 0x02</code> (we know <code>D_1[15]</code>, so this is easy)</li>
+<li>Iterate <code>C'_prev[14]</code> through 0–255</li>
+</ul>
+<p>When the oracle returns valid, $D_1[14] \oplus C'<em _text_prev="\text{prev">{\text{prev}}[14] = 0x02$, so: $D_1[14] = C'</em>[14] \oplus 0x02$}</p>
+<p>Then: $P_1[14] = D_1[14] \oplus C_0[14]$</p>
+<h3 id="repeat-for-all-16-bytes">Repeat for All 16 Bytes</h3>
+<p>Each byte costs at most 256 oracle queries. 16 bytes × 256 queries = <strong>at most 4096 requests</strong> to decrypt one 16-byte block. In practice, the average is ~128 queries per byte because the correct value is found on average halfway through.</p>
+<hr />
+<h2 id="full-python-implementation">Full Python Implementation</h2>
+<pre><code class="language-python">from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import os
+
+# ─── Simulated server-side oracle ────────────────────────────────────────────
+
+SECRET_KEY = os.urandom(16)  # 128-bit AES key — attacker does NOT know this
+
+def encrypt(plaintext: bytes) -&gt; tuple[bytes, bytes]:
+    &quot;&quot;&quot;Encrypt plaintext. Returns (iv, ciphertext).&quot;&quot;&quot;
+    iv = os.urandom(16)
+    cipher = AES.new(SECRET_KEY, AES.MODE_CBC, iv)
+    ct = cipher.encrypt(pad(plaintext, 16))
+    return iv, ct
+
+def padding_oracle(iv: bytes, ciphertext: bytes) -&gt; bool:
+    &quot;&quot;&quot;
+    The oracle. Returns True if decrypted ciphertext has valid PKCS#7 padding.
+    In a real attack this is a remote server call — the attacker observes
+    only True/False (valid/invalid padding).
+    &quot;&quot;&quot;
+    try:
+        cipher = AES.new(SECRET_KEY, AES.MODE_CBC, iv)
+        unpad(cipher.decrypt(ciphertext), 16)
+        return True
+    except ValueError:
+        return False
+
+
+# ─── Attacker code ────────────────────────────────────────────────────────────
+
+def recover_intermediate_block(oracle, prev_block: bytes, target_block: bytes) -&gt; bytes:
+    &quot;&quot;&quot;
+    Given a prev_block and target_block, recover D = Decrypt(target_block)
+    (the intermediate value before XOR with prev_block).
+    Uses the padding oracle to brute-force each byte from last to first.
+    &quot;&quot;&quot;
+    block_size = 16
+    D = bytearray(block_size)  # intermediate decrypted bytes we are recovering
+
+    for byte_pos in range(block_size - 1, -1, -1):
+        padding_byte = block_size - byte_pos  # target padding value (1, 2, 3, ...)
+
+        # Build a controlled previous block.
+        # Bytes after byte_pos are set so they produce 'padding_byte' when XOR'd with D.
+        # Bytes before byte_pos (including byte_pos itself) are iterated.
+        crafted = bytearray(block_size)
+        for k in range(byte_pos + 1, block_size):
+            crafted[k] = D[k] ^ padding_byte
+
+        found = False
+        for guess in range(256):
+            crafted[byte_pos] = guess
+            if oracle(bytes(crafted), target_block):
+                # Verify it is not a false positive caused by accidental multi-byte padding.
+                # Flip the byte before byte_pos (if one exists) and re-check.
+                if byte_pos &gt; 0:
+                    verify = bytearray(crafted)
+                    verify[byte_pos - 1] ^= 0x01
+                    if not oracle(bytes(verify), target_block):
+                        continue  # false positive — actual padding was longer; keep searching
+                D[byte_pos] = guess ^ padding_byte
+                found = True
+                break
+
+        if not found:
+            raise RuntimeError(f&quot;Could not find byte at position {byte_pos}&quot;)
+
+    return bytes(D)
+
+
+def padding_oracle_decrypt(oracle, iv: bytes, ciphertext: bytes) -&gt; bytes:
+    &quot;&quot;&quot;
+    Decrypt all blocks of ciphertext using only the padding oracle.
+    The attacker provides iv and ciphertext (both are transmitted in plaintext
+    in most real protocols — they are not secret).
+    &quot;&quot;&quot;
+    block_size = 16
+    assert len(ciphertext) % block_size == 0
+
+    # Split ciphertext into blocks
+    blocks = [ciphertext[i:i+block_size] for i in range(0, len(ciphertext), block_size)]
+    prev_blocks = [iv] + blocks[:-1]  # IV precedes first block; each block precedes next
+
+    plaintext = b&quot;&quot;
+    for i, (prev, curr) in enumerate(zip(prev_blocks, blocks)):
+        print(f&quot;  [*] Recovering block {i+1}/{len(blocks)}...&quot;)
+        D = recover_intermediate_block(oracle, prev, curr)
+        # P_i = D_i XOR C_{i-1}   (XOR intermediate with actual previous block)
+        P = bytes(d ^ p for d, p in zip(D, prev))
+        plaintext += P
+
+    # Remove PKCS#7 padding from the final plaintext
+    pad_len = plaintext[-1]
+    return plaintext[:-pad_len]
+
+
+# ─── Demo ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    secret_message = b&quot;Attack at dawn!!&quot;   # 16 bytes — exactly one block
+
+    print(&quot;=== Padding Oracle Attack Demo ===\n&quot;)
+    print(f&quot;Original plaintext : {secret_message}&quot;)
+
+    iv, ciphertext = encrypt(secret_message)
+    print(f&quot;IV (hex)           : {iv.hex()}&quot;)
+    print(f&quot;Ciphertext (hex)   : {ciphertext.hex()}&quot;)
+    print(f&quot;\nAttacker knows: IV and ciphertext. Does NOT know the key.&quot;)
+    print(f&quot;Attacker queries the oracle (at most 256 × 16 = 4096 times)...\n&quot;)
+
+    recovered = padding_oracle_decrypt(padding_oracle, iv, ciphertext)
+    print(f&quot;\nRecovered plaintext: {recovered}&quot;)
+    assert recovered == secret_message, &quot;Attack failed!&quot;
+    print(&quot;\n[+] Attack succeeded. Full plaintext recovered without the key.&quot;)
+</code></pre>
+<h3 id="sample-output">Sample Output</h3>
+<pre><code>=== Padding Oracle Attack Demo ===
+
+Original plaintext : b'Attack at dawn!!'
+IV (hex)           : a3f1c2...
+Ciphertext (hex)   : 7e9b04...
+
+Attacker knows: IV and ciphertext. Does NOT know the key.
+Attacker queries the oracle (at most 256 × 16 = 4096 times)...
+
+  [*] Recovering block 1/1...
+
+Recovered plaintext: b'Attack at dawn!!'
+
+[+] Attack succeeded. Full plaintext recovered without the key.
+</code></pre>
+<hr />
+<h2 id="byte-level-walkthrough-recovering-the-last-byte">Byte-Level Walkthrough — Recovering the Last Byte</h2>
+<p>Suppose the target block decrypts to intermediate bytes <code>D[0..15]</code> (unknown) and the actual plaintext last byte is <code>P[15] = 0x21</code> (<code>!</code>).</p>
+<pre><code>Real values (attacker does NOT know):
+  D[15]     = 0x11   (intermediate decrypt output)
+  C_prev[15]= 0x30   (known — it's the previous ciphertext block or IV)
+  P[15]     = D[15] XOR C_prev[15] = 0x11 XOR 0x30 = 0x21 = '!'  ✓
+
+Attacker manufactures crafted_prev with all zeros except the last byte:
+  crafted_prev = 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 [guess]
+
+  guess=0x00 → oracle sees P'[15] = D[15] XOR 0x00 = 0x11  invalid padding ✗
+  guess=0x01 → P'[15] = 0x11 XOR 0x01 = 0x10              invalid padding ✗
+  ...
+  guess=0x10 → P'[15] = 0x11 XOR 0x10 = 0x01              VALID padding \x01 ✓
+
+  Oracle returns True for guess=0x10.
+  D[15] = guess XOR 0x01 = 0x10 XOR 0x01 = 0x11
+  P[15] = D[15] XOR C_prev[15] = 0x11 XOR 0x30 = 0x21 = '!'
+</code></pre>
+<p>The attacker just recovered the last plaintext byte with at most 256 requests.</p>
+<hr />
+<h2 id="false-positive-edge-case">False Positive Edge Case</h2>
+<p>When targeting <code>\x01</code> padding at position 15, there is a subtle false positive risk: the other bytes in the crafted block (positions 0–14 are zeros) might accidentally produce a longer valid padding pattern.</p>
+<p>For example, if by coincidence bytes 14 and 15 of the decrypted block both happen to produce <code>\x02\x02</code>, the oracle returns True — but not because we found the <code>\x01</code> target. This is why the implementation flips a bit at position <code>byte_pos - 1</code> and re-checks:</p>
+<pre><code class="language-python">if byte_pos &gt; 0:
+    verify = bytearray(crafted)
+    verify[byte_pos - 1] ^= 0x01   # disturb the byte before our target
+    if not oracle(bytes(verify), target_block):
+        continue  # was a multi-byte false positive — keep searching
+</code></pre>
+<p>If disturbing the preceding byte breaks validity, the padding must have been longer than <code>\x01</code> — it was accidental multi-byte padding, not the target.</p>
+<hr />
+<h2 id="real-world-attack-examples">Real-World Attack Examples</h2>
+<h3 id="poodle-2014-ssl-30">POODLE (2014) — SSL 3.0</h3>
+<p>SSL 3.0 used CBC with a specific padding check: only the <strong>last byte</strong> had to be valid (the rest could be anything). This made the oracle easier to exploit.</p>
+<p>Attack surface: Any SSL 3.0 HTTPS connection where the attacker could inject chosen plaintext (e.g., browser making requests to attacker-controlled domain). POODLE forced browsers to downgrade to SSL 3.0 and then exploited the CBC padding oracle to steal session cookies.</p>
+<p>Fix: Disable SSL 3.0 entirely.</p>
+<h3 id="beast-2011-tls-10">BEAST (2011) — TLS 1.0</h3>
+<p>TLS 1.0 used the last block of the previous TLS record as the IV for the next record — making IVs <strong>predictable</strong>. This enabled a chosen-plaintext attack within CBC mode without needing a padding oracle per se.</p>
+<p>Fix: Upgrade to TLS 1.1+ which fixed IV handling; or use RC4 as a workaround at the time (since deprecated).</p>
+<h3 id="lucky13-2013-timing-side-channel">Lucky13 (2013) — Timing Side-Channel</h3>
+<p>Even with constant-time MAC checking, the MAC computation in CBC-HMAC took slightly different amounts of CPU time depending on how much padding was present. This timing difference (13 clock cycles on average — hence the name) was measurable over a network.</p>
+<p>Fix: Constant-time MAC verification; switch to AEAD cipher suites.</p>
+<h3 id="aspnet-padding-oracle-2010">ASP.NET Padding Oracle (2010)</h3>
+<p>ASP.NET's <code>ValidateRequest</code> returned HTTP 500 for padding errors and HTTP 200 (or a different 500 with different body) for MAC errors. This exposed every ASP.NET web application's ViewState and encrypted session data to the attack.</p>
+<hr />
+<h2 id="why-the-attack-is-so-powerful">Why The Attack Is So Powerful</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Requires only 256 oracle queries per byte</td>
+<td>For a 16-byte block: at most 4,096 requests. Typically ~2,048 on average.</td>
+</tr>
+<tr>
+<td>Works on any CBC-encrypted block</td>
+<td>Not just the last — any block can be targeted by presenting <code>(prev_block, target_block)</code></td>
+</tr>
+<tr>
+<td>Scales to arbitrary ciphertext length</td>
+<td>100-block ciphertext costs ~200,000 oracle queries — a few minutes.</td>
+</tr>
+<tr>
+<td>Key is never needed</td>
+<td>The math only requires knowledge of the ciphertext and access to the oracle.</td>
+</tr>
+<tr>
+<td>Works over HTTPS</td>
+<td>The oracle is a remote server; TLS wrapping the outer connection does not help because the decryption oracle is running inside the server.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="mitigations">Mitigations</h2>
+<table>
+<thead>
+<tr>
+<th>Mitigation</th>
+<th>How It Prevents the Attack</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Use GCM or another AEAD</strong></td>
+<td>Authentication tag is checked before any decryption output is returned. Forge one byte of ciphertext → authentication fails before padding is ever evaluated.</td>
+</tr>
+<tr>
+<td><strong>Encrypt-then-MAC</strong></td>
+<td>Apply HMAC over the ciphertext before decryption. Reject any ciphertext that fails the MAC check without attempting to decrypt. The padding check is never reached for tampered ciphertext.</td>
+</tr>
+<tr>
+<td><strong>Constant-time padding verification</strong></td>
+<td>Does not prevent the oracle — it only closes the timing channel. Still leaks through different response codes or bodies.</td>
+</tr>
+<tr>
+<td><strong>Uniform error responses</strong></td>
+<td>Return the same error regardless of whether it was a padding error or MAC error. Reduces information leakage but does not eliminate timing channels.</td>
+</tr>
+<tr>
+<td><strong>TLS 1.3</strong></td>
+<td>Removed all CBC cipher suites. Only AEAD (AES-GCM, ChaCha20-Poly1305) allowed.</td>
+</tr>
+</tbody>
+</table>
+<p>The only fully correct fix is <strong>not using unauthenticated CBC</strong>. Uniform errors and constant-time checks reduce the attack surface but do not eliminate it — Lucky13 demonstrated that even well-implemented TLS stacks leaked enough timing information.</p>
+<hr />
+<h2 id="mac-then-encrypt-vs-encrypt-then-mac">Mac-Then-Encrypt vs Encrypt-Then-Mac</h2>
+<p>The ordering matters enormously:</p>
+<pre><code>MAC-then-Encrypt (dangerous with CBC):
+  1. Compute MAC over plaintext
+  2. Append MAC to plaintext
+  3. Encrypt (plaintext || MAC) with CBC
+  → Oracle can still see padding validity before MAC is checked.
+     Attacker submits modified ciphertext, padding is checked first.
+
+Encrypt-then-MAC (safe):
+  1. Encrypt plaintext with CBC
+  2. Compute MAC over (IV || ciphertext)
+  3. Send (IV || ciphertext || MAC)
+  → Server checks MAC first. Any tampered ciphertext fails immediately.
+     Padding is never evaluated for forge requests.
+</code></pre>
+<p>TLS 1.0 and 1.1 used MAC-then-Encrypt — this is why the attack was broadly applicable. TLS 1.2 still allowed CBC but switched to a more careful verify-then-decrypt flow. TLS 1.3 removed CBC entirely.</p>
+<hr />
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>A padding oracle is <strong>any observable difference</strong> in server behaviour between "bad padding" and "bad MAC/other error" — not just an explicit error message.</li>
+<li>The attack requires no knowledge of the key. It only needs ciphertext and oracle access.</li>
+<li>Each byte costs at most 256 oracle queries. A full 16-byte block costs at most 4,096 requests.</li>
+<li>The correct fix is AEAD (GCM, ChaCha20-Poly1305), not better error handling or constant-time code.</li>
+<li>MAC-then-Encrypt is fundamentally broken for CBC. Encrypt-then-MAC is safe because forgeries are rejected before padding is ever evaluated.</li>
+<li>TLS 1.3 resolved this permanently by removing all CBC cipher suites.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

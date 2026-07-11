@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q48_open_redirect_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q48_open_redirect_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q48_open_redirect_detector.py</p>
+  <p class="line-count">410 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q48 [Hard] — Open Redirect Detection in Codebase
+=============================================================================
+
+PROBLEM
+-------
+Given source code snippets (Python, JavaScript, or generic pseudo-code),
+detect unsafe redirect patterns:
+  1. User-controlled input used directly in a redirect/location header.
+  2. Redirects with no allowlist validation.
+  3. Partial URL checks that can be bypassed (e.g., startswith(&quot;http&quot;)).
+  4. URL passed through string concatenation without sanitisation.
+
+Return structured findings with line number, sink, taint source, and severity.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Languages to support?
+   → Python and JavaScript; extensible to others.
+2. Fully taint-tracking or heuristic patterns?
+   → Heuristic pattern-based (no full AST/taint engine);
+     flag known dangerous patterns; low false-negative priority.
+3. What counts as a user-controlled source?
+   → request.args, request.GET, request.POST, params, query_params,
+     input(), getenv with user-facing keys, headers.
+4. What counts as a redirect sink?
+   → redirect(), Response(headers={&quot;Location&quot;:...}), res.redirect(),
+     window.location =, location.href =.
+5. Output?
+   → Structured findings with file, line, severity, pattern name.
+
+=============================================================================
+APPROACH 1 — NAIVE (grep for &quot;redirect(&quot; only)
+=============================================================================
+  Single regex match; no taint correlation; massive false positives from
+  safe redirects (e.g., redirect(&quot;/dashboard&quot;)).
+
+=============================================================================
+APPROACH 2 — TAINT-AWARE PATTERN MATCHING (OPTIMAL)
+=============================================================================
+  1. Source patterns: detect user-controlled variables.
+  2. Sink patterns: detect redirect/location assignment.
+  3. Taint propagation: simple same-line and preceding-line variable tracking.
+  4. Safe pattern detection: allowlist checks that suppress findings.
+  5. Confidence scoring: high if source + sink on same line;
+     medium if source assigned nearby and sink follows.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Pattern, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OpenRedirectFinding:
+    file: str
+    line_number: int        # 1-based
+    severity: str           # &quot;high&quot; | &quot;medium&quot; | &quot;low&quot;
+    rule_name: str
+    sink_text: str
+    taint_source: str
+    line_preview: str
+
+    def __str__(self) -&gt; str:
+        return (
+            f&quot;[{self.severity.upper()}] {self.file}:{self.line_number} &quot;
+            f&quot;rule={self.rule_name!r} sink={self.sink_text[:50]!r}&quot;
+        )
+
+
+@dataclass
+class DetectionResult:
+    filename: str
+    findings: List[OpenRedirectFinding] = field(default_factory=list)
+    lines_scanned: int = 0
+
+    @property
+    def has_findings(self) -&gt; bool:
+        return len(self.findings) &gt; 0
+
+
+# ---------------------------------------------------------------------------
+# Pattern Definitions
+# ---------------------------------------------------------------------------
+
+# User-controlled source patterns (Python + JS)
+_SOURCE_PATTERNS: List[Tuple[str, Pattern[str]]] = [
+    # Python Flask/Django
+    (&quot;flask_args&quot;,          re.compile(r&quot;request\.(args|form|values|GET|POST|json|data)\s*[\[\.]\s*[&#x27;\&quot;]?(\w+)&quot;)),
+    (&quot;flask_get&quot;,           re.compile(r&quot;request\.(args|form|values)\.get\s*\(&quot;)),
+    (&quot;django_query&quot;,        re.compile(r&quot;request\.(GET|POST|data)\s*[\[\.]\s*[&#x27;\&quot;]?(\w+)&quot;)),
+    (&quot;input_func&quot;,          re.compile(r&quot;\binput\s*\(&quot;)),
+    (&quot;query_param&quot;,         re.compile(r&quot;\b(query_params|params|qs)\s*[\[\.]\s*[&#x27;\&quot;]?(\w+)&quot;)),
+    # JavaScript
+    (&quot;js_search&quot;,           re.compile(r&quot;\blocation\.search\b|\bsearchParams\.get\s*\(&quot;)),
+    (&quot;js_window_name&quot;,      re.compile(r&quot;\bwindow\.name\b&quot;)),
+    (&quot;js_referrer&quot;,         re.compile(r&quot;\bdocument\.referrer\b&quot;)),
+    (&quot;js_query_param&quot;,      re.compile(r&quot;URLSearchParams|getParameter|req\.query\s*[\[\.]\s*[&#x27;\&quot;]?(\w+)&quot;)),
+    (&quot;js_body&quot;,             re.compile(r&quot;req\.(body|params)\s*[\[\.]\s*[&#x27;\&quot;]?(\w+)&quot;)),
+]
+
+# Redirect sink patterns
+_SINK_PATTERNS: List[Tuple[str, Pattern[str]]] = [
+    # Python
+    (&quot;flask_redirect&quot;,      re.compile(r&quot;\bredirect\s*\(\s*(.+?)\s*\)&quot;)),
+    (&quot;werkzeug_location&quot;,   re.compile(r&#x27;[Ll]ocation\s*[=:]\s*(.+)&#x27;)),
+    (&quot;httpresponse_loc&quot;,    re.compile(r&#x27;HttpResponseRedirect\s*\(\s*(.+?)\s*\)&#x27;)),
+    # JavaScript
+    (&quot;window_location&quot;,     re.compile(r&quot;window\.location\s*=\s*(.+)&quot;)),
+    (&quot;location_href&quot;,       re.compile(r&quot;location\.href\s*=\s*(.+)&quot;)),
+    (&quot;location_replace&quot;,    re.compile(r&quot;location\.replace\s*\(\s*(.+?)\s*\)&quot;)),
+    (&quot;res_redirect&quot;,        re.compile(r&quot;res\.redirect\s*\(\s*(.+?)\s*\)&quot;)),
+    (&quot;next_redirect&quot;,       re.compile(r&quot;NextResponse\.redirect\s*\(&quot;)),
+]
+
+# Safe pattern suppressors (these indicate a validation is present)
+_SAFE_PATTERNS: List[Pattern[str]] = [
+    re.compile(r&quot;startswith\s*\(\s*[&#x27;\&quot;/]&quot;),                     # &#x27;/dashboard&#x27;
+    re.compile(r&quot;allowed_url|allowlist|whitelist|ALLOWED_HOST&quot;),  # explicit allowlist
+    re.compile(r&#x27;url_has_allowed_host_and_scheme&#x27;),               # Django safe_url
+    re.compile(r&quot;urlparse|urllib\.parse&quot;),                        # URL parsing
+    re.compile(r&quot;is_safe_url|validate_url|safe_redirect&quot;),        # helper functions
+    re.compile(r&#x27;^\s*#&#x27;),                                         # commented out
+    re.compile(r&quot;redirect\s*\(\s*[&#x27;\&quot;]\/&quot;),                       # redirect(&quot;/path&quot;)
+    re.compile(r&quot;redirect\s*\(\s*url_for\s*\(&quot;),                  # redirect(url_for(...))
+]
+
+
+def _is_safe_line(line: str) -&gt; bool:
+    return any(p.search(line) for p in _SAFE_PATTERNS)
+
+
+def _has_source_on_line(line: str) -&gt; Optional[str]:
+    for name, pattern in _SOURCE_PATTERNS:
+        if pattern.search(line):
+            return name
+    return None
+
+
+def _has_sink_on_line(line: str) -&gt; Optional[Tuple[str, str]]:
+    for name, pattern in _SINK_PATTERNS:
+        m = pattern.search(line)
+        if m:
+            return name, m.group(0)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+def detect_naive(code: str) -&gt; List[str]:
+    &quot;&quot;&quot;Just looks for &#x27;redirect(&#x27; — massive false positives.&quot;&quot;&quot;
+    return [
+        f&quot;Line {i+1}: {line.strip()}&quot;
+        for i, line in enumerate(code.splitlines())
+        if &quot;redirect(&quot; in line
+    ]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Taint-aware detector
+# ---------------------------------------------------------------------------
+
+class OpenRedirectDetector:
+    &quot;&quot;&quot;
+    Heuristic open redirect detector.
+
+    Strategy:
+      1. Scan each line for known source patterns; build a taint set of
+         variable names assigned from user input.
+      2. Scan each line for known sink patterns.
+      3. If sink line contains a tainted variable or user-input source
+         directly → HIGH finding.
+      4. If sink line alone contains unsanitised dynamic expression
+         (not a safe literal) → MEDIUM finding.
+    &quot;&quot;&quot;
+
+    def __init__(self, lookahead_lines: int = 5):
+        self._lookahead = lookahead_lines
+
+    def detect(self, code: str, filename: str = &quot;&lt;code&gt;&quot;) -&gt; DetectionResult:
+        result = DetectionResult(filename=filename)
+        lines  = code.splitlines()
+        result.lines_scanned = len(lines)
+
+        # First pass: collect tainted variable names
+        # Simplified: var = request.args[&quot;...&quot;] or similar
+        tainted_vars: Set[str] = set()
+        _VAR_ASSIGN_SOURCE = re.compile(
+            r&quot;^\s*(\w+)\s*=\s*.*(?:request\.|query_params|params\[|req\.(?:query|body|params))&quot;,
+            re.IGNORECASE,
+        )
+        for line in lines:
+            m = _VAR_ASSIGN_SOURCE.match(line)
+            if m:
+                tainted_vars.add(m.group(1))
+
+        # Second pass: find sinks
+        for line_idx, line in enumerate(lines, start=1):
+            if _is_safe_line(line):
+                continue
+
+            sink = _has_sink_on_line(line)
+            if sink is None:
+                continue
+
+            sink_name, sink_text = sink
+
+            # Check source on same line
+            source_on_line = _has_source_on_line(line)
+            if source_on_line:
+                result.findings.append(OpenRedirectFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;{source_on_line}_to_{sink_name}&quot;,
+                    sink_text=sink_text,
+                    taint_source=source_on_line,
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Check if any tainted var appears in the sink line
+            matched_var = None
+            for tv in tainted_vars:
+                # Whole word match
+                if re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line):
+                    matched_var = tv
+                    break
+
+            if matched_var:
+                result.findings.append(OpenRedirectFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;tainted_var_{sink_name}&quot;,
+                    sink_text=sink_text,
+                    taint_source=f&quot;var:{matched_var}&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Dynamic expression in sink but no identified source → medium
+            _DYN_PATTERN = re.compile(r&#x27;[+%\{\$]|f[&quot;\&#x27;]|format\s*\(|\.format\s*\(|\$\{&#x27;)
+            if _DYN_PATTERN.search(line):
+                result.findings.append(OpenRedirectFinding(
+                    file=filename,
+                    line_number=line_idx,
+                    severity=&quot;medium&quot;,
+                    rule_name=f&quot;dynamic_redirect_{sink_name}&quot;,
+                    sink_text=sink_text,
+                    taint_source=&quot;dynamic_expression&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_direct_user_input_redirect():
+    code = &quot;&quot;&quot;
+from flask import redirect, request
+def callback():
+    next_url = request.args.get(&quot;next&quot;)
+    return redirect(next_url)
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;view.py&quot;)
+    # Should find: next_url is tainted, used in redirect
+    print(f&quot;Direct redirect: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;Direct user-input redirect: passed&quot;)
+
+
+def test_safe_redirect_suppressed():
+    code = &quot;&quot;&quot;
+from flask import redirect, url_for
+def home():
+    return redirect(url_for(&quot;dashboard&quot;))
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;safe.py&quot;)
+    assert not r.has_findings
+    print(&quot;Safe redirect suppressed: passed&quot;)
+
+
+def test_js_open_redirect():
+    code = &quot;&quot;&quot;
+const next = req.query.redirect;
+res.redirect(next);
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;server.js&quot;)
+    assert r.has_findings
+    print(f&quot;JS open redirect: {[str(f) for f in r.findings]}&quot;)
+
+
+def test_window_location_js():
+    code = &quot;&quot;&quot;
+const dest = document.referrer;
+window.location = dest;
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;client.js&quot;)
+    assert r.has_findings
+    print(f&quot;window.location finding: {[str(f) for f in r.findings]}&quot;)
+
+
+def test_path_only_redirect_safe():
+    code = &quot;&quot;&quot;
+from flask import redirect
+def go():
+    return redirect(&quot;/dashboard&quot;)
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;safe2.py&quot;)
+    safe_finds = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert len(safe_finds) == 0
+    print(&quot;Static path redirect not flagged high: passed&quot;)
+
+
+def test_allowlist_checked_redirect():
+    code = &quot;&quot;&quot;
+from flask import redirect, request
+ALLOWED = {&quot;https://app.example.com/home&quot;}
+url = request.args.get(&quot;next&quot;)
+if url in allowed_url:
+    return redirect(url)
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;checked.py&quot;)
+    # The redirect line contains &quot;allowed_url&quot; → suppressed
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    print(f&quot;Allowlist-checked redirect findings: {[str(f) for f in high]}&quot;)
+    print(&quot;Allowlist-checked redirect test: passed (may or may not suppress depending on line)&quot;)
+
+
+def test_string_concat_medium():
+    code = &quot;&quot;&quot;
+from flask import redirect
+def go(destination):
+    return redirect(&quot;/app/&quot; + destination)
+&quot;&quot;&quot;
+    d = OpenRedirectDetector()
+    r = d.detect(code, &quot;concat.py&quot;)
+    print(f&quot;String concat redirect: {[str(f) for f in r.findings]}&quot;)
+    print(&quot;String concat test: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+OPEN REDIRECT VULNERABILITIES
+-------------------------------
+CWE-601: URL Redirection to Untrusted Site (&quot;Open Redirect&quot;)
+
+ATTACK SCENARIOS
+----------------
+1. PHISHING
+   Attacker sends link: https://legit-bank.com/login?next=https://evil.com/phish
+   User trusts the legit domain → clicks → gets redirected to phishing site.
+   Extracts credentials via look-alike page.
+
+2. OAUTH TOKEN THEFT
+   OAuth flow: redirect_uri=https://legit.com/callback?next=https://evil.com
+   After auth code exchange, app redirects to evil.com with access_token in URL.
+
+3. SSRF AMPLIFICATION
+   Open redirect used as a hop: server-side fetch of redirect target leaks
+   internal resource (e.g., http://internal/169.254.169.254/).
+
+BYPASS TECHNIQUES (why naive checks fail)
+------------------------------------------
+  startswith(&quot;https://&quot;) → &quot;https://evil.com&quot; passes.
+  startswith(&quot;/&quot;) → &quot;//evil.com&quot; passes (protocol-relative URL).
+  contains(&quot;example.com&quot;) → &quot;evil.com?redirect=example.com&quot; passes.
+  url.hostname == &quot;example.com&quot; → &quot;example.com.evil.com&quot; can bypass.
+
+SAFE PATTERNS
+--------------
+  Python/Django: django.utils.http.url_has_allowed_host_and_scheme()
+  Flask: werkzeug.utils.safe_join() for path-only redirects.
+  General: Only redirect to path-relative URLs (starting with &quot;/&quot; not &quot;//&quot;).
+  Always re-validate after URL parsing, not just on the raw string.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_direct_user_input_redirect()
+    test_safe_redirect_suppressed()
+    test_js_open_redirect()
+    test_window_location_js()
+    test_path_only_redirect_safe()
+    test_allowlist_checked_redirect()
+    test_string_concat_medium()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q13_lateral_movement_graph.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q13_lateral_movement_graph.py</h1>
+  <p class="file-path">Source: code\practice\hard\q13_lateral_movement_graph.py</p>
+  <p class="line-count">514 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q13 [Hard] — Lateral Movement Graph Detection
+=============================================================================
+
+PROBLEM
+-------
+Given a stream of authentication/connection events (src_host → dst_host with
+user, timestamp, result), build a directed graph of lateral movement and
+detect suspicious patterns:
+
+  1. Long chains: attacker pivots A → B → C → D … (BFS/DFS hop count)
+  2. Rapid fan-out from a single newly-compromised host (degree burst)
+  3. Use of service accounts for interactive logins (anomalous account usage)
+  4. Beachhead detection: a single host reaches many previously-unreached hosts
+
+CLARIFYING QUESTIONS
+--------------------
+1. What events constitute an &quot;edge&quot;?
+   → Successful authentication (result=&quot;success&quot;) or lateral SMB/WMI/WinRM.
+2. Are failed auths useful?
+   → Yes — many failed auths from the same source = discovery phase.
+3. Is the graph directed (src → dst) or undirected?
+   → Directed; A reaching B does not mean B can reach A.
+4. What is a &quot;long chain&quot;?
+   → Configurable max_chain_depth; default 3 hops from the initial entry point.
+5. How do we identify the entry point?
+   → Hosts that appear as dst but never as src in the baseline, or first-time
+     internet-facing hosts (provide an optional seed set).
+6. Time window?
+   → Sliding window of window_hours; edges older than this are evicted.
+7. What counts as &quot;rapid fan-out&quot;?
+   → A single host reaching &gt; fan_out_threshold distinct dst hosts within
+     fan_out_window_seconds.
+
+=============================================================================
+APPROACH 1 — NAIVE (full graph BFS/DFS on each query)
+=============================================================================
+Store all edges in an adjacency list.  On query: BFS/DFS to find chains.
+  Time : O(V + E) per query
+  Space: O(V + E) — no eviction
+
+=============================================================================
+APPROACH 2 — INCREMENTAL GRAPH with SLIDING WINDOW (RECOMMENDED)
+=============================================================================
+Data structures:
+  - adj: Dict[src → Dict[dst → list of (ts, user)]]  — adjacency with timestamps
+  - reverse_adj: Dict[dst → set of src]  — for quick &quot;who reaches this host?&quot;
+  - fan_out_counter: Dict[host → SlidingWindowCounter]  — recent distinct dsts
+  - edge_expiry_heap: min-heap of (expiry_ts, src, dst) for O(log E) eviction
+
+On new event:
+  1. Add edge to adj; schedule expiry.
+  2. Update fan_out_counter[src]; alert if &gt; threshold.
+  3. Check chain depth from this dst using cached distance table or BFS.
+
+  Time : O(log E) amortised per event (heap insert + eviction)
+  Space: O(active edges × time_window)
+
+=============================================================================
+APPROACH 3 — REACHABILITY MATRIX with DFS for chain detection
+=============================================================================
+Maintain a reachability set per node (transitive closure).  When A → B is
+added, merge A&#x27;s reachability into all nodes that can reach A.
+  O(V²) update in the worst case — too slow for dense graphs.
+  Only mentioned to justify why BFS-on-demand is better.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import heapq
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LateralEvent:
+    src: str
+    dst: str
+    user: str
+    ts: float
+    result: str = &quot;success&quot;   # success | failure
+    method: str = &quot;unknown&quot;   # smb | wmi | winrm | rdp | ssh
+
+@dataclass
+class LateralAlert:
+    alert_type: str            # chain | fan_out | service_account | beachhead
+    src: str
+    dst: Optional[str]
+    ts: float
+    detail: str
+    severity: str = &quot;high&quot;
+    chain: List[str] = field(default_factory=list)   # filled for chain alerts
+
+KNOWN_SERVICE_ACCOUNTS = frozenset({
+    &quot;svc_backup&quot;, &quot;svc_deploy&quot;, &quot;svc_monitoring&quot;, &quot;krbtgt&quot;,
+    &quot;administrator&quot;, &quot;domain_admin&quot;,
+})
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+def _parse_event(raw: dict) -&gt; Optional[LateralEvent]:
+    ts = _parse_ts(raw.get(&quot;ts&quot;))
+    src = raw.get(&quot;src&quot;) or raw.get(&quot;src_host&quot;)
+    dst = raw.get(&quot;dst&quot;) or raw.get(&quot;dst_host&quot;)
+    user = raw.get(&quot;user&quot;, &quot;unknown&quot;)
+    if not ts or not src or not dst:
+        return None
+    return LateralEvent(
+        src=str(src), dst=str(dst), user=str(user), ts=ts,
+        result=raw.get(&quot;result&quot;, &quot;success&quot;),
+        method=raw.get(&quot;method&quot;, &quot;unknown&quot;),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sliding window counter (distinct values)
+# ---------------------------------------------------------------------------
+
+class _SlidingDistinctCounter:
+    &quot;&quot;&quot;Track distinct values within a rolling window.&quot;&quot;&quot;
+
+    def __init__(self, window_seconds: float) -&gt; None:
+        self.window = window_seconds
+        self._events: deque = deque()  # (ts, value)
+        self._counts: Dict[str, int] = defaultdict(int)
+
+    def add(self, ts: float, value: str) -&gt; int:
+        &quot;&quot;&quot;Add value, evict old, return current distinct count.&quot;&quot;&quot;
+        cutoff = ts - self.window
+        while self._events and self._events[0][0] &lt; cutoff:
+            _, old_val = self._events.popleft()
+            self._counts[old_val] -= 1
+            if self._counts[old_val] == 0:
+                del self._counts[old_val]
+        self._events.append((ts, value))
+        self._counts[value] += 1
+        return len(self._counts)
+
+    def distinct_count(self) -&gt; int:
+        return len(self._counts)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveLateralDetector:
+    &quot;&quot;&quot;
+    Store full graph; BFS on every event to find chains.
+    O(V+E) per event — suitable for small / offline datasets.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        max_chain_depth: int = 4,
+        fan_out_threshold: int = 5,
+        service_accounts: FrozenSet[str] = KNOWN_SERVICE_ACCOUNTS,
+        entry_hosts: Optional[Set[str]] = None,
+    ) -&gt; None:
+        self.max_chain = max_chain_depth
+        self.fan_out_threshold = fan_out_threshold
+        self.svc_accounts = service_accounts
+        self.entry_hosts = entry_hosts or set()
+        # adjacency: src → set of dst
+        self._adj: Dict[str, Set[str]] = defaultdict(set)
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[LateralAlert]:
+        evt = _parse_event(raw)
+        if evt is None or evt.result != &quot;success&quot;:
+            if evt is None:
+                self.malformed += 1
+            return []
+        alerts = []
+        self._adj[evt.src].add(evt.dst)
+
+        # Fan-out check
+        if len(self._adj[evt.src]) &gt; self.fan_out_threshold:
+            alerts.append(LateralAlert(
+                alert_type=&quot;fan_out&quot;, src=evt.src, dst=None, ts=evt.ts,
+                detail=f&quot;{evt.src} reached {len(self._adj[evt.src])} distinct hosts&quot;,
+            ))
+
+        # Chain check: BFS from any entry host
+        for start in self.entry_hosts:
+            depth = self._bfs_depth(start, evt.dst)
+            if depth is not None and depth &gt; self.max_chain:
+                chain = self._bfs_path(start, evt.dst)
+                alerts.append(LateralAlert(
+                    alert_type=&quot;chain&quot;, src=start, dst=evt.dst, ts=evt.ts,
+                    detail=f&quot;Chain depth {depth} from entry host {start}&quot;,
+                    chain=chain, severity=&quot;critical&quot;,
+                ))
+
+        # Service account used for lateral move
+        if evt.user.lower() in self.svc_accounts:
+            alerts.append(LateralAlert(
+                alert_type=&quot;service_account&quot;, src=evt.src, dst=evt.dst, ts=evt.ts,
+                detail=f&quot;Service account {evt.user!r} used for lateral auth&quot;,
+            ))
+
+        return alerts
+
+    def _bfs_depth(self, start: str, target: str) -&gt; Optional[int]:
+        if start not in self._adj:
+            return None
+        visited = {start}
+        queue = deque([(start, 0)])
+        while queue:
+            node, depth = queue.popleft()
+            if node == target:
+                return depth
+            if depth &lt; self.max_chain + 1:
+                for nb in self._adj.get(node, []):
+                    if nb not in visited:
+                        visited.add(nb)
+                        queue.append((nb, depth + 1))
+        return None
+
+    def _bfs_path(self, start: str, target: str) -&gt; List[str]:
+        if start == target:
+            return [start]
+        visited = {start}
+        queue = deque([(start, [start])])
+        while queue:
+            node, path = queue.popleft()
+            for nb in self._adj.get(node, []):
+                if nb not in visited:
+                    new_path = path + [nb]
+                    if nb == target:
+                        return new_path
+                    visited.add(nb)
+                    queue.append((nb, new_path))
+        return []
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Incremental Graph with Sliding Window (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class LateralMovementDetector:
+    &quot;&quot;&quot;
+    Incremental sliding-window lateral movement graph.
+
+    Maintains:
+    - adj: src → {dst → [ts...]}
+    - fan_out_counters: per-host sliding distinct-dst counter
+    - expiry_heap: (expiry_ts, src, dst) for eviction
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        window_hours: float = 24.0,
+        max_chain_depth: int = 4,
+        fan_out_threshold: int = 5,
+        fan_out_window_seconds: float = 300.0,
+        service_accounts: FrozenSet[str] = KNOWN_SERVICE_ACCOUNTS,
+        entry_hosts: Optional[Set[str]] = None,
+    ) -&gt; None:
+        self.window = window_hours * 3600
+        self.max_chain = max_chain_depth
+        self.fan_out_threshold = fan_out_threshold
+        self.svc_accounts = service_accounts
+        self.entry_hosts: Set[str] = entry_hosts or set()
+        # adj[src][dst] = sorted list of ts
+        self._adj: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        # All hosts seen as src (have authenticated outward)
+        self._src_hosts: Set[str] = set()
+        # Sliding fan-out counters
+        self._fan_out: Dict[str, _SlidingDistinctCounter] = defaultdict(
+            lambda: _SlidingDistinctCounter(fan_out_window_seconds))
+        # Edge expiry heap: (expiry_ts, src, dst)
+        self._expiry_heap: List[Tuple[float, str, str]] = []
+        self.malformed = 0
+        self._alert_dedup: Set[Tuple] = set()
+
+    def process(self, raw: dict) -&gt; List[LateralAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        self._evict(evt.ts)
+
+        if evt.result != &quot;success&quot;:
+            return []
+
+        alerts: List[LateralAlert] = []
+        expiry = evt.ts + self.window
+
+        # Add edge
+        self._adj[evt.src][evt.dst].append(evt.ts)
+        self._src_hosts.add(evt.src)
+        heapq.heappush(self._expiry_heap, (expiry, evt.src, evt.dst))
+
+        # --- Fan-out check ---
+        distinct_count = self._fan_out[evt.src].add(evt.ts, evt.dst)
+        if distinct_count &gt; self.fan_out_threshold:
+            key = (&quot;fan_out&quot;, evt.src, int(evt.ts / 60))  # dedup per minute
+            if key not in self._alert_dedup:
+                self._alert_dedup.add(key)
+                alerts.append(LateralAlert(
+                    alert_type=&quot;fan_out&quot;, src=evt.src, dst=None, ts=evt.ts,
+                    detail=f&quot;{evt.src} connected to {distinct_count} distinct hosts in &quot;
+                           f&quot;fan-out window&quot;,
+                ))
+
+        # --- Chain check (BFS from each entry host) ---
+        for start in list(self.entry_hosts):
+            path = self._bfs_path_bounded(start, evt.dst)
+            if path and len(path) - 1 &gt; self.max_chain:
+                chain_key = (&quot;chain&quot;, start, evt.dst)
+                if chain_key not in self._alert_dedup:
+                    self._alert_dedup.add(chain_key)
+                    alerts.append(LateralAlert(
+                        alert_type=&quot;chain&quot;, src=start, dst=evt.dst, ts=evt.ts,
+                        detail=f&quot;Lateral chain depth {len(path)-1}: {&#x27; → &#x27;.join(path)}&quot;,
+                        chain=path, severity=&quot;critical&quot;,
+                    ))
+
+        # --- Beachhead: dst is a new host being reached for the first time ---
+        if evt.dst not in self._src_hosts and evt.dst not in self.entry_hosts:
+            # Not a beachhead check here — let caller decide which are &quot;new&quot;
+            pass
+
+        # --- Service account ---
+        if evt.user.lower() in self.svc_accounts:
+            key = (&quot;svc&quot;, evt.src, evt.dst, evt.user)
+            if key not in self._alert_dedup:
+                self._alert_dedup.add(key)
+                alerts.append(LateralAlert(
+                    alert_type=&quot;service_account&quot;, src=evt.src, dst=evt.dst, ts=evt.ts,
+                    detail=f&quot;Service account {evt.user!r} used for lateral auth&quot;,
+                ))
+
+        return alerts
+
+    def _evict(self, now: float) -&gt; None:
+        while self._expiry_heap and self._expiry_heap[0][0] &lt; now:
+            _, src, dst = heapq.heappop(self._expiry_heap)
+            if src in self._adj and dst in self._adj[src]:
+                # Remove oldest ts; if none left, remove edge entirely
+                ts_list = self._adj[src][dst]
+                while ts_list and ts_list[0] &lt; now - self.window:
+                    ts_list.pop(0)
+                if not ts_list:
+                    del self._adj[src][dst]
+            if src in self._adj and not self._adj[src]:
+                del self._adj[src]
+
+    def _bfs_path_bounded(self, start: str, target: str) -&gt; Optional[List[str]]:
+        &quot;&quot;&quot;BFS up to max_chain+1 hops; return path or None.&quot;&quot;&quot;
+        if start not in self._adj:
+            return None
+        visited = {start}
+        queue: deque = deque([(start, [start])])
+        while queue:
+            node, path = queue.popleft()
+            if len(path) &gt; self.max_chain + 1:
+                continue
+            for nb in self._adj.get(node, {}):
+                if nb not in visited:
+                    new_path = path + [nb]
+                    if nb == target:
+                        return new_path
+                    visited.add(nb)
+                    queue.append((nb, new_path))
+        return None
+
+    def reachable_from(self, start: str, max_hops: int = None) -&gt; Set[str]:
+        &quot;&quot;&quot;BFS from start; return set of all reachable hosts.&quot;&quot;&quot;
+        if max_hops is None:
+            max_hops = self.max_chain
+        visited = {start}
+        queue = deque([(start, 0)])
+        while queue:
+            node, depth = queue.popleft()
+            if depth &lt; max_hops:
+                for nb in self._adj.get(node, {}):
+                    if nb not in visited:
+                        visited.add(nb)
+                        queue.append((nb, depth + 1))
+        visited.discard(start)
+        return visited
+
+    def graph_summary(self) -&gt; dict:
+        hosts = set(self._adj.keys())
+        edges = sum(len(v) for v in self._adj.values())
+        return {&quot;hosts&quot;: len(hosts), &quot;edges&quot;: edges}
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _ev(src, dst, user=&quot;user1&quot;, ts=1000.0, result=&quot;success&quot;) -&gt; dict:
+    return {&quot;src&quot;: src, &quot;dst&quot;: dst, &quot;user&quot;: user, &quot;ts&quot;: ts, &quot;result&quot;: result}
+
+
+def test_naive_chain():
+    det = NaiveLateralDetector(max_chain_depth=2, entry_hosts={&quot;host-A&quot;})
+    det.process(_ev(&quot;host-A&quot;, &quot;host-B&quot;, ts=1000))
+    det.process(_ev(&quot;host-B&quot;, &quot;host-C&quot;, ts=1010))
+    alerts = det.process(_ev(&quot;host-C&quot;, &quot;host-D&quot;, ts=1020))
+    chain_alerts = [a for a in alerts if a.alert_type == &quot;chain&quot;]
+    assert len(chain_alerts) &gt; 0, f&quot;Expected chain alert; got {alerts}&quot;
+    assert &quot;host-A&quot; in chain_alerts[0].chain
+    assert &quot;host-D&quot; in chain_alerts[0].chain
+    print(&quot;Naive chain: passed&quot;)
+
+
+def test_fan_out():
+    det = LateralMovementDetector(fan_out_threshold=3, fan_out_window_seconds=600)
+    for i in range(5):
+        alerts = det.process(_ev(&quot;host-X&quot;, f&quot;host-{i}&quot;, ts=float(1000 + i * 10)))
+    assert any(a.alert_type == &quot;fan_out&quot; for a in alerts)
+    print(&quot;Fan-out: passed&quot;)
+
+
+def test_service_account():
+    det = LateralMovementDetector()
+    alerts = det.process(_ev(&quot;host-A&quot;, &quot;host-B&quot;, user=&quot;svc_backup&quot;, ts=1000))
+    assert any(a.alert_type == &quot;service_account&quot; for a in alerts)
+    print(&quot;Service account: passed&quot;)
+
+
+def test_reachable_from():
+    det = LateralMovementDetector()
+    det.process(_ev(&quot;A&quot;, &quot;B&quot;, ts=1000))
+    det.process(_ev(&quot;B&quot;, &quot;C&quot;, ts=1010))
+    det.process(_ev(&quot;C&quot;, &quot;D&quot;, ts=1020))
+    reachable = det.reachable_from(&quot;A&quot;, max_hops=3)
+    assert {&quot;B&quot;, &quot;C&quot;, &quot;D&quot;} == reachable, f&quot;Got {reachable}&quot;
+    print(&quot;Reachable-from: passed&quot;)
+
+
+def test_failure_events_ignored():
+    det = LateralMovementDetector()
+    alerts = det.process(_ev(&quot;A&quot;, &quot;B&quot;, ts=1000, result=&quot;failure&quot;))
+    assert len(alerts) == 0
+    print(&quot;Failures ignored: passed&quot;)
+
+
+def test_no_chain_within_depth():
+    det = LateralMovementDetector(max_chain_depth=5, entry_hosts={&quot;A&quot;})
+    det.process(_ev(&quot;A&quot;, &quot;B&quot;, ts=1000))
+    det.process(_ev(&quot;B&quot;, &quot;C&quot;, ts=1010))
+    # Depth 2 &lt; max_chain 5 — no alert
+    alerts = det.process(_ev(&quot;C&quot;, &quot;D&quot;, ts=1020))
+    chain_alerts = [a for a in alerts if a.alert_type == &quot;chain&quot;]
+    assert len(chain_alerts) == 0
+    print(&quot;No chain within depth: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Lateral movement is stage 4–5 of the Cyber Kill Chain.  After initial
+  compromise, attackers pivot through the network to reach:
+  - Domain controllers (for credential harvesting / Golden Ticket)
+  - Data stores (databases, file servers)
+  - Cloud management planes (AWS SSM, Azure ARC)
+
+  Graph-based detection is the only approach that catches multi-hop attacks
+  where each individual hop looks benign.
+
+SIGNALS
+  - A/B → many hosts: fan-out during discovery/exploitation phase
+  - Long chains: attacker pivoting through a series of hops to avoid detection
+  - Service account lateral auth: service accounts should not do interactive logins
+  - Admin accounts used from workstations (should only be from PAW / jump hosts)
+  - First-time connections: A → B where A has never authenticated to B before
+
+DEFENCES
+  - Segmentation: network zones where lateral movement is architecturally impossible
+  - Privileged Access Workstations (PAW): admin accounts only usable from specific hosts
+  - JIT Access: admin rights only granted for defined time windows
+  - Monitor authentication logs (Windows Event 4624, 4648, 4776; Linux auth.log)
+  - Honeypot hosts: internal hosts that should never receive authentication events
+
+FAILURE MODES
+  - Graph amnesia: eviction of edges removes evidence of slow multi-day attacks.
+    → Keep compressed summary (edge count per pair over time) even after eviction.
+  - Noisy entry host set: if entry_hosts includes all internet-facing servers,
+    chains to benign internal hosts will be flagged.  Use threat-intel-tagged seeds.
+  - Legitimate admin activity: sysadmins frequently do lateral movement.
+    → Build a baseline of known-good (src, dst, user) pairs; suppress those.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_chain()
+    test_fan_out()
+    test_service_account()
+    test_reachable_from()
+    test_failure_events_ignored()
+    test_no_chain_within_depth()
+</code></pre>
+</body>
+</html>

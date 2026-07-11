@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q47_oauth_state_validator.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q47_oauth_state_validator.py</h1>
+  <p class="file-path">Source: code\practice\hard\q47_oauth_state_validator.py</p>
+  <p class="line-count">426 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q47 [Hard] — OAuth State Parameter Validator
+=============================================================================
+
+PROBLEM
+-------
+Implement OAuth 2.0 Authorization Code flow callback validation with:
+  1. State parameter generation (cryptographically random, bound to session).
+  2. State validation: verify state matches session-stored value.
+  3. Nonce validation (OIDC).
+  4. Redirect URI validation against allowlist.
+  5. Expiry: state tokens expire after MAX_AGE_S.
+  6. Single-use: state invalidated after first use.
+  7. PKCE (code_challenge/code_verifier) verification.
+
+CLARIFYING QUESTIONS
+--------------------
+1. State format?
+   → Random 32-byte URL-safe base64 + HMAC for integrity.
+2. State bound to session?
+   → Yes; store in server-side session by session_id.
+3. PKCE method?
+   → S256 only (code_challenge = BASE64URL(SHA256(code_verifier))).
+4. Redirect URI matching?
+   → Exact match against pre-registered allowlist; no wildcard.
+5. Multiple providers?
+   → Yes; state binds to a provider (iss) as well.
+
+=============================================================================
+APPROACH 1 — NAIVE
+=============================================================================
+  State = random token; no HMAC, no expiry, no single-use, wildcard redirect.
+
+=============================================================================
+APPROACH 2 — FULL OAUTH CALLBACK VALIDATOR (OPTIMAL)
+=============================================================================
+  1. generate_state() → (state_token, state_id) stored in server session.
+  2. validate_callback(session_id, state, code, redirect_uri) validates all.
+  3. PKCE: store code_challenge on auth request; verify on callback.
+  4. Nonce: store nonce on auth request; verify in ID token claims.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import secrets
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+STATE_BYTES          = 32
+STATE_MAX_AGE_S      = 600    # 10 minutes
+PKCE_VERIFIER_MIN    = 43     # RFC 7636: 43–128 chars
+PKCE_VERIFIER_MAX    = 128
+NONCE_BYTES          = 16
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OAuthSession:
+    session_id: str
+    state: str
+    state_hmac: str
+    code_challenge: Optional[str]        # BASE64URL(SHA256(verifier))
+    nonce: Optional[str]
+    redirect_uri: str
+    provider: str
+    created_at: float
+    used: bool = False
+
+
+@dataclass
+class OAuthCallbackResult:
+    valid: bool
+    session_id: str
+    nonce: Optional[str] = None
+    failure_reason: str = &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveOAuthValidator:
+    &quot;&quot;&quot;Stores state as plaintext; no expiry, no PKCE, wildcard redirect.&quot;&quot;&quot;
+
+    def __init__(self):
+        self._pending: Dict[str, str] = {}   # session_id → state
+
+    def generate_state(self, session_id: str) -&gt; str:
+        state = secrets.token_urlsafe(16)
+        self._pending[session_id] = state
+        return state
+
+    def validate(self, session_id: str, state: str, redirect_uri: str) -&gt; bool:
+        return self._pending.get(session_id) == state  # timing-vulnerable
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Secure OAuth validator
+# ---------------------------------------------------------------------------
+
+_HMAC_KEY = os.urandom(32)   # Server-side secret for HMAC integrity on state
+
+
+class OAuthStateManager:
+    &quot;&quot;&quot;
+    Manages OAuth 2.0 Authorization Code flow with PKCE and nonce.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowed_redirect_uris: List[str],
+        state_max_age_s: int = STATE_MAX_AGE_S,
+        hmac_key: Optional[bytes] = None,
+    ):
+        self._allowed_uris: Set[str] = set(allowed_redirect_uris)
+        self._max_age_s    = state_max_age_s
+        self._hmac_key     = hmac_key or _HMAC_KEY
+        # session_id → OAuthSession
+        self._sessions: Dict[str, OAuthSession] = {}
+
+    # --- Begin authorization flow -------------------------------------------
+
+    def begin_authorization(
+        self,
+        session_id: str,
+        redirect_uri: str,
+        provider: str = &quot;default&quot;,
+        use_pkce: bool = True,
+        use_nonce: bool = True,
+    ) -&gt; Dict[str, str]:
+        &quot;&quot;&quot;
+        Generates state (and optionally code_challenge + nonce).
+        Returns dict of query params to include in the authorization URL.
+        &quot;&quot;&quot;
+        if redirect_uri not in self._allowed_uris:
+            raise ValueError(f&quot;Redirect URI not in allowlist: {redirect_uri!r}&quot;)
+
+        raw_state  = secrets.token_urlsafe(STATE_BYTES)
+        state_hmac = self._compute_hmac(raw_state, session_id)
+
+        code_verifier  = None
+        code_challenge = None
+        if use_pkce:
+            code_verifier  = secrets.token_urlsafe(PKCE_VERIFIER_MIN)[:PKCE_VERIFIER_MAX]
+            code_challenge = self._s256(code_verifier)
+
+        nonce = secrets.token_hex(NONCE_BYTES) if use_nonce else None
+
+        session = OAuthSession(
+            session_id=session_id,
+            state=raw_state,
+            state_hmac=state_hmac,
+            code_challenge=code_challenge,
+            nonce=nonce,
+            redirect_uri=redirect_uri,
+            provider=provider,
+            created_at=time.monotonic(),
+        )
+        self._sessions[session_id] = session
+
+        params: Dict[str, str] = {
+            &quot;state&quot;: raw_state,
+            &quot;redirect_uri&quot;: redirect_uri,
+        }
+        if code_challenge:
+            params[&quot;code_challenge&quot;] = code_challenge
+            params[&quot;code_challenge_method&quot;] = &quot;S256&quot;
+        if nonce:
+            params[&quot;nonce&quot;] = nonce
+        # code_verifier is stored server-side; NOT sent in redirect
+        if code_verifier:
+            # In a real implementation, store code_verifier in the session
+            # and send it in the token exchange step.
+            session.code_challenge = code_challenge  # already set above
+            params[&quot;_code_verifier_for_test&quot;] = code_verifier
+        return params
+
+    # --- Validate callback ---------------------------------------------------
+
+    def validate_callback(
+        self,
+        session_id: str,
+        returned_state: str,
+        redirect_uri: str,
+        code_verifier: Optional[str] = None,
+    ) -&gt; OAuthCallbackResult:
+        &quot;&quot;&quot;
+        Validate the OAuth callback.
+        &quot;&quot;&quot;
+        fail = lambda reason: OAuthCallbackResult(
+            valid=False, session_id=session_id, failure_reason=reason
+        )
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            return fail(&quot;session_not_found&quot;)
+
+        if session.used:
+            return fail(&quot;state_already_used&quot;)
+
+        # Expiry check
+        age = time.monotonic() - session.created_at
+        if age &gt; self._max_age_s:
+            del self._sessions[session_id]
+            return fail(f&quot;state_expired: age={age:.0f}s&quot;)
+
+        # Redirect URI exact match
+        if redirect_uri != session.redirect_uri:
+            return fail(f&quot;redirect_uri_mismatch&quot;)
+
+        # State comparison (constant-time via HMAC)
+        expected_hmac = self._compute_hmac(returned_state, session_id)
+        if not hmac.compare_digest(expected_hmac, session.state_hmac):
+            return fail(&quot;state_mismatch&quot;)
+
+        # Double check raw state
+        if not hmac.compare_digest(returned_state, session.state):
+            return fail(&quot;state_raw_mismatch&quot;)
+
+        # PKCE verification
+        if session.code_challenge is not None:
+            if code_verifier is None:
+                return fail(&quot;pkce_verifier_missing&quot;)
+            if not (PKCE_VERIFIER_MIN &lt;= len(code_verifier) &lt;= PKCE_VERIFIER_MAX):
+                return fail(f&quot;pkce_verifier_length: {len(code_verifier)}&quot;)
+            computed_challenge = self._s256(code_verifier)
+            if not hmac.compare_digest(computed_challenge, session.code_challenge):
+                return fail(&quot;pkce_challenge_mismatch&quot;)
+
+        # Mark used (single-use)
+        session.used = True
+
+        return OAuthCallbackResult(
+            valid=True,
+            session_id=session_id,
+            nonce=session.nonce,
+        )
+
+    # --- Helpers ------------------------------------------------------------
+
+    def _compute_hmac(self, state: str, session_id: str) -&gt; str:
+        msg = f&quot;{session_id}:{state}&quot;.encode()
+        return hmac.new(self._hmac_key, msg, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _s256(verifier: str) -&gt; str:
+        digest = hashlib.sha256(verifier.encode(&quot;ascii&quot;)).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b&quot;=&quot;).decode()
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+ALLOWED_URIS = [
+    &quot;https://app.example.com/callback&quot;,
+    &quot;https://app.example.com/auth/callback&quot;,
+]
+
+
+def test_valid_flow():
+    mgr  = OAuthStateManager(ALLOWED_URIS)
+    sess = &quot;session-abc123&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+
+    params = mgr.begin_authorization(sess, redirect)
+    r = mgr.validate_callback(
+        session_id=sess,
+        returned_state=params[&quot;state&quot;],
+        redirect_uri=redirect,
+        code_verifier=params.get(&quot;_code_verifier_for_test&quot;),
+    )
+    assert r.valid, r.failure_reason
+    assert r.nonce is not None
+    print(f&quot;Valid OAuth flow: passed (nonce={r.nonce[:8]}...)&quot;)
+
+
+def test_csrf_state_mismatch():
+    mgr  = OAuthStateManager(ALLOWED_URIS)
+    sess = &quot;session-csrf&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+    mgr.begin_authorization(sess, redirect)
+    r = mgr.validate_callback(
+        session_id=sess,
+        returned_state=&quot;attacker_forged_state&quot;,
+        redirect_uri=redirect,
+    )
+    assert not r.valid
+    assert &quot;mismatch&quot; in r.failure_reason or &quot;challenge&quot; in r.failure_reason
+    print(f&quot;CSRF state rejected: passed ({r.failure_reason})&quot;)
+
+
+def test_redirect_uri_mismatch():
+    mgr  = OAuthStateManager(ALLOWED_URIS)
+    sess = &quot;session-redirect&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+    params = mgr.begin_authorization(sess, redirect, use_pkce=False, use_nonce=False)
+    r = mgr.validate_callback(
+        session_id=sess,
+        returned_state=params[&quot;state&quot;],
+        redirect_uri=&quot;https://evil.attacker.com/steal&quot;,
+    )
+    assert not r.valid
+    assert &quot;redirect_uri&quot; in r.failure_reason
+    print(f&quot;Redirect URI mismatch: passed&quot;)
+
+
+def test_disallowed_redirect_uri():
+    mgr = OAuthStateManager(ALLOWED_URIS)
+    try:
+        mgr.begin_authorization(&quot;s1&quot;, &quot;https://evil.com/phish&quot;, use_pkce=False)
+        assert False
+    except ValueError as e:
+        print(f&quot;Disallowed redirect URI: passed ({e})&quot;)
+
+
+def test_single_use_state():
+    mgr  = OAuthStateManager(ALLOWED_URIS)
+    sess = &quot;session-single&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+    params = mgr.begin_authorization(sess, redirect, use_pkce=False, use_nonce=False)
+    mgr.validate_callback(sess, params[&quot;state&quot;], redirect)
+    r2 = mgr.validate_callback(sess, params[&quot;state&quot;], redirect)
+    assert not r2.valid
+    assert r2.failure_reason == &quot;state_already_used&quot;
+    print(f&quot;Single-use state: passed&quot;)
+
+
+def test_expired_state():
+    mgr  = OAuthStateManager(ALLOWED_URIS, state_max_age_s=0)
+    sess = &quot;session-expire&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+    params = mgr.begin_authorization(sess, redirect, use_pkce=False, use_nonce=False)
+    import time; time.sleep(0.01)
+    r = mgr.validate_callback(sess, params[&quot;state&quot;], redirect)
+    assert not r.valid
+    assert &quot;expired&quot; in r.failure_reason
+    print(f&quot;Expired state: passed ({r.failure_reason})&quot;)
+
+
+def test_pkce_verifier_missing():
+    mgr  = OAuthStateManager(ALLOWED_URIS)
+    sess = &quot;session-pkce&quot;
+    redirect = &quot;https://app.example.com/callback&quot;
+    params = mgr.begin_authorization(sess, redirect, use_pkce=True, use_nonce=False)
+    r = mgr.validate_callback(
+        session_id=sess,
+        returned_state=params[&quot;state&quot;],
+        redirect_uri=redirect,
+        code_verifier=None,  # Missing verifier
+    )
+    assert not r.valid
+    assert &quot;pkce&quot; in r.failure_reason
+    print(f&quot;PKCE verifier missing: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+OAUTH CSRF AND STATE PARAMETER
+--------------------------------
+The OAuth state parameter is the CSRF token for the authorization flow.
+
+CSRF ATTACK WITHOUT STATE
+--------------------------
+1. Attacker starts their own OAuth flow; gets an authorization code.
+2. Instead of using it, embeds the callback URL in the victim&#x27;s browser
+   (via img src, XSS, link).
+3. Victim&#x27;s browser sends the callback to the app → app links the
+   attacker&#x27;s OAuth account to the victim&#x27;s session.
+   Result: attacker controls the victim&#x27;s account.
+4. Fix: bind state to session; validate on callback.
+
+OPEN REDIRECT IN REDIRECT_URI
+-------------------------------
+If redirect_uri is not strictly validated:
+  redirect_uri=https://app.example.com/callback/../phish
+  redirect_uri=https://app.example.com%0a.attacker.com/steal
+Attacker receives authorization code → exchanges for access token.
+Fix: exact match against pre-registered allowlist; no path-relative matching.
+
+PKCE (PROOF KEY FOR CODE EXCHANGE — RFC 7636)
+---------------------------------------------
+Protects public clients (SPAs, mobile apps) from authorization code
+interception:
+1. App generates random code_verifier (43–128 chars).
+2. Sends code_challenge = BASE64URL(SHA256(verifier)) in auth request.
+3. On token exchange, sends verifier.
+4. Server verifies challenge = S256(verifier) before issuing token.
+Without PKCE: malicious app on same device intercepts the redirect;
+exchanges code for tokens. With PKCE: can&#x27;t compute verifier from challenge.
+
+NONCE (OIDC REPLAY PREVENTION)
+-------------------------------
+Nonce embedded in ID token prevents replay:
+  Attacker captures an ID token, replays it to the app.
+  If nonce is checked, replay fails (nonce already consumed).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_flow()
+    test_csrf_state_mismatch()
+    test_redirect_uri_mismatch()
+    test_disallowed_redirect_uri()
+    test_single_use_state()
+    test_expired_state()
+    test_pkce_verifier_missing()
+</code></pre>
+</body>
+</html>

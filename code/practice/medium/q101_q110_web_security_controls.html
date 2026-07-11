@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q101_q110_web_security_controls.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q101_q110_web_security_controls.py</h1>
+  <p class="file-path">Source: code\practice\medium\q101_q110_web_security_controls.py</p>
+  <p class="line-count">802 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q101–Q110
+Topic: Web Security Controls — Command Execution, JWT Validation,
+       Secret Scanning, Input Validation, CSRF, Cookies, Security Headers, CORS
+&quot;&quot;&quot;
+
+import re
+import hmac
+import hashlib
+import json
+import time
+import base64
+import urllib.parse
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q101 — Secure Command Execution Wrapper
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a safe command execution wrapper that:
+  1. Only allows a predefined allowlist of commands.
+  2. Passes arguments as a list (never shell=True).
+  3. Strips or rejects dangerous characters in arguments.
+  4. Returns (stdout, stderr, returncode) tuple.
+
+Clarifying questions:
+  1. Should the allowlist be a config file or hardcoded?
+  2. Should we capture stdout+stderr together or separately?
+  3. What is the timeout?
+
+Security angle:
+  Shell injection (CWE-78) occurs when user input is interpolated into a shell
+  command. The fix is using subprocess with shell=False and an argument list.
+  An allowlist of commands prevents arbitrary binary execution even if an
+  injection bypass is found. This is the pattern used in hardened CI/CD runners.
+&quot;&quot;&quot;
+
+import subprocess
+
+_ALLOWED_COMMANDS: frozenset = frozenset({&quot;cmd&quot;, &quot;python&quot;, &quot;whoami&quot;, &quot;hostname&quot;})
+_DANGEROUS_ARG_RE = re.compile(r&quot;[;&amp;|`$&lt;&gt;!\\]&quot;)
+
+
+def safe_exec(
+    command: str,
+    args: List[str],
+    allowed_commands: Optional[frozenset] = None,
+    timeout: int = 10,
+) -&gt; Tuple[str, str, int]:
+    &quot;&quot;&quot;
+    Executes command safely with allowlist and argument sanitisation.
+    Returns (stdout, stderr, returncode).
+    Raises ValueError if command not allowed or args contain dangerous chars.
+    &quot;&quot;&quot;
+    if allowed_commands is None:
+        allowed_commands = _ALLOWED_COMMANDS
+
+    if command not in allowed_commands:
+        raise ValueError(f&quot;Command &#x27;{command}&#x27; not in allowlist&quot;)
+
+    for arg in args:
+        if _DANGEROUS_ARG_RE.search(arg):
+            raise ValueError(f&quot;Dangerous character in argument: {arg!r}&quot;)
+
+    result = subprocess.run(
+        [command] + args,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
+def test_q101():
+    import sys
+    # Allowed: run python with --version (works cross-platform)
+    stdout, stderr, rc = safe_exec(&quot;python&quot;, [&quot;--version&quot;])
+    assert rc == 0
+
+    # Disallowed command
+    try:
+        safe_exec(&quot;rm&quot;, [&quot;/tmp/test&quot;])
+        assert False, &quot;Should have raised&quot;
+    except ValueError as e:
+        assert &quot;allowlist&quot; in str(e)
+
+    # Dangerous argument
+    try:
+        safe_exec(&quot;python&quot;, [&quot;hello; rm -rf /&quot;])
+        assert False, &quot;Should have raised&quot;
+    except ValueError as e:
+        assert &quot;Dangerous&quot; in str(e)
+
+    print(&quot;Q101 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q102 — Validate JWT Algorithm
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a JWT header decoder that validates the algorithm field.
+  Reject tokens that use &quot;none&quot;, symmetric algorithms on asymmetric endpoints,
+  or algorithms not in an explicit allowlist.
+
+Clarifying questions:
+  1. Are we validating the header only, or the full JWT signature?
+  2. What algorithms are acceptable? (default: RS256, ES256, PS256)
+  3. Should we flag alg:none with an error or silently reject?
+
+Security angle:
+  The CVE-2015-9235 &quot;alg:none&quot; attack allows bypassing JWT signature
+  verification by setting the algorithm to &quot;none&quot; — the server then accepts
+  any token without verifying. Other attack: downgrade from RS256 to HS256,
+  then sign with the server&#x27;s public key as the HMAC secret.
+  The fix: maintain an explicit server-side allowlist of accepted algorithms.
+  Never read the algorithm from the token header without validation.
+&quot;&quot;&quot;
+
+_SAFE_JWT_ALGORITHMS: frozenset = frozenset({&quot;RS256&quot;, &quot;RS384&quot;, &quot;RS512&quot;, &quot;ES256&quot;, &quot;ES384&quot;, &quot;PS256&quot;})
+
+
+def decode_jwt_header(token: str) -&gt; Dict:
+    &quot;&quot;&quot;
+    Decodes the JWT header (base64url) and returns the parsed dict.
+    Raises ValueError if header cannot be decoded.
+    &quot;&quot;&quot;
+    try:
+        parts = token.split(&quot;.&quot;)
+        if len(parts) != 3:
+            raise ValueError(&quot;Not a valid JWT (expected 3 parts)&quot;)
+        header_b64 = parts[0]
+        # Add padding
+        padding = 4 - len(header_b64) % 4
+        header_b64 += &quot;=&quot; * (padding % 4)
+        header_json = base64.urlsafe_b64decode(header_b64).decode(&quot;utf-8&quot;)
+        return json.loads(header_json)
+    except Exception as exc:
+        raise ValueError(f&quot;Failed to decode JWT header: {exc}&quot;) from exc
+
+
+def validate_jwt_algorithm(
+    token: str,
+    allowed_algorithms: Optional[frozenset] = None,
+) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;valid&quot;: bool, &quot;alg&quot;: str, &quot;reason&quot;: str}.
+    &quot;&quot;&quot;
+    if allowed_algorithms is None:
+        allowed_algorithms = _SAFE_JWT_ALGORITHMS
+
+    try:
+        header = decode_jwt_header(token)
+    except ValueError as e:
+        return {&quot;valid&quot;: False, &quot;alg&quot;: None, &quot;reason&quot;: str(e)}
+
+    alg = header.get(&quot;alg&quot;) or &quot;none&quot;
+
+    if alg.lower() == &quot;none&quot;:
+        return {&quot;valid&quot;: False, &quot;alg&quot;: alg, &quot;reason&quot;: &quot;Algorithm &#x27;none&#x27; rejected&quot;}
+    if alg not in allowed_algorithms:
+        return {&quot;valid&quot;: False, &quot;alg&quot;: alg, &quot;reason&quot;: f&quot;Algorithm &#x27;{alg}&#x27; not in allowlist&quot;}
+
+    return {&quot;valid&quot;: True, &quot;alg&quot;: alg, &quot;reason&quot;: &quot;OK&quot;}
+
+
+def _make_jwt(header_dict: dict) -&gt; str:
+    &quot;&quot;&quot;Helper: create a JWT token string with given header (no real signature).&quot;&quot;&quot;
+    header_json = json.dumps(header_dict).encode()
+    header_b64 = base64.urlsafe_b64encode(header_json).rstrip(b&quot;=&quot;).decode()
+    return f&quot;{header_b64}.payload.signature&quot;
+
+
+def test_q102():
+    # Valid RS256 token
+    tok_rs256 = _make_jwt({&quot;alg&quot;: &quot;RS256&quot;, &quot;typ&quot;: &quot;JWT&quot;})
+    r = validate_jwt_algorithm(tok_rs256)
+    assert r[&quot;valid&quot;] is True
+
+    # alg:none attack
+    tok_none = _make_jwt({&quot;alg&quot;: &quot;none&quot;, &quot;typ&quot;: &quot;JWT&quot;})
+    r = validate_jwt_algorithm(tok_none)
+    assert r[&quot;valid&quot;] is False
+    assert &quot;none&quot; in r[&quot;reason&quot;]
+
+    # HS256 not in allowlist
+    tok_hs256 = _make_jwt({&quot;alg&quot;: &quot;HS256&quot;, &quot;typ&quot;: &quot;JWT&quot;})
+    r = validate_jwt_algorithm(tok_hs256)
+    assert r[&quot;valid&quot;] is False
+
+    print(&quot;Q102 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q103 — Validate JWT Expiry and Audience
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Decode and validate the JWT payload (exp, nbf, aud claims) without
+  verifying the signature (treating signature verification as a separate step).
+
+Clarifying questions:
+  1. Should we enforce strict aud matching (list vs string)?
+  2. What is the acceptable clock skew? (default: 30 seconds)
+  3. Should we reject JWTs with no exp claim?
+
+Security angle:
+  Missing claim validation is a common JWT implementation flaw:
+  - No exp check → tokens valid forever after compromise.
+  - No aud check → tokens issued for service A accepted by service B.
+  These are listed in jwt.io&#x27;s &quot;Critical vulnerabilities in JWT libraries&quot; (2015).
+  Every JWT consumer must validate: exp, nbf, aud, iss (and sub as needed).
+&quot;&quot;&quot;
+
+
+def decode_jwt_payload(token: str) -&gt; Dict:
+    &quot;&quot;&quot;Decode the JWT payload claims (middle part).&quot;&quot;&quot;
+    try:
+        parts = token.split(&quot;.&quot;)
+        if len(parts) != 3:
+            raise ValueError(&quot;Invalid JWT structure&quot;)
+        payload_b64 = parts[1]
+        padding = 4 - len(payload_b64) % 4
+        payload_b64 += &quot;=&quot; * (padding % 4)
+        payload_json = base64.urlsafe_b64decode(payload_b64).decode(&quot;utf-8&quot;)
+        return json.loads(payload_json)
+    except Exception as exc:
+        raise ValueError(f&quot;Failed to decode JWT payload: {exc}&quot;) from exc
+
+
+def validate_jwt_claims(
+    token: str,
+    expected_audience: Optional[str] = None,
+    clock_skew_seconds: int = 30,
+    require_exp: bool = True,
+    now: Optional[float] = None,
+) -&gt; Dict:
+    &quot;&quot;&quot;
+    Validates exp, nbf, and aud claims.
+    Returns {&quot;valid&quot;: bool, &quot;reason&quot;: str, &quot;claims&quot;: dict}.
+    &quot;&quot;&quot;
+    now = now if now is not None else time.time()
+    try:
+        claims = decode_jwt_payload(token)
+    except ValueError as e:
+        return {&quot;valid&quot;: False, &quot;reason&quot;: str(e), &quot;claims&quot;: {}}
+
+    # exp check
+    exp = claims.get(&quot;exp&quot;)
+    if require_exp and exp is None:
+        return {&quot;valid&quot;: False, &quot;reason&quot;: &quot;Missing &#x27;exp&#x27; claim&quot;, &quot;claims&quot;: claims}
+    if exp is not None and now &gt; exp + clock_skew_seconds:
+        return {&quot;valid&quot;: False, &quot;reason&quot;: &quot;Token expired&quot;, &quot;claims&quot;: claims}
+
+    # nbf check
+    nbf = claims.get(&quot;nbf&quot;)
+    if nbf is not None and now &lt; nbf - clock_skew_seconds:
+        return {&quot;valid&quot;: False, &quot;reason&quot;: &quot;Token not yet valid (nbf)&quot;, &quot;claims&quot;: claims}
+
+    # aud check
+    if expected_audience is not None:
+        aud = claims.get(&quot;aud&quot;)
+        aud_list = [aud] if isinstance(aud, str) else (aud or [])
+        if expected_audience not in aud_list:
+            return {&quot;valid&quot;: False, &quot;reason&quot;: f&quot;Audience mismatch: expected {expected_audience!r}&quot;, &quot;claims&quot;: claims}
+
+    return {&quot;valid&quot;: True, &quot;reason&quot;: &quot;OK&quot;, &quot;claims&quot;: claims}
+
+
+def _make_jwt_with_payload(header: dict, payload: dict) -&gt; str:
+    def b64(d: dict) -&gt; str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b&quot;=&quot;).decode()
+    return f&quot;{b64(header)}.{b64(payload)}.sig&quot;
+
+
+def test_q103():
+    now = time.time()
+
+    # Valid token
+    tok_ok = _make_jwt_with_payload(
+        {&quot;alg&quot;: &quot;RS256&quot;}, {&quot;sub&quot;: &quot;u1&quot;, &quot;exp&quot;: int(now + 300), &quot;aud&quot;: &quot;api.example.com&quot;}
+    )
+    r = validate_jwt_claims(tok_ok, expected_audience=&quot;api.example.com&quot;, now=now)
+    assert r[&quot;valid&quot;] is True
+
+    # Expired
+    tok_exp = _make_jwt_with_payload(
+        {&quot;alg&quot;: &quot;RS256&quot;}, {&quot;sub&quot;: &quot;u1&quot;, &quot;exp&quot;: int(now - 400)}
+    )
+    r = validate_jwt_claims(tok_exp, now=now)
+    assert r[&quot;valid&quot;] is False and &quot;expired&quot; in r[&quot;reason&quot;].lower()
+
+    # Wrong audience
+    tok_aud = _make_jwt_with_payload(
+        {&quot;alg&quot;: &quot;RS256&quot;}, {&quot;sub&quot;: &quot;u1&quot;, &quot;exp&quot;: int(now + 300), &quot;aud&quot;: &quot;other.service&quot;}
+    )
+    r = validate_jwt_claims(tok_aud, expected_audience=&quot;api.example.com&quot;, now=now)
+    assert r[&quot;valid&quot;] is False and &quot;Audience&quot; in r[&quot;reason&quot;]
+
+    print(&quot;Q103 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q104 — Detect Hardcoded Secrets in Code
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Scan a code snippet or file for hardcoded secrets:
+  - AWS access keys (AKIA...).
+  - Password assignments.
+  - API keys / tokens in variable names.
+  - Private key PEM blocks.
+
+Clarifying questions:
+  1. Should we scan line-by-line or as full text?
+  2. What is the false positive strategy for test fixtures?
+  3. Should we compute entropy of string values to reduce false positives?
+
+Security angle:
+  Hardcoded secrets (CWE-798) are the most common cause of credential leakage
+  on GitHub. GitHub secret scanning, truffleHog, and Gitleaks all use this
+  approach. Detection must balance high sensitivity with low false positive rate.
+  Entropy threshold (Shannon &gt; 4.5 bits/char) reduces false positives
+  from dictionary-like values.
+&quot;&quot;&quot;
+
+import math
+
+_SECRET_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;aws_access_key&quot;, re.compile(r&quot;\bAKIA[0-9A-Z]{16}\b&quot;)),
+    (&quot;aws_secret_key&quot;, re.compile(r&quot;&quot;&quot;(?:aws_secret|secret_access_key)\s*=\s*[&quot;&#x27;][A-Za-z0-9/+]{40}[&quot;&#x27;]&quot;&quot;&quot;, re.IGNORECASE)),
+    (&quot;password_assign&quot;, re.compile(r&quot;&quot;&quot;(?:password|passwd|pwd)\s*=\s*[&quot;&#x27;][^&quot;&#x27;]{6,}[&quot;&#x27;]&quot;&quot;&quot;, re.IGNORECASE)),
+    (&quot;api_key_assign&quot;,  re.compile(r&quot;&quot;&quot;(?:api_key|apikey|token|secret)\s*=\s*[&quot;&#x27;][A-Za-z0-9._\-]{16,}[&quot;&#x27;]&quot;&quot;&quot;, re.IGNORECASE)),
+    (&quot;private_key_pem&quot;, re.compile(r&quot;-----BEGIN (RSA |EC )?PRIVATE KEY-----&quot;)),
+]
+
+
+def _shannon_entropy(s: str) -&gt; float:
+    if not s:
+        return 0.0
+    freq = {c: s.count(c) / len(s) for c in set(s)}
+    return -sum(p * math.log2(p) for p in freq.values())
+
+
+def detect_hardcoded_secrets(code: str, min_entropy: float = 3.0) -&gt; List[Dict]:
+    findings = []
+    for name, pattern in _SECRET_PATTERNS:
+        for match in pattern.finditer(code):
+            snippet = match.group(0)
+            # Extract the value portion for entropy check
+            val_match = re.search(r&quot;&quot;&quot;[&quot;&#x27;]([^&quot;&#x27;]+)[&quot;&#x27;]&quot;&quot;&quot;, snippet)
+            value = val_match.group(1) if val_match else snippet
+            if _shannon_entropy(value) &gt;= min_entropy:
+                findings.append({
+                    &quot;type&quot;: name,
+                    &quot;snippet&quot;: snippet[:100],
+                    &quot;entropy&quot;: round(_shannon_entropy(value), 2),
+                })
+    return findings
+
+
+def test_q104():
+    code_with_secrets = &quot;&quot;&quot;
+AWS_ACCESS_KEY_ID = &quot;AKIAIOSFODNN7EXAMPLE&quot;
+password = &quot;SuperSecret123!&quot;
+api_key = &quot;sk-abcdefghijklmnopqrstuvwx12345678&quot;
+&quot;&quot;&quot;
+    code_clean = &quot;&quot;&quot;
+password = os.environ.get(&quot;DB_PASSWORD&quot;)
+api_key = config.get(&quot;API_KEY&quot;)
+&quot;&quot;&quot;
+    results_bad = detect_hardcoded_secrets(code_with_secrets)
+    results_clean = detect_hardcoded_secrets(code_clean)
+    assert len(results_bad) &gt;= 2
+    assert len(results_clean) == 0
+    print(&quot;Q104 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q105 — Build Simple Secret Scanner (File-Level)
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Extend Q104 to scan a list of (filename, content) pairs and return a
+  report grouped by file with line numbers.
+
+Clarifying questions:
+  1. Should we skip binary files?
+  2. Should we support .gitignore-style exclusions?
+  3. Should we return only the first match per file or all?
+
+Security angle:
+  Secret scanners like truffleHog and Gitleaks scan git history line by line.
+  Providing line numbers is critical for remediation. Scanning pre-commit
+  (before secrets enter git history) is the best control.
+&quot;&quot;&quot;
+
+
+def scan_files_for_secrets(
+    files: List[Tuple[str, str]],
+    min_entropy: float = 3.0,
+) -&gt; Dict[str, List[Dict]]:
+    &quot;&quot;&quot;
+    Returns {filename: [finding, ...]} for files with secrets.
+    &quot;&quot;&quot;
+    report: Dict[str, List[Dict]] = {}
+    for filename, content in files:
+        file_findings = []
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            findings = detect_hardcoded_secrets(line, min_entropy=min_entropy)
+            for f in findings:
+                file_findings.append({**f, &quot;line&quot;: lineno})
+        if file_findings:
+            report[filename] = file_findings
+    return report
+
+
+def test_q105():
+    files = [
+        (&quot;config.py&quot;, &#x27;api_key = &quot;sk-abcdefghijklmnopqrstu12345&quot;\nDEBUG = True\n&#x27;),
+        (&quot;settings.py&quot;, &#x27;DB_HOST = &quot;localhost&quot;\nDB_PORT = 5432\n&#x27;),
+    ]
+    report = scan_files_for_secrets(files)
+    assert &quot;config.py&quot; in report
+    assert report[&quot;config.py&quot;][0][&quot;line&quot;] == 1
+    assert &quot;settings.py&quot; not in report
+    print(&quot;Q105 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q106 — Build Allowlist-Based Input Validator
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Build a generic input validator that checks user-supplied values against
+  configurable allowlist rules (regex pattern, min/max length, allowed chars).
+  Return a validation result with specific error messages.
+
+Clarifying questions:
+  1. Should we validate nested JSON objects or flat key-value pairs?
+  2. Should we support multiple rules per field?
+  3. Should we sanitise (strip) or reject?
+
+Security angle:
+  Input validation (OWASP A03) is the first layer of defence against injection.
+  Allowlist validation (only permit known-good values) is stronger than
+  denylist (block known-bad). This pattern is used in API gateway request
+  validation and WAF rule configuration.
+&quot;&quot;&quot;
+
+
+def validate_input(
+    value: str,
+    field_name: str,
+    allowed_pattern: Optional[str] = None,
+    min_length: int = 0,
+    max_length: int = 256,
+    allowed_chars: Optional[str] = None,
+) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;valid&quot;: bool, &quot;errors&quot;: [str]}.
+    &quot;&quot;&quot;
+    errors = []
+
+    if not isinstance(value, str):
+        return {&quot;valid&quot;: False, &quot;errors&quot;: [f&quot;{field_name}: must be a string&quot;]}
+
+    length = len(value)
+    if length &lt; min_length:
+        errors.append(f&quot;{field_name}: too short (min {min_length})&quot;)
+    if length &gt; max_length:
+        errors.append(f&quot;{field_name}: too long (max {max_length})&quot;)
+
+    if allowed_pattern:
+        if not re.fullmatch(allowed_pattern, value):
+            errors.append(f&quot;{field_name}: does not match required pattern&quot;)
+
+    if allowed_chars:
+        bad = set(value) - set(allowed_chars)
+        if bad:
+            errors.append(f&quot;{field_name}: contains disallowed characters: {sorted(bad)}&quot;)
+
+    return {&quot;valid&quot;: len(errors) == 0, &quot;errors&quot;: errors}
+
+
+def test_q106():
+    r = validate_input(&quot;alice123&quot;, &quot;username&quot;, allowed_pattern=r&quot;[a-z0-9]{3,20}&quot;, min_length=3, max_length=20)
+    assert r[&quot;valid&quot;] is True
+
+    r = validate_input(&quot;al&quot;, &quot;username&quot;, allowed_pattern=r&quot;[a-z0-9]{3,20}&quot;, min_length=3)
+    assert r[&quot;valid&quot;] is False
+    assert any(&quot;short&quot; in e for e in r[&quot;errors&quot;])
+
+    r = validate_input(&quot;alice&#x27;; DROP TABLE users--&quot;, &quot;username&quot;,
+                       allowed_chars=&quot;abcdefghijklmnopqrstuvwxyz0123456789&quot;)
+    assert r[&quot;valid&quot;] is False
+
+    print(&quot;Q106 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q107 — CSRF Token Validator
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement CSRF token generation and validation using HMAC-SHA256.
+  Tokens are bound to the session ID so they can&#x27;t be reused across sessions.
+
+Clarifying questions:
+  1. Should the token be per-request (nonce) or per-session?
+  2. How long should tokens be valid? (default: per-session)
+  3. Should we use the double-submit cookie pattern or synchroniser token?
+
+Security angle:
+  CSRF (OWASP A01) exploits the browser&#x27;s automatic inclusion of cookies.
+  HMAC-based tokens are unforgeable without the server&#x27;s secret key.
+  Binding the token to the session ID prevents an attacker from using their own
+  valid token against another user&#x27;s session (token substitution attack).
+&quot;&quot;&quot;
+
+_CSRF_SECRET = b&quot;csrf-secret-key-change-in-production&quot;
+
+
+def generate_csrf_token(session_id: str, secret: bytes = _CSRF_SECRET) -&gt; str:
+    &quot;&quot;&quot;Generate a CSRF token bound to the session ID.&quot;&quot;&quot;
+    mac = hmac.new(secret, session_id.encode(), hashlib.sha256)
+    return mac.hexdigest()
+
+
+def validate_csrf_token(
+    session_id: str,
+    token: str,
+    secret: bytes = _CSRF_SECRET,
+) -&gt; bool:
+    &quot;&quot;&quot;Validate CSRF token using constant-time comparison.&quot;&quot;&quot;
+    expected = generate_csrf_token(session_id, secret)
+    return hmac.compare_digest(expected, token)
+
+
+def test_q107():
+    sid = &quot;session-abc-123&quot;
+    token = generate_csrf_token(sid)
+    assert validate_csrf_token(sid, token) is True
+    assert validate_csrf_token(sid, &quot;tampered&quot;) is False
+    assert validate_csrf_token(&quot;other-session&quot;, token) is False
+    print(&quot;Q107 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q108 — Secure Cookie Configuration Checker
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a Set-Cookie header string, check that it has all required security
+  attributes: Secure, HttpOnly, SameSite=Strict or Lax, and an appropriate
+  Max-Age or Expires.
+
+Clarifying questions:
+  1. Should we check all cookies or just session cookies?
+  2. Is SameSite=None acceptable if Secure is also set? (yes, for cross-origin)
+  3. Should we flag overly long Max-Age values?
+
+Security angle:
+  Cookie security attributes prevent a range of attacks:
+  - Secure: prevents transmission over plain HTTP (MitM interception).
+  - HttpOnly: prevents JavaScript access (XSS cookie theft).
+  - SameSite=Strict/Lax: prevents CSRF.
+  Missing any of these is a misconfiguration (CWE-614, CWE-1004, CWE-1275).
+&quot;&quot;&quot;
+
+
+def check_cookie_security(set_cookie_header: str) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;secure&quot;: bool, &quot;httponly&quot;: bool, &quot;samesite&quot;: str|None, &quot;issues&quot;: [str]}.
+    &quot;&quot;&quot;
+    issues = []
+    attrs = [a.strip().lower() for a in set_cookie_header.split(&quot;;&quot;)]
+
+    secure = &quot;secure&quot; in attrs
+    httponly = &quot;httponly&quot; in attrs
+    samesite = next((a.split(&quot;=&quot;)[1].strip() for a in attrs if a.startswith(&quot;samesite=&quot;)), None)
+    has_expiry = any(a.startswith(&quot;max-age=&quot;) or a.startswith(&quot;expires=&quot;) for a in attrs)
+
+    if not secure:
+        issues.append(&quot;Missing Secure flag&quot;)
+    if not httponly:
+        issues.append(&quot;Missing HttpOnly flag&quot;)
+    if samesite is None:
+        issues.append(&quot;Missing SameSite attribute&quot;)
+    elif samesite == &quot;none&quot; and not secure:
+        issues.append(&quot;SameSite=None requires Secure flag&quot;)
+    if not has_expiry:
+        issues.append(&quot;Missing Max-Age or Expires (session cookie — consider explicit expiry)&quot;)
+
+    return {
+        &quot;secure&quot;: secure,
+        &quot;httponly&quot;: httponly,
+        &quot;samesite&quot;: samesite,
+        &quot;has_expiry&quot;: has_expiry,
+        &quot;issues&quot;: issues,
+    }
+
+
+def test_q108():
+    good = &quot;sessionid=abc123; Secure; HttpOnly; SameSite=Strict; Max-Age=3600&quot;
+    bad  = &quot;sessionid=abc123; Max-Age=3600&quot;
+
+    r_good = check_cookie_security(good)
+    assert r_good[&quot;issues&quot;] == []
+
+    r_bad = check_cookie_security(bad)
+    assert any(&quot;Secure&quot; in i for i in r_bad[&quot;issues&quot;])
+    assert any(&quot;HttpOnly&quot; in i for i in r_bad[&quot;issues&quot;])
+    assert any(&quot;SameSite&quot; in i for i in r_bad[&quot;issues&quot;])
+    print(&quot;Q108 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q109 — Detect Missing Security Headers
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given an HTTP response headers dict, check for the presence and correctness
+  of required security headers:
+  - Strict-Transport-Security (HSTS)
+  - X-Content-Type-Options: nosniff
+  - X-Frame-Options: DENY or SAMEORIGIN
+  - Content-Security-Policy (any non-empty value)
+  - Referrer-Policy
+
+Clarifying questions:
+  1. Should we validate header values or just presence?
+  2. Should we flag deprecated headers (X-XSS-Protection)?
+  3. Is Permissions-Policy required?
+
+Security angle:
+  Missing security headers (OWASP A05 misconfiguration) are flagged by every
+  security scanner (e.g., SecurityHeaders.com). HSTS prevents SSL stripping,
+  X-Content-Type-Options prevents MIME sniffing attacks, CSP reduces XSS impact,
+  X-Frame-Options prevents clickjacking.
+&quot;&quot;&quot;
+
+_REQUIRED_HEADERS: Dict[str, Optional[re.Pattern]] = {
+    &quot;strict-transport-security&quot;: re.compile(r&quot;max-age=\d+&quot;, re.IGNORECASE),
+    &quot;x-content-type-options&quot;: re.compile(r&quot;nosniff&quot;, re.IGNORECASE),
+    &quot;x-frame-options&quot;: re.compile(r&quot;(DENY|SAMEORIGIN)&quot;, re.IGNORECASE),
+    &quot;content-security-policy&quot;: re.compile(r&quot;.+&quot;),
+    &quot;referrer-policy&quot;: re.compile(r&quot;.+&quot;),
+}
+
+
+def check_security_headers(headers: Dict[str, str]) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;missing&quot;: [str], &quot;misconfigured&quot;: [str], &quot;ok&quot;: [str]}.
+    Headers dict keys are compared case-insensitively.
+    &quot;&quot;&quot;
+    normalised = {k.lower(): v for k, v in headers.items()}
+    missing, misconfigured, ok = [], [], []
+
+    for header, pattern in _REQUIRED_HEADERS.items():
+        value = normalised.get(header)
+        if value is None:
+            missing.append(header)
+        elif pattern and not pattern.search(value):
+            misconfigured.append(f&quot;{header}: {value!r}&quot;)
+        else:
+            ok.append(header)
+
+    return {&quot;missing&quot;: missing, &quot;misconfigured&quot;: misconfigured, &quot;ok&quot;: ok}
+
+
+def test_q109():
+    good_headers = {
+        &quot;Strict-Transport-Security&quot;: &quot;max-age=31536000; includeSubDomains&quot;,
+        &quot;X-Content-Type-Options&quot;: &quot;nosniff&quot;,
+        &quot;X-Frame-Options&quot;: &quot;DENY&quot;,
+        &quot;Content-Security-Policy&quot;: &quot;default-src &#x27;self&#x27;&quot;,
+        &quot;Referrer-Policy&quot;: &quot;strict-origin-when-cross-origin&quot;,
+    }
+    bad_headers = {
+        &quot;X-Content-Type-Options&quot;: &quot;nosniff&quot;,
+        &quot;X-Frame-Options&quot;: &quot;ALLOWALL&quot;,   # bad value
+    }
+
+    r_good = check_security_headers(good_headers)
+    assert r_good[&quot;missing&quot;] == []
+    assert r_good[&quot;misconfigured&quot;] == []
+
+    r_bad = check_security_headers(bad_headers)
+    assert &quot;strict-transport-security&quot; in r_bad[&quot;missing&quot;]
+    assert any(&quot;x-frame-options&quot; in m for m in r_bad[&quot;misconfigured&quot;])
+    print(&quot;Q109 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q110 — Validate CORS Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Validate an Access-Control-Allow-Origin header value against a server-side
+  allowlist of trusted origins. Return whether the CORS response is safe.
+  Flag: wildcard + credentials, or reflective origin without validation.
+
+Clarifying questions:
+  1. Is the server reflecting the request Origin header back? (dangerous)
+  2. Does the response also include Access-Control-Allow-Credentials: true?
+  3. Are subdomains included in the allowlist?
+
+Security angle:
+  CORS misconfiguration (PortSwigger Web Security Academy top topic):
+  1. Wildcard (*) with credentials is forbidden by spec but some libraries
+     bypass it — credential leakage.
+  2. Reflective origin (echo request Origin unconditionally) allows any site
+     to make credentialed cross-origin requests.
+  3. Null origin allowed (for iframe/file:// attacks).
+  The fix: a server-side allowlist, never reflect without validation.
+&quot;&quot;&quot;
+
+_NULL_ORIGIN = &quot;null&quot;
+
+
+def validate_cors_config(
+    acao_header: str,
+    acac_header: Optional[str],   # Access-Control-Allow-Credentials
+    request_origin: Optional[str],
+    allowed_origins: Optional[Set[str]] = None,
+) -&gt; Dict:
+    &quot;&quot;&quot;
+    Returns {&quot;safe&quot;: bool, &quot;issues&quot;: [str]}.
+    acao_header: the ACAO header value the server sent.
+    acac_header: the ACAC header value (e.g., &quot;true&quot;).
+    request_origin: the Origin the client sent.
+    allowed_origins: server-side allowlist.
+    &quot;&quot;&quot;
+    issues = []
+    credentials = (acac_header or &quot;&quot;).lower() == &quot;true&quot;
+
+    if acao_header == &quot;*&quot;:
+        if credentials:
+            issues.append(&quot;Wildcard ACAO with credentials=true is forbidden&quot;)
+        # else wildcard without credentials is acceptable for public APIs
+
+    elif acao_header == _NULL_ORIGIN:
+        issues.append(&quot;ACAO: null is dangerous (allows iframe/file:// attacks)&quot;)
+
+    else:
+        # Check reflective origin
+        if request_origin and acao_header == request_origin:
+            if allowed_origins and request_origin not in allowed_origins:
+                issues.append(
+                    f&quot;Origin &#x27;{request_origin}&#x27; reflected but not in allowlist (reflective CORS)&quot;
+                )
+
+        # Check against allowlist
+        if allowed_origins and acao_header not in allowed_origins:
+            issues.append(f&quot;ACAO value &#x27;{acao_header}&#x27; not in allowed origins allowlist&quot;)
+
+    return {&quot;safe&quot;: len(issues) == 0, &quot;issues&quot;: issues}
+
+
+def test_q110():
+    allowed = {&quot;https://example.com&quot;, &quot;https://app.example.com&quot;}
+
+    # Safe: allowlisted origin, no credentials
+    r = validate_cors_config(&quot;https://example.com&quot;, None, &quot;https://example.com&quot;, allowed)
+    assert r[&quot;safe&quot;] is True
+
+    # Unsafe: wildcard + credentials
+    r = validate_cors_config(&quot;*&quot;, &quot;true&quot;, &quot;https://evil.com&quot;, allowed)
+    assert r[&quot;safe&quot;] is False
+    assert any(&quot;Wildcard&quot; in i for i in r[&quot;issues&quot;])
+
+    # Unsafe: null origin
+    r = validate_cors_config(&quot;null&quot;, &quot;true&quot;, None, allowed)
+    assert r[&quot;safe&quot;] is False
+
+    # Unsafe: reflected origin not in allowlist
+    r = validate_cors_config(&quot;https://evil.com&quot;, &quot;true&quot;, &quot;https://evil.com&quot;, allowed)
+    assert r[&quot;safe&quot;] is False
+
+    print(&quot;Q110 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q101()
+    test_q102()
+    test_q103()
+    test_q104()
+    test_q105()
+    test_q106()
+    test_q107()
+    test_q108()
+    test_q109()
+    test_q110()
+    print(&quot;\nAll Q101–Q110 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

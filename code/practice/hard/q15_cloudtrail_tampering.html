@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q15_cloudtrail_tampering.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q15_cloudtrail_tampering.py</h1>
+  <p class="file-path">Source: code\practice\hard\q15_cloudtrail_tampering.py</p>
+  <p class="line-count">502 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q15 [Hard] — CloudTrail Tampering Detection
+=============================================================================
+
+PROBLEM
+-------
+AWS CloudTrail is the audit log for all API calls in an AWS account.
+Attackers who gain sufficient privileges try to tamper with CloudTrail to
+cover their tracks:
+
+  1. StopLogging     — disables the trail entirely
+  2. DeleteTrail     — permanently destroys the trail
+  3. UpdateTrail     — changes S3 bucket, reduces log scope (e.g. disables
+                       data events, removes MFA delete protection)
+  4. PutEventSelectors — removes certain event types from logging
+  5. DeleteLogGroup  — deletes CloudWatch Logs log group receiving CT events
+  6. PutBucketPolicy — overly permissive S3 policy on the CT bucket (public access)
+  7. DeleteBucketLifecycle — removes S3 lifecycle that preserves CT logs
+  8. DisableKey / ScheduleKeyDeletion — deletes the KMS key encrypting CT logs
+
+Additionally detect:
+  - Caller using root account for any CloudTrail action
+  - Actions from an unusual region (not in company&#x27;s approved regions)
+  - Burst of CloudTrail API calls from the same principal within a window
+    (attacker probing what logging is configured)
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input format?
+   → CloudTrail event dicts (subset of real CT schema).
+2. What is the approved region list?
+   → Configurable; default {&quot;us-east-1&quot;, &quot;us-west-2&quot;, &quot;eu-west-1&quot;}.
+3. Burst threshold?
+   → &gt; burst_threshold CT API calls from same principal in burst_window_seconds.
+4. Should we look at only CloudTrail-namespace events or also S3/KMS?
+   → Yes — include S3 and KMS events that affect CT log storage.
+5. False positive handling for UpdateTrail by legitimate automation?
+   → Accept an allowlist of principals (e.g. a CT-admin IAM role).
+6. What severity to assign each finding type?
+   → StopLogging/DeleteTrail = critical; others = high; probing = medium.
+
+=============================================================================
+APPROACH 1 — NAIVE (rule list scan per event)
+=============================================================================
+Hardcode a list of (eventName → alert) rules.
+For each event, check event name against all rules.
+  Time : O(R) per event  (R = number of rules, ≈ 20)
+  Space: O(1) — stateless
+
+=============================================================================
+APPROACH 2 — INDEX + STATEFUL BURST DETECTOR (RECOMMENDED)
+=============================================================================
+  - dict-lookup for O(1) event-name → rule classification
+  - Sliding window counter per principal for burst detection
+  - Allowlist set for suppressing known-good principals
+
+  Time : O(1) per event
+  Space: O(active principals × burst_window)
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Rule definitions
+# ---------------------------------------------------------------------------
+
+# eventName → (alert_type, severity, description)
+_CT_CRITICAL_EVENTS: Dict[str, Tuple[str, str, str]] = {
+    &quot;StopLogging&quot;:             (&quot;ct_stop_logging&quot;,      &quot;critical&quot;, &quot;CloudTrail logging stopped&quot;),
+    &quot;DeleteTrail&quot;:             (&quot;ct_delete_trail&quot;,       &quot;critical&quot;, &quot;CloudTrail trail deleted&quot;),
+    &quot;UpdateTrail&quot;:             (&quot;ct_update_trail&quot;,       &quot;high&quot;,     &quot;CloudTrail trail modified&quot;),
+    &quot;PutEventSelectors&quot;:       (&quot;ct_event_selectors&quot;,    &quot;high&quot;,     &quot;CloudTrail event selectors changed&quot;),
+    &quot;DeleteLogGroup&quot;:          (&quot;ct_delete_log_group&quot;,   &quot;high&quot;,     &quot;CloudWatch log group deleted&quot;),
+    &quot;PutBucketPolicy&quot;:         (&quot;ct_s3_bucket_policy&quot;,   &quot;high&quot;,     &quot;S3 CT bucket policy changed&quot;),
+    &quot;DeleteBucket&quot;:            (&quot;ct_delete_bucket&quot;,      &quot;critical&quot;, &quot;S3 CT bucket deleted&quot;),
+    &quot;DeleteBucketLifecycle&quot;:   (&quot;ct_lifecycle_deleted&quot;,  &quot;high&quot;,     &quot;S3 lifecycle policy removed&quot;),
+    &quot;PutBucketAcl&quot;:            (&quot;ct_bucket_acl&quot;,         &quot;high&quot;,     &quot;S3 CT bucket ACL changed&quot;),
+    &quot;DisableKey&quot;:              (&quot;ct_kms_disable&quot;,        &quot;critical&quot;, &quot;KMS key encrypting CT disabled&quot;),
+    &quot;ScheduleKeyDeletion&quot;:     (&quot;ct_kms_schedule_del&quot;,   &quot;critical&quot;, &quot;KMS key encrypting CT scheduled for deletion&quot;),
+    &quot;CreateKey&quot;:               (&quot;ct_kms_new_key&quot;,        &quot;medium&quot;,   &quot;New KMS key created (verify scope)&quot;),
+    &quot;PutRetentionPolicy&quot;:      (&quot;ct_retention_policy&quot;,   &quot;high&quot;,     &quot;CloudWatch Logs retention policy changed&quot;),
+}
+
+# Services for CT storage
+_CT_SERVICES: FrozenSet[str] = frozenset({
+    &quot;cloudtrail.amazonaws.com&quot;,
+    &quot;s3.amazonaws.com&quot;,
+    &quot;logs.amazonaws.com&quot;,
+    &quot;kms.amazonaws.com&quot;,
+})
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CloudTrailEvent:
+    event_id: str
+    ts: float
+    region: str
+    event_name: str
+    event_source: str
+    user_identity: dict       # {&quot;type&quot;: &quot;IAMUser&quot;, &quot;arn&quot;: ..., &quot;principalId&quot;: ...}
+    source_ip: str
+    request_params: dict = field(default_factory=dict)
+    error_code: Optional[str] = None
+
+@dataclass
+class CTAlert:
+    alert_type: str
+    severity: str
+    event_name: str
+    ts: float
+    principal: str
+    region: str
+    detail: str
+    event_id: str
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_principal(user_identity: dict) -&gt; str:
+    &quot;&quot;&quot;Extract a normalised principal identifier from CT userIdentity.&quot;&quot;&quot;
+    arn = user_identity.get(&quot;arn&quot;) or user_identity.get(&quot;principalId&quot;, &quot;unknown&quot;)
+    # Strip session suffix from assumed-role ARNs for normalisation
+    if &quot;assumed-role&quot; in str(arn):
+        parts = str(arn).split(&quot;/&quot;)
+        if len(parts) &gt;= 3:
+            return &quot;/&quot;.join(parts[:3])
+    return str(arn)
+
+
+def _parse_ct_event(raw: dict) -&gt; Optional[CloudTrailEvent]:
+    ts = _parse_ts(raw.get(&quot;eventTime&quot;) or raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return CloudTrailEvent(
+        event_id=raw.get(&quot;eventID&quot;, &quot;unknown&quot;),
+        ts=ts,
+        region=raw.get(&quot;awsRegion&quot;) or raw.get(&quot;region&quot;, &quot;us-east-1&quot;),
+        event_name=raw.get(&quot;eventName&quot;, &quot;&quot;),
+        event_source=raw.get(&quot;eventSource&quot;, &quot;&quot;),
+        user_identity=raw.get(&quot;userIdentity&quot;, {}),
+        source_ip=raw.get(&quot;sourceIPAddress&quot;, &quot;&quot;),
+        request_params=raw.get(&quot;requestParameters&quot;) or {},
+        error_code=raw.get(&quot;errorCode&quot;),
+    )
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive rule-check (stateless)
+# ---------------------------------------------------------------------------
+
+class NaiveCTTampering:
+    &quot;&quot;&quot;
+    Simple event-name lookup table detector.
+    No burst detection, no stateful tracking.
+    O(1) per event.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        approved_regions: Optional[Set[str]] = None,
+        allowlist_principals: Optional[Set[str]] = None,
+    ) -&gt; None:
+        self.approved_regions = approved_regions or {&quot;us-east-1&quot;, &quot;us-west-2&quot;, &quot;eu-west-1&quot;}
+        self.allowlist = allowlist_principals or set()
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[CTAlert]:
+        evt = _parse_ct_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        principal = _extract_principal(evt.user_identity)
+        if principal in self.allowlist:
+            return []
+
+        alerts = []
+
+        # Rule: known tampering event
+        if evt.event_name in _CT_CRITICAL_EVENTS:
+            at, sev, desc = _CT_CRITICAL_EVENTS[evt.event_name]
+            alerts.append(CTAlert(
+                alert_type=at, severity=sev,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=principal, region=evt.region,
+                detail=desc,
+                event_id=evt.event_id,
+            ))
+
+        # Rule: root account usage
+        if evt.user_identity.get(&quot;type&quot;) == &quot;Root&quot;:
+            alerts.append(CTAlert(
+                alert_type=&quot;root_account_usage&quot;, severity=&quot;critical&quot;,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=&quot;root&quot;, region=evt.region,
+                detail=&quot;Root account used for API call&quot;,
+                event_id=evt.event_id,
+            ))
+
+        # Rule: unusual region
+        if evt.region not in self.approved_regions:
+            alerts.append(CTAlert(
+                alert_type=&quot;unusual_region&quot;, severity=&quot;medium&quot;,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=principal, region=evt.region,
+                detail=f&quot;API call from unapproved region {evt.region!r}&quot;,
+                event_id=evt.event_id,
+            ))
+
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full stateful detector with burst detection (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class CloudTrailTamperingDetector:
+    &quot;&quot;&quot;
+    Full stateful CloudTrail tampering detector.
+    Adds burst detection (rapid probing of CT APIs) on top of the naive checks.
+    O(1) per event.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        approved_regions: Optional[Set[str]] = None,
+        allowlist_principals: Optional[Set[str]] = None,
+        burst_threshold: int = 5,
+        burst_window_seconds: float = 60.0,
+    ) -&gt; None:
+        self.approved_regions = approved_regions or {&quot;us-east-1&quot;, &quot;us-west-2&quot;, &quot;eu-west-1&quot;}
+        self.allowlist = allowlist_principals or set()
+        self.burst_threshold = burst_threshold
+        self.burst_window = burst_window_seconds
+        # principal → deque of ts for burst detection
+        self._burst: Dict[str, deque] = defaultdict(deque)
+        # Dedup set to avoid re-alerting on same burst in same window
+        self._burst_alerted: Set[str] = set()
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[CTAlert]:
+        evt = _parse_ct_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+
+        principal = _extract_principal(evt.user_identity)
+        if principal in self.allowlist:
+            return []
+
+        alerts: List[CTAlert] = []
+
+        # --- Known tampering event ---
+        if evt.event_name in _CT_CRITICAL_EVENTS:
+            at, sev, desc = _CT_CRITICAL_EVENTS[evt.event_name]
+            # Escalate to critical if called by root
+            if evt.user_identity.get(&quot;type&quot;) == &quot;Root&quot;:
+                sev = &quot;critical&quot;
+            alerts.append(CTAlert(
+                alert_type=at, severity=sev,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=principal, region=evt.region,
+                detail=f&quot;{desc} (params: {list(evt.request_params.keys())[:5]})&quot;,
+                event_id=evt.event_id,
+            ))
+
+        # --- Root account ---
+        if evt.user_identity.get(&quot;type&quot;) == &quot;Root&quot;:
+            alerts.append(CTAlert(
+                alert_type=&quot;root_account_usage&quot;, severity=&quot;critical&quot;,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=&quot;root&quot;, region=evt.region,
+                detail=&quot;Root account used — no valid use case for normal operations&quot;,
+                event_id=evt.event_id,
+            ))
+
+        # --- Unusual region ---
+        if evt.region not in self.approved_regions:
+            alerts.append(CTAlert(
+                alert_type=&quot;unusual_region&quot;, severity=&quot;medium&quot;,
+                event_name=evt.event_name, ts=evt.ts,
+                principal=principal, region=evt.region,
+                detail=f&quot;Event in unapproved region {evt.region!r}&quot;,
+                event_id=evt.event_id,
+            ))
+
+        # --- Burst detection: rapid CT API calls from same principal ---
+        if evt.event_source in _CT_SERVICES:
+            q = self._burst[principal]
+            cutoff = evt.ts - self.burst_window
+            while q and q[0] &lt; cutoff:
+                q.popleft()
+            q.append(evt.ts)
+
+            if len(q) &gt; self.burst_threshold and principal not in self._burst_alerted:
+                self._burst_alerted.add(principal)
+                alerts.append(CTAlert(
+                    alert_type=&quot;ct_api_burst&quot;, severity=&quot;high&quot;,
+                    event_name=evt.event_name, ts=evt.ts,
+                    principal=principal, region=evt.region,
+                    detail=(f&quot;Principal made {len(q)} CloudTrail-related API calls &quot;
+                            f&quot;in {self.burst_window}s&quot;),
+                    event_id=evt.event_id,
+                ))
+            elif len(q) &lt;= self.burst_threshold:
+                # Reset dedup if burst subsided
+                self._burst_alerted.discard(principal)
+
+        return alerts
+
+    def stats(self) -&gt; dict:
+        return {
+            &quot;tracked_principals&quot;: len(self._burst),
+            &quot;malformed&quot;: self.malformed,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Sample Events
+# ---------------------------------------------------------------------------
+
+SAMPLE_EVENTS = [
+    {
+        &quot;eventID&quot;: &quot;evt-001&quot;,
+        &quot;eventTime&quot;: 1_000_000.0,
+        &quot;awsRegion&quot;: &quot;us-east-1&quot;,
+        &quot;eventName&quot;: &quot;StopLogging&quot;,
+        &quot;eventSource&quot;: &quot;cloudtrail.amazonaws.com&quot;,
+        &quot;userIdentity&quot;: {&quot;type&quot;: &quot;IAMUser&quot;, &quot;arn&quot;: &quot;arn:aws:iam::123:user/attacker&quot;},
+        &quot;sourceIPAddress&quot;: &quot;1.2.3.4&quot;,
+    },
+    {
+        &quot;eventID&quot;: &quot;evt-002&quot;,
+        &quot;eventTime&quot;: 1_000_010.0,
+        &quot;awsRegion&quot;: &quot;ap-southeast-1&quot;,   # unusual region
+        &quot;eventName&quot;: &quot;DeleteTrail&quot;,
+        &quot;eventSource&quot;: &quot;cloudtrail.amazonaws.com&quot;,
+        &quot;userIdentity&quot;: {&quot;type&quot;: &quot;IAMUser&quot;, &quot;arn&quot;: &quot;arn:aws:iam::123:user/attacker&quot;},
+        &quot;sourceIPAddress&quot;: &quot;1.2.3.4&quot;,
+    },
+    {
+        &quot;eventID&quot;: &quot;evt-003&quot;,
+        &quot;eventTime&quot;: 1_000_020.0,
+        &quot;awsRegion&quot;: &quot;us-east-1&quot;,
+        &quot;eventName&quot;: &quot;DescribeTrails&quot;,
+        &quot;eventSource&quot;: &quot;cloudtrail.amazonaws.com&quot;,
+        &quot;userIdentity&quot;: {&quot;type&quot;: &quot;Root&quot;},
+        &quot;sourceIPAddress&quot;: &quot;5.6.7.8&quot;,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _raw_event(name, region=&quot;us-east-1&quot;, principal_type=&quot;IAMUser&quot;,
+               principal_arn=&quot;arn:aws:iam::123:user/alice&quot;,
+               ts=1_000_000.0, source=&quot;cloudtrail.amazonaws.com&quot;, **kwargs) -&gt; dict:
+    return {
+        &quot;eventID&quot;: f&quot;e-{name}-{ts}&quot;,
+        &quot;eventTime&quot;: ts,
+        &quot;awsRegion&quot;: region,
+        &quot;eventName&quot;: name,
+        &quot;eventSource&quot;: source,
+        &quot;userIdentity&quot;: {&quot;type&quot;: principal_type, &quot;arn&quot;: principal_arn},
+        &quot;sourceIPAddress&quot;: &quot;10.0.0.1&quot;,
+        **kwargs,
+    }
+
+
+def test_stop_logging():
+    det = CloudTrailTamperingDetector()
+    alerts = det.process(_raw_event(&quot;StopLogging&quot;))
+    assert any(a.alert_type == &quot;ct_stop_logging&quot; for a in alerts)
+    assert any(a.severity == &quot;critical&quot; for a in alerts)
+    print(&quot;StopLogging: passed&quot;)
+
+
+def test_root_usage():
+    det = CloudTrailTamperingDetector()
+    alerts = det.process(_raw_event(&quot;DescribeTrails&quot;, principal_type=&quot;Root&quot;))
+    assert any(a.alert_type == &quot;root_account_usage&quot; for a in alerts)
+    print(&quot;Root usage: passed&quot;)
+
+
+def test_unusual_region():
+    det = CloudTrailTamperingDetector()
+    alerts = det.process(_raw_event(&quot;ListTrails&quot;, region=&quot;ap-southeast-2&quot;))
+    assert any(a.alert_type == &quot;unusual_region&quot; for a in alerts)
+    print(&quot;Unusual region: passed&quot;)
+
+
+def test_allowlist():
+    det = CloudTrailTamperingDetector(allowlist_principals={&quot;arn:aws:iam::123:user/alice&quot;})
+    alerts = det.process(_raw_event(&quot;StopLogging&quot;))  # alice is allowlisted
+    assert len(alerts) == 0
+    print(&quot;Allowlist suppression: passed&quot;)
+
+
+def test_burst_detection():
+    det = CloudTrailTamperingDetector(burst_threshold=3, burst_window_seconds=60)
+    results = []
+    for i in range(5):
+        results += det.process(_raw_event(&quot;DescribeTrails&quot;, ts=float(1000 + i * 5)))
+    assert any(a.alert_type == &quot;ct_api_burst&quot; for a in results), \
+        f&quot;Expected burst alert; got {[a.alert_type for a in results]}&quot;
+    print(&quot;Burst detection: passed&quot;)
+
+
+def test_no_alert_on_benign():
+    det = CloudTrailTamperingDetector()
+    alerts = det.process(_raw_event(&quot;GetEventSelectors&quot;,
+                                    source=&quot;cloudtrail.amazonaws.com&quot;))
+    # Not a tampering event — no alert
+    assert all(a.alert_type not in _CT_CRITICAL_EVENTS for a in alerts)
+    print(&quot;No alert on benign: passed&quot;)
+
+
+def test_malformed():
+    det = CloudTrailTamperingDetector()
+    r = det.process({})  # no eventTime
+    assert r == []
+    assert det.malformed == 1
+    print(&quot;Malformed event: passed&quot;)
+
+
+def test_naive_all_sample():
+    det = NaiveCTTampering()
+    all_alerts = []
+    for evt in SAMPLE_EVENTS:
+        all_alerts += det.process(evt)
+    types = {a.alert_type for a in all_alerts}
+    assert &quot;ct_stop_logging&quot; in types
+    assert &quot;ct_delete_trail&quot; in types
+    assert &quot;root_account_usage&quot; in types
+    print(f&quot;Sample events: {types}&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  The first action a skilled attacker takes after gaining cloud admin access
+  is to cover their tracks by disabling CloudTrail.  Examples:
+
+  - TeamTNT (2020): disabled CloudTrail in compromised AWS accounts.
+  - Pacu framework: has a dedicated &quot;cloudtrail__backdoor_event_selectors&quot; module.
+  - Rhino Security Labs research: showed that UpdateTrail + PutEventSelectors
+    can silently stop logging data plane events while management events continue,
+    making the trail appear healthy.
+
+KEY EVASION TECHNIQUES TO DETECT
+  1. UpdateTrail to remove S3 data events (appears healthy, misses S3 exfil logs).
+  2. PutEventSelectors to set ReadWriteType=ReadOnly (misses write actions).
+  3. DeleteLogGroup in CloudWatch to destroy ingested logs while trail &quot;runs&quot;.
+  4. Using IAM role from a different region to do CT operations (unusual region).
+
+HARDENING CONTROLS
+  - Enable CloudTrail organisation trail with SCP blocking StopLogging/DeleteTrail.
+  - Enable S3 MFA Delete on the CT bucket.
+  - Use S3 Object Lock (WORM) on the CT bucket.
+  - Set up SNS notification on StopLogging event (AWS Managed Rule: cloudtrail-enabled).
+  - Use separate &quot;security&quot; AWS account for CT storage; no cross-account delete.
+  - Log aggregation: ship CT to SIEM in real-time — attacker cannot delete historical logs.
+
+DETECTION GAPS
+  - If attacker deletes logs first then stops trail — historical events are gone.
+  - Root account usage cannot be blocked by SCPs (root is exempt from SCPs).
+  - KMS key deletion has a 7-30 day waiting period — detect ScheduleKeyDeletion.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_stop_logging()
+    test_root_usage()
+    test_unusual_region()
+    test_allowlist()
+    test_burst_detection()
+    test_no_alert_on_benign()
+    test_malformed()
+    test_naive_all_sample()
+</code></pre>
+</body>
+</html>

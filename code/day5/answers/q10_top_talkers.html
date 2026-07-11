@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q10_top_talkers.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q10_top_talkers.py</h1>
+  <p class="file-path">Source: code\day5\answers\q10_top_talkers.py</p>
+  <p class="line-count">278 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q10. Top Talkers Report
+========================
+Given a list of (src_ip, dst_ip, bytes) flow records:
+- Top 5 source IPs by total bytes sent.
+- Top 5 destination IPs by total bytes received.
+- All (src, dst) pairs where bytes &gt; threshold (e.g., 1 GB).
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Find the heaviest network talkers from a list of flow records.&quot;
+
+--- CANDIDATE FIRST RESPONSE (sort the raw list repeatedly) ---
+&quot;I&#x27;d sort the whole list by bytes for each question.&quot;
+
+Follow-up: &quot;That doesn&#x27;t aggregate — the same IP appears multiple times.&quot;
+→ Need to sum bytes per IP first, then sort.
+
+--- CANDIDATE SECOND RESPONSE (dict aggregation, then sort) ---
+&quot;I&#x27;ll build a dict: src_ip → total_bytes, then sort it.&quot;
+
+Follow-up: &quot;Good. What&#x27;s more efficient than sorting the entire dict for top-5?&quot;
+→ heapq.nlargest — O(N log k) vs O(N log N). For k=5, much faster on large N.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Dict aggregation, top-K with manual heap (without builtins) and heapq (with),
+threshold filtering, clean report.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import sys
+import heapq
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (bytes, realistic scale)
+# ─────────────────────────────────────────────────────────────────────────────
+
+GB = 1_073_741_824
+MB = 1_048_576
+
+SAMPLE_FLOWS = [
+    (&quot;10.0.0.1&quot;,  &quot;8.8.8.8&quot;,          5 * MB),
+    (&quot;10.0.0.2&quot;,  &quot;1.1.1.1&quot;,         50 * MB),
+    (&quot;10.0.0.1&quot;,  &quot;8.8.8.8&quot;,        200 * MB),
+    (&quot;10.0.0.3&quot;,  &quot;203.0.113.1&quot;,       2 * GB),   # suspicious exfil
+    (&quot;10.0.0.2&quot;,  &quot;1.1.1.1&quot;,        800 * MB),
+    (&quot;10.0.0.4&quot;,  &quot;8.8.4.4&quot;,          3 * MB),
+    (&quot;10.0.0.5&quot;,  &quot;203.0.113.2&quot;,       1.5 * GB), # suspicious exfil
+    (&quot;10.0.0.1&quot;,  &quot;192.168.1.100&quot;,   900 * MB),
+    (&quot;10.0.0.6&quot;,  &quot;10.0.0.99&quot;,       10 * MB),
+    (&quot;10.0.0.7&quot;,  &quot;8.8.8.8&quot;,         20 * MB),
+    (&quot;10.0.0.3&quot;,  &quot;203.0.113.1&quot;,     500 * MB),   # same pair, more bytes
+    (&quot;10.0.0.8&quot;,  &quot;172.217.0.0&quot;,      80 * MB),
+    (&quot;10.0.0.9&quot;,  &quot;172.217.0.0&quot;,     900 * MB),
+    (&quot;10.0.0.10&quot;, &quot;1.1.1.1&quot;,          15 * MB),
+    (&quot;10.0.0.2&quot;,  &quot;10.0.0.99&quot;,       400 * MB),
+]
+
+EXFIL_THRESHOLD_BYTES = GB  # Flag (src, dst) pairs exceeding 1 GB total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual dict, manual top-K via partial sort, no heapq / sorted key)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_top_k_items(count_dict, k):
+    &quot;&quot;&quot;
+    Extract top-k (key, value) pairs by value descending.
+    Uses selection (find max k times) — O(N*k) which is fine for small k.
+    &quot;&quot;&quot;
+    remaining = list(count_dict.items())
+    result = []
+    for _ in range(min(k, len(remaining))):
+        # Find index of max value
+        max_idx = 0
+        for i in range(1, len(remaining)):
+            if remaining[i][1] &gt; remaining[max_idx][1]:
+                max_idx = i
+        result.append(remaining[max_idx])
+        # Remove it
+        remaining[max_idx] = remaining[-1]
+        remaining.pop()
+    return result
+
+
+def _bytes_to_human(b: float) -&gt; str:
+    &quot;&quot;&quot;Convert bytes to human-readable string without f-string formatting tricks.&quot;&quot;&quot;
+    gb = b / (1024 ** 3)
+    if gb &gt;= 1:
+        val = int(gb * 100) / 100  # 2 decimal places manually
+        return str(val) + &quot; GB&quot;
+    mb = b / (1024 ** 2)
+    val = int(mb * 100) / 100
+    return str(val) + &quot; MB&quot;
+
+
+def analyze_without_builtins(flows, threshold_bytes):
+    &quot;&quot;&quot;
+    Aggregate flows and compute top talkers.
+    flows: list of (src_ip, dst_ip, bytes)
+    &quot;&quot;&quot;
+    src_totals  = {}   # src_ip   → total bytes sent
+    dst_totals  = {}   # dst_ip   → total bytes received
+    pair_totals = {}   # (src, dst) → total bytes
+
+    for item in flows:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            print(f&quot;[WARN] Skipping malformed flow record: {item}&quot;, file=sys.stderr)
+            continue
+        src, dst, byte_count = item
+
+        # Validate
+        if not isinstance(byte_count, (int, float)) or byte_count &lt; 0:
+            print(f&quot;[WARN] Invalid byte count for ({src},{dst}): {byte_count}&quot;,
+                  file=sys.stderr)
+            continue
+
+        src_totals[src]       = src_totals.get(src, 0) + byte_count
+        dst_totals[dst]       = dst_totals.get(dst, 0) + byte_count
+        pair                  = (src, dst)
+        pair_totals[pair]     = pair_totals.get(pair, 0) + byte_count
+
+    top5_src  = _manual_top_k_items(src_totals,  5)
+    top5_dst  = _manual_top_k_items(dst_totals,  5)
+
+    # Heavy pairs: all (src, dst) with total &gt; threshold
+    heavy_pairs = []
+    for pair, total in pair_totals.items():
+        if total &gt; threshold_bytes:
+            heavy_pairs.append((pair[0], pair[1], total))
+
+    # Sort heavy_pairs descending by bytes (manual insertion sort)
+    for i in range(1, len(heavy_pairs)):
+        cur = heavy_pairs[i]
+        j = i - 1
+        while j &gt;= 0 and heavy_pairs[j][2] &lt; cur[2]:
+            heavy_pairs[j + 1] = heavy_pairs[j]
+            j -= 1
+        heavy_pairs[j + 1] = cur
+
+    return top5_src, top5_dst, heavy_pairs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (defaultdict, heapq.nlargest, sorted)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(flows, threshold_bytes):
+    src_totals  = defaultdict(int)
+    dst_totals  = defaultdict(int)
+    pair_totals = defaultdict(int)
+
+    for item in flows:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            print(f&quot;[WARN] Skipping malformed flow record: {item}&quot;, file=sys.stderr)
+            continue
+        src, dst, byte_count = item
+
+        if not isinstance(byte_count, (int, float)) or byte_count &lt; 0:
+            print(f&quot;[WARN] Invalid byte count for ({src},{dst}): {byte_count}&quot;,
+                  file=sys.stderr)
+            continue
+
+        src_totals[src]     += byte_count
+        dst_totals[dst]     += byte_count
+        pair_totals[(src, dst)] += byte_count
+
+    # heapq.nlargest is O(N log k) — better than sorting the entire dict
+    top5_src = heapq.nlargest(5, src_totals.items(),  key=lambda x: x[1])
+    top5_dst = heapq.nlargest(5, dst_totals.items(),  key=lambda x: x[1])
+
+    heavy_pairs = sorted(
+        [(src, dst, total) for (src, dst), total in pair_totals.items()
+         if total &gt; threshold_bytes],
+        key=lambda x: x[2],
+        reverse=True
+    )
+
+    return top5_src, top5_dst, heavy_pairs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_bytes(b: float) -&gt; str:
+    gb = b / (1024 ** 3)
+    if gb &gt;= 1:
+        return f&quot;{gb:.2f} GB&quot;
+    return f&quot;{b / (1024**2):.2f} MB&quot;
+
+
+def print_report(top5_src, top5_dst, heavy_pairs, threshold_bytes, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*65}&quot;)
+    print(f&quot;  TOP TALKERS REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*65}&quot;)
+
+    print(&quot;\nTop 5 Source IPs by Bytes Sent:&quot;)
+    for rank, (ip, total) in enumerate(top5_src, 1):
+        print(f&quot;  {rank}. {ip:&lt;20} {_fmt_bytes(total)}&quot;)
+
+    print(&quot;\nTop 5 Destination IPs by Bytes Received:&quot;)
+    for rank, (ip, total) in enumerate(top5_dst, 1):
+        print(f&quot;  {rank}. {ip:&lt;20} {_fmt_bytes(total)}&quot;)
+
+    threshold_str = _fmt_bytes(threshold_bytes)
+    print(f&quot;\n(src, dst) Pairs Exceeding {threshold_str}:&quot;)
+    if heavy_pairs:
+        for src, dst, total in heavy_pairs:
+            print(f&quot;  {src:&lt;20} → {dst:&lt;20} : {_fmt_bytes(total)}&quot;)
+    else:
+        print(&quot;  None.&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    print(&quot;[INFO] Using built-in sample data.\n&quot;)
+
+    top5_src_manual,  top5_dst_manual,  heavy_manual  = analyze_without_builtins(
+        SAMPLE_FLOWS, EXFIL_THRESHOLD_BYTES)
+    top5_src_builtin, top5_dst_builtin, heavy_builtin = analyze_with_builtins(
+        SAMPLE_FLOWS, EXFIL_THRESHOLD_BYTES)
+
+    print_report(top5_src_manual,  top5_dst_manual,  heavy_manual,
+                 EXFIL_THRESHOLD_BYTES, label=&quot;(Manual / No Builtins)&quot;)
+    print_report(top5_src_builtin, top5_dst_builtin, heavy_builtin,
+                 EXFIL_THRESHOLD_BYTES, label=&quot;(With Builtins)&quot;)
+
+    # Sanity: top-5 sets should be equal (order may differ between manual and heapq)
+    assert set(ip for ip, _ in top5_src_manual) == set(ip for ip, _ in top5_src_builtin), \
+        &quot;Top-5 src mismatch!&quot;
+    assert len(heavy_manual) == len(heavy_builtin), \
+        f&quot;Heavy pair count mismatch: {len(heavy_manual)} vs {len(heavy_builtin)}&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+    # Edge case tests
+    print(&quot;--- Edge Case Tests ---&quot;)
+    print(&quot;Empty flows:&quot;, analyze_with_builtins([], GB))
+    print(&quot;Single flow:&quot;, analyze_with_builtins([(&quot;1.1.1.1&quot;, &quot;2.2.2.2&quot;, 5 * MB)], GB))
+    print()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Aggregation : O(F)  — F = number of flow records
+# Top-K       : O(N log k) with heapq.nlargest; O(N log N) with full sort
+#               O(N*k) with manual selection (fine for k=5)
+# Heavy pairs : O(P)  — P = unique (src,dst) pairs
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;The flow log has 500 million records. How do you handle it?&quot;
+#     → Stream aggregate: read line by line, maintain running totals in dicts.
+#       Use only O(U) space where U = unique IPs/pairs. No need to load all records.
+# - &quot;What if you need top-K in real-time as flows arrive?&quot;
+#     → Use a min-heap of size k. For each new flow: update aggregate,
+#       if the IP&#x27;s new total exceeds the heap&#x27;s minimum, replace it.
+# - &quot;How would you handle private vs public IP distinction?&quot;
+#     → Use ipaddress.ip_address(ip).is_private to classify. Exfil typically
+#       means private src → public dst with high byte count.
+# - &quot;Can the same (src, dst) pair appear across multiple days of logs?&quot;
+#     → Yes. When loading multiple files, continue aggregating into the same dicts.
+#       Add a &#x27;date&#x27; dimension if you need per-day breakdown.
+# =============================================================================
+</code></pre>
+</body>
+</html>

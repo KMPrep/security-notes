@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q35_safe_archive_extraction.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q35_safe_archive_extraction.py</h1>
+  <p class="file-path">Source: code\practice\hard\q35_safe_archive_extraction.py</p>
+  <p class="line-count">395 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q35 [Hard] — Safe Archive Extraction (Zip-Slip Prevention)
+=============================================================================
+
+PROBLEM
+-------
+Write code to extract ZIP (and tar.gz) archives safely, preventing:
+  1. Zip-Slip: path traversal via entries like &quot;../../etc/passwd&quot;.
+  2. Zip bomb: excessive decompressed size or entry count.
+  3. Absolute paths: entries starting with &quot;/&quot; or a drive letter.
+  4. Symlink attacks: symlinks pointing outside the target directory.
+  5. Executable bit preservation that could create attack surface.
+
+Also implement a dry-run mode that validates without extracting.
+
+CLARIFYING QUESTIONS
+--------------------
+1. ZIP only or also tar/tar.gz?
+   → Both; common in malware delivery and supply-chain attacks.
+2. Symlinks allowed?
+   → Only symlinks staying within the target directory; external → reject.
+3. Maximum decompressed size?
+   → Configurable; default 500 MB.
+4. Maximum entry count?
+   → Configurable; default 10,000 entries.
+5. What to do on violation?
+   → Raise ExtractionError with detail; don&#x27;t partially extract.
+
+=============================================================================
+APPROACH 1 — NAIVE (zipfile.extractall without validation)
+=============================================================================
+  zipfile.ZipFile.extractall() is inherently unsafe; some Python versions
+  strip &quot;..&quot; but absolute paths are implementation-dependent.
+  Never use without validation.
+
+=============================================================================
+APPROACH 2 — SAFE EXTRACTION WITH ENTRY VALIDATION (RECOMMENDED)
+=============================================================================
+  1. Open archive; iterate entries before extracting anything.
+  2. Resolve target path; verify it is inside the destination directory.
+  3. Check total size against bomb limit.
+  4. For symlinks: verify symlink target is also inside destination.
+  5. Extract one entry at a time; abort and clean up on any violation.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import os
+import shutil
+import tarfile
+import tempfile
+import zipfile
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExtractionSummary:
+    archive_path: str
+    destination: str
+    entries_extracted: int = 0
+    total_bytes: int = 0
+    rejected_entries: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+class ExtractionError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Validation Helper
+# ---------------------------------------------------------------------------
+
+def _safe_path(base_dir: str, member_path: str) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Resolve member_path relative to base_dir.
+    Returns the absolute resolved path if it is inside base_dir, else None.
+    &quot;&quot;&quot;
+    # Normalise base
+    base = os.path.realpath(base_dir)
+    # Strip leading slashes and drive letters from member path
+    # (handles absolute entries like &quot;/etc/passwd&quot; or &quot;C:\\evil&quot;)
+    sanitised = os.path.normpath(member_path)
+    # Remove any leading separator after normalisation
+    while sanitised.startswith(os.sep) or (len(sanitised) &gt; 1 and sanitised[1] == &quot;:&quot;):
+        sanitised = sanitised.lstrip(os.sep)
+        if len(sanitised) &gt; 1 and sanitised[1] == &quot;:&quot;:
+            sanitised = sanitised[2:].lstrip(os.sep)
+
+    target = os.path.realpath(os.path.join(base, sanitised))
+    if not target.startswith(base + os.sep) and target != base:
+        return None
+    return target
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (unsafe, for illustration only)
+# ---------------------------------------------------------------------------
+
+def extract_zip_naive(archive_path: str, dest: str) -&gt; None:
+    &quot;&quot;&quot;
+    UNSAFE: zipfile.extractall() without entry validation.
+    Vulnerable to zip-slip on older Python versions and absolute paths.
+    NEVER USE IN PRODUCTION.
+    &quot;&quot;&quot;
+    with zipfile.ZipFile(archive_path, &quot;r&quot;) as zf:
+        zf.extractall(dest)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Safe ZIP extractor
+# ---------------------------------------------------------------------------
+
+def extract_zip_safe(
+    archive_path: str,
+    dest: str,
+    max_decompressed_bytes: int = 500 * 1024 * 1024,  # 500 MB
+    max_entries: int = 10_000,
+    max_ratio: float = 100.0,
+    dry_run: bool = False,
+) -&gt; ExtractionSummary:
+    &quot;&quot;&quot;
+    Safe ZIP extraction.
+    Validates all entries before extracting any.
+    Raises ExtractionError on policy violation.
+    &quot;&quot;&quot;
+    summary = ExtractionSummary(archive_path=archive_path, destination=dest)
+
+    if not os.path.isfile(archive_path):
+        raise ExtractionError(f&quot;Archive not found: {archive_path}&quot;)
+
+    dest = os.path.realpath(dest)
+
+    with zipfile.ZipFile(archive_path, &quot;r&quot;) as zf:
+        infos = zf.infolist()
+
+        if len(infos) &gt; max_entries:
+            raise ExtractionError(
+                f&quot;Archive has {len(infos)} entries, exceeds max {max_entries}&quot;
+            )
+
+        total_uncompressed = sum(e.file_size for e in infos)
+        total_compressed   = sum(e.compress_size for e in infos) or 1
+        ratio = total_uncompressed / total_compressed
+
+        if total_uncompressed &gt; max_decompressed_bytes:
+            raise ExtractionError(
+                f&quot;Total decompressed size {total_uncompressed} exceeds &quot;
+                f&quot;limit {max_decompressed_bytes} (zip bomb?)&quot;
+            )
+
+        if ratio &gt; max_ratio:
+            raise ExtractionError(
+                f&quot;Compression ratio {ratio:.1f}:1 exceeds limit {max_ratio}:1 &quot;
+                f&quot;(zip bomb?)&quot;
+            )
+
+        # Validate each entry path
+        for info in infos:
+            safe = _safe_path(dest, info.filename)
+            if safe is None:
+                raise ExtractionError(
+                    f&quot;Path traversal detected: {info.filename!r}&quot;
+                )
+            # Detect symlinks (external_attr on Unix stores file mode)
+            if info.create_system == 3:  # Unix
+                mode = (info.external_attr &gt;&gt; 16) &amp; 0xFFFF
+                if (mode &amp; 0xA000) == 0xA000:  # S_ISLNK
+                    # We&#x27;d need to read the link target; flag for review
+                    summary.warnings.append(
+                        f&quot;Symlink entry detected: {info.filename!r} — skipping&quot;
+                    )
+                    summary.rejected_entries.append(info.filename)
+                    continue
+
+        if dry_run:
+            summary.entries_extracted = len(infos) - len(summary.rejected_entries)
+            summary.total_bytes = total_uncompressed
+            return summary
+
+        # Create destination
+        os.makedirs(dest, exist_ok=True)
+
+        # Extract validated entries
+        rejected = set(summary.rejected_entries)
+        for info in infos:
+            if info.filename in rejected:
+                continue
+            safe = _safe_path(dest, info.filename)
+            if safe is None:
+                continue  # Already validated above; defensive
+            # Directory entry
+            if info.filename.endswith(&quot;/&quot;):
+                os.makedirs(safe, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(safe), exist_ok=True)
+            with zf.open(info) as src, open(safe, &quot;wb&quot;) as dst:
+                shutil.copyfileobj(src, dst)
+            summary.entries_extracted += 1
+            summary.total_bytes += info.file_size
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2b — Safe tar.gz extractor
+# ---------------------------------------------------------------------------
+
+def extract_tar_safe(
+    archive_path: str,
+    dest: str,
+    max_decompressed_bytes: int = 500 * 1024 * 1024,
+    max_entries: int = 10_000,
+    dry_run: bool = False,
+) -&gt; ExtractionSummary:
+    &quot;&quot;&quot;
+    Safe tar/tar.gz extraction.
+    Rejects absolute paths, path traversal, devices, and symlinks.
+    &quot;&quot;&quot;
+    summary = ExtractionSummary(archive_path=archive_path, destination=dest)
+    dest = os.path.realpath(dest)
+
+    with tarfile.open(archive_path, &quot;r:*&quot;) as tf:
+        members = tf.getmembers()
+
+        if len(members) &gt; max_entries:
+            raise ExtractionError(
+                f&quot;Archive has {len(members)} entries, exceeds max {max_entries}&quot;
+            )
+
+        total_size = sum(m.size for m in members if m.isfile())
+        if total_size &gt; max_decompressed_bytes:
+            raise ExtractionError(
+                f&quot;Total decompressed size {total_size} exceeds limit {max_decompressed_bytes}&quot;
+            )
+
+        safe_members = []
+        for member in members:
+            # Reject absolute
+            if os.path.isabs(member.name):
+                raise ExtractionError(f&quot;Absolute path in archive: {member.name!r}&quot;)
+            # Reject traversal
+            safe = _safe_path(dest, member.name)
+            if safe is None:
+                raise ExtractionError(f&quot;Path traversal: {member.name!r}&quot;)
+            # Reject device files
+            if member.isdev():
+                raise ExtractionError(f&quot;Device file in archive: {member.name!r}&quot;)
+            # Warn on symlinks
+            if member.issym() or member.islnk():
+                link_target = os.path.realpath(
+                    os.path.join(os.path.dirname(safe), member.linkname)
+                )
+                if not link_target.startswith(dest):
+                    raise ExtractionError(
+                        f&quot;Symlink {member.name!r} → {member.linkname!r} escapes dest&quot;
+                    )
+            safe_members.append(member)
+
+        if dry_run:
+            summary.entries_extracted = len(safe_members)
+            summary.total_bytes = total_size
+            return summary
+
+        os.makedirs(dest, exist_ok=True)
+        for member in safe_members:
+            tf.extract(member, path=dest, set_attrs=False)
+            summary.entries_extracted += 1
+            summary.total_bytes += member.size
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _make_zip(entries: dict, out_path: str) -&gt; None:
+    &quot;&quot;&quot;entries: {name: content_bytes}&quot;&quot;&quot;
+    with zipfile.ZipFile(out_path, &quot;w&quot;, zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+
+def test_normal_extraction():
+    with tempfile.TemporaryDirectory() as tmp:
+        arc = os.path.join(tmp, &quot;test.zip&quot;)
+        dest = os.path.join(tmp, &quot;out&quot;)
+        _make_zip({
+            &quot;readme.txt&quot;: b&quot;hello&quot;,
+            &quot;subdir/config.json&quot;: b&#x27;{&quot;key&quot;:&quot;value&quot;}&#x27;,
+        }, arc)
+        s = extract_zip_safe(arc, dest)
+        assert s.entries_extracted == 2
+        assert os.path.isfile(os.path.join(dest, &quot;readme.txt&quot;))
+        print(&quot;Normal extraction: passed&quot;)
+
+
+def test_path_traversal_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        arc = os.path.join(tmp, &quot;evil.zip&quot;)
+        dest = os.path.join(tmp, &quot;out&quot;)
+        _make_zip({&quot;../../evil.txt&quot;: b&quot;pwned&quot;}, arc)
+        try:
+            extract_zip_safe(arc, dest)
+            assert False, &quot;Expected ExtractionError&quot;
+        except ExtractionError as e:
+            assert &quot;traversal&quot; in str(e).lower() or &quot;Path traversal&quot; in str(e)
+            print(f&quot;Path traversal rejected: passed ({e})&quot;)
+
+
+def test_zip_bomb_size():
+    with tempfile.TemporaryDirectory() as tmp:
+        arc = os.path.join(tmp, &quot;bomb.zip&quot;)
+        dest = os.path.join(tmp, &quot;out&quot;)
+        # Create a highly compressible entry that exceeds limit
+        _make_zip({&quot;zeros.bin&quot;: b&quot;\x00&quot; * (2 * 1024 * 1024)}, arc)
+        try:
+            extract_zip_safe(arc, dest, max_decompressed_bytes=1024)
+            assert False, &quot;Expected ExtractionError&quot;
+        except ExtractionError as e:
+            assert &quot;zip bomb&quot; in str(e).lower() or &quot;decompressed size&quot; in str(e).lower() or &quot;exceeds&quot; in str(e).lower()
+            print(f&quot;Zip bomb size rejected: passed ({e})&quot;)
+
+
+def test_too_many_entries():
+    with tempfile.TemporaryDirectory() as tmp:
+        arc = os.path.join(tmp, &quot;many.zip&quot;)
+        dest = os.path.join(tmp, &quot;out&quot;)
+        entries = {f&quot;file{i}.txt&quot;: b&quot;x&quot; for i in range(50)}
+        _make_zip(entries, arc)
+        try:
+            extract_zip_safe(arc, dest, max_entries=10)
+            assert False, &quot;Expected ExtractionError&quot;
+        except ExtractionError as e:
+            assert &quot;entries&quot; in str(e)
+            print(f&quot;Too many entries rejected: passed ({e})&quot;)
+
+
+def test_dry_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        arc = os.path.join(tmp, &quot;test.zip&quot;)
+        dest = os.path.join(tmp, &quot;out&quot;)
+        _make_zip({&quot;a.txt&quot;: b&quot;data&quot;}, arc)
+        s = extract_zip_safe(arc, dest, dry_run=True)
+        assert s.entries_extracted == 1
+        assert not os.path.isdir(dest), &quot;Dry run should not create files&quot;
+        print(&quot;Dry run: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+ZIP-SLIP (CVE-2018-1002220 and related)
+  A zip/tar archive contains an entry like:
+    &quot;../../../../etc/cron.d/evil&quot;
+  When extracted naively, this writes outside the destination directory.
+  Affected: Java&#x27;s ZipInputStream, Ruby gems, npm packages, Go archives.
+  Fix: Resolve the absolute target path; verify it starts with dest/.
+
+ZIP BOMB
+  A ZIP entry stores ~50 bytes compressed that expand to 4 GB
+  (e.g. all-zero content; deflate ratio ~1000:1).
+  Nested zips (e.g. 42.zip) exponentially amplify this.
+  Fix: Check total_uncompressed before extraction; limit ratio.
+
+SYMLINK ATTACK
+  A symlink entry points to /etc or C:\\Windows.
+  Subsequent extraction of a real file into that symlink overwrites
+  the target on the host.
+  Fix: Validate symlink targets are inside dest; or reject symlinks entirely.
+
+SAFE ALTERNATIVES
+  Python&#x27;s tarfile.extractall() since Python 3.12 has a filter=
+  parameter (filter=&quot;data&quot; is the safest).
+  Always use it: tarfile.open(...).extractall(path, filter=&quot;data&quot;).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_normal_extraction()
+    test_path_traversal_rejected()
+    test_zip_bomb_size()
+    test_too_many_entries()
+    test_dry_run()
+</code></pre>
+</body>
+</html>

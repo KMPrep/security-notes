@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q33_elf_metadata.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q33_elf_metadata.py</h1>
+  <p class="file-path">Source: code\practice\hard\q33_elf_metadata.py</p>
+  <p class="line-count">690 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q33 [Hard] — Parse ELF Metadata (Simplified)
+=============================================================================
+
+PROBLEM
+-------
+Parse an ELF binary (Linux executable or shared library) from raw bytes:
+  1. ELF magic validation (0x7F &#x27;ELF&#x27;).
+  2. ELF header: class (32/64-bit), endianness, OS/ABI, e_type, e_machine,
+     e_entry, e_phoff, e_shoff.
+  3. Program headers: segment type, flags, virtual address, file offset, size.
+  4. Section headers: name, type, flags, virtual address, offset, size.
+  5. Dynamic segment: NEEDED (imported libraries), RPATH, RUNPATH.
+  6. Symbol tables (.dynsym): exported and imported symbols.
+  7. Security indicators: missing stack canary, missing NX, RELRO status,
+     PIE detection, missing FORTIFY.
+
+CLARIFYING QUESTIONS
+--------------------
+1. 32-bit and 64-bit ELF?
+   → Both; struct sizes differ.
+2. Little-endian and big-endian?
+   → Handle both; ELFDATA2LSB (LE) and ELFDATA2MSB (BE).
+3. Stripped binaries (no section headers)?
+   → Parse program headers; section headers optional.
+4. Parse all symbol tables?
+   → Focus on .dynsym (dynamic symbols) for import/export info.
+5. Error handling on corrupt data?
+   → Return partial result; flag corrupt fields.
+
+=============================================================================
+APPROACH 1 — NAIVE (struct.unpack_from at hardcoded offsets)
+=============================================================================
+  Directly unpack fields at known ELF spec offsets.
+  Verbose but explicit; easy to cross-reference with the ELF spec.
+
+=============================================================================
+APPROACH 2 — SAFE BUFFER + STRUCT FORMAT DISPATCH (RECOMMENDED)
+=============================================================================
+  Use a SafeBuffer wrapper + select struct format strings based on
+  class (EI_CLASS) and endianness (EI_DATA).
+  Cleaner; less error-prone for the 32/64 bit case split.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+import struct
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# ELF Constants
+# ---------------------------------------------------------------------------
+
+ELF_MAGIC = b&quot;\x7fELF&quot;
+
+ELFCLASS32 = 1
+ELFCLASS64 = 2
+
+ELFDATA2LSB = 1  # Little-endian
+ELFDATA2MSB = 2  # Big-endian
+
+# e_type
+ET_TYPES: Dict[int, str] = {
+    0: &quot;ET_NONE&quot;,
+    1: &quot;ET_REL&quot;,
+    2: &quot;ET_EXEC&quot;,
+    3: &quot;ET_DYN&quot;,
+    4: &quot;ET_CORE&quot;,
+}
+
+# e_machine
+EM_MACHINES: Dict[int, str] = {
+    0x00: &quot;NONE&quot;,
+    0x02: &quot;SPARC&quot;,
+    0x03: &quot;x86&quot;,
+    0x08: &quot;MIPS&quot;,
+    0x14: &quot;PowerPC&quot;,
+    0x28: &quot;ARM&quot;,
+    0x2A: &quot;SuperH&quot;,
+    0x32: &quot;IA-64&quot;,
+    0x3E: &quot;x86-64&quot;,
+    0xB7: &quot;AArch64&quot;,
+    0xF3: &quot;RISC-V&quot;,
+}
+
+# Program header types
+PT_TYPES: Dict[int, str] = {
+    0: &quot;PT_NULL&quot;,
+    1: &quot;PT_LOAD&quot;,
+    2: &quot;PT_DYNAMIC&quot;,
+    3: &quot;PT_INTERP&quot;,
+    4: &quot;PT_NOTE&quot;,
+    5: &quot;PT_SHLIB&quot;,
+    6: &quot;PT_PHDR&quot;,
+    7: &quot;PT_TLS&quot;,
+    0x6474E550: &quot;PT_GNU_EH_FRAME&quot;,
+    0x6474E551: &quot;PT_GNU_STACK&quot;,
+    0x6474E552: &quot;PT_GNU_RELRO&quot;,
+}
+
+# Program header flags
+PF_X = 0x1  # Execute
+PF_W = 0x2  # Write
+PF_R = 0x4  # Read
+
+# Section types
+SHT_TYPES: Dict[int, str] = {
+    0: &quot;SHT_NULL&quot;,
+    1: &quot;SHT_PROGBITS&quot;,
+    2: &quot;SHT_SYMTAB&quot;,
+    3: &quot;SHT_STRTAB&quot;,
+    4: &quot;SHT_RELA&quot;,
+    5: &quot;SHT_HASH&quot;,
+    6: &quot;SHT_DYNAMIC&quot;,
+    7: &quot;SHT_NOTE&quot;,
+    8: &quot;SHT_NOBITS&quot;,
+    9: &quot;SHT_REL&quot;,
+    11: &quot;SHT_DYNSYM&quot;,
+    14: &quot;SHT_INIT_ARRAY&quot;,
+    15: &quot;SHT_FINI_ARRAY&quot;,
+}
+
+# Dynamic tag types
+DT_NEEDED  = 1
+DT_RPATH   = 15
+DT_RUNPATH = 29
+DT_NULL    = 0
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProgramHeader:
+    ph_type: str
+    flags: int
+    vaddr: int
+    offset: int
+    filesz: int
+    memsz: int
+    align: int
+    is_executable: bool = False
+    is_writable: bool = False
+    is_readable: bool = False
+
+
+@dataclass
+class SectionHeader:
+    name: str
+    sh_type: str
+    flags: int
+    vaddr: int
+    offset: int
+    size: int
+    entropy: float = 0.0
+
+
+@dataclass
+class Symbol:
+    name: str
+    value: int
+    size: int
+    symbol_type: str
+    bind: str
+    is_imported: bool  # True if UND (value=0, shndx=0)
+
+
+@dataclass
+class ELFMetadata:
+    path: str = &quot;&quot;
+    is_valid: bool = False
+    error: str = &quot;&quot;
+
+    # ELF header
+    ei_class: str = &quot;&quot;     # ELF32 / ELF64
+    is_64bit: bool = False
+    is_little_endian: bool = True
+    os_abi: int = 0
+    e_type: str = &quot;&quot;
+    e_machine: str = &quot;&quot;
+    e_entry: int = 0
+    e_phoff: int = 0
+    e_shoff: int = 0
+    e_phnum: int = 0
+    e_shnum: int = 0
+
+    # Segments and sections
+    program_headers: List[ProgramHeader] = field(default_factory=list)
+    sections: List[SectionHeader] = field(default_factory=list)
+
+    # Dynamic info
+    needed_libs: List[str] = field(default_factory=list)
+    rpath: str = &quot;&quot;
+    runpath: str = &quot;&quot;
+
+    # Symbols
+    symbols: List[Symbol] = field(default_factory=list)
+
+    # Security
+    has_stack_canary: bool = False
+    has_nx_stack: bool = False
+    has_relro: bool = False
+    has_pie: bool = False
+    has_fortify: bool = False
+    anomalies: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Safe Buffer
+# ---------------------------------------------------------------------------
+
+class _Buf:
+    def __init__(self, data: bytes, little_endian: bool = True) -&gt; None:
+        self._data = data
+        self._len = len(data)
+        self._le = little_endian
+        self._endian = &quot;&lt;&quot; if little_endian else &quot;&gt;&quot;
+
+    def read(self, offset: int, n: int) -&gt; Optional[bytes]:
+        if offset &lt; 0 or offset + n &gt; self._len:
+            return None
+        return self._data[offset:offset + n]
+
+    def _unpack(self, fmt: str, offset: int) -&gt; Optional[int]:
+        size = struct.calcsize(fmt)
+        b = self.read(offset, size)
+        if b is None:
+            return None
+        return struct.unpack_from(fmt, b)[0]
+
+    def u8(self, off: int) -&gt; Optional[int]:  return self._unpack(&quot;B&quot;, off)
+    def u16(self, off: int) -&gt; Optional[int]: return self._unpack(self._endian + &quot;H&quot;, off)
+    def u32(self, off: int) -&gt; Optional[int]: return self._unpack(self._endian + &quot;I&quot;, off)
+    def u64(self, off: int) -&gt; Optional[int]: return self._unpack(self._endian + &quot;Q&quot;, off)
+    def i64(self, off: int) -&gt; Optional[int]: return self._unpack(self._endian + &quot;q&quot;, off)
+
+    def uword(self, off: int, is64: bool) -&gt; Optional[int]:
+        return self.u64(off) if is64 else self.u32(off)
+
+    def cstr(self, offset: int, max_len: int = 256) -&gt; str:
+        end = offset
+        while end &lt; self._len and end &lt; offset + max_len and self._data[end] != 0:
+            end += 1
+        return self._data[offset:end].decode(&quot;latin-1&quot;, errors=&quot;replace&quot;)
+
+    def __len__(self) -&gt; int:
+        return self._len
+
+
+# ---------------------------------------------------------------------------
+# Entropy
+# ---------------------------------------------------------------------------
+
+def _entropy(data: bytes) -&gt; float:
+    if not data:
+        return 0.0
+    freq: Dict[int, int] = {}
+    for b in data:
+        freq[b] = freq.get(b, 0) + 1
+    total = len(data)
+    ent = 0.0
+    for c in freq.values():
+        p = c / total
+        ent -= p * math.log2(p)
+    return round(ent, 4)
+
+
+# ---------------------------------------------------------------------------
+# Core ELF Parser
+# ---------------------------------------------------------------------------
+
+def parse_elf(data: bytes, path: str = &quot;&quot;) -&gt; ELFMetadata:
+    meta = ELFMetadata(path=path)
+
+    if len(data) &lt; 16:
+        meta.error = &quot;File too small for ELF&quot;
+        return meta
+
+    if data[:4] != ELF_MAGIC:
+        meta.error = f&quot;Missing ELF magic (got {data[:4]!r})&quot;
+        return meta
+
+    ei_class = data[4]
+    ei_data  = data[5]
+    os_abi   = data[7]
+
+    meta.is_64bit = (ei_class == ELFCLASS64)
+    meta.ei_class = &quot;ELF64&quot; if meta.is_64bit else &quot;ELF32&quot;
+    meta.is_little_endian = (ei_data == ELFDATA2LSB)
+    meta.os_abi = os_abi
+
+    buf = _Buf(data, little_endian=meta.is_little_endian)
+    is64 = meta.is_64bit
+    e = &quot;&gt;&quot; if ei_data == ELFDATA2MSB else &quot;&lt;&quot;
+
+    # --- ELF Header fields ---
+    if is64:
+        e_type    = buf.u16(16)
+        e_machine = buf.u16(18)
+        e_version = buf.u32(20)
+        e_entry   = buf.u64(24)
+        e_phoff   = buf.u64(32)
+        e_shoff   = buf.u64(40)
+        e_phentsize = buf.u16(54)
+        e_phnum     = buf.u16(56)
+        e_shentsize = buf.u16(58)
+        e_shnum     = buf.u16(60)
+        e_shstrndx  = buf.u16(62)
+    else:
+        e_type    = buf.u16(16)
+        e_machine = buf.u16(18)
+        e_version = buf.u32(20)
+        e_entry   = buf.u32(24)
+        e_phoff   = buf.u32(28)
+        e_shoff   = buf.u32(32)
+        e_phentsize = buf.u16(42)
+        e_phnum     = buf.u16(44)
+        e_shentsize = buf.u16(46)
+        e_shnum     = buf.u16(48)
+        e_shstrndx  = buf.u16(50)
+
+    # Defaults for None
+    e_type    = e_type or 0
+    e_machine = e_machine or 0
+    e_entry   = e_entry or 0
+    e_phoff   = e_phoff or 0
+    e_shoff   = e_shoff or 0
+    e_phentsize = e_phentsize or 0
+    e_phnum   = e_phnum or 0
+    e_shentsize = e_shentsize or 0
+    e_shnum   = e_shnum or 0
+    e_shstrndx = e_shstrndx or 0
+
+    meta.e_type    = ET_TYPES.get(e_type, f&quot;ET_UNKNOWN({e_type})&quot;)
+    meta.e_machine = EM_MACHINES.get(e_machine, f&quot;EM_{e_machine:#x}&quot;)
+    meta.e_entry   = e_entry
+    meta.e_phoff   = e_phoff
+    meta.e_shoff   = e_shoff
+    meta.e_phnum   = e_phnum
+    meta.e_shnum   = e_shnum
+
+    # --- Program Headers ---
+    phdrs: List[ProgramHeader] = []
+    for i in range(min(e_phnum, 256)):  # safety cap
+        ph_off = e_phoff + i * e_phentsize
+        if is64:
+            p_type  = buf.u32(ph_off)
+            p_flags = buf.u32(ph_off + 4)
+            p_offset = buf.u64(ph_off + 8)
+            p_vaddr  = buf.u64(ph_off + 16)
+            p_filesz = buf.u64(ph_off + 32)
+            p_memsz  = buf.u64(ph_off + 40)
+            p_align  = buf.u64(ph_off + 48)
+        else:
+            p_type  = buf.u32(ph_off)
+            p_flags = buf.u32(ph_off + 24)
+            p_offset = buf.u32(ph_off + 4)
+            p_vaddr  = buf.u32(ph_off + 8)
+            p_filesz = buf.u32(ph_off + 16)
+            p_memsz  = buf.u32(ph_off + 20)
+            p_align  = buf.u32(ph_off + 28)
+
+        p_type = p_type or 0
+        p_flags = p_flags or 0
+        p_offset = p_offset or 0
+        p_vaddr = p_vaddr or 0
+        p_filesz = p_filesz or 0
+        p_memsz = p_memsz or 0
+        p_align = p_align or 0
+
+        ph = ProgramHeader(
+            ph_type=PT_TYPES.get(p_type, f&quot;PT_{p_type:#x}&quot;),
+            flags=p_flags,
+            vaddr=p_vaddr, offset=p_offset,
+            filesz=p_filesz, memsz=p_memsz, align=p_align,
+            is_executable=bool(p_flags &amp; PF_X),
+            is_writable=bool(p_flags &amp; PF_W),
+            is_readable=bool(p_flags &amp; PF_R),
+        )
+        phdrs.append(ph)
+
+        # Security: NX stack
+        if p_type == 0x6474E551:  # PT_GNU_STACK
+            meta.has_nx_stack = not bool(p_flags &amp; PF_X)
+        # RELRO
+        if p_type == 0x6474E552:  # PT_GNU_RELRO
+            meta.has_relro = True
+
+    meta.program_headers = phdrs
+    meta.has_pie = (meta.e_type == &quot;ET_DYN&quot;)
+
+    # --- Section String Table ---
+    strtab_off = 0
+    strtab_size = 0
+    if e_shstrndx and e_shoff and e_shstrndx &lt; e_shnum:
+        shstr_off = e_shoff + e_shstrndx * e_shentsize
+        if is64:
+            strtab_off  = buf.u64(shstr_off + 24) or 0
+            strtab_size = buf.u64(shstr_off + 32) or 0
+        else:
+            strtab_off  = buf.u32(shstr_off + 16) or 0
+            strtab_size = buf.u32(shstr_off + 20) or 0
+
+    def _sec_name(name_idx: int) -&gt; str:
+        if strtab_off and name_idx &lt; strtab_size:
+            return buf.cstr(strtab_off + name_idx)
+        return f&quot;&lt;{name_idx}&gt;&quot;
+
+    # --- Section Headers ---
+    sections: List[SectionHeader] = []
+    dynsym_sec: Optional[SectionHeader] = None
+    dynstr_off = 0
+    dynstr_size = 0
+    dynamic_sec_off = 0
+    dynamic_sec_size = 0
+
+    for i in range(min(e_shnum, 256)):
+        sh_off = e_shoff + i * e_shentsize
+        if is64:
+            sh_name   = buf.u32(sh_off)
+            sh_type   = buf.u32(sh_off + 4)
+            sh_flags  = buf.u64(sh_off + 8)
+            sh_vaddr  = buf.u64(sh_off + 16)
+            sh_offset = buf.u64(sh_off + 24)
+            sh_size   = buf.u64(sh_off + 32)
+        else:
+            sh_name   = buf.u32(sh_off)
+            sh_type   = buf.u32(sh_off + 4)
+            sh_flags  = buf.u32(sh_off + 8)
+            sh_vaddr  = buf.u32(sh_off + 12)
+            sh_offset = buf.u32(sh_off + 16)
+            sh_size   = buf.u32(sh_off + 20)
+
+        sh_name   = sh_name or 0
+        sh_type   = sh_type or 0
+        sh_flags  = sh_flags or 0
+        sh_vaddr  = sh_vaddr or 0
+        sh_offset = sh_offset or 0
+        sh_size   = sh_size or 0
+
+        name = _sec_name(sh_name)
+        sec_data = buf.read(sh_offset, sh_size) or b&quot;&quot;
+        ent = _entropy(sec_data)
+
+        sec = SectionHeader(
+            name=name,
+            sh_type=SHT_TYPES.get(sh_type, f&quot;SHT_{sh_type:#x}&quot;),
+            flags=sh_flags, vaddr=sh_vaddr, offset=sh_offset,
+            size=sh_size, entropy=ent,
+        )
+        sections.append(sec)
+
+        if name == &quot;.dynstr&quot;:
+            dynstr_off = sh_offset
+            dynstr_size = sh_size
+        elif name == &quot;.dynamic&quot;:
+            dynamic_sec_off = sh_offset
+            dynamic_sec_size = sh_size
+        elif name == &quot;.dynsym&quot;:
+            dynsym_sec = sec
+
+        # Security checks from section names
+        if name == &quot;__stack_chk_fail&quot; or name == &quot;.note.gnu.build-id&quot;:
+            pass
+        if name == &quot;.got.plt&quot;:
+            pass  # relro covers this
+
+    meta.sections = sections
+
+    # --- Dynamic section ---
+    if dynamic_sec_off and dynstr_off:
+        dyn_ent_size = 16 if is64 else 8
+        n_entries = dynamic_sec_size // dyn_ent_size
+        for i in range(min(n_entries, 1024)):
+            doff = dynamic_sec_off + i * dyn_ent_size
+            if is64:
+                d_tag = buf.i64(doff)
+                d_val = buf.u64(doff + 8)
+            else:
+                d_tag = buf.u32(doff)
+                d_val = buf.u32(doff + 4)
+            if d_tag is None or d_tag == DT_NULL:
+                break
+            if d_val is None:
+                continue
+            if d_tag == DT_NEEDED:
+                lib = buf.cstr(dynstr_off + d_val)
+                meta.needed_libs.append(lib)
+            elif d_tag == DT_RPATH:
+                meta.rpath = buf.cstr(dynstr_off + d_val)
+            elif d_tag == DT_RUNPATH:
+                meta.runpath = buf.cstr(dynstr_off + d_val)
+
+    # --- Dynamic Symbols (.dynsym) ---
+    if dynsym_sec and dynstr_off:
+        sym_ent_size = 24 if is64 else 16
+        n_syms = dynsym_sec.size // sym_ent_size
+        sym_names: Dict[str, bool] = {}  # name → is_imported
+
+        for i in range(min(n_syms, 4096)):
+            soff = dynsym_sec.offset + i * sym_ent_size
+            if is64:
+                st_name  = buf.u32(soff)
+                st_info  = buf.u8(soff + 4)
+                st_shndx = buf.u16(soff + 6)
+                st_value = buf.u64(soff + 8)
+                st_size  = buf.u64(soff + 16)
+            else:
+                st_name  = buf.u32(soff)
+                st_value = buf.u32(soff + 4)
+                st_size  = buf.u32(soff + 8)
+                st_info  = buf.u8(soff + 12)
+                st_shndx = buf.u16(soff + 14)
+
+            st_name  = st_name or 0
+            st_info  = st_info or 0
+            st_shndx = st_shndx or 0
+            st_value = st_value or 0
+            st_size  = st_size or 0
+
+            sym_name = buf.cstr(dynstr_off + st_name)
+            bind = {0: &quot;LOCAL&quot;, 1: &quot;GLOBAL&quot;, 2: &quot;WEAK&quot;}.get(st_info &gt;&gt; 4, &quot;OTHER&quot;)
+            stype = {0: &quot;NOTYPE&quot;, 1: &quot;OBJECT&quot;, 2: &quot;FUNC&quot;, 3: &quot;SECTION&quot;, 4: &quot;FILE&quot;}.get(st_info &amp; 0xF, &quot;OTHER&quot;)
+            is_imported = (st_shndx == 0 and st_value == 0 and sym_name)
+
+            if sym_name:
+                meta.symbols.append(Symbol(
+                    name=sym_name, value=st_value, size=st_size,
+                    symbol_type=stype, bind=bind, is_imported=is_imported,
+                ))
+
+        # Security: stack canary
+        meta.has_stack_canary = any(
+            &quot;__stack_chk_fail&quot; in s.name for s in meta.symbols
+        )
+        # FORTIFY: __printf_chk, __memcpy_chk etc.
+        meta.has_fortify = any(
+            s.name.endswith(&quot;_chk&quot;) for s in meta.symbols
+        )
+
+    # --- Anomalies ---
+    anomalies: List[str] = []
+    if not meta.has_nx_stack:
+        anomalies.append(&quot;Executable stack (no PT_GNU_STACK or NX not set)&quot;)
+    if not meta.has_relro:
+        anomalies.append(&quot;No RELRO (GOT overwrite possible)&quot;)
+    if not meta.has_pie:
+        anomalies.append(&quot;Not PIE (fixed load address, harder to ASLR)&quot;)
+    if not meta.has_stack_canary:
+        anomalies.append(&quot;No stack canary (__stack_chk_fail not found)&quot;)
+    if meta.rpath:
+        anomalies.append(f&quot;RPATH set: {meta.rpath!r} (DLL injection risk)&quot;)
+
+    # High entropy sections
+    for s in meta.sections:
+        if s.entropy &gt; 7.2 and s.size &gt; 512 and s.name not in (&quot;.rodata&quot;,):
+            anomalies.append(f&quot;High entropy section &#x27;{s.name}&#x27;: {s.entropy:.2f}&quot;)
+
+    meta.anomalies = anomalies
+    meta.is_valid = True
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _build_minimal_elf64() -&gt; bytes:
+    &quot;&quot;&quot;Build a minimal valid ELF64 LE binary.&quot;&quot;&quot;
+    buf = bytearray(0x200)
+
+    # ELF ident
+    buf[0:4] = ELF_MAGIC
+    buf[4] = ELFCLASS64
+    buf[5] = ELFDATA2LSB
+    buf[6] = 1     # EV_CURRENT
+    buf[7] = 0     # ELFOSABI_NONE
+
+    # ELF header (64-bit)
+    struct.pack_into(&quot;&lt;H&quot;, buf, 16, 2)     # e_type = ET_EXEC
+    struct.pack_into(&quot;&lt;H&quot;, buf, 18, 0x3E)  # e_machine = x86-64
+    struct.pack_into(&quot;&lt;I&quot;, buf, 20, 1)     # e_version
+    struct.pack_into(&quot;&lt;Q&quot;, buf, 24, 0x400000)  # e_entry
+    struct.pack_into(&quot;&lt;Q&quot;, buf, 32, 0x40)  # e_phoff = 64
+    struct.pack_into(&quot;&lt;Q&quot;, buf, 40, 0)     # e_shoff = 0 (no sections)
+    struct.pack_into(&quot;&lt;I&quot;, buf, 48, 0)     # e_flags
+    struct.pack_into(&quot;&lt;H&quot;, buf, 52, 64)    # e_ehsize
+    struct.pack_into(&quot;&lt;H&quot;, buf, 54, 56)    # e_phentsize
+    struct.pack_into(&quot;&lt;H&quot;, buf, 56, 1)     # e_phnum = 1
+    struct.pack_into(&quot;&lt;H&quot;, buf, 58, 64)    # e_shentsize
+    struct.pack_into(&quot;&lt;H&quot;, buf, 60, 0)     # e_shnum = 0
+    struct.pack_into(&quot;&lt;H&quot;, buf, 62, 0)     # e_shstrndx = 0
+
+    # PT_GNU_STACK (non-executable stack)
+    ph_off = 0x40
+    struct.pack_into(&quot;&lt;I&quot;, buf, ph_off,      0x6474E551)  # PT_GNU_STACK
+    struct.pack_into(&quot;&lt;I&quot;, buf, ph_off + 4,  PF_R | PF_W)  # flags (no exec)
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 8,  0)  # offset
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 16, 0)  # vaddr
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 24, 0)  # paddr
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 32, 0)  # filesz
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 40, 0)  # memsz
+    struct.pack_into(&quot;&lt;Q&quot;, buf, ph_off + 48, 16) # align
+
+    return bytes(buf)
+
+
+def test_parse_elf64():
+    data = _build_minimal_elf64()
+    meta = parse_elf(data, path=&quot;test_elf64&quot;)
+    assert meta.is_valid, f&quot;ELF64 parse failed: {meta.error}&quot;
+    assert meta.is_64bit
+    assert meta.e_machine == &quot;x86-64&quot;
+    assert meta.e_type == &quot;ET_EXEC&quot;
+    assert meta.has_nx_stack
+    print(f&quot;ELF64 parse: passed (machine={meta.e_machine}, nx={meta.has_nx_stack})&quot;)
+
+
+def test_invalid_magic():
+    meta = parse_elf(b&quot;\x7fNOT&quot; + b&quot;\x00&quot; * 60)
+    assert not meta.is_valid
+    assert &quot;ELF magic&quot; in meta.error
+    print(&quot;Invalid ELF magic: passed&quot;)
+
+
+def test_anomaly_no_nx():
+    data = bytearray(_build_minimal_elf64())
+    # Change PT_GNU_STACK flags to add PF_X
+    ph_off = 0x40
+    struct.pack_into(&quot;&lt;I&quot;, data, ph_off + 4, PF_R | PF_W | PF_X)
+    meta = parse_elf(bytes(data))
+    assert meta.is_valid
+    assert not meta.has_nx_stack
+    assert any(&quot;Executable stack&quot; in a for a in meta.anomalies)
+    print(&quot;No NX anomaly: passed&quot;)
+
+
+def test_truncated_elf():
+    meta = parse_elf(b&quot;\x7fELF\x02\x01&quot;)  # truncated
+    assert not meta.is_valid
+    print(&quot;Truncated ELF: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+ELF SECURITY HARDENING INDICATORS
+
+ASLR / PIE
+  Position-Independent Executable (ET_DYN / -fPIE) allows the kernel to
+  randomise the load address.  Without it, exploits can use hardcoded
+  gadget addresses.
+
+NX (Non-Executable Stack / Heap)
+  PT_GNU_STACK with PF_W|PF_R (no PF_X) tells the kernel to mark the stack NX.
+  Without this, shellcode can be injected and executed on the stack.
+
+RELRO (Relocation Read-Only)
+  PT_GNU_RELRO marks the GOT (Global Offset Table) read-only after startup.
+  Without RELRO, an attacker who can write to memory can overwrite GOT entries
+  to redirect function calls.
+
+STACK CANARY
+  __stack_chk_fail in .dynsym indicates the binary was compiled with -fstack-
+  protector.  A canary value between local vars and return address detects
+  stack overflows.
+
+RPATH / RUNPATH
+  Hard-coded library search paths.  If an attacker can plant a malicious
+  .so at the RPATH location, they achieve DLL injection (library hijacking).
+
+FORTIFY SOURCE
+  __memcpy_chk, __printf_chk etc. are fortify-source wrappers that add
+  bounds checks at compile time (-D_FORTIFY_SOURCE=2).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_parse_elf64()
+    test_invalid_magic()
+    test_anomaly_no_nx()
+    test_truncated_elf()
+</code></pre>
+</body>
+</html>

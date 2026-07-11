@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q23_syslog_normalizer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q23_syslog_normalizer.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q23_syslog_normalizer.py</p>
+  <p class="line-count">313 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q23. Universal Syslog Normalizer
+==================================
+Parse five different log formats (RFC 5424, RFC 3164, JSON, Windows
+key=value, Apache CLF) and output a unified JSON record per event.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Parse only Apache logs with a regex.
+  Problem: Real SOC environments receive logs from Linux syslog, Windows
+  Event Log, structured JSON from cloud services, and web servers — all
+  in the same pipeline. A single-format parser is useless.
+
+BETTER: Write a parser per format, select by filename.
+  Problem: In a SIEM stream you don&#x27;t know the format in advance.
+  Need to auto-detect the format based on the first character / schema.
+
+GOOGLE-LEVEL (this file):
+  - Auto-detect: each parser returns None if the line doesn&#x27;t match its format.
+  - Ordered probe: cheapest/most-specific first, catch-all last.
+  - Output: unified schema with ts (epoch float), host, source_type,
+    severity, message, and extra dict for format-specific fields.
+  - Handles malformed lines without crashing.
+
+Complexity: O(N × F) worst-case where F = 5 formats.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import json
+from datetime import datetime, timezone
+from typing import Any
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (mixed formats in one stream)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = r&quot;&quot;&quot;
+&lt;34&gt;1 2024-03-12T08:00:00Z webserver01 nginx - - - SSL handshake failed from 1.2.3.4
+&lt;165&gt;1 2024-03-12T08:00:01.123Z db-host myapp 1234 ID47 [exampleSDID@32473 iut=&quot;3&quot; eventSource=&quot;Application&quot;] An application error occurred
+Mar 12 08:00:02 authserver sshd[5678]: Failed password for root from 9.10.11.12 port 44322 ssh2
+Mar 12 08:00:03 authserver sudo: alice : TTY=pts/0 ; USER=root ; COMMAND=/bin/bash
+{&quot;timestamp&quot;:&quot;2024-03-12T08:00:04Z&quot;,&quot;host&quot;:&quot;k8snode1&quot;,&quot;level&quot;:&quot;ERROR&quot;,&quot;message&quot;:&quot;OOMKill: container exceeded memory limit&quot;,&quot;container&quot;:&quot;webapp&quot;,&quot;namespace&quot;:&quot;production&quot;}
+EventID=4625 TimeCreated=2024-03-12T08:00:05Z ComputerName=WKSTN01 UserName=bob Status=0xC000006D SubStatus=0xC000006A LogonType=3
+10.0.0.1 - carol [12/Mar/2024:08:00:06 +0000] &quot;GET /admin/config.php HTTP/1.1&quot; 403 1024
+MALFORMED_LINE_NOT_ANY_FORMAT
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIFIED SCHEMA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_record(
+    ts: float,
+    source_type: str,
+    host: str,
+    severity: str,
+    message: str,
+    extra: dict[str, Any] | None = None,
+) -&gt; dict:
+    return {
+        &quot;ts&quot;:          ts,
+        &quot;ts_iso&quot;:      datetime.fromtimestamp(ts, tz=timezone.utc).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;),
+        &quot;source_type&quot;: source_type,
+        &quot;host&quot;:        host,
+        &quot;severity&quot;:    severity,
+        &quot;message&quot;:     message,
+        &quot;extra&quot;:       extra or {},
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── RFC 5424 ─────────────────────────────────────────────────────────────────
+# &lt;PRI&gt;VERSION TIMESTAMP HOST APP PID MSGID STRUCTURED-DATA MSG
+RFC5424_RE = re.compile(
+    r&#x27;^&lt;(?P&lt;pri&gt;\d+)&gt;(?P&lt;ver&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;ts&gt;\S+)\s+(?P&lt;host&gt;\S+)\s+(?P&lt;app&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;pid&gt;\S+)\s+(?P&lt;msgid&gt;\S+)\s+(?P&lt;sd&gt;\S+)\s*(?P&lt;msg&gt;.*)&#x27;
+)
+
+SEVERITY_NAMES = [&quot;EMERGENCY&quot;,&quot;ALERT&quot;,&quot;CRITICAL&quot;,&quot;ERROR&quot;,&quot;WARNING&quot;,&quot;NOTICE&quot;,&quot;INFO&quot;,&quot;DEBUG&quot;]
+
+
+def parse_rfc5424(line: str) -&gt; dict | None:
+    m = RFC5424_RE.match(line)
+    if not m:
+        return None
+    try:
+        ts_str = m.group(&quot;ts&quot;).rstrip(&quot;Z&quot;)
+        # Handle optional fractional seconds
+        for fmt in (&quot;%Y-%m-%dT%H:%M:%S.%f&quot;, &quot;%Y-%m-%dT%H:%M:%S&quot;):
+            try:
+                ts = datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc).timestamp()
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    except Exception:
+        return None
+
+    pri      = int(m.group(&quot;pri&quot;))
+    sev_idx  = pri % 8
+    severity = SEVERITY_NAMES[sev_idx]
+    return make_record(
+        ts=ts,
+        source_type=&quot;RFC5424&quot;,
+        host=m.group(&quot;host&quot;),
+        severity=severity,
+        message=m.group(&quot;msg&quot;).strip(),
+        extra={&quot;app&quot;: m.group(&quot;app&quot;), &quot;pid&quot;: m.group(&quot;pid&quot;), &quot;msgid&quot;: m.group(&quot;msgid&quot;)},
+    )
+
+
+# ── RFC 3164 ─────────────────────────────────────────────────────────────────
+# &lt;PRI&gt;Mon DD HH:MM:SS host process[pid]: message
+RFC3164_RE = re.compile(
+    r&#x27;^&lt;(?P&lt;pri&gt;\d+)&gt;(?P&lt;ts&gt;\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;(?P&lt;host&gt;\S+)\s+(?P&lt;proc&gt;[^:\[]+)(?:\[(?P&lt;pid&gt;\d+)\])?:\s*(?P&lt;msg&gt;.*)&#x27;
+)
+# Also handles the bare form without PRI
+RFC3164_BARE_RE = re.compile(
+    r&#x27;^(?P&lt;ts&gt;\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;(?P&lt;host&gt;\S+)\s+(?P&lt;proc&gt;[^:\[]+)(?:\[(?P&lt;pid&gt;\d+)\])?:\s*(?P&lt;msg&gt;.*)&#x27;
+)
+
+MONTH_MAP = {&quot;Jan&quot;:1,&quot;Feb&quot;:2,&quot;Mar&quot;:3,&quot;Apr&quot;:4,&quot;May&quot;:5,&quot;Jun&quot;:6,
+             &quot;Jul&quot;:7,&quot;Aug&quot;:8,&quot;Sep&quot;:9,&quot;Oct&quot;:10,&quot;Nov&quot;:11,&quot;Dec&quot;:12}
+RFC3164_YEAR = 2024
+
+
+def _parse_rfc3164_ts(ts_str: str) -&gt; float | None:
+    parts = ts_str.split()
+    if len(parts) != 3:
+        return None
+    try:
+        month = MONTH_MAP.get(parts[0], 0)
+        day   = int(parts[1])
+        h, mi, s = map(int, parts[2].split(&quot;:&quot;))
+        return datetime(RFC3164_YEAR, month, day, h, mi, s,
+                        tzinfo=timezone.utc).timestamp()
+    except (ValueError, KeyError):
+        return None
+
+
+def parse_rfc3164(line: str) -&gt; dict | None:
+    m = RFC3164_RE.match(line) or RFC3164_BARE_RE.match(line)
+    if not m:
+        return None
+    ts = _parse_rfc3164_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    pri      = int(m.group(&quot;pri&quot;)) if &quot;pri&quot; in m.groupdict() and m.group(&quot;pri&quot;) else 14
+    sev_idx  = pri % 8
+    severity = SEVERITY_NAMES[sev_idx]
+    return make_record(
+        ts=ts,
+        source_type=&quot;RFC3164&quot;,
+        host=m.group(&quot;host&quot;),
+        severity=severity,
+        message=m.group(&quot;msg&quot;).strip(),
+        extra={&quot;process&quot;: m.group(&quot;proc&quot;).strip(), &quot;pid&quot;: m.group(&quot;pid&quot;)},
+    )
+
+
+# ── JSON ──────────────────────────────────────────────────────────────────────
+def parse_json(line: str) -&gt; dict | None:
+    if not line.startswith(&quot;{&quot;):
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    ts_str = obj.get(&quot;timestamp&quot;) or obj.get(&quot;time&quot;) or obj.get(&quot;@timestamp&quot;)
+    if not ts_str:
+        return None
+    try:
+        ts = datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+    level = (obj.get(&quot;level&quot;) or obj.get(&quot;severity&quot;) or &quot;INFO&quot;).upper()
+    msg   = obj.get(&quot;message&quot;) or obj.get(&quot;msg&quot;) or &quot;&quot;
+    host  = obj.get(&quot;host&quot;) or obj.get(&quot;hostname&quot;) or &quot;?&quot;
+    extra = {k: v for k, v in obj.items() if k not in (&quot;timestamp&quot;,&quot;time&quot;,&quot;@timestamp&quot;,&quot;level&quot;,&quot;severity&quot;,&quot;message&quot;,&quot;msg&quot;,&quot;host&quot;,&quot;hostname&quot;)}
+    return make_record(ts=ts, source_type=&quot;JSON&quot;, host=host, severity=level, message=msg, extra=extra)
+
+
+# ── Windows key=value ─────────────────────────────────────────────────────────
+WINDOWS_KV_RE = re.compile(r&#x27;EventID=\d+.*TimeCreated=&#x27;, re.IGNORECASE)
+KV_PAIR_RE    = re.compile(r&#x27;(\w+)=(\S+)&#x27;)
+
+
+def parse_windows_kv(line: str) -&gt; dict | None:
+    if not WINDOWS_KV_RE.search(line):
+        return None
+    kv = dict(KV_PAIR_RE.findall(line))
+    ts_str = kv.get(&quot;TimeCreated&quot;, &quot;&quot;)
+    try:
+        ts = datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+    # Map EventID to rough severity
+    eid      = int(kv.get(&quot;EventID&quot;, &quot;0&quot;))
+    severity = &quot;WARNING&quot; if eid in (4624, 4625, 4648, 4768, 4769) else &quot;INFO&quot;
+    msg      = f&quot;EventID={eid} User={kv.get(&#x27;UserName&#x27;,&#x27;?&#x27;)} Status={kv.get(&#x27;Status&#x27;,&#x27;?&#x27;)}&quot;
+    return make_record(
+        ts=ts, source_type=&quot;WINDOWS_KV&quot;,
+        host=kv.get(&quot;ComputerName&quot;, &quot;?&quot;),
+        severity=severity,
+        message=msg,
+        extra={k: v for k, v in kv.items() if k not in (&quot;TimeCreated&quot;,)},
+    )
+
+
+# ── Apache CLF ────────────────────────────────────────────────────────────────
+APACHE_CLF_RE = re.compile(
+    r&#x27;^(?P&lt;ip&gt;\S+)\s+\S+\s+(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;\[(?P&lt;ts&gt;[^\]]+)\]\s+&quot;(?P&lt;req&gt;[^&quot;]+)&quot;\s+(?P&lt;status&gt;\d+)\s+(?P&lt;bytes&gt;\S+)&#x27;
+)
+CLF_TIME_FMT = &quot;%d/%b/%Y:%H:%M:%S %z&quot;
+
+
+def parse_apache_clf(line: str) -&gt; dict | None:
+    m = APACHE_CLF_RE.match(line)
+    if not m:
+        return None
+    try:
+        ts = datetime.strptime(m.group(&quot;ts&quot;), CLF_TIME_FMT).timestamp()
+    except ValueError:
+        return None
+    status   = int(m.group(&quot;status&quot;))
+    severity = &quot;WARNING&quot; if status &gt;= 400 else &quot;INFO&quot;
+    return make_record(
+        ts=ts, source_type=&quot;APACHE_CLF&quot;,
+        host=m.group(&quot;ip&quot;),
+        severity=severity,
+        message=m.group(&quot;req&quot;),
+        extra={&quot;user&quot;: m.group(&quot;user&quot;), &quot;status&quot;: status, &quot;bytes&quot;: m.group(&quot;bytes&quot;)},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+PARSERS = [parse_json, parse_windows_kv, parse_rfc5424, parse_rfc3164, parse_apache_clf]
+
+
+def parse_any(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    for parser in PARSERS:
+        result = parser(line)
+        if result is not None:
+            return result
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(records: list[dict], raw_count: int) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;UNIVERSAL SYSLOG NORMALIZATION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+    print(f&quot;\nInput lines: {raw_count}   Parsed: {len(records)}   &quot;
+          f&quot;Failed: {raw_count - len(records)}&quot;)
+
+    by_type: dict[str, int] = {}
+    for r in records:
+        by_type[r[&quot;source_type&quot;]] = by_type.get(r[&quot;source_type&quot;], 0) + 1
+    print(&quot;\nFormat breakdown:&quot;)
+    for fmt, count in sorted(by_type.items()):
+        print(f&quot;  {fmt:15s} {count}&quot;)
+
+    print(&quot;\nSample normalized records (sorted by timestamp):&quot;)
+    for r in sorted(records, key=lambda x: x[&quot;ts&quot;])[:20]:
+        extra_preview = &quot;, &quot;.join(f&quot;{k}={v}&quot; for k, v in list(r[&quot;extra&quot;].items())[:3])
+        print(f&quot;  [{r[&#x27;source_type&#x27;]:12s}] [{r[&#x27;severity&#x27;]:10s}]  &quot;
+              f&quot;ts={r[&#x27;ts_iso&#x27;]}  host={r[&#x27;host&#x27;]}&quot;)
+        print(f&quot;    msg: {r[&#x27;message&#x27;][:80]}&quot;)
+        if extra_preview:
+            print(f&quot;    extra: {extra_preview}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    stripped = [l for l in raw_lines if l.strip()]
+    records  = [r for r in (parse_any(l) for l in stripped) if r is not None]
+    print_report(records, len(stripped))
+</code></pre>
+</body>
+</html>

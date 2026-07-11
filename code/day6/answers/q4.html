@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q4.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q4.py</h1>
+  <p class="file-path">Source: code\day6\answers\q4.py</p>
+  <p class="line-count">350 lines</p>
+  <pre><code class="language-python"># Q4 (Hard) - Threat Event Correlation Engine
+# Two sorted event lists from different sensors. A correlated threat occurs when
+# the same source_ip appears in both sensors within time window T. Return all
+# correlated pairs with their time delta.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;I have two sorted lists of security events (timestamp, event_type, source_ip).
+#    For every event in sensor_a, I want to find all events in sensor_b from the
+#    same IP where |ts_a - ts_b| &lt;= T. Return all correlated pairs sorted by
+#    sensor_a timestamp ascending.&quot;
+#
+# STEP 2 — Assumptions
+#   - Both lists are sorted ascending by timestamp
+#   - The same IP can appear multiple times in both lists
+#   - If sensor_a event correlates with MULTIPLE sensor_b events, report ALL pairs
+#   - T &gt;= 0 (T=0 means exact timestamp match only)
+#   - Tuples are (timestamp: int, event_type: str, source_ip: str)
+#
+# STEP 3 — Naive approach
+#   &quot;For each event in sensor_a, scan ALL events in sensor_b with the same IP.
+#    O(n * m) where n=|sensor_a|, m=|sensor_b|. For 1M events each: 10^12 ops.&quot;
+#
+# STEP 4 — Better approach: group by IP, then two-pointer per IP
+#   &quot;Step 1: Group sensor_b events by source_ip → dict: {ip: [events sorted by ts]}
+#    Step 2: For each sensor_a event (ts_a, type_a, ip):
+#              look up sensor_b events for that IP
+#              use binary search to find the window [ts_a-T, ts_a+T]
+#              collect all sensor_b events in that window
+#    Step 3: Append to results, sort by sensor_a timestamp.
+#
+#    Time:  O(n log n + m log m) for grouping and binary search per lookup
+#           = O((n+m) log(n+m)) overall
+#    Space: O(m) for the grouped sensor_b dict&quot;
+#
+# STEP 5 — Why not just two-pointer over merged stream?
+#   &quot;Two-pointer over the merged stream works ONLY if events are interleaved and
+#    you process one IP at a time. Grouping by IP first is cleaner and handles
+#    the &#x27;same IP&#x27; requirement explicitly.&quot;
+#
+# STEP 6 — Follow-up: 1 billion events per day
+#   &quot;1B events/day ≈ 11,500 events/second.
+#    Approach:
+#    a) Partition by source_ip using consistent hashing across workers.
+#       Each worker handles a subset of IPs independently — fully parallel.
+#    b) Use Apache Kafka: partition logs by source_ip key → events for the same
+#       IP always go to the same partition → natural parallelism.
+#    c) Within each partition, maintain a sliding window per IP using a deque.
+#       Push events; evict events older than T; on each push, check cross-sensor.
+#    d) State store (Redis/RocksDB) for IP → recent events, with TTL = T.
+#    e) Apache Flink or Spark Streaming for stateful windowed joins.
+#    Key: never hold ALL events in memory; process in windows.&quot;
+#
+# STEP 7 — Security framing
+#   &quot;This is a multi-stage attack detection pattern: port_scan on sensor_a
+#    followed by exec_shell on sensor_b from the same IP within T seconds = kill chain.
+#    False positives: CDN IPs, NAT — correlate on (ip, port, user) not just ip.
+#    False negatives: IP rotation/spoofing — use session tokens or user-agent.&quot;
+#
+# Complexity:
+#   Naive:          O(n*m)
+#   Group + bisect: O((n+m) log m)  ← target
+# ─────────────────────────────────────────────────────────────────────────────
+
+import bisect
+from collections import defaultdict
+
+
+# ── APPROACH 1: Brute force O(n*m) ───────────────────────────────────────────
+
+def correlate_naive(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    For each event in sensor_a, scan all sensor_b events for same IP within T.
+
+    Time:  O(n*m)
+    Space: O(c) where c = number of correlated pairs
+    &quot;&quot;&quot;
+    if not isinstance(sensor_a, list) or not isinstance(sensor_b, list):
+        raise TypeError(&quot;sensor_a and sensor_b must be lists&quot;)
+    if T &lt; 0:
+        raise ValueError(f&quot;T must be &gt;= 0, got {T}&quot;)
+    if not sensor_a or not sensor_b:
+        return []
+
+    results = []
+    for ts_a, type_a, ip_a in sensor_a:
+        for ts_b, type_b, ip_b in sensor_b:
+            if ip_a == ip_b and abs(ts_a - ts_b) &lt;= T:
+                results.append({
+                    &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                    &quot;sensor_b_event&quot;: (ts_b, type_b, ip_b),
+                    &quot;ip&quot;:             ip_a,
+                    &quot;delta_seconds&quot;:  abs(ts_a - ts_b),
+                })
+    results.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return results
+
+
+# ── APPROACH 2: Group by IP + binary search O((n+m) log m) ───────────────────
+
+def correlate(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    1. Group sensor_b events by source_ip: {ip: [(ts, type), ...]}  O(m)
+    2. For each sensor_a event, binary search sensor_b[ip] for window [ts-T, ts+T]
+       and collect all events in that window.  O(n log m) per event
+    3. Sort output by sensor_a timestamp.  O(c log c)
+
+    Total: O(m + n log m + c log c)
+
+    Args:
+        sensor_a: list of (timestamp, event_type, source_ip) — sorted ascending
+        sensor_b: list of (timestamp, event_type, source_ip) — sorted ascending
+        T:        correlation window in seconds
+
+    Returns:
+        list of correlated pair dicts, sorted by sensor_a timestamp
+    &quot;&quot;&quot;
+    if not isinstance(sensor_a, list) or not isinstance(sensor_b, list):
+        raise TypeError(&quot;sensor_a and sensor_b must be lists&quot;)
+    if T &lt; 0:
+        raise ValueError(f&quot;T must be &gt;= 0, got {T}&quot;)
+    if not sensor_a or not sensor_b:
+        return []
+
+    # Step 1: Group sensor_b by IP — store (ts, event_type) per IP, sorted by ts
+    b_by_ip: dict = defaultdict(list)
+    for ts_b, type_b, ip_b in sensor_b:
+        b_by_ip[ip_b].append((ts_b, type_b))
+    # Ensure each group is sorted (sensor_b is globally sorted, but per-IP may not be)
+    for ip in b_by_ip:
+        b_by_ip[ip].sort()
+
+    results = []
+
+    # Step 2: For each sensor_a event, binary search in sensor_b[ip]
+    for ts_a, type_a, ip_a in sensor_a:
+        if ip_a not in b_by_ip:
+            continue
+
+        b_events = b_by_ip[ip_a]       # sorted list of (ts_b, type_b)
+        b_ts     = [e[0] for e in b_events]   # timestamps only, for bisect
+
+        # Find range [ts_a - T, ts_a + T] in b_ts
+        lo_idx = bisect.bisect_left(b_ts,  ts_a - T)
+        hi_idx = bisect.bisect_right(b_ts, ts_a + T)
+
+        for idx in range(lo_idx, hi_idx):
+            ts_b, type_b = b_events[idx]
+            results.append({
+                &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                &quot;sensor_b_event&quot;: (ts_b, type_b, ip_a),
+                &quot;ip&quot;:             ip_a,
+                &quot;delta_seconds&quot;:  abs(ts_a - ts_b),
+            })
+
+    # Step 3: Sort output by sensor_a timestamp
+    results.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return results
+
+
+# ── APPROACH 3: Two-pointer per IP (avoids extracting ts list) ────────────────
+
+def correlate_two_pointer(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    For each IP, use two pointers over the per-IP events from each sensor.
+    The outer pointer moves through sensor_a events for that IP;
+    the inner window tracks the valid sensor_b range.
+
+    Time:  O(m + n + c) amortized for each IP; O(n + m + c) total
+    Space: O(n + m) for grouping
+    &quot;&quot;&quot;
+    if not isinstance(sensor_a, list) or not isinstance(sensor_b, list):
+        raise TypeError(&quot;sensor_a and sensor_b must be lists&quot;)
+    if T &lt; 0:
+        raise ValueError(f&quot;T must be &gt;= 0, got {T}&quot;)
+
+    # Group both sensors by IP
+    a_by_ip: dict = defaultdict(list)
+    b_by_ip: dict = defaultdict(list)
+    for ts, etype, ip in sensor_a:
+        a_by_ip[ip].append((ts, etype))
+    for ts, etype, ip in sensor_b:
+        b_by_ip[ip].append((ts, etype))
+
+    results = []
+
+    for ip in a_by_ip:
+        if ip not in b_by_ip:
+            continue
+
+        a_events = sorted(a_by_ip[ip])
+        b_events = sorted(b_by_ip[ip])
+        mb = len(b_events)
+
+        left = 0    # earliest b_event that could still match
+
+        for ts_a, type_a in a_events:
+            # Advance left past events that are too old (ts_b &lt; ts_a - T)
+            while left &lt; mb and b_events[left][0] &lt; ts_a - T:
+                left += 1
+            # Collect all b_events in [ts_a-T, ts_a+T]
+            idx = left
+            while idx &lt; mb and b_events[idx][0] &lt;= ts_a + T:
+                ts_b, type_b = b_events[idx]
+                results.append({
+                    &quot;sensor_a_event&quot;: (ts_a, type_a, ip),
+                    &quot;sensor_b_event&quot;: (ts_b, type_b, ip),
+                    &quot;ip&quot;:             ip,
+                    &quot;delta_seconds&quot;:  abs(ts_a - ts_b),
+                })
+                idx += 1
+
+    results.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return results
+
+
+# ── MANUAL — no defaultdict, no bisect ───────────────────────────────────────
+
+def _manual_bisect_left(arr, val):
+    lo, hi = 0, len(arr)
+    while lo &lt; hi:
+        mid = lo + (hi - lo) // 2
+        if arr[mid] &lt; val:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def _manual_bisect_right(arr, val):
+    lo, hi = 0, len(arr)
+    while lo &lt; hi:
+        mid = lo + (hi - lo) // 2
+        if arr[mid] &lt;= val:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def correlate_manual(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    Group + binary search without defaultdict or bisect module.
+
+    Time:  O(m + n log m + c log c)
+    Space: O(n + m)
+    &quot;&quot;&quot;
+    if not sensor_a or not sensor_b:
+        return []
+
+    # Manual grouping dict
+    b_groups = {}
+    for ts_b, type_b, ip_b in sensor_b:
+        if ip_b not in b_groups:
+            b_groups[ip_b] = []
+        b_groups[ip_b].append((ts_b, type_b))
+
+    # Sort each group
+    for ip in b_groups:
+        b_groups[ip].sort()
+
+    results = []
+    for ts_a, type_a, ip_a in sensor_a:
+        if ip_a not in b_groups:
+            continue
+        b_events = b_groups[ip_a]
+        b_ts = [e[0] for e in b_events]
+        lo = _manual_bisect_left(b_ts, ts_a - T)
+        hi = _manual_bisect_right(b_ts, ts_a + T)
+        for i in range(lo, hi):
+            ts_b, type_b = b_events[i]
+            results.append({
+                &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                &quot;sensor_b_event&quot;: (ts_b, type_b, ip_a),
+                &quot;ip&quot;:             ip_a,
+                &quot;delta_seconds&quot;:  abs(ts_a - ts_b),
+            })
+
+    results.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return results
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    sensor_a = [
+        (100, &quot;port_scan&quot;,   &quot;1.1.1.1&quot;),
+        (200, &quot;login_fail&quot;,  &quot;2.2.2.2&quot;),
+        (300, &quot;port_scan&quot;,   &quot;3.3.3.3&quot;),
+        (400, &quot;login_fail&quot;,  &quot;1.1.1.1&quot;),
+    ]
+    sensor_b = [
+        (110, &quot;dns_query&quot;,   &quot;1.1.1.1&quot;),
+        (210, &quot;exec_shell&quot;,  &quot;2.2.2.2&quot;),
+        (320, &quot;http_req&quot;,    &quot;3.3.3.3&quot;),
+        (395, &quot;dns_query&quot;,   &quot;1.1.1.1&quot;),
+        (500, &quot;exec_shell&quot;,  &quot;1.1.1.1&quot;),
+    ]
+    T = 30
+
+    results = correlate(sensor_a, sensor_b, T)
+
+    # Manually verify:
+    # (100, 1.1.1.1) ↔ (110, 1.1.1.1): delta=10 ✓ (T=30)
+    # (200, 2.2.2.2) ↔ (210, 2.2.2.2): delta=10 ✓
+    # (300, 3.3.3.3) ↔ (320, 3.3.3.3): delta=20 ✓
+    # (400, 1.1.1.1) ↔ (395, 1.1.1.1): delta=5  ✓
+    # (400, 1.1.1.1) ↔ (500, 1.1.1.1): delta=100 ✗ (T=30)
+    assert len(results) == 4, f&quot;Expected 4 correlations, got {len(results)}&quot;
+
+    # Sorted by sensor_a timestamp
+    a_ts = [r[&quot;sensor_a_event&quot;][0] for r in results]
+    assert a_ts == sorted(a_ts), &quot;Results must be sorted by sensor_a timestamp&quot;
+
+    # Verify IPs
+    for r in results:
+        assert r[&quot;sensor_a_event&quot;][2] == r[&quot;sensor_b_event&quot;][2], &quot;IPs must match&quot;
+        assert r[&quot;delta_seconds&quot;] &lt;= T
+
+    # All approaches agree
+    r1 = correlate_naive(sensor_a, sensor_b, T)
+    r2 = correlate(sensor_a, sensor_b, T)
+    r3 = correlate_two_pointer(sensor_a, sensor_b, T)
+    r4 = correlate_manual(sensor_a, sensor_b, T)
+    assert len(r1) == len(r2) == len(r3) == len(r4), \
+        f&quot;Mismatch: {len(r1)}, {len(r2)}, {len(r3)}, {len(r4)}&quot;
+
+    # Edge cases
+    assert correlate([], sensor_b, T) == []
+    assert correlate(sensor_a, [], T) == []
+    assert correlate([], [], T)       == []
+    # T=0: only exact timestamp matches
+    exact = correlate([(100, &quot;scan&quot;, &quot;1.1.1.1&quot;)],
+                      [(100, &quot;dns&quot;,  &quot;1.1.1.1&quot;), (101, &quot;dns&quot;, &quot;1.1.1.1&quot;)], T=0)
+    assert len(exact) == 1
+    assert exact[0][&quot;delta_seconds&quot;] == 0
+
+    print(&quot;Q4 — All assertions passed.&quot;)
+    print(f&quot;\nCorrelated pairs (T={T}s):&quot;)
+    for r in results:
+        a, b = r[&quot;sensor_a_event&quot;], r[&quot;sensor_b_event&quot;]
+        print(f&quot;  IP={r[&#x27;ip&#x27;]}  A:[ts={a[0]},{a[1]}] ↔ B:[ts={b[0]},{b[1]}]  Δ={r[&#x27;delta_seconds&#x27;]}s&quot;)
+    print()
+    print(&quot;Complexity: O(m + n log m + c log c)&quot;)
+    print(&quot;  where n=|sensor_a|, m=|sensor_b|, c=|correlated pairs|&quot;)
+    print()
+    print(&quot;Scale (1B events/day):&quot;)
+    print(&quot;  Partition by source_ip → Kafka topic per-IP hash bucket&quot;)
+    print(&quot;  Each consumer: sliding window deque with TTL=T per IP&quot;)
+    print(&quot;  State store: Redis ZSET with ZRANGEBYSCORE for time window lookup&quot;)
+</code></pre>
+</body>
+</html>

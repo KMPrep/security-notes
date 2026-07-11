@@ -1,0 +1,1504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sigma and Detection-as-Code</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: detection\Sigma-and-Detection-as-Code\README.md</p>
+<h1 id="sigma-and-detection-as-code">Sigma and Detection-as-Code</h1>
+<p><strong>Category:</strong> Detection Engineering — Portable Detection Content, CI/CD for Detections<br />
+<strong>Related notes:</strong> <code>detection/Detection-Engineering/README.md</code>, <code>detection/MITRE-ATTACK/README.md</code>, <code>detection/IDS-SIEM/README.md</code>, <code>detection/Anomaly-Detection/README.md</code><br />
+<strong>Anchors:</strong> Sigma specification (SigmaHQ), pySigma, sigma-cli, MITRE ATT&amp;CK, the Alerting &amp; Detection Strategy (ADS) framework, Palantir/Elastic detection-rules repos</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Sigma is a vendor-neutral, YAML-based signature format for describing detections against log data. It plays the same role for SIEM log analytics that Snort/Suricata rules play for network traffic and YARA plays for files: one portable, human-readable rule that a compiler (<code>sigma-cli</code>/pySigma) translates into whatever backend query language your platform speaks — Splunk SPL, Elastic Query DSL / Lucene / EQL, Microsoft Sentinel/Defender KQL, Google Chronicle YARA-L, Elasticsearch ES|QL, Loki LogQL, and dozens more. Detection-as-Code (DaC) is the operating model wrapped around that format: detections are treated as source code — version-controlled in Git, peer-reviewed via pull requests, unit-tested against known log samples, linted, validated, and deployed to production through CI/CD pipelines rather than click-ops in a SIEM console.</p>
+<p>At scale this matters because a detection estate is not 50 rules — it is thousands, spanning cloud audit logs (CloudTrail, GCP Cloud Audit Logs, Azure Activity), Kubernetes audit, EDR telemetry, identity providers, and application logs, across multiple SIEMs acquired through acquisitions and regional data-residency constraints. Without a portable format and a code pipeline, detections rot: they are undocumented, untested, tied to one vendor, and silently break when a log schema changes. Sigma + DaC turns detection engineering into a software-engineering discipline with the same guarantees — reproducibility, testability, review, and rollback.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- Sigma is a <strong>generic detection language</strong> (<code>logsource</code> + <code>detection</code> + <code>condition</code>); a <strong>converter (pySigma/sigma-cli) plus a pipeline</strong> maps abstract fields to a concrete backend query. The pipeline is where the real portability work happens.<br />
+- <strong>Detection-as-Code</strong> = detections in Git, PR-reviewed, unit-tested against saved log samples, CI-validated, and deployed by pipeline — not hand-edited in the SIEM.<br />
+- Write <strong>behavior-based, robust</strong> rules mapped to <strong>ATT&amp;CK techniques</strong>; avoid brittle single-IOC rules (hashes, IPs, exact command strings) that an attacker trivially mutates.<br />
+- <strong>Test the detection, not the attack</strong>: replay a known-malicious log sample (true positive) and a known-benign sample (true negative) and assert the rule fires exactly on the malicious one. This is validation of the <em>detection logic</em>, distinct from running offensive tooling.<br />
+- Manage the <strong>rule lifecycle</strong>: idea → ADS/design doc → draft → test → PR review → staged deploy → tune (FP feedback) → measure (coverage, MTTD) → deprecate.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>A Sigma rule is a YAML document with a fixed set of top-level keys. The heart is the <code>detection</code> block: a set of <strong>named search identifiers</strong> (each a map or list of field/value matchers) combined by a boolean <strong><code>condition</code></strong> expression. The converter walks that AST, applies a <strong>processing pipeline</strong> to translate Sigma's abstract taxonomy (field names, log sources, value modifiers) into the target's real schema, and emits a backend query string.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it is</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code> / <code>id</code></td>
+<td>Human name + stable UUID</td>
+<td><code>id</code> is a UUID4; never reuse it — it is the rule's identity across renames</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>experimental</code> / <code>test</code> / <code>stable</code> / <code>deprecated</code> / <code>unsupported</code></td>
+<td>Drives what a pipeline promotes to prod</td>
+</tr>
+<tr>
+<td><code>logsource</code></td>
+<td><code>product</code> / <code>category</code> / <code>service</code> triple</td>
+<td>Abstract selector (e.g. <code>product: aws</code>, <code>service: cloudtrail</code>) resolved by the pipeline to real indices/tables</td>
+</tr>
+<tr>
+<td><code>detection</code></td>
+<td>Named <strong>search identifiers</strong> + <code>condition</code></td>
+<td>Each identifier is field:value matchers combined with AND (within a map) and OR (across a list)</td>
+</tr>
+<tr>
+<td><code>condition</code></td>
+<td>Boolean expression over identifiers</td>
+<td>Supports <code>and/or/not</code>, <code>1 of selection*</code>, <code>all of them</code>, <code>| count() by ...</code> aggregations, <code>near</code></td>
+</tr>
+<tr>
+<td><strong>Field modifiers</strong></td>
+<td><code>|contains</code>, <code>|startswith</code>, <code>|endswith</code>, <code>|re</code>, <code>|base64</code>, <code>|cidr</code>, <code>|all</code>, <code>|gte</code>, <code>|lt</code>, <code>|expand</code>, <code>|cased</code></td>
+<td>Suffix on a field key that changes match semantics — the portability lever</td>
+</tr>
+<tr>
+<td><code>fields</code></td>
+<td>Columns to surface in the alert</td>
+<td>Analyst context, not part of the match logic</td>
+</tr>
+<tr>
+<td><code>falsepositives</code></td>
+<td>Known benign triggers</td>
+<td>Documentation for the triage analyst; also feeds tuning</td>
+</tr>
+<tr>
+<td><code>level</code></td>
+<td><code>informational</code>→<code>low</code>→<code>medium</code>→<code>high</code>→<code>critical</code></td>
+<td>Severity; often mapped to SOAR routing</td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td><code>attack.tXXXX</code>, <code>attack.&lt;tactic&gt;</code>, <code>cve.YYYY.N</code></td>
+<td>ATT&amp;CK/CVE mapping; enables coverage reporting</td>
+</tr>
+<tr>
+<td><strong>Pipeline</strong></td>
+<td>pySigma <code>ProcessingPipeline</code></td>
+<td>Ordered transformations: field mappings, logsource→index, value transforms, error/placeholder handling</td>
+</tr>
+<tr>
+<td><strong>Backend</strong></td>
+<td>pySigma plugin</td>
+<td>Emits the final query (e.g. <code>pySigma-backend-splunk</code>)</td>
+</tr>
+<tr>
+<td><strong>Correlation rules</strong></td>
+<td>Sigma "meta-rules"</td>
+<td>Newer spec: <code>count</code>, <code>value_count</code>, <code>temporal</code>, <code>temporal_ordered</code> across referenced base rules</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Match semantics you must know cold:</strong><br />
+- Inside a single search-identifier <strong>map</strong>, all <code>key: value</code> pairs are <strong>AND</strong>-ed.<br />
+- A <strong>list of values</strong> for one key is <strong>OR</strong>-ed (<code>Image|endswith: ['\a.exe', '\b.exe']</code> = ends with a.exe OR b.exe).<br />
+- A search identifier expressed as a <strong>list of maps</strong> OR-s the maps.<br />
+- <code>all of selection*</code> / <code>1 of selection*</code> wildcard-match identifier names.<br />
+- Values are <strong>case-insensitive by default</strong> and support <code>*</code> (any) and <code>?</code> (single char) wildcards; use <code>|cased</code> and <code>|re</code> when you need exactness.</p>
+<p>The three-stage conversion is the mental model to carry into a design review:</p>
+<pre class="mermaid">
+flowchart LR
+  A[Sigma YAML rule] --> B[pySigma parser builds AST]
+  B --> C[Processing pipeline maps fields and logsource]
+  C --> D[Backend emits query]
+  D --> E[Splunk SPL]
+  D --> F[Elastic KQL or EQL]
+  D --> G[Chronicle YARA-L]
+  D --> H[Sentinel KQL]
+</pre>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Install the toolchain.</strong> <code>sigma-cli</code> is the CLI wrapper around pySigma; backends and pipelines install as plugins.</p>
+<pre><code class="language-bash"># sigma-cli + pySigma
+pipx install sigma-cli
+sigma plugin list                         # see available backends/pipelines
+sigma plugin install splunk               # pySigma-backend-splunk + splunk pipelines
+sigma plugin install elasticsearch        # Elastic (Lucene/DSL/EQL/ES|QL)
+sigma plugin install cortexxdr            # example vendor backend
+
+# Convert one rule to Splunk SPL
+sigma convert -t splunk -p splunk_windows rules/cloud/aws_iam_backdoor_role.yml
+
+# Convert a whole folder to Elastic Query String, apply the ECS pipeline,
+# and wrap results as importable detection-rule NDJSON
+sigma convert -t elasticsearch -f siem_rule_ndjson -p ecs_windows \
+  -o out/elastic_rules.ndjson rules/
+
+# List which pipelines a backend supports
+sigma convert -t splunk --without-pipeline rules/x.yml   # no field mapping (debug)
+</code></pre>
+<p><strong>A processing pipeline in YAML</strong> — this is what makes Sigma portable. It rewrites Sigma's abstract <code>logsource</code> and field names into your real schema. Example: map the AWS CloudTrail taxonomy onto a Splunk index and sourcetype and rename fields.</p>
+<pre><code class="language-yaml"># pipelines/aws_cloudtrail_splunk.yml
+name: aws-cloudtrail-splunk
+priority: 20
+transformations:
+  - id: cloudtrail_index
+    type: add_condition
+    conditions:
+      index: cloudtrail
+      sourcetype: aws:cloudtrail
+    rule_conditions:
+      - type: logsource
+        product: aws
+        service: cloudtrail
+  - id: field_rename
+    type: field_name_mapping
+    mapping:
+      eventName: eventName          # already ECS-ish; explicit for clarity
+      userIdentity.arn: userIdentity.arn
+      requestParameters.roleName: requestParameters.roleName
+    rule_conditions:
+      - type: logsource
+        product: aws
+        service: cloudtrail
+  - id: fail_unsupported
+    type: detection_item_failure
+    message: &quot;Field not mapped for CloudTrail on Splunk&quot;
+    rule_conditions:
+      - type: logsource
+        product: aws
+        service: cloudtrail
+    field_name_conditions:
+      - type: include_fields
+        fields: []                  # any unmapped field errors out loudly
+</code></pre>
+<p><strong>Rule example 1 — Suspicious cloud IAM change (AWS CloudTrail).</strong> Detects an identity attaching the <code>AdministratorAccess</code> managed policy or an inline admin policy to a principal — a classic privilege-escalation / backdoor step (ATT&amp;CK T1098 Account Manipulation, T1078 Valid Accounts).</p>
+<pre><code class="language-yaml">title: AWS IAM AdministratorAccess Attached To Principal
+id: 8f2b1c4e-6d3a-4a71-9d2e-1f4c7a9b0c31
+status: test
+description: &gt;
+  Detects attachment of the AWS-managed AdministratorAccess policy, or creation of
+  an inline policy granting Action=* Resource=*, to any IAM user, group, or role.
+  Frequently used for privilege escalation and persistence after credential theft.
+references:
+  - https://attack.mitre.org/techniques/T1098/
+author: detection-eng
+date: 2026/07/07
+tags:
+  - attack.persistence
+  - attack.privilege-escalation
+  - attack.t1098
+  - attack.t1078
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  managed_admin:
+    eventSource: iam.amazonaws.com
+    eventName:
+      - AttachUserPolicy
+      - AttachRolePolicy
+      - AttachGroupPolicy
+    requestParameters.policyArn|endswith: ':policy/AdministratorAccess'
+  inline_star:
+    eventSource: iam.amazonaws.com
+    eventName:
+      - PutUserPolicy
+      - PutRolePolicy
+      - PutGroupPolicy
+    requestParameters.policyDocument|contains|all:
+      - '&quot;Effect&quot;:&quot;Allow&quot;'
+      - '&quot;Action&quot;:&quot;*&quot;'
+      - '&quot;Resource&quot;:&quot;*&quot;'
+  success:
+    errorCode: null            # no error code field =&gt; call succeeded
+  condition: (managed_admin or inline_star) and success
+fields:
+  - userIdentity.arn
+  - eventName
+  - requestParameters.policyArn
+  - sourceIPAddress
+  - awsRegion
+falsepositives:
+  - Break-glass admin provisioning by IAM automation (allowlist the CI role ARN)
+  - Sanctioned Terraform/CloudFormation runs (correlate with pipeline principal)
+level: high
+</code></pre>
+<p><strong>Rule example 2 — New service-account key created (GCP Cloud Audit Logs).</strong> Creating a user-managed key on a service account is a top persistence/cred-theft vector in GCP (ATT&amp;CK T1098.001 Additional Cloud Credentials). Long-lived JSON keys should be rare and controlled by IAM automation only.</p>
+<pre><code class="language-yaml">title: GCP Service Account User-Managed Key Created
+id: c1a9e7d2-4b83-4f0a-8c6d-2e5b1a7f9d40
+status: test
+description: &gt;
+  Detects creation of a user-managed key for a GCP service account. User-managed
+  keys are long-lived credentials and a common persistence mechanism; most workloads
+  should use Workload Identity / short-lived tokens instead.
+references:
+  - https://attack.mitre.org/techniques/T1098/001/
+author: detection-eng
+date: 2026/07/07
+tags:
+  - attack.persistence
+  - attack.t1098.001
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  selection:
+    data.protoPayload.methodName: google.iam.admin.v1.CreateServiceAccountKey
+  filter_terraform:
+    data.protoPayload.authenticationInfo.principalEmail|endswith: '@iam-automation.iam.gserviceaccount.com'
+  condition: selection and not filter_terraform
+fields:
+  - data.protoPayload.authenticationInfo.principalEmail
+  - data.protoPayload.resourceName
+  - data.protoPayload.requestMetadata.callerIp
+falsepositives:
+  - Legitimate key rotation performed by the sanctioned iam-automation service account
+level: medium
+</code></pre>
+<p><strong>Rule example 3 — Linux sudo anomaly (auditd).</strong> Detects execution of a shell or interpreter via <code>sudo</code> by an account that should never use interactive privilege escalation (service accounts), or sudo to root running a shell — ATT&amp;CK T1548.003 Sudo and Sudo Caching / T1059.004 Unix Shell.</p>
+<pre><code class="language-yaml">title: Suspicious Sudo To Interactive Shell By Service Account
+id: 5e0d3f18-9a2c-4d67-b1e4-7c8a0f2b6d99
+status: experimental
+description: &gt;
+  Detects sudo invocations that spawn an interactive shell or interpreter where the
+  invoking user is a non-interactive service account. Indicates privilege escalation
+  or hands-on-keyboard activity on a host that should only run automation.
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+author: detection-eng
+date: 2026/07/07
+tags:
+  - attack.privilege-escalation
+  - attack.t1548.003
+  - attack.execution
+  - attack.t1059.004
+logsource:
+  product: linux
+  service: auditd
+detection:
+  execve:
+    type: EXECVE
+    a0|endswith: 'sudo'
+  shell_target:
+    a1|endswith:
+      - 'bash'
+      - 'sh'
+      - 'zsh'
+      - 'python3'
+      - 'perl'
+  svc_actor:
+    AUID:
+      - '997'          # example: svc-deploy uid
+      - '998'          # example: svc-batch uid
+  condition: execve and shell_target and svc_actor
+fields:
+  - AUID
+  - UID
+  - a0
+  - a1
+  - exe
+falsepositives:
+  - Approved maintenance window where automation legitimately opens a shell (rare; ticket-gated)
+level: high
+</code></pre>
+<p><strong>Converting Rule 1 to a backend query.</strong> Running <code>sigma convert -t splunk -p aws_cloudtrail_splunk rules/cloud/aws_iam_admin_attached.yml</code> yields Splunk SPL similar to:</p>
+<pre><code class="language-spl">index=cloudtrail sourcetype=aws:cloudtrail
+(
+  (eventSource=&quot;iam.amazonaws.com&quot;
+    (eventName=&quot;AttachUserPolicy&quot; OR eventName=&quot;AttachRolePolicy&quot; OR eventName=&quot;AttachGroupPolicy&quot;)
+    &quot;requestParameters.policyArn&quot;=&quot;*:policy/AdministratorAccess&quot;)
+  OR
+  (eventSource=&quot;iam.amazonaws.com&quot;
+    (eventName=&quot;PutUserPolicy&quot; OR eventName=&quot;PutRolePolicy&quot; OR eventName=&quot;PutGroupPolicy&quot;)
+    &quot;requestParameters.policyDocument&quot;=&quot;*\&quot;Effect\&quot;:\&quot;Allow\&quot;*&quot;
+    &quot;requestParameters.policyDocument&quot;=&quot;*\&quot;Action\&quot;:\&quot;*\&quot;*&quot;
+    &quot;requestParameters.policyDocument&quot;=&quot;*\&quot;Resource\&quot;:\&quot;*\&quot;*&quot;)
+)
+NOT errorCode=*
+| table userIdentity.arn eventName requestParameters.policyArn sourceIPAddress awsRegion
+</code></pre>
+<p>The same rule, targeting Elastic with <code>-t lucene -p ecs_cloudtrail</code>, becomes a Lucene/KQL query using ECS field names (<code>aws.cloudtrail.event_name</code>, <code>aws.cloudtrail.user_identity.arn</code>) — that field remapping is done entirely by the pipeline, not by editing the rule. For Chronicle, <code>-t chronicle</code> emits <strong>YARA-L 2.0</strong> with <code>events:</code> matchers and a <code>condition:</code> block. The rule author never touches vendor syntax; the pipeline owns the translation.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Detection-as-Code CI/CD pipeline.</strong></p>
+<pre class="mermaid">
+flowchart TD
+  A[Engineer writes Sigma rule] --> B[Local unit test with sigma test]
+  B --> C[Open pull request]
+  C --> D[CI lint and schema validate]
+  D --> E[CI convert to backends]
+  E --> F[CI replay log samples true positive and true negative]
+  F --> G{All checks pass}
+  G -->|No| H[Fail PR and comment]
+  G -->|Yes| I[Peer review approval]
+  I --> J[Merge to main]
+  J --> K[Deploy to staging SIEM]
+  K --> L[Shadow mode measure false positives]
+  L --> M[Promote to production]
+</pre>
+<p><strong>Diagram B — Rule lifecycle state machine.</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Idea
+  Idea --> Draft
+  Draft --> Test
+  Test --> Review
+  Review --> Draft
+  Review --> Staged
+  Staged --> Production
+  Production --> Tuning
+  Tuning --> Production
+  Production --> Deprecated
+  Deprecated --> [*]
+</pre>
+<p><strong>Diagram C — Testing flow: replaying samples through the compiled rule.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+  participant Dev as Engineer
+  participant CI as CI runner
+  participant Conv as sigma-cli converter
+  participant Eng as Test log engine
+  Dev->>CI: Push rule plus positive and negative samples
+  CI->>Conv: Convert rule to backend query
+  Conv-->>CI: Compiled query
+  CI->>Eng: Load positive sample and run query
+  Eng-->>CI: One match expected
+  CI->>Eng: Load negative sample and run query
+  Eng-->>CI: Zero matches expected
+  CI-->>Dev: Pass if positive fires and negative silent
+</pre>
+<p><strong>Diagram D — Pyramid of Pain: what to key detections on.</strong></p>
+<pre class="mermaid">
+flowchart TD
+  A[Hash values trivial to change] --> B[IP addresses easy to change]
+  B --> C[Domain names simple to change]
+  C --> D[Network and host artifacts annoying]
+  D --> E[Tools challenging]
+  E --> F[TTPs tough for the adversary]
+  F --> G[Prefer detections at TTP level]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson for detection content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SolarWinds / SUNBURST</td>
+<td>2020</td>
+<td>Supply-chain implant; low-and-slow C2, valid-account abuse</td>
+<td>Behavior-based cloud/identity detections (anomalous token issuance, new federation trust) beat IOC lists that arrived weeks late</td>
+</tr>
+<tr>
+<td>Capital One</td>
+<td>2019</td>
+<td>SSRF → EC2 metadata → over-permissioned IAM role → S3 exfil</td>
+<td>A Sigma rule on CloudTrail for role credentials used from an unusual ASN / mass <code>ListBuckets</code>+<code>GetObject</code> would have flagged it</td>
+</tr>
+<tr>
+<td>Codecov Bash Uploader</td>
+<td>2021</td>
+<td>CI secret exfiltration via modified script</td>
+<td>Detect anomalous outbound from CI runners; DaC applies to protecting the detection pipeline itself</td>
+</tr>
+<tr>
+<td>Log4Shell (CVE-2021-44228)</td>
+<td>2021</td>
+<td>JNDI lookup RCE</td>
+<td>The community shipped Sigma rules within hours — portability let every SIEM deploy the same logic fast</td>
+</tr>
+<tr>
+<td>Okta support-system compromise</td>
+<td>2023</td>
+<td>Session/token theft via support tooling</td>
+<td>Identity-provider Sigma rules (impossible travel, new device, admin role grant) are the detection surface</td>
+</tr>
+<tr>
+<td>MOVEit (CVE-2023-34362)</td>
+<td>2023</td>
+<td>SQLi in managed file transfer, mass exfil</td>
+<td>Web/app-log Sigma rules for anomalous file-download volume and webshell creation</td>
+</tr>
+<tr>
+<td>Midnight Blizzard on Microsoft</td>
+<td>2024</td>
+<td>Password-spray → legacy OAuth app → mailbox access</td>
+<td>KQL/Sigma detections for OAuth consent grants and legacy-auth sign-ins</td>
+</tr>
+<tr>
+<td>SigRed (CVE-2020-1350)</td>
+<td>2020</td>
+<td>Windows DNS server RCE</td>
+<td>Signature plus behavior detection; shows why rules need CVE tags for coverage mapping</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — Capital One (2019).</strong> An SSRF flaw let an attacker reach the EC2 instance metadata service, retrieve temporary credentials for the WAF's IAM role, and use them to enumerate and download ~100M records from S3. The credentials were legitimate (T1078), so no signature-IOC would fire. The detectable behavior was <em>contextual</em>: role credentials minted for an in-VPC workload were suddenly presented from an external IP with a burst of <code>ListBuckets</code> and thousands of <code>GetObject</code> calls. A Sigma rule on CloudTrail keying on "instance-role credential used from a <code>sourceIPAddress</code> outside AWS ranges" plus a correlation on S3 read volume would have surfaced it within minutes. The lesson that drives DaC: the durable detection is a <strong>behavior mapped to ATT&amp;CK</strong>, version-controlled and tested, not an IP block.</p>
+<p><strong>Case study — Log4Shell (2021).</strong> Within hours of disclosure, SigmaHQ and vendors published Sigma rules matching JNDI patterns (<code>${jndi:ldap://…}</code>) in web logs and process-creation events for suspicious Java child processes. Because they were Sigma, a Splunk shop, an Elastic shop, and a Sentinel shop all deployed the <em>same reviewed logic</em> by running their converter — no re-authoring in three dialects. This is the portability dividend: incident response speed scales with the number of backends your one rule compiles to. The follow-up lesson was equally important — the naive <code>contains jndi:ldap</code> rule was quickly evaded by obfuscation (<code>${${lower:j}ndi:…}</code>), which is exactly why rule quality (regex normalization, decode modifiers) and a tuning loop matter.</p>
+<p><strong>Case study — SolarWinds (2020).</strong> SUNBURST dwelled for months using signed updates and valid credentials, deliberately avoiding known IOCs. Detection ultimately came from <strong>anomalous identity behavior</strong> — new federation trust relationships, tokens issued with unusual claims, service principals granted new permissions. These are precisely the events that make durable Sigma rules on cloud audit and identity logs (T1098, T1550.001). The incident retired the industry's faith in IOC feeds as a primary defense and elevated behavior-based, ATT&amp;CK-mapped, code-managed detections.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Failure mode</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Brittle single-IOC rule (hash/IP)</td>
+<td>Detection gap</td>
+<td>Rule keyed at bottom of Pyramid of Pain</td>
+<td>Trivial attacker evasion; false confidence</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Exact command-string match</td>
+<td>Defense evasion T1027</td>
+<td>No normalization/decoding</td>
+<td>Bypassed by quoting, casing, env vars</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Unmapped field breaks conversion</td>
+<td>Pipeline defect</td>
+<td>Missing field mapping in pipeline</td>
+<td>Rule silently emits wrong/empty query</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Case-sensitivity mismatch</td>
+<td>Detection gap</td>
+<td>Assumed case behavior wrong per backend</td>
+<td>Misses or over-matches</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No true-negative test</td>
+<td>Test gap</td>
+<td>Only tested that it fires</td>
+<td>FP storm floods SOC on deploy</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>No true-positive test</td>
+<td>Test gap</td>
+<td>Never replayed malicious sample</td>
+<td>Rule is dead on arrival, never fires</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Log source not onboarded</td>
+<td>Coverage gap</td>
+<td>Rule deployed with no data feeding it</td>
+<td>Silent blind spot; looks "covered"</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Schema drift after vendor update</td>
+<td>Reliability</td>
+<td>Field renamed upstream</td>
+<td>Rule stops firing without error</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Duplicate <code>id</code> / reused UUID</td>
+<td>Content hygiene</td>
+<td>Copy-paste rule authoring</td>
+<td>Broken lineage, dedup, coverage stats</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Over-broad <code>condition</code></td>
+<td>FP / noise</td>
+<td><code>selection</code> with no filters</td>
+<td>Analyst alert fatigue; real alerts buried</td>
+<td>High</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Detection logic disabled by attacker</td>
+<td>Impair defenses T1562.001</td>
+<td>Attacker with SIEM access edits rules</td>
+<td>Detections silently removed</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Secrets in rule repo</td>
+<td>Cred exposure T1552</td>
+<td>Hardcoded tokens in test data</td>
+<td>Leaked creds via Git history</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td>No aggregation on brute-force pattern</td>
+<td>Detection gap</td>
+<td>Single-event rule for volumetric attack</td>
+<td>Misses password spray below per-event bar</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Timestamp/timezone confusion</td>
+<td>Reliability</td>
+<td><code>near</code>/temporal windows misaligned</td>
+<td>Correlation rules fire wrong or never</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Rule sprawl, no deprecation</td>
+<td>Lifecycle debt</td>
+<td>No retirement process</td>
+<td>Thousands of stale rules, slow SIEM</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Backend-specific tuning lost</td>
+<td>Portability</td>
+<td>Manual edits in SIEM console (click-ops)</td>
+<td>Drift between Git and prod; not reproducible</td>
+<td>High</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Missing ATT&amp;CK tags</td>
+<td>Coverage measurement</td>
+<td>Author skipped <code>tags</code></td>
+<td>Cannot build coverage heatmap</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Regex catastrophic backtracking</td>
+<td>Availability / DoS</td>
+<td>Greedy <code>|re</code> on large fields</td>
+<td>Query timeouts, dropped events</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Test data not representative</td>
+<td>Test gap</td>
+<td>Synthetic sample unlike prod logs</td>
+<td>Passes CI, fails in prod</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>No FP feedback loop</td>
+<td>Lifecycle</td>
+<td>Alerts closed without tagging outcome</td>
+<td>Same FPs recur; no precision metric</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Brittle IOC</td>
+<td>Detect at TTP level; reserve IOC rules for time-boxed IR</td>
+<td>Rule design / ADS review</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Exact string match</td>
+<td>Use <code>|contains</code>, <code>|re</code>, <code>|base64offset</code>, normalization</td>
+<td>Rule authoring</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Unmapped field</td>
+<td><code>detection_item_failure</code> transform errors loudly</td>
+<td>Pipeline</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Case mismatch</td>
+<td>Backend-aware pipeline; <code>|cased</code> where needed</td>
+<td>Pipeline + rule</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No true-negative</td>
+<td>Mandatory benign sample assertion in CI</td>
+<td>CI test harness</td>
+</tr>
+<tr>
+<td>6</td>
+<td>No true-positive</td>
+<td>Mandatory malicious sample assertion in CI</td>
+<td>CI test harness</td>
+</tr>
+<tr>
+<td>7</td>
+<td>No data onboarded</td>
+<td>Data-availability check before deploy</td>
+<td>Pipeline / SIEM health</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Schema drift</td>
+<td>Contract tests on field presence; scheduled re-validation</td>
+<td>CI cron + monitoring</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Duplicate id</td>
+<td><code>sigma check</code> / lint for unique UUIDs</td>
+<td>CI lint</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Over-broad condition</td>
+<td>Peer review + FP budget threshold gate</td>
+<td>PR review + staging</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Rule tampering</td>
+<td>RBAC on SIEM; Git as source of truth; drift detection</td>
+<td>IAM + reconciliation job</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Secrets in repo</td>
+<td>Pre-commit secret scanning (gitleaks)</td>
+<td>Pre-commit + CI</td>
+</tr>
+<tr>
+<td>13</td>
+<td>No aggregation</td>
+<td>Sigma correlation rules (<code>count</code>, <code>temporal</code>)</td>
+<td>Rule authoring</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Timezone issues</td>
+<td>Normalize to UTC at ingest; test windows explicitly</td>
+<td>Ingest pipeline + tests</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Rule sprawl</td>
+<td>Deprecation SLA; <code>status: deprecated</code> reaping</td>
+<td>Lifecycle policy</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Click-ops drift</td>
+<td>Deploy only via pipeline; reconcile Git vs prod</td>
+<td>CD + drift job</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Missing tags</td>
+<td>Lint requires <code>tags</code> with ≥1 ATT&amp;CK ID</td>
+<td>CI lint</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Regex DoS</td>
+<td>Ban unbounded quantifiers; regex lint/timeout</td>
+<td>CI lint + backend guard</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Unrepresentative test data</td>
+<td>Seed samples from sanitized prod logs</td>
+<td>Test data governance</td>
+</tr>
+<tr>
+<td>20</td>
+<td>No FP loop</td>
+<td>Alert outcome tagging → precision dashboard</td>
+<td>SOAR + metrics pipeline</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Detect at the TTP level, not the IOC level.</strong> The single highest-leverage control is <em>where on the Pyramid of Pain you anchor the rule</em>. Hashes, IPs, and domains are cheap for an attacker to rotate; TTPs (the actual technique — e.g. "attach admin policy," "create SA key," "sudo to shell as a service account") are expensive to change because they are how the attack fundamentally works. Concretely, Rule 1 keys on the CloudTrail <code>eventName</code> + the semantic shape of the policy (<code>Action:* Resource:*</code>), not on a specific role name or IP. Trade-off: TTP rules are broader and can be noisier, so they demand good filters and a tuning loop. IOC rules still have a place — but as <em>time-boxed IR artifacts</em> with an expiry, not the backbone of the estate. Interviewers want to hear you make this distinction explicitly.</p>
+<p><strong>2. Robust matching via modifiers and normalization.</strong> A rule that matches the exact string <code>powershell -enc SQBFAF...</code> is defeated by casing, whitespace, or a different base64 blob. Robustness comes from Sigma's modifiers: <code>|contains|all</code> to require several independent substrings, <code>|base64offset|contains</code> to catch encoded payloads at any alignment, <code>|re</code> for a normalized regex, and <code>|cased</code> only where exactness is genuinely needed. The pipeline can also insert value transforms (lowercasing, unescaping) before matching. Trade-off: regexes are slower and risk catastrophic backtracking on large fields, so lint for unbounded quantifiers and prefer anchored, bounded patterns. The goal is a rule that survives trivial mutation while staying cheap to evaluate at ingest volume.</p>
+<p><strong>3. Two-sided testing in CI (validate the detection, not the attack).</strong> Every rule ships with at least one <strong>true-positive</strong> log sample (a real, sanitized malicious event that MUST match) and one <strong>true-negative</strong> sample (a benign look-alike that MUST NOT match). CI converts the rule and runs it against both, asserting exactly one hit and zero hits respectively. This is fundamentally different from running offensive tooling: we are not launching an attack, we are replaying a <em>recorded log line</em> to prove the compiled query behaves. Where atomic-red-team-style thinking applies is as the <em>source</em> of representative telemetry — a technique is executed once in a lab, the resulting logs are captured, sanitized, and committed as fixtures. Trade-off: maintaining representative samples is real work and they drift from prod schemas; mitigate by seeding fixtures from sanitized production logs and re-validating on a schedule. This control is what turns "I think this rule works" into a reproducible guarantee.</p>
+<p><strong>4. Pipeline-owned portability with fail-loud on unmapped fields.</strong> The processing pipeline is the contract between abstract Sigma and concrete backends. Its most important safety property is failing loudly: if a rule references a field the pipeline doesn't know how to map, a <code>detection_item_failure</code> transform must error the build rather than silently emitting an empty or wrong query — the worst outcome, a rule that looks deployed but matches nothing. Implement per-logsource pipelines (CloudTrail→Splunk, auditd→Elastic ECS) with explicit <code>field_name_mapping</code> and an index/table resolver. Trade-off: pipelines are code too and need their own tests; a bug in a shared pipeline breaks every rule that uses it, so version and review pipelines with the same rigor as rules.</p>
+<p><strong>5. Git as the single source of truth with drift reconciliation.</strong> Detections live in Git and reach production <em>only</em> through the pipeline; nobody edits rules in the SIEM console. A scheduled reconciliation job diffs what's deployed against what's in <code>main</code> and alerts on drift — catching both well-meaning click-ops and malicious tampering (T1562.001). Combine with RBAC so few humans can mutate deployed detections directly. Trade-off: this slows down the "quick fix in prod at 2am" instinct; the mitigation is a fast, well-tested emergency-merge path (short-lived branch, expedited review) so the pipeline is never the reason an incident response stalls. Reproducibility and auditability are worth the discipline at scale.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<p>Detection content is only as good as its inputs. Key sources and the fields Sigma rules key on:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Log/service</th>
+<th>High-value fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AWS</td>
+<td>CloudTrail (<code>aws:cloudtrail</code>)</td>
+<td><code>eventName</code>, <code>eventSource</code>, <code>userIdentity.arn</code>, <code>sourceIPAddress</code>, <code>errorCode</code>, <code>requestParameters.*</code></td>
+</tr>
+<tr>
+<td>GCP</td>
+<td>Cloud Audit Logs (<code>gcp.audit</code>)</td>
+<td><code>protoPayload.methodName</code>, <code>authenticationInfo.principalEmail</code>, <code>resourceName</code>, <code>requestMetadata.callerIp</code></td>
+</tr>
+<tr>
+<td>Azure/Entra</td>
+<td>Activity + Sign-in / Audit</td>
+<td><code>OperationName</code>, <code>Identity</code>, <code>CallerIpAddress</code>, <code>ResultType</code>, <code>AppId</code></td>
+</tr>
+<tr>
+<td>Linux hosts</td>
+<td>auditd, Sysmon-for-Linux</td>
+<td><code>type</code>, <code>AUID</code>, <code>UID</code>, <code>a0..aN</code>, <code>exe</code>, <code>syscall</code></td>
+</tr>
+<tr>
+<td>Windows hosts</td>
+<td>Sysmon, Security eventlog</td>
+<td><code>EventID</code>, <code>Image</code>, <code>CommandLine</code>, <code>ParentImage</code>, <code>User</code>, <code>TargetObject</code></td>
+</tr>
+<tr>
+<td>Kubernetes</td>
+<td>API server audit</td>
+<td><code>verb</code>, <code>objectRef.resource</code>, <code>user.username</code>, <code>sourceIPs</code>, <code>responseStatus.code</code></td>
+</tr>
+<tr>
+<td>Identity</td>
+<td>Okta/Entra system log</td>
+<td><code>eventType</code>, <code>actor</code>, <code>client.ipAddress</code>, <code>outcome.result</code></td>
+</tr>
+<tr>
+<td><strong>Meta</strong></td>
+<td>The detection pipeline itself</td>
+<td>Rule deploy events, drift-reconciliation results, alert outcome tags</td>
+</tr>
+</tbody>
+</table>
+<p>Instrument the pipeline as a first-class telemetry source: every deploy, every CI test pass/fail, and every alert's triage outcome (TP/FP/benign) must be logged so you can compute precision, recall proxies, and MTTD per rule.</p>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>Detection A — meta-detection: someone disabled or deleted a detection rule in the SIEM (tamper detection).</strong> Sigma over Splunk audit logs:</p>
+<pre><code class="language-yaml">title: SIEM Saved Search Or Correlation Rule Disabled Or Deleted
+id: 2d7f6b90-1c4e-4a2f-b8d1-9e0a3c5f7b62
+status: test
+description: Detects modification, disabling, or deletion of detection content in the SIEM outside the deployment pipeline.
+logsource:
+  product: splunk
+  service: audittrail
+detection:
+  action:
+    action:
+      - 'edit_savedsearch'
+      - 'delete_savedsearch'
+    info: 'disabled'
+  not_pipeline:
+    user|startswith: 'svc-detection-cd'
+  condition: action and not not_pipeline
+fields:
+  - user
+  - action
+  - savedsearch_name
+falsepositives:
+  - Emergency change by on-call detection engineer (must have ticket)
+level: high
+</code></pre>
+<p><strong>Detection B — password spray via aggregation (Sigma correlation rule).</strong> Single failed logins are noise; the <em>rate</em> is the signal. This uses the newer Sigma correlation spec on top of a base rule:</p>
+<pre><code class="language-yaml">title: Base Failed Cloud Console Sign In
+id: 7a1c2e34-8b90-4d5f-a6c1-0e2f4b6d8a10
+status: test
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventName: ConsoleLogin
+    responseElements.ConsoleLogin: 'Failure'
+  condition: selection
+level: informational
+---
+title: Password Spray Against Cloud Console
+id: 9b2d4f56-0a1c-4e7f-b8d2-3c5e7a9b1d20
+status: test
+correlation:
+  type: value_count
+  rules:
+    - 7a1c2e34-8b90-4d5f-a6c1-0e2f4b6d8a10
+  group-by:
+    - sourceIPAddress
+  timespan: 10m
+  condition:
+    gte: 10
+    field: userIdentity.userName
+tags:
+  - attack.credential-access
+  - attack.t1110.003
+level: high
+</code></pre>
+<p><strong>Detection C — the true-positive/true-negative CI assertion (pytest-style harness).</strong> This is how you <em>test the detection</em>, not the attack:</p>
+<pre><code class="language-python"># tests/test_iam_admin_rule.py
+import json, subprocess, re
+
+def compile_rule(path, target=&quot;splunk&quot;, pipeline=&quot;aws_cloudtrail_splunk&quot;):
+    out = subprocess.check_output(
+        [&quot;sigma&quot;, &quot;convert&quot;, &quot;-t&quot;, target, &quot;-p&quot;, pipeline, path], text=True)
+    return out.strip()
+
+def matches(query, sample):
+    # minimal evaluator: check eventName + policyArn semantics against one log line
+    ev = json.loads(sample)
+    return (ev[&quot;eventSource&quot;] == &quot;iam.amazonaws.com&quot;
+            and ev[&quot;eventName&quot;] in (&quot;AttachUserPolicy&quot;,&quot;AttachRolePolicy&quot;,&quot;AttachGroupPolicy&quot;)
+            and ev[&quot;requestParameters&quot;][&quot;policyArn&quot;].endswith(&quot;:policy/AdministratorAccess&quot;)
+            and &quot;errorCode&quot; not in ev)
+
+def test_true_positive():
+    q = compile_rule(&quot;rules/cloud/aws_iam_admin_attached.yml&quot;)
+    tp = open(&quot;tests/samples/attach_admin_success.json&quot;).read()
+    assert matches(q, tp), &quot;rule must fire on the known-malicious sample&quot;
+
+def test_true_negative():
+    q = compile_rule(&quot;rules/cloud/aws_iam_admin_attached.yml&quot;)
+    tn = open(&quot;tests/samples/attach_readonly_success.json&quot;).read()
+    assert not matches(q, tn), &quot;rule must stay silent on benign ReadOnlyAccess attach&quot;
+</code></pre>
+<p>In a real harness the "evaluator" is the SIEM itself in a container (e.g. a Splunk/Elastic test instance) or a purpose-built log-replay engine; the assertion contract is identical — exactly one hit on the TP fixture, zero on the TN fixture. This validates detection <em>logic and packaging</em>; it deliberately does not execute any attack tooling.</p>
+<h3 id="response-playbook">Response playbook</h3>
+<p>When a Sigma-driven alert fires (using Rule 1 — IAM admin attached — as the worked example):</p>
+<ol>
+<li><strong>Triage / validate (minutes 0–10).</strong> Confirm the alert is a true positive: pull the raw CloudTrail record, check <code>userIdentity.arn</code>, <code>sourceIPAddress</code>, and whether the principal is the sanctioned automation role. Tag the alert outcome (feeds the precision metric).</li>
+<li><strong>Contain.</strong> If confirmed malicious, immediately detach the offending policy and attach a deny-all boundary; if the actor is a compromised principal, disable its access keys / revoke its sessions (<code>aws iam update-access-key --status Inactive</code>, or revoke the role's active sessions via an AWSRevokeOlderSessions inline policy).</li>
+<li><strong>Scope.</strong> Query CloudTrail for all actions by that principal and from that <code>sourceIPAddress</code> in the surrounding window; look for lateral movement (assumed roles, new keys, data access). Pivot to related Sigma rules (Rule 2 key-creation, S3 mass-read) via shared entities.</li>
+<li><strong>Eradicate.</strong> Remove any persistence the actor created (new IAM users, access keys, trust policies, Lambda backdoors), rotate exposed credentials, and invalidate leaked tokens.</li>
+<li><strong>Recover.</strong> Restore least-privilege policies, re-enable legitimate automation, confirm no residual access.</li>
+<li><strong>Detection feedback (close the loop).</strong> File the outcome back into the detection repo: if it was a FP, add a filter/allowlist and a new true-negative fixture; if TP, verify the rule's coverage and consider a correlation rule for the broader kill chain. Update the rule's <code>falsepositives</code> and, if needed, <code>level</code>. Every incident should leave the detection content measurably better.</li>
+</ol>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What are the required components of a Sigma rule and how does <code>condition</code> combine them?</strong><br />
+A Sigma rule needs at minimum a <code>title</code>, a <code>logsource</code> (product/category/service selector), and a <code>detection</code> block containing one or more named search identifiers plus a <code>condition</code>. Each search identifier is a map of field:value matchers; pairs within a map are AND-ed and a list of values for one key is OR-ed. The <code>condition</code> is a boolean expression over those identifier names (<code>and</code>, <code>or</code>, <code>not</code>, <code>1 of them</code>, <code>all of selection*</code>, aggregations). <code>id</code> (a UUID), <code>level</code>, and <code>tags</code> are strongly recommended for lineage, severity, and ATT&amp;CK mapping.<br />
+<em>Why asked / signal:</em> Confirms the candidate can actually read and write the format, not just name-drop it.</p>
+<p><strong>Q2. How does one Sigma rule end up as a Splunk query and an Elastic query?</strong><br />
+pySigma parses the YAML into an abstract syntax tree, then a <strong>processing pipeline</strong> maps Sigma's abstract taxonomy — logsource → index/table, and abstract field names → the backend's real schema (e.g. ECS) — after which a <strong>backend plugin</strong> serializes the AST into the target query language. <code>sigma-cli</code> is the CLI front-end. The rule author writes once; the pipeline+backend own all vendor-specific translation, which is the source of Sigma's portability.<br />
+<em>Why asked / signal:</em> Tests understanding that portability lives in the pipeline, not in the rule text.</p>
+<p><strong>Q3. What is Detection-as-Code and why adopt it?</strong><br />
+Detection-as-Code treats detections as software: stored in Git, peer-reviewed via pull requests, unit-tested against known log samples, linted, and deployed through CI/CD instead of hand-editing in a SIEM console. Benefits are reproducibility, versioning/rollback, testability, review, and auditability — plus portability when the content is Sigma. It converts detection engineering from tribal click-ops into an engineering discipline with measurable quality.<br />
+<em>Why asked / signal:</em> Baseline maturity check; separates tool users from engineers.</p>
+<p><strong>Q4. What are field modifiers and give three examples.</strong><br />
+Modifiers are suffixes on a field key that change match semantics: <code>|contains</code> (substring), <code>|startswith</code>/<code>|endswith</code> (anchored substring), <code>|re</code> (regex), <code>|base64offset|contains</code> (match base64-encoded value at any alignment), <code>|cidr</code> (IP in range), <code>|all</code> (require all listed values), <code>|gte</code>/<code>|lt</code> (numeric compare), <code>|cased</code> (case-sensitive). They are the primary tool for writing robust matches that survive attacker mutation.<br />
+<em>Why asked / signal:</em> Practical fluency; modifiers are where rule quality is won or lost.</p>
+<p><strong>Q5. Why prefer ATT&amp;CK-mapped behavioral rules over IOC lists?</strong><br />
+Because of the Pyramid of Pain: hashes, IPs, and domains are trivial for an attacker to rotate, while TTPs are expensive to change since they are how the attack fundamentally operates. Behavioral rules mapped to ATT&amp;CK techniques stay valid across campaigns and let you build coverage heatmaps; IOC rules are still useful but belong as time-boxed IR artifacts, not the backbone. SolarWinds and Capital One both evaded IOC-based defenses but exhibited detectable behaviors.<br />
+<em>Why asked / signal:</em> Core detection-engineering philosophy.</p>
+<h3 id="tier-2-system-design-trade-off">Tier 2 — System design / trade-off</h3>
+<p><strong>Q6. Design a detection-content pipeline for a company with Splunk in one region and Elastic in another.</strong><br />
+Author all detections as Sigma in a single Git monorepo. On PR, CI runs: schema lint (<code>sigma check</code>), unique-UUID and required-tags lint, secret scanning, then conversion to both Splunk SPL and Elastic queries using region-specific pipelines, and finally replays each rule's true-positive and true-negative fixtures against ephemeral Splunk/Elastic test containers, asserting exactly-one and zero matches. On merge, a CD job deploys converted content to each region's staging SIEM in shadow mode; a reconciliation job diffs deployed vs. <code>main</code> to catch drift. Promotion to prod is gated on a false-positive budget observed in staging. Metrics (precision from alert-outcome tags, coverage from ATT&amp;CK tags) feed a dashboard. The key design point is that one reviewed rule compiles to both backends, so logic never diverges between regions.<br />
+<em>Why asked / signal:</em> Tests end-to-end pipeline design and the portability payoff at scale.</p>
+<p><strong>Q7. How do you handle false positives systematically rather than case-by-case?</strong><br />
+Build a closed feedback loop: every alert is triaged and tagged with an outcome (TP/FP/benign) in the SOAR, which feeds a per-rule precision metric. FPs above a threshold trigger a tuning task: add a filter/allowlist to the rule's <code>condition</code>, capture the benign event as a new true-negative fixture (so the fix is regression-tested), update the <code>falsepositives</code> field, and possibly lower <code>level</code>. Deploy the tuned rule through the same pipeline. Systemically, gate new rules on a staging false-positive budget before prod, and prefer correlation/aggregation over per-event rules for volumetric patterns. The discipline is that tuning changes are code changes, reviewed and tested, never silent console edits.<br />
+<em>Why asked / signal:</em> FP management is the daily reality of detection engineering; ad-hoc answers reveal inexperience.</p>
+<p><strong>Q8. When would you NOT use Sigma, and what are its limitations?</strong><br />
+Sigma is a <em>log-matching</em> language; it is a poor fit when detection needs stateful stream processing, ML/statistical baselining, graph analytics, or rich joins that its condition grammar can't express — there you drop to native SPL/KQL/YARA-L or a streaming platform. Correlation support exists but is newer and less expressive than a full SIEM's. Some backends lack feature parity (aggregations, regex flavors), so a rule may convert lossily. Sigma also doesn't cover network-packet detection (that's Snort/Suricata) or file detection (YARA). The mature answer: use Sigma for the large portable middle of log-based detections and accept native content for the long tail that needs backend-specific power, keeping both in the same Git/DaC workflow.<br />
+<em>Why asked / signal:</em> Senior candidates know a tool's edges; juniors treat it as universal.</p>
+<p><strong>Q9. How do you measure whether your detection estate is any good?</strong><br />
+Track multiple signals: <strong>coverage</strong> (ATT&amp;CK technique heatmap derived from rule <code>tags</code>, weighted by data-source availability so you don't claim coverage for un-onboarded logs), <strong>precision</strong> (TP / (TP+FP) from alert-outcome tags per rule), <strong>volume/noise</strong> (alerts per rule per day), <strong>MTTD</strong> for validated incidents, and <strong>rule health</strong> (last-fired timestamp, conversion errors, failing tests). Combine coverage with threat intel to prioritize gaps against relevant adversaries. Beware vanity metrics: rule count is meaningless; a heatmap that ignores data availability lies. The north star is durable, high-precision coverage of techniques that matter to your threat model.<br />
+<em>Why asked / signal:</em> Tests metric literacy and skepticism toward vanity numbers.</p>
+<p><strong>Q10. Where do you draw the line between a signature-IOC rule and a behavioral rule in production?</strong><br />
+Behavioral, ATT&amp;CK-mapped rules form the durable backbone because they survive attacker mutation; IOC rules (specific hashes, IPs, domains) are legitimate but should be <strong>time-boxed IR artifacts</strong> with an expiry and a reference to the incident/intel that justified them, so the estate doesn't accumulate dead IOCs. Operationally I'd keep IOC content in a separate managed feed with TTLs and automated retirement, while behavioral rules live as reviewed Sigma with tests. The trade-off is freshness vs. durability: IOCs give precise, low-FP hits <em>now</em> but decay fast; behaviors are broader and need tuning but last. A good program runs both, clearly separated, not a pile of stale IP rules masquerading as coverage.<br />
+<em>Why asked / signal:</em> Nuance on the Pyramid of Pain in a production context.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. Walk through exactly what a pySigma processing pipeline does and why fail-loud matters.</strong><br />
+A pipeline is an ordered list of <code>transformations</code>, each optionally gated by <code>rule_conditions</code>/<code>field_name_conditions</code>. Typical transforms: <code>field_name_mapping</code> (abstract→real field names), <code>add_condition</code> (inject index/sourcetype or a static filter for a logsource), value transforms (base64, lowercasing), placeholder resolution, and <code>detection_item_failure</code>/<code>rule_failure</code> to error on unsupported constructs. Order and <code>priority</code> matter because later transforms operate on the output of earlier ones. Fail-loud is critical: the single worst outcome is a rule that converts to an empty or wrong query and <em>looks</em> deployed while matching nothing — a silent blind spot. So an unmapped field must raise a build error, not pass through. Pipelines are code and get their own tests, because a shared-pipeline bug breaks every rule that depends on it.<br />
+<em>Why asked / signal:</em> Deep internals; only hands-on practitioners answer this well.</p>
+<p><strong>Q12. How do you test a detection without running attack tooling in production?</strong><br />
+Separate the <em>technique execution</em> (done once, in an isolated lab) from <em>detection validation</em> (done continuously, in CI). In the lab you may run a controlled, atomic technique to generate authentic telemetry, then capture, sanitize, and commit the resulting log lines as fixtures. Detection validation replays those fixtures — pure recorded log data — through the compiled rule (ideally against an ephemeral SIEM container) and asserts exactly one match on the true-positive fixture and zero on the true-negative. No offensive tooling runs in CI or prod; you are exercising the <em>query</em>, not the attack. This gives regression safety: when a rule or pipeline changes, the fixtures re-prove behavior. Fixtures are seeded from sanitized prod logs to stay representative, and re-validated on a schedule to catch schema drift.<br />
+<em>Why asked / signal:</em> Directly probes the defensive test philosophy and the discipline boundary.</p>
+<p><strong>Q13. Explain Sigma correlation rules and when a single-event rule is insufficient.</strong><br />
+Single-event rules fire on one log line; many attacks are only visible as <em>patterns</em> — password spray (many failures across accounts from one IP), impossible travel, or beaconing. Sigma's correlation spec defines meta-rules that reference base rules and apply <code>count</code>, <code>value_count</code>, <code>temporal</code> (several base rules within a window), or <code>temporal_ordered</code> (in sequence) with <code>group-by</code> and a <code>timespan</code>. Example: a base rule matches a failed console login, and a <code>value_count</code> correlation fires when ≥10 distinct usernames fail from one <code>sourceIPAddress</code> in 10 minutes. The trade-offs: correlation needs correct time normalization (UTC at ingest) and windows are stateful and heavier to evaluate; backend support varies, so a correlation rule may convert to native stateful search (e.g. Splunk <code>stats ... by</code>) or not at all. Use correlation for volumetric/sequential signal, single-event for discrete high-fidelity actions.<br />
+<em>Why asked / signal:</em> Tests the frontier of the spec and stateful detection reasoning.</p>
+<p><strong>Q14. An attacker with SIEM console access starts disabling detections. How does your architecture resist and detect this?</strong><br />
+Defense in depth. Prevention: strict RBAC so almost no human can mutate deployed detections directly; deployment happens only via a service account through the pipeline, and Git is the source of truth. Detection: a meta-rule on the SIEM's own audit log fires when a saved search/correlation rule is edited, disabled, or deleted by anyone other than the deployment service account (see Detection A). Reconciliation: a scheduled job diffs live SIEM content against <code>main</code> and alerts on any drift, so even a silent tamper surfaces within the job interval. Recovery: because content is in Git, re-deploying the correct state is a pipeline run, not a rebuild from memory. This maps to ATT&amp;CK T1562.001 (Impair Defenses) and the principle that your detection pipeline is itself a target that needs monitoring and integrity controls.<br />
+<em>Why asked / signal:</em> Tests thinking about the detection system as an attack surface.</p>
+<p><strong>Q15. You must roll out a Log4Shell-class emergency detection across three SIEMs in under an hour, safely. How?</strong><br />
+Author one Sigma rule capturing the robust behavioral signal — not just <code>contains jndi:ldap</code>, which is trivially obfuscated, but a normalized regex plus decode modifiers and a companion process-creation rule for suspicious Java child processes. Fast-path it through an expedited pipeline: quick lint, convert to all three backends, and validate against a true-positive fixture built from a captured exploit log line and a true-negative from benign traffic — this proves the rule fires and won't storm the SOC. Deploy to production in <em>shadow/alert-only</em> mode across all three simultaneously via the pipeline, watching alert volume for a few minutes before enabling any automated response. The expedited path still runs the essential gates (convert + two-sided test), just with an accelerated single-reviewer approval and a tracked emergency ticket. The whole point of DaC + Sigma is that "one reviewed rule to three backends in an hour, tested" is a routine pipeline run, not a heroics exercise — and the shadow-mode step is what keeps "fast" from becoming "self-inflicted DoS on the SOC."<br />
+<em>Why asked / signal:</em> Synthesizes portability, testing, safe rollout, and incident tempo under pressure.</p>
+<h2 id="8-ecosystem-mapping">8. Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Sigma / open</th>
+<th>Splunk</th>
+<th>Elastic</th>
+<th>Microsoft Sentinel</th>
+<th>Google Chronicle</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rule/query language</td>
+<td>Sigma YAML</td>
+<td>SPL</td>
+<td>Query DSL / Lucene / EQL / ES|QL</td>
+<td>KQL</td>
+<td>YARA-L 2.0</td>
+</tr>
+<tr>
+<td>Converter</td>
+<td>sigma-cli / pySigma</td>
+<td><code>pySigma-backend-splunk</code></td>
+<td><code>pySigma-backend-elasticsearch</code></td>
+<td><code>pySigma-backend-kusto</code></td>
+<td><code>pySigma-backend-chronicle</code></td>
+</tr>
+<tr>
+<td>Schema/normalization</td>
+<td>Sigma taxonomy + pipeline</td>
+<td>CIM</td>
+<td>ECS</td>
+<td>ASIM</td>
+<td>UDM</td>
+</tr>
+<tr>
+<td>Detection content repo</td>
+<td>SigmaHQ <code>sigma</code></td>
+<td>ESCU / Splunk Security Content</td>
+<td><code>detection-rules</code> (Elastic)</td>
+<td>Sentinel GitHub repos</td>
+<td>Chronicle detection rules</td>
+</tr>
+<tr>
+<td>Correlation</td>
+<td>Sigma correlation spec</td>
+<td><code>stats</code>/<code>tstats</code> by entity</td>
+<td>EQL sequences / correlation rules</td>
+<td>KQL joins / near</td>
+<td>YARA-L multi-event + <code>match</code></td>
+</tr>
+<tr>
+<td>Enrichment</td>
+<td>pipeline placeholders</td>
+<td>lookups / KV store</td>
+<td>enrich policies</td>
+<td>watchlists</td>
+<td>reference lists</td>
+</tr>
+<tr>
+<td>Aggregation modifier</td>
+<td><code>count</code>, <code>value_count</code>, <code>temporal</code></td>
+<td><code>stats count by</code></td>
+<td><code>bucket</code>/aggs</td>
+<td><code>summarize</code></td>
+<td><code>outcome</code>/<code>match</code> window</td>
+</tr>
+<tr>
+<td>Severity</td>
+<td><code>level</code></td>
+<td><code>urgency</code></td>
+<td><code>severity</code>/<code>risk_score</code></td>
+<td><code>severity</code></td>
+<td>severity/priority</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Sigma = one portable rule; the pipeline = the portability.</strong> The <code>logsource</code>+<code>detection</code>+<code>condition</code> structure is abstract; pySigma pipelines and backends do the vendor translation. Know the match semantics (map=AND, list=OR) cold.</li>
+<li><strong>Detection-as-Code is the operating model:</strong> Git, PR review, unit tests, lint, CI/CD, and drift reconciliation. Never click-ops production detections.</li>
+<li><strong>Anchor detections at the TTP level</strong> (Pyramid of Pain) and map every rule to ATT&amp;CK via <code>tags</code>; reserve IOC rules as time-boxed IR artifacts.</li>
+<li><strong>Write robust matchers</strong> with modifiers (<code>|contains|all</code>, <code>|base64offset</code>, <code>|re</code>) so rules survive trivial attacker mutation; lint regexes against catastrophic backtracking.</li>
+<li><strong>Test the detection, not the attack:</strong> replay a sanitized true-positive and a true-negative fixture through the compiled query and assert exactly-one and zero matches. Execute techniques only in a lab to <em>generate</em> fixtures.</li>
+<li><strong>Fail loud in pipelines:</strong> an unmapped field must error the build; a silently empty query is the worst possible outcome.</li>
+<li><strong>Use correlation rules</strong> for volumetric/sequential signal (password spray, beaconing) that single-event rules miss; normalize time to UTC at ingest.</li>
+<li><strong>Measure with real metrics</strong> — coverage weighted by data availability, per-rule precision from alert-outcome tags, MTTD, rule health — not rule count.</li>
+<li><strong>The detection pipeline is itself an attack surface</strong> (T1562.001): RBAC it, monitor SIEM audit logs for rule tampering, and reconcile Git vs. prod.</li>
+<li><strong>Close the loop:</strong> every incident and every false positive should leave the detection content measurably better via a new fixture and a reviewed change.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>SigmaHQ — Sigma specification and rule repository: https://github.com/SigmaHQ/sigma and https://sigmahq.io</li>
+<li>pySigma documentation and plugin directory: https://sigmahq-pysigma.readthedocs.io and https://github.com/SigmaHQ/pySigma</li>
+<li>sigma-cli: https://github.com/SigmaHQ/sigma-cli</li>
+<li>MITRE ATT&amp;CK — techniques referenced (T1098, T1078, T1548.003, T1110.003, T1562.001): https://attack.mitre.org</li>
+<li>David Bianco — The Pyramid of Pain: https://detect-respond.blogspot.com/2013/03/the-pyramid-of-pain.html</li>
+<li>Palantir — Alerting and Detection Strategy (ADS) Framework: https://github.com/palantir/alerting-detection-strategy-framework</li>
+<li>Elastic <code>detection-rules</code> repository (Detection-as-Code reference): https://github.com/elastic/detection-rules</li>
+<li>Splunk Security Content / ESCU: https://github.com/splunk/security_content</li>
+<li>Google Chronicle YARA-L 2.0 language reference: https://cloud.google.com/chronicle/docs/detection/yara-l-2-0-overview</li>
+<li>Microsoft ASIM and Sentinel detection content: https://learn.microsoft.com/azure/sentinel/normalization</li>
+<li>NIST SP 800-92 (Guide to Computer Security Log Management) and SP 800-137 (ISCM): https://csrc.nist.gov</li>
+<li>Red Canary — Atomic Red Team (technique telemetry generation, for producing test fixtures): https://github.com/redcanaryco/atomic-red-team</li>
+<li>Cross-reference: <code>detection/Detection-Engineering/README.md</code>, <code>detection/MITRE-ATTACK/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

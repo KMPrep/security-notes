@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q19_firewall_policy_gap.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q19_firewall_policy_gap.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q19_firewall_policy_gap.py</p>
+  <p class="line-count">344 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q19. Firewall Policy Gap Analyzer
+===================================
+Detect shadowed rules, policy gaps, east-west lateral movement,
+and exfiltration indicators from firewall traffic logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Show all DENY traffic — blocked is blocked.
+  Problem: Attacker traffic may be allowed (the whole point of policy gaps).
+  Showing only denies misses: allowed traffic to unexpected destinations,
+  east-west between segments that should be isolated, and outbound on
+  non-standard ports.
+
+BETTER: Flag ALLOW traffic on unusual ports.
+  Problem: What&#x27;s &quot;unusual&quot; is environment-specific. A port allowed by a
+  permissive rule (e.g., 0/0 → 0/0) but never explicitly intended is a
+  &quot;shadowed-rule&quot; problem. Need rule-level analysis, not just port analysis.
+
+GOOGLE-LEVEL (this file):
+  - Shadowed rules: a specific DENY rule is shadowed by an earlier ALLOW *
+    rule — the deny can never fire.
+  - Policy gaps: ALLOW traffic from untrusted zone → sensitive zone that has
+    no explicit rule (matched the catch-all).
+  - East-west movement: internal subnet→internal subnet on sensitive ports
+    (SMB, RDP, SSH, WinRM) where the subnets are in different security zones.
+  - Exfil indicators: large outbound bytes to external IPs on non-standard ports,
+    or high distinct-destination counts (beaconing/scanning).
+
+Complexity: O(R²) for rule shadowing, O(N) for traffic analysis.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+from ipaddress import ip_network, ip_address, IPv4Network, IPv4Address
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA — Rule table + traffic log
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_RULES = &quot;&quot;&quot;\
+# id  priority  src_zone  dst_zone   src_net        dst_net          proto  dport  action
+1     10        any       any        0.0.0.0/0      0.0.0.0/0        any    any    ALLOW
+2     20        untrusted dmz        0.0.0.0/0      10.10.0.0/24     tcp    443    ALLOW
+3     30        untrusted sensitive  0.0.0.0/0      10.20.0.0/24     any    any    DENY
+4     40        internal  internal   10.0.0.0/8     10.0.0.0/8       tcp    445    DENY
+5     50        any       any        0.0.0.0/0      0.0.0.0/0        any    any    ALLOW
+&quot;&quot;&quot;
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z ALLOW src=192.168.1.5 dst=10.20.0.50 proto=tcp dport=22 bytes=50000 rule=1
+2024-03-12T08:01:00Z ALLOW src=192.168.1.5 dst=8.8.8.8 proto=udp dport=53 bytes=200 rule=1
+2024-03-12T08:02:00Z ALLOW src=10.0.0.10 dst=10.0.0.20 proto=tcp dport=3389 bytes=1500000 rule=1
+2024-03-12T08:03:00Z ALLOW src=10.0.0.30 dst=10.0.0.40 proto=tcp dport=445 bytes=800000 rule=1
+2024-03-12T08:04:00Z ALLOW src=10.0.0.50 dst=203.0.113.5 proto=tcp dport=4444 bytes=2000000 rule=1
+2024-03-12T08:05:00Z ALLOW src=10.0.0.50 dst=203.0.113.6 proto=tcp dport=4444 bytes=1000000 rule=1
+2024-03-12T08:06:00Z ALLOW src=10.0.0.50 dst=203.0.113.7 proto=tcp dport=4444 bytes=900000 rule=1
+2024-03-12T08:07:00Z ALLOW src=10.0.0.50 dst=203.0.113.8 proto=tcp dport=4444 bytes=1100000 rule=1
+2024-03-12T08:08:00Z DENY  src=10.0.0.60 dst=10.0.0.70 proto=tcp dport=445 bytes=0 rule=4
+2024-03-12T08:09:00Z ALLOW src=192.168.1.10 dst=10.10.0.5 proto=tcp dport=443 bytes=50000 rule=2
+MALFORMED_LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Security zones and their subnets
+ZONES: dict[str, list[IPv4Network]] = {
+    &quot;sensitive&quot;: [ip_network(&quot;10.20.0.0/24&quot;)],
+    &quot;internal&quot;:  [ip_network(&quot;10.0.0.0/8&quot;)],
+    &quot;dmz&quot;:       [ip_network(&quot;10.10.0.0/24&quot;)],
+    &quot;untrusted&quot;: [ip_network(&quot;192.168.0.0/16&quot;)],
+    &quot;external&quot;:  [ip_network(&quot;0.0.0.0/0&quot;)],  # catch-all
+}
+
+EAST_WEST_PORTS = {445: &quot;SMB&quot;, 3389: &quot;RDP&quot;, 22: &quot;SSH&quot;, 5985: &quot;WinRM&quot;, 5986: &quot;WinRM-SSL&quot;}
+EXFIL_BYTES_THRESHOLD = 500_000       # 500 KB per flow to external
+EXFIL_DISTINCT_DSTS_THRESHOLD = 3     # distinct external IPs on same non-standard port
+
+
+def zone_of(ip_str: str) -&gt; str:
+    try:
+        addr = ip_address(ip_str)
+    except ValueError:
+        return &quot;unknown&quot;
+    for zone, nets in ZONES.items():
+        if zone == &quot;external&quot;:
+            continue
+        for net in nets:
+            if addr in net:
+                return zone
+    return &quot;external&quot;
+
+
+def is_internal(ip_str: str) -&gt; bool:
+    return zone_of(ip_str) not in (&quot;external&quot;, &quot;unknown&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RULE PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_rules(lines: list[str]) -&gt; list[dict]:
+    rules = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith(&quot;#&quot;):
+            continue
+        parts = line.split()
+        if len(parts) &lt; 9:
+            continue
+        try:
+            rules.append({
+                &quot;id&quot;:       int(parts[0]),
+                &quot;priority&quot;: int(parts[1]),
+                &quot;src_zone&quot;: parts[2],
+                &quot;dst_zone&quot;: parts[3],
+                &quot;src_net&quot;:  ip_network(parts[4], strict=False),
+                &quot;dst_net&quot;:  ip_network(parts[5], strict=False),
+                &quot;proto&quot;:    parts[6],
+                &quot;dport&quot;:    parts[7],  # may be &quot;any&quot; or numeric string
+                &quot;action&quot;:   parts[8].upper(),
+            })
+        except (ValueError, IndexError):
+            continue
+    return sorted(rules, key=lambda r: r[&quot;priority&quot;])
+
+
+def rules_conflict(r_a: dict, r_b: dict) -&gt; bool:
+    &quot;&quot;&quot;Return True if r_b (higher priority number) is shadowed by r_a (lower priority/catch-all).&quot;&quot;&quot;
+    def net_overlap(n1: IPv4Network, n2: IPv4Network) -&gt; bool:
+        return n1.overlaps(n2)
+
+    if r_a[&quot;priority&quot;] &gt;= r_b[&quot;priority&quot;]:
+        return False  # r_b fires first — no shadow
+    if r_a[&quot;action&quot;] != &quot;ALLOW&quot; or r_b[&quot;action&quot;] != &quot;DENY&quot;:
+        return False  # shadow only matters if a DENY is made unreachable by an ALLOW
+
+    # Check if r_a covers r_b&#x27;s src, dst, and ports
+    if not net_overlap(r_a[&quot;src_net&quot;], r_b[&quot;src_net&quot;]):
+        return False
+    if not net_overlap(r_a[&quot;dst_net&quot;], r_b[&quot;dst_net&quot;]):
+        return False
+    if r_a[&quot;proto&quot;] not in (&quot;any&quot;, r_b[&quot;proto&quot;]) and r_b[&quot;proto&quot;] != &quot;any&quot;:
+        return False
+    if r_a[&quot;dport&quot;] not in (&quot;any&quot;, r_b[&quot;dport&quot;]) and r_b[&quot;dport&quot;] != &quot;any&quot;:
+        return False
+    return True
+
+
+def detect_shadowed_rules(rules: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for i, r_a in enumerate(rules):
+        for r_b in rules[i + 1:]:
+            if rules_conflict(r_a, r_b):
+                alerts.append({
+                    &quot;type&quot;:         &quot;SHADOWED_RULE&quot;,
+                    &quot;deny_rule_id&quot;: r_b[&quot;id&quot;],
+                    &quot;shadowed_by&quot;:  r_a[&quot;id&quot;],
+                    &quot;deny_action&quot;:  f&quot;{r_b[&#x27;src_net&#x27;]} → {r_b[&#x27;dst_net&#x27;]} {r_b[&#x27;proto&#x27;]}/{r_b[&#x27;dport&#x27;]}&quot;,
+                })
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRAFFIC PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+TRAFFIC_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+(?P&lt;action&gt;ALLOW|DENY)\s+&#x27;
+    r&#x27;src=(?P&lt;src&gt;\S+)\s+dst=(?P&lt;dst&gt;\S+)\s+&#x27;
+    r&#x27;proto=(?P&lt;proto&gt;\S+)\s+dport=(?P&lt;dport&gt;\d+)\s+&#x27;
+    r&#x27;bytes=(?P&lt;bytes&gt;\d+)\s+rule=(?P&lt;rule&gt;\d+)&#x27;,
+    re.IGNORECASE,
+)
+
+
+def parse_traffic(lines: list[str]) -&gt; list[dict]:
+    records = []
+    for line in lines:
+        line = line.strip()
+        m = TRAFFIC_RE.match(line)
+        if not m:
+            continue
+        try:
+            ts = datetime.strptime(m.group(&quot;ts&quot;), &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+        except ValueError:
+            continue
+        records.append({
+            &quot;ts&quot;:     ts,
+            &quot;action&quot;: m.group(&quot;action&quot;).upper(),
+            &quot;src&quot;:    m.group(&quot;src&quot;),
+            &quot;dst&quot;:    m.group(&quot;dst&quot;),
+            &quot;proto&quot;:  m.group(&quot;proto&quot;),
+            &quot;dport&quot;:  int(m.group(&quot;dport&quot;)),
+            &quot;bytes&quot;:  int(m.group(&quot;bytes&quot;)),
+            &quot;rule&quot;:   int(m.group(&quot;rule&quot;)),
+        })
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRAFFIC DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_east_west(records: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for r in records:
+        if r[&quot;action&quot;] != &quot;ALLOW&quot;:
+            continue
+        dport = r[&quot;dport&quot;]
+        if dport not in EAST_WEST_PORTS:
+            continue
+        src_zone = zone_of(r[&quot;src&quot;])
+        dst_zone = zone_of(r[&quot;dst&quot;])
+        if src_zone != &quot;external&quot; and dst_zone != &quot;external&quot; and src_zone != dst_zone:
+            alerts.append({
+                &quot;type&quot;:     &quot;EAST_WEST_LATERAL&quot;,
+                &quot;src&quot;:      r[&quot;src&quot;],
+                &quot;dst&quot;:      r[&quot;dst&quot;],
+                &quot;port&quot;:     f&quot;{dport}/{EAST_WEST_PORTS[dport]}&quot;,
+                &quot;src_zone&quot;: src_zone,
+                &quot;dst_zone&quot;: dst_zone,
+                &quot;bytes&quot;:    r[&quot;bytes&quot;],
+                &quot;ts&quot;:       r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_exfil(records: list[dict]) -&gt; list[dict]:
+    # Large single-flow exfil
+    large_flows = [
+        {
+            &quot;type&quot;:  &quot;EXFIL_LARGE_FLOW&quot;,
+            &quot;src&quot;:   r[&quot;src&quot;],
+            &quot;dst&quot;:   r[&quot;dst&quot;],
+            &quot;dport&quot;: r[&quot;dport&quot;],
+            &quot;bytes&quot;: r[&quot;bytes&quot;],
+            &quot;ts&quot;:    r[&quot;ts&quot;],
+        }
+        for r in records
+        if r[&quot;action&quot;] == &quot;ALLOW&quot; and r[&quot;bytes&quot;] &gt; EXFIL_BYTES_THRESHOLD
+        and not is_internal(r[&quot;dst&quot;])
+    ]
+
+    # Many distinct external dsts on same non-standard port from same src
+    src_port_dsts: dict[tuple, set] = defaultdict(set)
+    src_port_ts: dict[tuple, float] = {}
+    for r in records:
+        if r[&quot;action&quot;] == &quot;ALLOW&quot; and not is_internal(r[&quot;dst&quot;]) and r[&quot;dport&quot;] &gt; 1024:
+            key = (r[&quot;src&quot;], r[&quot;dport&quot;])
+            src_port_dsts[key].add(r[&quot;dst&quot;])
+            src_port_ts.setdefault(key, r[&quot;ts&quot;])
+
+    scatter = [
+        {
+            &quot;type&quot;:  &quot;EXFIL_MULTI_DST&quot;,
+            &quot;src&quot;:   src,
+            &quot;dport&quot;: dport,
+            &quot;count&quot;: len(dsts),
+            &quot;ts&quot;:    src_port_ts[(src, dport)],
+        }
+        for (src, dport), dsts in src_port_dsts.items()
+        if len(dsts) &gt;= EXFIL_DISTINCT_DSTS_THRESHOLD
+    ]
+
+    return large_flows + scatter
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(shadowed, east_west, exfil) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;FIREWALL POLICY GAP &amp; TRAFFIC ANOMALY REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[SHADOWED_RULES] {len(shadowed)} issue(s)&quot;)
+    for a in shadowed:
+        print(f&quot;  DENY rule #{a[&#x27;deny_rule_id&#x27;]} ({a[&#x27;deny_action&#x27;]})&quot;)
+        print(f&quot;    shadowed by ALLOW rule #{a[&#x27;shadowed_by&#x27;]} — the DENY can never fire&quot;)
+
+    print(f&quot;\n[EAST_WEST_LATERAL] {len(east_west)} event(s)&quot;)
+    for a in east_west:
+        print(f&quot;  {a[&#x27;src&#x27;]} ({a[&#x27;src_zone&#x27;]}) → {a[&#x27;dst&#x27;]} ({a[&#x27;dst_zone&#x27;]}) &quot;
+              f&quot;port={a[&#x27;port&#x27;]}  bytes={a[&#x27;bytes&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[EXFIL_INDICATORS] {len(exfil)} event(s)&quot;)
+    for a in exfil:
+        if a[&quot;type&quot;] == &quot;EXFIL_LARGE_FLOW&quot;:
+            print(f&quot;  [LARGE_FLOW] {a[&#x27;src&#x27;]} → {a[&#x27;dst&#x27;]}:{a[&#x27;dport&#x27;]}  &quot;
+                  f&quot;bytes={a[&#x27;bytes&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+        else:
+            print(f&quot;  [MULTI_DST] {a[&#x27;src&#x27;]}:{a[&#x27;dport&#x27;]} → {a[&#x27;count&#x27;]} distinct external IPs  &quot;
+                  f&quot;ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            all_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        all_lines = (SAMPLE_RULES + &quot;\n&quot; + SAMPLE_LOG).splitlines(keepends=True)
+
+    # Split into rule section and traffic section by blank line
+    rule_lines: list[str] = []
+    traffic_lines: list[str] = []
+    in_traffic = False
+    for line in all_lines:
+        if not in_traffic and (line.strip().startswith(&quot;2024&quot;) or
+                                re.match(r&#x27;\d{4}-\d{2}-\d{2}&#x27;, line.strip())):
+            in_traffic = True
+        if in_traffic:
+            traffic_lines.append(line)
+        else:
+            rule_lines.append(line)
+
+    rules   = parse_rules(rule_lines)
+    records = parse_traffic(traffic_lines)
+
+    print(f&quot;Loaded {len(rules)} firewall rules, {len(records)} traffic events.\n&quot;)
+    print_report(
+        detect_shadowed_rules(rules),
+        detect_east_west(records),
+        detect_exfil(records),
+    )
+</code></pre>
+</body>
+</html>

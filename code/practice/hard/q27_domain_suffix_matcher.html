@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q27_domain_suffix_matcher.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q27_domain_suffix_matcher.py</h1>
+  <p class="file-path">Source: code\practice\hard\q27_domain_suffix_matcher.py</p>
+  <p class="line-count">371 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q27 [Hard] — Build a Domain Suffix Matcher
+=============================================================================
+
+PROBLEM
+-------
+Build a data structure that, given a hostname, efficiently determines:
+  1. Whether the hostname belongs to a known domain suffix (e.g. &quot;.google.com&quot;)
+  2. The longest matching suffix
+  3. Public Suffix List (PSL)-style eTLD+1 extraction
+  4. Support for wildcard rules: &quot;*.compute.internal&quot; matches any subdomain
+  5. Exception rules: !specific.compute.internal → exclude from wildcard
+
+Use cases:
+  - Domain allowlist / blocklist enforcement
+  - DNS SSRF: detect if a host resolves to a blocked domain family
+  - Phishing detection: extract eTLD+1 to compare against known brands
+  - Cookie scope enforcement (same-origin checks)
+
+CLARIFYING QUESTIONS
+--------------------
+1. Case sensitivity?
+   → All lower-case; normalise input.
+2. Wildcard rules?
+   → &quot;*.evil.com&quot; matches &quot;sub.evil.com&quot; but NOT &quot;evil.com&quot; itself.
+3. Exception rules?
+   → &quot;!allowed.evil.com&quot; exempts that specific domain from a wildcard match.
+4. Partial match or full suffix?
+   → Must match from the right; &quot;oogle.com&quot; does NOT match &quot;google.com&quot;.
+5. Max domain depth?
+   → Domains can have up to 128 labels; structure handles arbitrary depth.
+
+=============================================================================
+APPROACH 1 — NAIVE (set of suffixes + linear scan)
+=============================================================================
+  Store suffixes in a set; strip leftmost label and check iteratively.
+  O(L²) worst case per lookup (L = labels in hostname).
+
+=============================================================================
+APPROACH 2 — REVERSED-LABEL TRIE (RECOMMENDED)
+=============================================================================
+  Store domain labels in a trie, root = TLD, next level = SLD, etc.
+  Insert reversed label sequence.
+  Lookup: traverse labels from right to left; collect match.
+  O(L) insert and lookup (L = number of labels).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MatchResult:
+    hostname: str
+    matched_suffix: str        # longest matching suffix
+    tag: Any = None
+    is_wildcard_match: bool = False
+    is_exception: bool = False
+    etld_plus_one: str = &quot;&quot;    # registrable domain (eTLD+1)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _normalise(domain: str) -&gt; str:
+    return domain.strip().lower().rstrip(&quot;.&quot;)
+
+
+def _labels(domain: str) -&gt; List[str]:
+    &quot;&quot;&quot;Split domain into labels, normalised.&quot;&quot;&quot;
+    return _normalise(domain).split(&quot;.&quot;)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive set-based matcher
+# ---------------------------------------------------------------------------
+
+class NaiveSuffixMatcher:
+    &quot;&quot;&quot;
+    O(L²) per lookup.  No wildcard support.
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._suffixes: Dict[str, Any] = {}  # suffix → tag
+
+    def add(self, suffix: str, tag: Any = None) -&gt; None:
+        self._suffixes[_normalise(suffix)] = tag
+
+    def match(self, hostname: str) -&gt; Optional[MatchResult]:
+        host = _normalise(hostname)
+        parts = host.split(&quot;.&quot;)
+        best: Optional[str] = None
+        for i in range(len(parts)):
+            candidate = &quot;.&quot;.join(parts[i:])
+            if candidate in self._suffixes:
+                if best is None or len(candidate) &gt; len(best):
+                    best = candidate
+        if best is None:
+            return None
+        tag = self._suffixes[best]
+        labels = host.split(&quot;.&quot;)
+        suffix_parts = best.split(&quot;.&quot;)
+        etld1 = &quot;.&quot;.join(labels[-(len(suffix_parts) + 1):]) if len(labels) &gt; len(suffix_parts) else host
+        return MatchResult(hostname=host, matched_suffix=best, tag=tag, etld_plus_one=etld1)
+
+    def __len__(self) -&gt; int:
+        return len(self._suffixes)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Reversed-label trie
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _TrieNode:
+    children: Dict[str, &quot;_TrieNode&quot;] = field(default_factory=dict)
+    is_suffix: bool = False       # this node represents a complete suffix
+    is_wildcard: bool = False     # wildcard rule: any one label matches
+    is_exception: bool = False    # exception rule: exclude this from wildcard parent
+    tag: Any = None
+
+
+class DomainSuffixMatcher:
+    &quot;&quot;&quot;
+    Reversed-label trie for O(L) domain suffix matching.
+    Supports:
+      - Exact suffixes: &quot;google.com&quot;
+      - Wildcard: &quot;*.compute.internal&quot;
+      - Exceptions: &quot;!allowed.compute.internal&quot;
+    &quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._root = _TrieNode()
+        self._count = 0
+
+    def add(self, suffix: str, tag: Any = None) -&gt; None:
+        &quot;&quot;&quot;
+        Add a suffix rule.
+        Prefix with &quot;!&quot; to add an exception rule.
+        Use &quot;*&quot; as a label to add a wildcard rule (e.g. &quot;*.evil.com&quot;).
+        &quot;&quot;&quot;
+        is_exception = suffix.startswith(&quot;!&quot;)
+        if is_exception:
+            suffix = suffix[1:]
+        norm = _normalise(suffix)
+        parts = norm.split(&quot;.&quot;)
+        # Reverse labels: TLD first in trie
+        node = self._root
+        for label in reversed(parts):
+            if label not in node.children:
+                node.children[label] = _TrieNode()
+            node = node.children[label]
+        if is_exception:
+            node.is_exception = True
+        elif &quot;*&quot; in parts:
+            # Mark the parent of &quot;*&quot; as wildcard
+            node.is_wildcard = True
+        else:
+            node.is_suffix = True
+        node.tag = tag
+        self._count += 1
+
+    def match(self, hostname: str) -&gt; Optional[MatchResult]:
+        &quot;&quot;&quot;
+        Find longest matching suffix for hostname.
+        Returns MatchResult or None.
+        &quot;&quot;&quot;
+        host = _normalise(hostname)
+        parts = host.split(&quot;.&quot;)
+
+        node = self._root
+        matched_depth = 0
+        best_depth = 0
+        best_node: Optional[_TrieNode] = None
+        is_wildcard_match = False
+        is_exception = False
+
+        # Traverse labels from right to left (TLD → subdomain)
+        for i, label in enumerate(reversed(parts)):
+            # Check for exception rule first
+            exc_node = node.children.get(label)
+            if exc_node and exc_node.is_exception:
+                is_exception = True
+                return MatchResult(
+                    hostname=host,
+                    matched_suffix=&quot;.&quot;.join(reversed(parts[-i-1:])),
+                    tag=exc_node.tag,
+                    is_exception=True,
+                    etld_plus_one=host,
+                )
+
+            # Check exact label match
+            next_node = node.children.get(label)
+            if next_node:
+                matched_depth += 1
+                node = next_node
+                if node.is_suffix:
+                    best_depth = matched_depth
+                    best_node = node
+                    is_wildcard_match = False
+            else:
+                # Check wildcard at this level
+                wildcard_node = node.children.get(&quot;*&quot;)
+                if wildcard_node:
+                    matched_depth += 1
+                    best_depth = matched_depth
+                    best_node = wildcard_node
+                    is_wildcard_match = True
+                    node = wildcard_node
+                else:
+                    break
+
+        if best_node is None:
+            return None
+
+        # Build matched suffix from the right
+        suffix_parts = parts[-best_depth:]
+        matched = &quot;.&quot;.join(suffix_parts)
+
+        # eTLD+1: one label to the left of the suffix
+        if len(parts) &gt; best_depth:
+            etld1 = &quot;.&quot;.join(parts[-(best_depth + 1):])
+        else:
+            etld1 = host
+
+        return MatchResult(
+            hostname=host,
+            matched_suffix=matched,
+            tag=best_node.tag,
+            is_wildcard_match=is_wildcard_match,
+            is_exception=is_exception,
+            etld_plus_one=etld1,
+        )
+
+    def contains(self, suffix: str) -&gt; bool:
+        return self.match(_normalise(suffix)) is not None
+
+    def __len__(self) -&gt; int:
+        return self._count
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_exact_match():
+    m = DomainSuffixMatcher()
+    m.add(&quot;evil.com&quot;, tag=&quot;malware&quot;)
+    r = m.match(&quot;sub.evil.com&quot;)
+    assert r and r.matched_suffix == &quot;evil.com&quot; and r.tag == &quot;malware&quot;
+    assert r.etld_plus_one == &quot;sub.evil.com&quot;
+    print(&quot;Exact match: passed&quot;)
+
+
+def test_longest_match():
+    m = DomainSuffixMatcher()
+    m.add(&quot;com&quot;, tag=&quot;generic-tld&quot;)
+    m.add(&quot;evil.com&quot;, tag=&quot;malicious&quot;)
+    r = m.match(&quot;sub.evil.com&quot;)
+    assert r and r.matched_suffix == &quot;evil.com&quot;, \
+        f&quot;Expected evil.com; got {r.matched_suffix if r else None}&quot;
+    print(&quot;Longest match: passed&quot;)
+
+
+def test_no_match():
+    m = DomainSuffixMatcher()
+    m.add(&quot;evil.com&quot;)
+    r = m.match(&quot;google.com&quot;)
+    assert r is None
+    print(&quot;No match: passed&quot;)
+
+
+def test_wildcard():
+    m = DomainSuffixMatcher()
+    m.add(&quot;*.compute.internal&quot;, tag=&quot;internal&quot;)
+    r = m.match(&quot;host1.compute.internal&quot;)
+    assert r and r.is_wildcard_match and r.tag == &quot;internal&quot;
+    # exact &quot;compute.internal&quot; should NOT match wildcard
+    r2 = m.match(&quot;compute.internal&quot;)
+    # Wildcard only matches if there is an extra label
+    assert r2 is None or not r2.is_wildcard_match
+    print(&quot;Wildcard: passed&quot;)
+
+
+def test_etld_plus_one():
+    m = DomainSuffixMatcher()
+    m.add(&quot;co.uk&quot;, tag=&quot;uk-registrar&quot;)
+    r = m.match(&quot;www.brand.co.uk&quot;)
+    assert r and r.etld_plus_one == &quot;brand.co.uk&quot;, \
+        f&quot;Expected brand.co.uk; got {r.etld_plus_one if r else None}&quot;
+    print(&quot;eTLD+1: passed&quot;)
+
+
+def test_naive_match():
+    m = NaiveSuffixMatcher()
+    m.add(&quot;evil.com&quot;, tag=&quot;malware&quot;)
+    r = m.match(&quot;sub.evil.com&quot;)
+    assert r and r.matched_suffix == &quot;evil.com&quot;
+    print(&quot;Naive match: passed&quot;)
+
+
+def test_partial_label_no_match():
+    m = DomainSuffixMatcher()
+    m.add(&quot;evil.com&quot;)
+    # &quot;notevil.com&quot; should NOT match &quot;evil.com&quot; (label boundary enforced)
+    r = m.match(&quot;notevil.com&quot;)
+    assert r is None
+    print(&quot;Partial label no match: passed&quot;)
+
+
+def test_subdomain_of_suffix():
+    m = DomainSuffixMatcher()
+    m.add(&quot;malware-cdn.net&quot;, tag=&quot;cdn&quot;)
+    r1 = m.match(&quot;payload.malware-cdn.net&quot;)
+    r2 = m.match(&quot;malware-cdn.net&quot;)
+    assert r1 and r1.matched_suffix == &quot;malware-cdn.net&quot;
+    assert r2 and r2.matched_suffix == &quot;malware-cdn.net&quot;
+    print(&quot;Subdomain and apex match: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+SECURITY USE CASES
+
+1. DNS RPZ (Response Policy Zone)
+   Match queried domain against threat-intel domain list.
+   Return NXDOMAIN or sinkhole IP for matches.
+   DomainSuffixMatcher enables &quot;*.badactor.com&quot; blocking.
+
+2. eTLD+1 Extraction (Cookie Scope / CORS)
+   Browsers use the Public Suffix List to determine cookie scope.
+   &quot;evil.com&quot; and &quot;app.evil.com&quot; share the eTLD+1 &quot;evil.com&quot;.
+   Correct eTLD+1 extraction prevents cross-subdomain cookie leakage.
+
+3. Phishing Detection
+   Check if eTLD+1 of email &quot;From&quot; domain matches a brand impersonation list.
+   E.g. &quot;paypa1.com&quot; → not in brandlist but visually similar (Q28).
+
+4. SSRF via DNS
+   An attacker registers &quot;169.254.169.254.attacker.com&quot; → resolves to metadata IP.
+   Suffix matching alone doesn&#x27;t help; must also validate the resolved IP (Q22/Q23).
+
+TRIE ADVANTAGES OVER HASH SET
+  - O(L) lookup vs O(L) hash compute — comparable, but trie enables
+    longest-prefix matching and wildcard patterns.
+  - Memory: shared prefixes stored once (space efficient for many TLD suffixes).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_exact_match()
+    test_longest_match()
+    test_no_match()
+    test_wildcard()
+    test_etld_plus_one()
+    test_naive_match()
+    test_partial_label_no_match()
+    test_subdomain_of_suffix()
+</code></pre>
+</body>
+</html>

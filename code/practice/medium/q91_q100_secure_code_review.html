@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q91_q100_secure_code_review.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q91_q100_secure_code_review.py</h1>
+  <p class="file-path">Source: code\practice\medium\q91_q100_secure_code_review.py</p>
+  <p class="line-count">673 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q91–Q100
+Topic: Secure Code Review — SQL Injection, Password Hashing, Session Tokens,
+       File Upload, Path Traversal, Redirect Validation, HTML Sanitisation,
+       Unsafe Deserialization, Shell Injection
+&quot;&quot;&quot;
+
+import re
+import os
+import ast
+import hashlib
+import hmac
+import html
+import json
+import urllib.parse
+from typing import Dict, List, Optional, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q91 — Review Login Code for SQL Injection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Write a function that analyses a Python code snippet for SQL injection
+  vulnerabilities — specifically unsafe string interpolation or concatenation
+  into SQL queries.
+
+Clarifying questions:
+  1. Should we flag only SELECT/INSERT/UPDATE/DELETE?
+  2. Should parameterised queries be flagged as safe?
+  3. Is this a static analysis tool or a runtime interceptor?
+
+Security angle:
+  SQL injection (OWASP A03) is the most commonly exploited web vulnerability.
+  Classic patterns: f-string/%-format/+ concatenation into a query string.
+  Safe patterns: query+params tuple passed to execute(), SQLAlchemy ORM,
+  psycopg2 parameterised queries.
+  False positive: raw string that is never passed to execute().
+&quot;&quot;&quot;
+
+# Patterns that indicate unsafe SQL construction
+_SQLI_PATTERNS = [
+    re.compile(r&quot;&quot;&quot;(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE).*(%s|{|}|f[&quot;&#x27;]|[&quot;&#x27;]\s*\+)&quot;&quot;&quot;,
+               re.IGNORECASE | re.DOTALL),
+    re.compile(r&quot;&quot;&quot;cursor\.execute\(\s*[&quot;&#x27;].*%.*%|cursor\.execute\(\s*f[&quot;&#x27;]&quot;&quot;&quot;,
+               re.IGNORECASE),
+    re.compile(r&quot;&quot;&quot;cursor\.execute\(\s*[^&quot;&#x27;(]*([&quot;&#x27;].*\+)&quot;&quot;&quot;, re.IGNORECASE),
+]
+
+_SAFE_PARAMETERISED = re.compile(
+    r&quot;&quot;&quot;cursor\.execute\(\s*[&quot;&#x27;][^&quot;&#x27;]*[&quot;&#x27;]\s*,&quot;&quot;&quot;, re.IGNORECASE
+)
+
+
+def review_sql_injection(code: str) -&gt; Dict:
+    &quot;&quot;&quot;
+    Naive: regex scan for unsafe SQL construction patterns.
+    Returns a report with verdict and matched evidence.
+    O(n) per pattern.
+    &quot;&quot;&quot;
+    findings = []
+    for pattern in _SQLI_PATTERNS:
+        for match in pattern.finditer(code):
+            findings.append(match.group(0).strip()[:120])
+
+    # Parameterised queries are safe even if the SQL keyword pattern fires on %s
+    safe_count = len(_SAFE_PARAMETERISED.findall(code))
+    if safe_count &gt; 0:
+        verdict = &quot;LIKELY_SAFE&quot;
+    elif findings:
+        verdict = &quot;VULNERABLE&quot;
+    else:
+        verdict = &quot;REVIEW_NEEDED&quot;
+    return {&quot;verdict&quot;: verdict, &quot;findings&quot;: findings}
+
+
+def test_q91():
+    unsafe_code = &quot;&quot;&quot;
+def login(username, password):
+    query = &quot;SELECT * FROM users WHERE username=&#x27;&quot; + username + &quot;&#x27;&quot;
+    cursor.execute(query)
+&quot;&quot;&quot;
+    safe_code = &quot;&quot;&quot;
+def login(username, password):
+    cursor.execute(&quot;SELECT * FROM users WHERE username=%s&quot;, (username,))
+&quot;&quot;&quot;
+    r_unsafe = review_sql_injection(unsafe_code)
+    r_safe = review_sql_injection(safe_code)
+    assert r_unsafe[&quot;verdict&quot;] == &quot;VULNERABLE&quot;
+    assert r_safe[&quot;verdict&quot;] == &quot;LIKELY_SAFE&quot;
+    print(&quot;Q91 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q92 — Review Password Hashing Code
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse a code snippet for insecure password hashing:
+  - MD5/SHA1/SHA256 used directly without a salt.
+  - Missing use of bcrypt/argon2/scrypt/pbkdf2.
+
+Clarifying questions:
+  1. Is this a static checker or a runtime validator?
+  2. Should we check for salt absence or just weak algorithm?
+  3. Is PBKDF2 with high iterations acceptable? (yes, with iteration count check)
+
+Security angle:
+  Weak password hashing (CWE-916) allows offline cracking via rainbow tables
+  (unsalted MD5) or GPU attacks (fast hashes). NIST SP 800-63B mandates
+  memory-hard KDFs (bcrypt, argon2, scrypt). SHA256(password) with no salt
+  is categorically insecure regardless of algorithm strength.
+&quot;&quot;&quot;
+
+_WEAK_HASH_RE = re.compile(
+    r&quot;\bhashlib\.(md5|sha1|sha256|sha512)\b.*\.update\(.*password|&quot;
+    r&quot;\bhashlib\.(md5|sha1|sha256|sha512)\(.*password&quot;,
+    re.IGNORECASE,
+)
+_STRONG_HASH_RE = re.compile(
+    r&quot;\b(bcrypt|argon2|scrypt|pbkdf2_hmac)\b&quot;, re.IGNORECASE
+)
+
+
+def review_password_hashing(code: str) -&gt; Dict:
+    &quot;&quot;&quot;
+    Static analysis: check for weak hash algorithms applied to passwords.
+    Returns verdict and details.
+    &quot;&quot;&quot;
+    weak_matches = _WEAK_HASH_RE.findall(code)
+    strong_matches = _STRONG_HASH_RE.findall(code)
+
+    if weak_matches and not strong_matches:
+        verdict = &quot;INSECURE&quot;
+        reason = f&quot;Weak hash algorithm used directly on password: {weak_matches}&quot;
+    elif strong_matches:
+        verdict = &quot;LIKELY_SECURE&quot;
+        reason = f&quot;Strong KDF found: {strong_matches}&quot;
+    else:
+        verdict = &quot;REVIEW_NEEDED&quot;
+        reason = &quot;No recognised hash pattern found; manual review required&quot;
+
+    return {&quot;verdict&quot;: verdict, &quot;reason&quot;: reason}
+
+
+def test_q92():
+    insecure = &quot;h = hashlib.sha256(password.encode()).hexdigest()&quot;
+    secure = &quot;h = bcrypt.hashpw(password.encode(), bcrypt.gensalt())&quot;
+    also_secure = &quot;dk = hashlib.pbkdf2_hmac(&#x27;sha256&#x27;, password.encode(), salt, 260000)&quot;
+
+    assert review_password_hashing(insecure)[&quot;verdict&quot;] == &quot;INSECURE&quot;
+    assert review_password_hashing(secure)[&quot;verdict&quot;] == &quot;LIKELY_SECURE&quot;
+    assert review_password_hashing(also_secure)[&quot;verdict&quot;] == &quot;LIKELY_SECURE&quot;
+    print(&quot;Q92 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q93 — Review Session Token Generation
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse code snippets for insecure session token generation:
+  - Using random.random() or uuid.uuid4() — not CSPRNG.
+  - Insufficient entropy (&lt; 128 bits).
+
+Clarifying questions:
+  1. Is uuid4() acceptable? (No: uuid4 uses os.urandom internally in Python
+     but is not typically designed as a security token; secrets.token_urlsafe
+     is preferred and more explicit.)
+  2. Should we check token length too?
+  3. How about JWT token signing validation?
+
+Security angle:
+  Predictable session tokens are CWE-330 / OWASP A07. An attacker who can
+  predict session IDs can hijack accounts. Python&#x27;s random module is seeded
+  with time and is not cryptographically secure. The correct approach is
+  secrets.token_urlsafe(32) which uses os.urandom (CSPRNG).
+&quot;&quot;&quot;
+
+_INSECURE_TOKEN_RE = re.compile(
+    r&quot;\brandom\.(random|randint|choice|choices|randrange|getrandbits)\b&quot;,
+    re.IGNORECASE,
+)
+_SECURE_TOKEN_RE = re.compile(
+    r&quot;\b(secrets\.token_urlsafe|secrets\.token_hex|os\.urandom|secrets\.token_bytes)\b&quot;,
+    re.IGNORECASE,
+)
+
+
+def review_session_token_generation(code: str) -&gt; Dict:
+    insecure = _INSECURE_TOKEN_RE.findall(code)
+    secure = _SECURE_TOKEN_RE.findall(code)
+
+    if insecure:
+        return {
+            &quot;verdict&quot;: &quot;INSECURE&quot;,
+            &quot;reason&quot;: f&quot;Non-CSPRNG source used: {insecure}&quot;,
+        }
+    if secure:
+        return {&quot;verdict&quot;: &quot;SECURE&quot;, &quot;reason&quot;: f&quot;CSPRNG used: {secure}&quot;}
+    return {&quot;verdict&quot;: &quot;REVIEW_NEEDED&quot;, &quot;reason&quot;: &quot;No recognised token generation pattern&quot;}
+
+
+def test_q93():
+    bad = &quot;token = str(random.random())[2:]&quot;
+    good = &quot;token = secrets.token_urlsafe(32)&quot;
+
+    assert review_session_token_generation(bad)[&quot;verdict&quot;] == &quot;INSECURE&quot;
+    assert review_session_token_generation(good)[&quot;verdict&quot;] == &quot;SECURE&quot;
+    print(&quot;Q93 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q94 — Review Password Reset Flow
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse a password reset token code snippet for vulnerabilities:
+  - No expiry check on reset token.
+  - Token not invalidated after first use.
+  - Predictable token generation.
+  - Timing-safe comparison not used.
+
+Clarifying questions:
+  1. Is this server-side validation code?
+  2. Should we treat DB-fetched tokens as potentially constant-time?
+  3. Do we check for old-password re-use?
+
+Security angle:
+  Password reset flaws (CWE-640) are a top account-takeover vector:
+  1. No expiry → token valid indefinitely after compromise.
+  2. No invalidation after use → replay attack possible.
+  3. Predictable token → attacker enumerates valid tokens.
+  4. == comparison → timing side-channel leaks validity.
+  Correct: secrets.compare_digest(). Django uses this; many frameworks miss #2.
+&quot;&quot;&quot;
+
+_TIMING_SAFE_RE = re.compile(r&quot;\bhmac\.compare_digest|secrets\.compare_digest\b&quot;)
+_UNSAFE_COMPARE_RE = re.compile(r&quot;token\s*==\s*\w+|\w+\s*==\s*token&quot;, re.IGNORECASE)
+_EXPIRY_CHECK_RE = re.compile(r&quot;expir|expires_at|created_at|timedelta|datetime\.now&quot;, re.IGNORECASE)
+_INVALIDATE_RE = re.compile(r&quot;(delete|remove|invalidate|used\s*=\s*True|used_at)&quot;, re.IGNORECASE)
+
+
+def review_password_reset(code: str) -&gt; Dict:
+    issues = []
+    if _UNSAFE_COMPARE_RE.search(code) and not _TIMING_SAFE_RE.search(code):
+        issues.append(&quot;Timing-unsafe token comparison (use hmac.compare_digest)&quot;)
+    if not _EXPIRY_CHECK_RE.search(code):
+        issues.append(&quot;No expiry check found on reset token&quot;)
+    if not _INVALIDATE_RE.search(code):
+        issues.append(&quot;Token not invalidated after use&quot;)
+    verdict = &quot;INSECURE&quot; if issues else &quot;LIKELY_SECURE&quot;
+    return {&quot;verdict&quot;: verdict, &quot;issues&quot;: issues}
+
+
+def test_q94():
+    bad_code = &quot;&quot;&quot;
+def reset_password(token, new_password):
+    record = db.get_token(token)
+    if record.token == token:
+        db.update_password(record.user_id, new_password)
+&quot;&quot;&quot;
+    good_code = &quot;&quot;&quot;
+def reset_password(token, new_password):
+    record = db.get_token(token)
+    if not record or record.expires_at &lt; datetime.now():
+        raise ValueError(&#x27;Invalid or expired token&#x27;)
+    if not hmac.compare_digest(record.token, token):
+        raise ValueError(&#x27;Invalid token&#x27;)
+    db.update_password(record.user_id, new_password)
+    db.delete(record)
+&quot;&quot;&quot;
+    r_bad = review_password_reset(bad_code)
+    r_good = review_password_reset(good_code)
+    assert r_bad[&quot;verdict&quot;] == &quot;INSECURE&quot;
+    assert len(r_bad[&quot;issues&quot;]) &gt;= 2
+    assert r_good[&quot;verdict&quot;] == &quot;LIKELY_SECURE&quot;
+    print(&quot;Q94 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q95 — Review File Upload Handler
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse a file upload handler for vulnerabilities:
+  - No file type validation (MIME sniffing or extension check).
+  - Path traversal via filename (../../etc/passwd).
+  - Files stored in web root (direct execution risk).
+  - No size limit.
+
+Clarifying questions:
+  1. Is this Flask/Django/FastAPI code?
+  2. Is the upload directory configurable?
+  3. Should we check for virus scanning integration?
+
+Security angle:
+  File upload attacks (OWASP A04): uploading webshells, path traversal
+  to overwrite system files, zip bombs for DoS. Secure upload requires:
+  1. Allowlist of MIME types.
+  2. Filename sanitisation (os.path.basename + uuid rename).
+  3. Storage outside web root.
+  4. Size limit.
+&quot;&quot;&quot;
+
+_FILENAME_SECURE_RE = re.compile(
+    r&quot;secure_filename|os\.path\.basename|uuid|uuid4&quot;, re.IGNORECASE
+)
+_MIME_CHECK_RE = re.compile(
+    r&quot;content_type|mimetype|magic\.|filetype|allowed_extensions&quot;, re.IGNORECASE
+)
+_SIZE_LIMIT_RE = re.compile(
+    r&quot;MAX_CONTENT_LENGTH|content_length|\.seek\(|os\.path\.getsize|max_size&quot;, re.IGNORECASE
+)
+
+
+def review_file_upload(code: str) -&gt; Dict:
+    issues = []
+    if not _FILENAME_SECURE_RE.search(code):
+        issues.append(&quot;Filename not sanitised (path traversal risk)&quot;)
+    if not _MIME_CHECK_RE.search(code):
+        issues.append(&quot;No MIME / extension validation&quot;)
+    if not _SIZE_LIMIT_RE.search(code):
+        issues.append(&quot;No file size limit enforced&quot;)
+    verdict = &quot;INSECURE&quot; if issues else &quot;LIKELY_SECURE&quot;
+    return {&quot;verdict&quot;: verdict, &quot;issues&quot;: issues}
+
+
+def test_q95():
+    bad = &quot;&quot;&quot;
+@app.route(&#x27;/upload&#x27;, methods=[&#x27;POST&#x27;])
+def upload():
+    f = request.files[&#x27;file&#x27;]
+    f.save(&#x27;/var/uploads/&#x27; + f.filename)
+&quot;&quot;&quot;
+    good = &quot;&quot;&quot;
+@app.route(&#x27;/upload&#x27;, methods=[&#x27;POST&#x27;])
+def upload():
+    f = request.files[&#x27;file&#x27;]
+    if f.content_type not in allowed_extensions:
+        abort(400)
+    if f.content_length &gt; MAX_CONTENT_LENGTH:
+        abort(413)
+    filename = secure_filename(f.filename)
+    f.save(os.path.join(UPLOAD_DIR, filename))
+&quot;&quot;&quot;
+    r_bad = review_file_upload(bad)
+    r_good = review_file_upload(good)
+    assert r_bad[&quot;verdict&quot;] == &quot;INSECURE&quot;
+    assert len(r_bad[&quot;issues&quot;]) &gt;= 2
+    assert r_good[&quot;verdict&quot;] == &quot;LIKELY_SECURE&quot;
+    print(&quot;Q95 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q96 — Secure File Path Join
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a safe file path join that prevents path traversal attacks.
+  Given a base directory and a user-supplied filename, return the resolved
+  path only if it is within the base directory.
+
+Clarifying questions:
+  1. Should symlinks be followed? (no — resolve symlinks before checking)
+  2. Should null bytes be rejected? (yes — CWE-626)
+  3. Should Windows paths (backslash) be normalised?
+
+Security angle:
+  Path traversal (CWE-22) lets attackers read /etc/passwd by supplying
+  &quot;../../etc/passwd&quot; as a filename. The fix is:
+  1. os.path.realpath() to resolve all &quot;..&quot; and symlinks.
+  2. Check that the resolved path starts with the base directory.
+  Never use string manipulation alone — os.path.normpath does NOT follow symlinks
+  and can be fooled by symbolic links pointing outside the base.
+&quot;&quot;&quot;
+
+
+def safe_path_join(base_dir: str, filename: str) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Returns the safe resolved path, or None if traversal is detected.
+    &quot;&quot;&quot;
+    if &quot;\x00&quot; in filename:
+        return None  # Null byte injection
+    # Reject obvious traversal markers early
+    if &quot;..&quot; in filename or filename.startswith(&quot;/&quot;) or filename.startswith(&quot;\\&quot;):
+        return None
+    base_real = os.path.realpath(base_dir)
+    candidate = os.path.realpath(os.path.join(base_real, filename))
+    if candidate.startswith(base_real + os.sep) or candidate == base_real:
+        return candidate
+    return None
+
+
+def test_q96():
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Normal file
+        result = safe_path_join(tmpdir, &quot;report.pdf&quot;)
+        assert result is not None
+        assert result.startswith(os.path.realpath(tmpdir))
+
+        # Path traversal
+        assert safe_path_join(tmpdir, &quot;../../etc/passwd&quot;) is None
+        assert safe_path_join(tmpdir, &quot;../etc/passwd&quot;) is None
+
+        # Null byte
+        assert safe_path_join(tmpdir, &quot;file\x00.txt&quot;) is None
+
+        # Absolute path
+        assert safe_path_join(tmpdir, &quot;/etc/passwd&quot;) is None
+    print(&quot;Q96 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q97 — Validate Redirect URL
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a redirect URL validator that prevents open redirect attacks.
+  Only allow redirects to the same origin or to an explicit allowlist of
+  trusted domains.
+
+Clarifying questions:
+  1. Should relative paths (no domain) be allowed? (yes — always safe)
+  2. Should sub-domains of an allowed domain be permitted?
+  3. Should we handle protocol-relative URLs (//evil.com)?
+
+Security angle:
+  Open redirect (CWE-601) enables phishing: attacker crafts
+  https://trusted.com/login?next=https://evil.com to steal credentials.
+  The correct fix is an allowlist of trusted hosts, not a denylist.
+  Protocol-relative URLs (//evil.com) bypass naive &quot;starts with /&quot; checks.
+&quot;&quot;&quot;
+
+_ALLOWED_HOSTS: frozenset = frozenset({&quot;example.com&quot;, &quot;app.example.com&quot;})
+
+
+def is_safe_redirect(url: str, allowed_hosts: Optional[frozenset] = None) -&gt; bool:
+    &quot;&quot;&quot;
+    Returns True only if the URL is safe to redirect to.
+    &quot;&quot;&quot;
+    if allowed_hosts is None:
+        allowed_hosts = _ALLOWED_HOSTS
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+
+    # Relative URL (no scheme, no netloc) is safe
+    if not parsed.scheme and not parsed.netloc:
+        # But not protocol-relative: //evil.com → netloc=&#x27;evil.com&#x27;
+        if url.startswith(&quot;//&quot;):
+            return False
+        return True
+
+    # Must be http or https
+    if parsed.scheme not in (&quot;http&quot;, &quot;https&quot;):
+        return False
+
+    # Must be in the allowlist (strip port)
+    host = parsed.hostname or &quot;&quot;
+    return host in allowed_hosts
+
+
+def test_q97():
+    assert is_safe_redirect(&quot;/dashboard&quot;) is True
+    assert is_safe_redirect(&quot;//evil.com/steal&quot;) is False
+    assert is_safe_redirect(&quot;https://example.com/home&quot;) is True
+    assert is_safe_redirect(&quot;https://evil.com/phish&quot;) is False
+    assert is_safe_redirect(&quot;javascript:alert(1)&quot;) is False
+    assert is_safe_redirect(&quot;ftp://example.com/file&quot;) is False
+    assert is_safe_redirect(&quot;https://app.example.com/page&quot;) is True
+    print(&quot;Q97 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q98 — Sanitise HTML Output
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement an HTML output sanitiser that:
+  1. Escapes dangerous HTML characters for plain-text contexts.
+  2. Strips disallowed tags for rich-text contexts (allowlist of safe tags).
+
+Clarifying questions:
+  1. Is this for a template context or direct DOM insertion?
+  2. Should we preserve allowed inline tags? (e.g., &lt;b&gt;, &lt;i&gt;, &lt;a&gt;)
+  3. Should we strip event handlers from allowed tags?
+
+Security angle:
+  XSS (OWASP A03) via unsanitised user input rendered as HTML. The two levels:
+  1. Escape: html.escape() → safe for plain-text display.
+  2. Strip: regex or parser-based allowlist for user-generated HTML.
+  Using a regex-only strip is fragile; production should use bleach/nh3.
+  Here we implement a simple regex-based strip for demonstration.
+&quot;&quot;&quot;
+
+_ALLOWED_TAGS = frozenset({&quot;b&quot;, &quot;i&quot;, &quot;u&quot;, &quot;em&quot;, &quot;strong&quot;, &quot;p&quot;, &quot;br&quot;, &quot;ul&quot;, &quot;li&quot;, &quot;ol&quot;})
+_TAG_RE = re.compile(r&quot;&lt;/?([a-zA-Z][a-zA-Z0-9]*)\b[^&gt;]*&gt;&quot;, re.IGNORECASE)
+_ATTR_EVENT_RE = re.compile(r&#x27;&#x27;&#x27;\bon\w+\s*=\s*(?:&quot;[^&quot;]*&quot;|&#x27;[^&#x27;]*&#x27;|\S+)&#x27;&#x27;&#x27;, re.IGNORECASE)
+
+
+def sanitise_html_escape(text: str) -&gt; str:
+    &quot;&quot;&quot;Level 1: full HTML escape — safe for plain-text contexts.&quot;&quot;&quot;
+    return html.escape(text, quote=True)
+
+
+def sanitise_html_strip(html_input: str) -&gt; str:
+    &quot;&quot;&quot;
+    Level 2: strip disallowed tags; keep allowed safe tags.
+    Also strips event handler attributes.
+    WARNING: regex-based stripping is incomplete; prefer bleach/nh3 in production.
+    &quot;&quot;&quot;
+    # Strip event handlers from any tag
+    clean = _ATTR_EVENT_RE.sub(&quot;&quot;, html_input)
+
+    def replace_tag(m: re.Match) -&gt; str:
+        tag_name = m.group(1).lower()
+        if tag_name in _ALLOWED_TAGS:
+            return m.group(0)
+        return &quot;&quot;
+
+    return _TAG_RE.sub(replace_tag, clean)
+
+
+def test_q98():
+    # Escape test
+    xss = &#x27;&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;&#x27;
+    escaped = sanitise_html_escape(xss)
+    assert &quot;&lt;script&gt;&quot; not in escaped
+    assert &quot;&amp;lt;script&amp;gt;&quot; in escaped
+
+    # Strip test
+    dirty = &#x27;&lt;b&gt;bold&lt;/b&gt;&lt;script&gt;evil()&lt;/script&gt;&lt;p onclick=&quot;bad()&quot;&gt;text&lt;/p&gt;&#x27;
+    clean = sanitise_html_strip(dirty)
+    assert &quot;&lt;script&gt;&quot; not in clean
+    assert &quot;&lt;b&gt;&quot; in clean
+    assert &quot;onclick&quot; not in clean
+    assert &quot;&lt;p&quot; in clean      # p is allowed, but onclick stripped
+    print(&quot;Q98 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q99 — Detect Unsafe Deserialization Usage
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse a Python code snippet for unsafe deserialization:
+  - pickle.loads / pickle.load on untrusted input.
+  - yaml.load() without Loader=yaml.SafeLoader.
+  - marshal.loads() on untrusted data.
+
+Clarifying questions:
+  1. Should we flag all pickle usage or only where input is external?
+  2. Is yaml.safe_load() acceptable? (yes)
+  3. Should we flag shelve / jsonpickle?
+
+Security angle:
+  Unsafe deserialization (OWASP A08) allows arbitrary code execution.
+  pickle.loads(attacker_data) → RCE in one line. This has caused major
+  incidents (CVE-2019-20907 and many ML model poisoning attacks).
+  Safer alternatives: json, yaml.safe_load, msgpack (no code execution).
+&quot;&quot;&quot;
+
+_UNSAFE_DESER_RE = re.compile(
+    r&quot;\b(pickle|marshal|shelve)\.(loads?|load)\b|&quot;
+    r&quot;\byaml\.load\b(?!\s*\([^)]*SafeLoader)|&quot;
+    r&quot;\bjsonpickle\.decode\b&quot;,
+    re.IGNORECASE,
+)
+_SAFE_YAML_RE = re.compile(r&quot;\byaml\.safe_load\b|\byaml\.load\b.*SafeLoader&quot;, re.IGNORECASE)
+
+
+def detect_unsafe_deserialization(code: str) -&gt; Dict:
+    unsafe = _UNSAFE_DESER_RE.findall(code)
+    safe_yaml = _SAFE_YAML_RE.findall(code)
+
+    # If yaml.load is flagged but SafeLoader is present, it&#x27;s a false positive
+    adjusted = [u for u in unsafe if not (isinstance(u, str) and &quot;yaml&quot; in u.lower() and safe_yaml)]
+
+    verdict = &quot;VULNERABLE&quot; if adjusted else &quot;LIKELY_SAFE&quot;
+    return {&quot;verdict&quot;: verdict, &quot;unsafe_calls&quot;: adjusted}
+
+
+def test_q99():
+    bad_pickle = &quot;data = pickle.loads(user_input)&quot;
+    bad_yaml = &quot;cfg = yaml.load(open(&#x27;config.yaml&#x27;))&quot;
+    good_yaml = &quot;cfg = yaml.safe_load(open(&#x27;config.yaml&#x27;))&quot;
+    good_json = &quot;data = json.loads(user_input)&quot;
+
+    assert detect_unsafe_deserialization(bad_pickle)[&quot;verdict&quot;] == &quot;VULNERABLE&quot;
+    assert detect_unsafe_deserialization(bad_yaml)[&quot;verdict&quot;] == &quot;VULNERABLE&quot;
+    assert detect_unsafe_deserialization(good_yaml)[&quot;verdict&quot;] == &quot;LIKELY_SAFE&quot;
+    assert detect_unsafe_deserialization(good_json)[&quot;verdict&quot;] == &quot;LIKELY_SAFE&quot;
+    print(&quot;Q99 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q100 — Detect Shell Injection Risk
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Analyse code for shell injection vulnerabilities:
+  - os.system() with user input.
+  - subprocess with shell=True and interpolated input.
+  - eval() / exec() on user-controlled data.
+
+Clarifying questions:
+  1. Should we flag subprocess(shell=False) with user input? (no — safe)
+  2. Should we flag subprocess(shell=True) even with hardcoded strings? (warn)
+  3. Is eval() always unsafe? (yes in this context — flag it)
+
+Security angle:
+  Shell injection (OWASP A03, CWE-78) allows OS command execution.
+  subprocess.run([&quot;ls&quot;, user_dir], shell=False) is safe.
+  subprocess.run(f&quot;ls {user_dir}&quot;, shell=True) is NOT safe.
+  os.system(cmd) is never safe with user input.
+  Detecting shell=True is the primary indicator; eval/exec are always risky.
+&quot;&quot;&quot;
+
+_SHELL_INJECT_RE = re.compile(
+    r&quot;\bos\.system\s*\(|&quot;
+    r&quot;\bsubprocess\.(run|call|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True|&quot;
+    r&quot;\beval\s*\(|&quot;
+    r&quot;\bexec\s*\(&quot;,
+    re.IGNORECASE,
+)
+
+_SAFE_SUBPROCESS_RE = re.compile(
+    r&quot;\bsubprocess\.(run|call|Popen|check_output)\s*\(\[&quot;,   # list form → safe
+    re.IGNORECASE,
+)
+
+
+def detect_shell_injection_risk(code: str) -&gt; Dict:
+    risky = _SHELL_INJECT_RE.findall(code)
+    safe = _SAFE_SUBPROCESS_RE.findall(code)
+    verdict = &quot;RISKY&quot; if risky else &quot;LIKELY_SAFE&quot;
+    return {&quot;verdict&quot;: verdict, &quot;risky_patterns&quot;: risky, &quot;safe_patterns&quot;: safe}
+
+
+def test_q100():
+    bad1 = &quot;os.system(&#x27;ls &#x27; + user_dir)&quot;
+    bad2 = &quot;subprocess.run(f&#x27;cat {filename}&#x27;, shell=True)&quot;
+    bad3 = &quot;eval(user_expression)&quot;
+    good = &quot;subprocess.run([&#x27;ls&#x27;, user_dir], capture_output=True)&quot;
+
+    assert detect_shell_injection_risk(bad1)[&quot;verdict&quot;] == &quot;RISKY&quot;
+    assert detect_shell_injection_risk(bad2)[&quot;verdict&quot;] == &quot;RISKY&quot;
+    assert detect_shell_injection_risk(bad3)[&quot;verdict&quot;] == &quot;RISKY&quot;
+    assert detect_shell_injection_risk(good)[&quot;verdict&quot;] == &quot;LIKELY_SAFE&quot;
+    print(&quot;Q100 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q91()
+    test_q92()
+    test_q93()
+    test_q94()
+    test_q95()
+    test_q96()
+    test_q97()
+    test_q98()
+    test_q99()
+    test_q100()
+    print(&quot;\nAll Q91–Q100 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

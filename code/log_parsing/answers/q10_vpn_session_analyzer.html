@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q10_vpn_session_analyzer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q10_vpn_session_analyzer.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q10_vpn_session_analyzer.py</p>
+  <p class="line-count">287 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q10. VPN Session Log Analyzer — Impossible Travel + Exfil
+===========================================================
+Detect impossible travel, after-hours access, data exfiltration,
+and Tor exit node usage from VPN session logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Flag sessions outside business hours.
+  Problem: Misses the most interesting patterns — impossible travel (same
+  user in two countries within hours) and large data exfil.
+
+BETTER: Sort sessions per user by timestamp; compare consecutive countries.
+  Problem: Concurrent sessions for the same user from different regions are
+  legitimate in some enterprises (split-tunnelling, multi-device). Need to
+  check the OVERLAP between sessions, not just order. Also needs actual
+  travel-time estimation — two hours for US→Russia is physically impossible.
+
+GOOGLE-LEVEL (this file):
+  - Impossible travel: overlapping or temporally close sessions from distinct
+    country codes. Use a min-travel-time table (simplified) for realism.
+  - After-hours: configurable time window check on session start.
+  - Exfil: bytes_out &gt; threshold in a single session.
+  - Tor: check src_ip against a provided list (simulated here inline).
+  - Per-user risk timeline output for analyst triage.
+
+Complexity: O(N log N) sort per user; O(U × S) where U = users, S = sessions.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime, timezone
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z user=alice src_ip=203.0.113.10 country=US bytes_in=1024 bytes_out=102400 event=session_start session_id=s1
+2024-03-12T09:30:00Z user=alice src_ip=185.220.101.5 country=RU bytes_in=512 bytes_out=256 event=session_start session_id=s2
+2024-03-12T08:00:00Z user=bob src_ip=10.0.0.50 country=US bytes_in=2048 bytes_out=2048 event=session_start session_id=s3
+2024-03-12T23:30:00Z user=carol src_ip=10.0.0.51 country=US bytes_in=1024 bytes_out=104857600 event=session_start session_id=s4
+2024-03-12T01:30:00Z user=dave src_ip=198.51.100.20 country=US bytes_in=512 bytes_out=512 event=session_start session_id=s5
+2024-03-12T09:00:00Z user=eve src_ip=185.220.101.1 country=US bytes_in=1024 bytes_out=1024 event=session_start session_id=s6
+2024-03-12T10:00:00Z user=frank src_ip=10.0.0.52 country=DE bytes_in=4096 bytes_out=4096 event=session_start session_id=s7
+2024-03-12T10:30:00Z user=frank src_ip=203.0.113.99 country=JP bytes_in=2048 bytes_out=2048 event=session_start session_id=s8
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# Simulated Tor exit node list (in practice, loaded from a threat feed)
+TOR_EXIT_IPS = {
+    &quot;185.220.101.1&quot;,
+    &quot;185.220.101.5&quot;,
+    &quot;185.220.101.34&quot;,
+    &quot;198.96.155.3&quot;,
+    &quot;46.165.230.5&quot;,
+}
+
+# Simplified minimum travel time in hours between countries (symmetric)
+# In production, use a geolocation DB and great-circle distance / max speed of travel
+MIN_TRAVEL_HOURS: dict[frozenset, float] = {
+    frozenset({&quot;US&quot;, &quot;RU&quot;}): 10.0,
+    frozenset({&quot;US&quot;, &quot;CN&quot;}): 12.0,
+    frozenset({&quot;US&quot;, &quot;AU&quot;}): 20.0,
+    frozenset({&quot;US&quot;, &quot;DE&quot;}): 8.0,
+    frozenset({&quot;US&quot;, &quot;JP&quot;}): 13.0,
+    frozenset({&quot;DE&quot;, &quot;JP&quot;}): 11.0,
+    frozenset({&quot;RU&quot;, &quot;JP&quot;}): 9.0,
+}
+DEFAULT_MIN_TRAVEL_HOURS = 1.0  # same-country or unknown pair
+
+EXFIL_BYTES_THRESHOLD   = 100_000_000  # 100 MB
+AFTER_HOURS_START_UTC   = 22   # 22:00 UTC
+AFTER_HOURS_END_UTC     = 6    # 06:00 UTC
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+&#x27;
+    r&#x27;user=(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;src_ip=(?P&lt;src_ip&gt;\S+)\s+&#x27;
+    r&#x27;country=(?P&lt;country&gt;\S+)\s+&#x27;
+    r&#x27;bytes_in=(?P&lt;bytes_in&gt;\d+)\s+&#x27;
+    r&#x27;bytes_out=(?P&lt;bytes_out&gt;\d+)\s+&#x27;
+    r&#x27;event=(?P&lt;event&gt;\S+)\s+&#x27;
+    r&#x27;session_id=(?P&lt;session_id&gt;\S+)&#x27;
+)
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    try:
+        return datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return {
+        &quot;ts&quot;:         ts,
+        &quot;user&quot;:       m.group(&quot;user&quot;),
+        &quot;src_ip&quot;:     m.group(&quot;src_ip&quot;),
+        &quot;country&quot;:    m.group(&quot;country&quot;),
+        &quot;bytes_in&quot;:   int(m.group(&quot;bytes_in&quot;)),
+        &quot;bytes_out&quot;:  int(m.group(&quot;bytes_out&quot;)),
+        &quot;event&quot;:      m.group(&quot;event&quot;),
+        &quot;session_id&quot;: m.group(&quot;session_id&quot;),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def min_travel_hours(c1: str, c2: str) -&gt; float:
+    key = frozenset({c1, c2})
+    return MIN_TRAVEL_HOURS.get(key, DEFAULT_MIN_TRAVEL_HOURS) if c1 != c2 else float(&quot;inf&quot;)
+
+
+def detect_impossible_travel(user_sessions: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    For each pair of sessions from distinct countries, check if the time gap
+    is less than the minimum feasible travel time.
+    &quot;&quot;&quot;
+    alerts = []
+    sessions = sorted(user_sessions, key=lambda x: x[&quot;ts&quot;])
+    for i in range(len(sessions)):
+        for j in range(i + 1, len(sessions)):
+            s1, s2 = sessions[i], sessions[j]
+            if s1[&quot;country&quot;] == s2[&quot;country&quot;]:
+                continue
+            gap_hours = (s2[&quot;ts&quot;] - s1[&quot;ts&quot;]) / 3600.0
+            req_hours = min_travel_hours(s1[&quot;country&quot;], s2[&quot;country&quot;])
+            if gap_hours &lt; req_hours:
+                alerts.append({
+                    &quot;type&quot;:       &quot;IMPOSSIBLE_TRAVEL&quot;,
+                    &quot;risk&quot;:       &quot;CRITICAL&quot;,
+                    &quot;session1&quot;:   s1[&quot;session_id&quot;],
+                    &quot;session2&quot;:   s2[&quot;session_id&quot;],
+                    &quot;country1&quot;:   s1[&quot;country&quot;],
+                    &quot;country2&quot;:   s2[&quot;country&quot;],
+                    &quot;gap_hours&quot;:  round(gap_hours, 2),
+                    &quot;min_travel&quot;: req_hours,
+                    &quot;ip1&quot;:        s1[&quot;src_ip&quot;],
+                    &quot;ip2&quot;:        s2[&quot;src_ip&quot;],
+                })
+    return alerts
+
+
+def detect_after_hours(sessions: list[dict]) -&gt; list[dict]:
+    alerts = []
+    for s in sessions:
+        hour = datetime.utcfromtimestamp(s[&quot;ts&quot;]).hour
+        if hour &gt;= AFTER_HOURS_START_UTC or hour &lt; AFTER_HOURS_END_UTC:
+            alerts.append({
+                &quot;type&quot;:       &quot;AFTER_HOURS_ACCESS&quot;,
+                &quot;risk&quot;:       &quot;MEDIUM&quot;,
+                &quot;session_id&quot;: s[&quot;session_id&quot;],
+                &quot;user&quot;:       s[&quot;user&quot;],
+                &quot;src_ip&quot;:     s[&quot;src_ip&quot;],
+                &quot;country&quot;:    s[&quot;country&quot;],
+                &quot;hour_utc&quot;:   hour,
+                &quot;ts&quot;:         s[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_exfil(sessions: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:       &quot;DATA_EXFIL&quot;,
+            &quot;risk&quot;:       &quot;HIGH&quot;,
+            &quot;session_id&quot;: s[&quot;session_id&quot;],
+            &quot;user&quot;:       s[&quot;user&quot;],
+            &quot;src_ip&quot;:     s[&quot;src_ip&quot;],
+            &quot;bytes_out&quot;:  s[&quot;bytes_out&quot;],
+            &quot;ts&quot;:         s[&quot;ts&quot;],
+        }
+        for s in sessions
+        if s[&quot;bytes_out&quot;] &gt; EXFIL_BYTES_THRESHOLD
+    ]
+
+
+def detect_tor(sessions: list[dict]) -&gt; list[dict]:
+    return [
+        {
+            &quot;type&quot;:       &quot;TOR_EXIT_NODE&quot;,
+            &quot;risk&quot;:       &quot;HIGH&quot;,
+            &quot;session_id&quot;: s[&quot;session_id&quot;],
+            &quot;user&quot;:       s[&quot;user&quot;],
+            &quot;src_ip&quot;:     s[&quot;src_ip&quot;],
+            &quot;ts&quot;:         s[&quot;ts&quot;],
+        }
+        for s in sessions
+        if s[&quot;src_ip&quot;] in TOR_EXIT_IPS
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGGREGATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_vpn_logs(records: list[dict]) -&gt; dict[str, list[dict]]:
+    user_sessions: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        user_sessions[r[&quot;user&quot;]].append(r)
+
+    user_findings: dict[str, list[dict]] = defaultdict(list)
+    for user, sessions in user_sessions.items():
+        user_findings[user].extend(detect_impossible_travel(sessions))
+        user_findings[user].extend(detect_after_hours(sessions))
+        user_findings[user].extend(detect_exfil(sessions))
+        user_findings[user].extend(detect_tor(sessions))
+
+    return dict(user_findings)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+RISK_ORDER = {&quot;CRITICAL&quot;: 0, &quot;HIGH&quot;: 1, &quot;MEDIUM&quot;: 2, &quot;LOW&quot;: 3}
+
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(user_findings: dict) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;VPN SESSION ANALYSIS REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    for user in sorted(user_findings):
+        findings = sorted(user_findings[user], key=lambda x: RISK_ORDER.get(x[&quot;risk&quot;], 9))
+        if not findings:
+            continue
+        max_risk = findings[0][&quot;risk&quot;]
+        print(f&quot;\n  User: {user}  max_risk={max_risk}  findings={len(findings)}&quot;)
+        for f in findings:
+            print(f&quot;    [{f[&#x27;risk&#x27;]}] {f[&#x27;type&#x27;]}&quot;)
+            for k, v in f.items():
+                if k in (&quot;type&quot;, &quot;risk&quot;, &quot;user&quot;):
+                    continue
+                if isinstance(v, float) and v &gt; 1e9:
+                    print(f&quot;      {k}={ts_fmt(v)}&quot;)
+                elif k == &quot;bytes_out&quot;:
+                    print(f&quot;      {k}={v/1_000_000:.1f}MB&quot;)
+                else:
+                    print(f&quot;      {k}={v}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records  = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    findings = analyze_vpn_logs(records)
+    total    = sum(len(v) for v in findings.values())
+    print(f&quot;Parsed {len(records)} VPN session events.  &quot;
+          f&quot;Found {total} finding(s) across {len(findings)} user(s).\n&quot;)
+    print_report(findings)
+</code></pre>
+</body>
+</html>

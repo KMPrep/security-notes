@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>STRIDE — Threat Modeling Framework</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: threat_modelling\STRIDE\README.md</p>
+<h1 id="stride-threat-modeling-framework">STRIDE — Threat Modeling Framework</h1>
+<p><strong>Domain:</strong> Threat Modeling / Secure Design<br />
+<strong>Origin:</strong> Microsoft (Loren Kohnfelder &amp; Praerit Garg, 1999)<br />
+<strong>References:</strong> Microsoft SDL Threat Modeling, OWASP Threat Modeling, Shostack "Threat Modeling: Designing for Security"</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>STRIDE is a threat-classification framework that maps six categories of attack — Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, and Elevation of privilege — onto the six security properties they violate. Each category is the inverse of a desirable property: Spoofing breaks authentication, Tampering breaks integrity, Repudiation breaks non-repudiation, Information disclosure breaks confidentiality, Denial of service breaks availability, and Elevation of privilege breaks authorization. You apply STRIDE by walking a data-flow diagram (DFD) and, at each element that crosses a trust boundary, asking which of the six threats apply and what control neutralizes them. It gives structure to an otherwise open-ended "what could go wrong?" conversation, which is exactly why it works well under time pressure. STRIDE tells you <em>what</em> to look for; it does not rank risk, so it pairs with DREAD or a risk matrix for prioritization.</p>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>STRIDE is applied against a <strong>data-flow diagram</strong> built from four element types: external entities (actors/clients), processes (services/code), data stores (databases, queues, caches), and data flows (the arrows between them). Trust boundaries are drawn wherever the level of trust changes — the browser-to-server edge, the service-to-database edge, the boundary between your VPC and a third-party API. Threats concentrate at these boundaries because that is where an attacker-controlled element meets a trusted one.</p>
+<p>The practical technique is <strong>STRIDE-per-element</strong>: for each element you consult a susceptibility matrix, because not every category applies to every element type. External entities can be Spoofed and can Repudiate; processes are vulnerable to all six; data stores are prone to Tampering, Information disclosure, Denial of service, and (for logs) Repudiation; data flows are prone to Tampering, Information disclosure, and Denial of service. For every applicable cell you name a concrete threat, decide whether an existing control mitigates it, and if not, log it as a finding. The alternative, <strong>STRIDE-per-interaction</strong>, enumerates threats along each (source, flow, destination) tuple instead and scales better for large systems.</p>
+<p>The mapping from category to property to control is the load-bearing idea:</p>
+<table>
+<thead>
+<tr>
+<th>STRIDE</th>
+<th>Violated Property</th>
+<th>Primary Control Family</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spoofing</td>
+<td>Authentication</td>
+<td>Identity proofing, MFA, mutual TLS</td>
+</tr>
+<tr>
+<td>Tampering</td>
+<td>Integrity</td>
+<td>Signatures, hashes, access control, TLS</td>
+</tr>
+<tr>
+<td>Repudiation</td>
+<td>Non-repudiation</td>
+<td>Signed audit logs, secure timestamps</td>
+</tr>
+<tr>
+<td>Information disclosure</td>
+<td>Confidentiality</td>
+<td>Encryption in transit and at rest, least privilege</td>
+</tr>
+<tr>
+<td>Denial of service</td>
+<td>Availability</td>
+<td>Rate limiting, quotas, autoscaling, filtering</td>
+</tr>
+<tr>
+<td>Elevation of privilege</td>
+<td>Authorization</td>
+<td>AuthZ checks, sandboxing, input validation</td>
+</tr>
+</tbody>
+</table>
+<h4 id="diagram-a-dfd-with-trust-boundaries-web-app-api-database">Diagram A — DFD with Trust Boundaries (Web App + API + Database)</h4>
+<pre class="mermaid">
+flowchart LR
+    U[Browser User] -->|HTTPS request| GW[API Gateway]
+    GW -->|Validated call| API[App Service]
+    API -->|Query| DB[(User Database)]
+    API -->|Read write| CACHE[(Session Cache)]
+    API -->|Emit event| LOG[(Audit Log Store)]
+    EXT[Third Party Payment API] -->|Callback| GW
+    subgraph Untrusted
+        U
+        EXT
+    end
+    subgraph DMZ
+        GW
+    end
+    subgraph Internal
+        API
+        DB
+        CACHE
+        LOG
+    end
+</pre>
+<h4 id="diagram-b-category-to-property-to-control-mapping">Diagram B — Category-to-Property-to-Control Mapping</h4>
+<pre class="mermaid">
+flowchart TD
+    S[Spoofing] --> AU[Authentication]
+    T[Tampering] --> IN[Integrity]
+    R[Repudiation] --> NR[Non repudiation]
+    I[Information disclosure] --> CO[Confidentiality]
+    D[Denial of service] --> AV[Availability]
+    E[Elevation of privilege] --> AZ[Authorization]
+    AU --> C1[MFA and mutual TLS]
+    IN --> C2[Signing and access control]
+    NR --> C3[Signed audit logs]
+    CO --> C4[Encryption and least privilege]
+    AV --> C5[Rate limiting and quotas]
+    AZ --> C6[AuthZ checks and sandboxing]
+</pre>
+<h4 id="diagram-c-running-a-stride-session">Diagram C — Running a STRIDE Session</h4>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Scope
+    Scope --> DrawDFD
+    DrawDFD --> MarkBoundaries
+    MarkBoundaries --> EnumerateThreats
+    EnumerateThreats --> RankRisk
+    RankRisk --> AssignControls
+    AssignControls --> Validate
+    Validate --> [*]
+</pre>
+<h2 id="3-what-can-go-wrong">3. What Can Go Wrong</h2>
+<p>Worked example: an API-backed web app with a user database, a session cache, an audit log, and a third-party payment callback (Diagram A). Each row is a concrete threat surfaced by STRIDE-per-element.</p>
+<table>
+<thead>
+<tr>
+<th>STRIDE</th>
+<th>Example Threat (this system)</th>
+<th>Affected Property</th>
+<th>Element Hit</th>
+<th>Example Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spoofing</td>
+<td>Attacker forges a session cookie or replays a stolen bearer token to impersonate a user</td>
+<td>Authentication</td>
+<td>Browser to Gateway flow</td>
+<td>Short-lived signed tokens, MFA, token binding</td>
+</tr>
+<tr>
+<td>Tampering</td>
+<td>Client mutates the <code>amount</code> field on a payment request in transit or via a proxy</td>
+<td>Integrity</td>
+<td>Gateway to App flow</td>
+<td>TLS plus server-side validation and request signing</td>
+</tr>
+<tr>
+<td>Repudiation</td>
+<td>User denies making a transaction and logs lack a trustworthy trail</td>
+<td>Non-repudiation</td>
+<td>Audit Log store</td>
+<td>Append-only signed logs with secure timestamps</td>
+</tr>
+<tr>
+<td>Information disclosure</td>
+<td>SQL injection or verbose error leaks PII from the user database</td>
+<td>Confidentiality</td>
+<td>App to Database flow and DB</td>
+<td>Parameterized queries, encryption at rest, field-level access control</td>
+</tr>
+<tr>
+<td>Denial of service</td>
+<td>Unauthenticated flood of expensive search queries exhausts DB connections</td>
+<td>Availability</td>
+<td>Gateway and App</td>
+<td>Rate limiting, quotas, connection pooling, autoscaling</td>
+</tr>
+<tr>
+<td>Elevation of privilege</td>
+<td>Missing object-level authZ lets a normal user hit an admin endpoint (BOLA/IDOR)</td>
+<td>Authorization</td>
+<td>App Service process</td>
+<td>Per-request authZ, deny-by-default, RBAC/ABAC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-mitigation-controls">4. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>STRIDE</th>
+<th>Concrete Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spoofing</td>
+<td>MFA, WebAuthn/passkeys, mutual TLS between services, OIDC/OAuth token validation, token binding, anti-replay nonces</td>
+</tr>
+<tr>
+<td>Tampering</td>
+<td>TLS for flows, HMAC/signatures on messages, integrity hashes on stored objects, least-privilege write access, immutable infrastructure</td>
+</tr>
+<tr>
+<td>Repudiation</td>
+<td>Append-only audit logs, log signing, tamper-evident storage (WORM), synchronized secure timestamps, forwarding logs off-host</td>
+</tr>
+<tr>
+<td>Information disclosure</td>
+<td>TLS 1.2+/1.3, encryption at rest, field-level and column-level encryption, least privilege, data minimization, suppressing verbose errors</td>
+</tr>
+<tr>
+<td>Denial of service</td>
+<td>Rate limiting and quotas, WAF, autoscaling, circuit breakers, request cost accounting, upstream DDoS scrubbing, timeouts</td>
+</tr>
+<tr>
+<td>Elevation of privilege</td>
+<td>Deny-by-default authorization, per-object authZ checks, input validation, sandboxing, dropping OS privileges, RBAC/ABAC, avoiding confused-deputy patterns</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-controls-deeper-context">Top 3 Controls — Deeper Context</h3>
+<h4 id="1-strong-authentication-against-spoofing">1. Strong Authentication Against Spoofing</h4>
+<p>Spoofing is the entry point for most attack chains, so authentication controls carry the most leverage. Human identity should use phishing-resistant MFA (WebAuthn/passkeys) rather than SMS or TOTP, and service identity should use short-lived, automatically rotated credentials — mutual TLS or workload identity — instead of long-lived static keys. The design goal is that possession of a network position never equals possession of an identity. The trade-off is operational: certificate and key rotation add moving parts, but that is far cheaper than credential theft leading to full impersonation.</p>
+<h4 id="2-authorization-against-elevation-of-privilege">2. Authorization Against Elevation of Privilege</h4>
+<p>EoP is the highest-severity STRIDE category because a successful case usually collapses every other property at once. The durable defense is deny-by-default authorization checked at every request, including object-level checks — the single most common API flaw (BOLA/IDOR) is an endpoint that authenticates the caller but never confirms the caller owns the specific object being accessed. Authorization must live on the server and be re-evaluated per request; never trust a client-supplied role, tenant ID, or "is_admin" flag. The trade-off is that centralized, fine-grained authZ adds latency and code, so teams cache decisions and use policy engines (OPA, Cedar) to keep it maintainable.</p>
+<h4 id="3-encryption-and-least-privilege-against-information-disclosure">3. Encryption and Least Privilege Against Information Disclosure</h4>
+<p>Confidentiality controls are layered because no single control is sufficient: TLS protects data in motion, encryption at rest protects stolen media, and least-privilege plus data minimization limit blast radius when the other two fail. The highest-value move is often reducing how much sensitive data exists and who can reach it, not adding another cipher. The trade-off is that key management, tokenization, and access reviews are ongoing operational burdens, but they cap the damage of the breaches that inevitably slip past prevention.</p>
+<h2 id="5-practice-questions">5. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li><strong>What does each letter of STRIDE stand for?</strong> Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege. This is asked to confirm you know the framework before they build on it.</li>
+<li><strong>What security property does each STRIDE category violate?</strong> Authentication, integrity, non-repudiation, confidentiality, availability, and authorization respectively — STRIDE is literally the inverse of those six properties. This is asked to see if you understand <em>why</em> the categories exist rather than memorizing a list.</li>
+<li><strong>What is a data-flow diagram and why does STRIDE need one?</strong> A DFD models external entities, processes, data stores, and flows, plus trust boundaries; STRIDE is applied per element, so without the diagram you have nothing to enumerate against. This is asked to test whether you can ground the framework in an artifact.</li>
+<li><strong>What is a trust boundary and why does it matter?</strong> It is any edge where the level of trust changes, such as client-to-server or service-to-third-party; threats concentrate there because attacker-controlled input meets trusted logic. This is asked because boundary identification is the core skill of threat modeling.</li>
+<li><strong>How is Spoofing different from Elevation of privilege?</strong> Spoofing is becoming someone you are not (breaking authentication); EoP is doing something your identity is not allowed to do (breaking authorization). This is asked to check that you separate authN from authZ cleanly.</li>
+</ol>
+<h3 id="tier-2-design-and-application">Tier 2 — Design and Application</h3>
+<ol>
+<li><strong>Walk me through applying STRIDE to a login API.</strong> Draw browser to gateway to auth service to user DB; at the browser flow enumerate Spoofing (credential stuffing, token replay) and Tampering, at the DB enumerate Information disclosure and Tampering, then assign MFA, rate limiting, parameterized queries, and signed audit logs. This is asked to see if you can execute the method live, not just define it.</li>
+<li><strong>Not every threat applies to every element — how do you know which to consider?</strong> Use the susceptibility matrix: external entities get S and R, data stores get T/I/D and R for logs, data flows get T/I/D, and processes get all six. This is asked to test whether you apply STRIDE efficiently instead of brute-forcing every cell.</li>
+<li><strong>STRIDE gives you a list of threats but no priorities — how do you rank them?</strong> STRIDE only classifies; pair it with a risk method like DREAD, a likelihood-by-impact matrix, or CVSS-style scoring, and weight by business context and exploitability. This is asked to see that you know STRIDE's boundary and don't overclaim.</li>
+<li><strong>How does Repudiation manifest in a system with no user-facing identity, like an internal batch job?</strong> It shows up as inability to attribute an action to a specific service or operator; the fix is signed, append-only audit logs with strong service identity and secure timestamps. This is asked because Repudiation is the category candidates most often skip or misunderstand.</li>
+<li><strong>A third-party payment API calls back into your gateway — what STRIDE threats does that flow introduce?</strong> Spoofing (is the callback really from the provider?), Tampering (was the amount or status altered?), and Repudiation; controls are signature/HMAC verification of the webhook, allow-listing source, idempotency keys, and TLS. This is asked to test threat modeling of inbound integrations, a common real-world blind spot.</li>
+<li><strong>How do you keep a threat model from going stale after the design changes?</strong> Store the DFD and threats as code/docs in the repo, tie updates to design-review gates, and re-run STRIDE on the diff when boundaries or data flows change. This is asked to test whether you treat threat modeling as a lifecycle activity, not a one-time document.</li>
+<li><strong>When would you choose STRIDE-per-interaction over STRIDE-per-element?</strong> For large systems where per-element enumeration explodes; per-interaction walks each (source, flow, destination) tuple and produces fewer, more relevant threats. This is asked to probe how you scale the method to real architectures.</li>
+</ol>
+<h3 id="tier-3-expert-and-deep-dive">Tier 3 — Expert and Deep-Dive</h3>
+<ol>
+<li><strong>Where does STRIDE break down, and what would you use alongside or instead of it?</strong> It is weak on business-logic abuse, privacy harms, and multi-step attack chains; complement it with LINDDUN for privacy, attack trees or MITRE ATT&amp;CK for chained adversary behavior, and PASTA for risk-centric depth. This is asked to see senior-level awareness of the framework's limits.</li>
+<li><strong>How would you adapt STRIDE for an LLM-backed or agentic system?</strong> Map prompt injection to Tampering/EoP, training-data or context leakage to Information disclosure, model impersonation to Spoofing, and tool/plugin abuse to Elevation of privilege, then anchor findings to OWASP LLM Top 10 and MITRE ATLAS. This is asked to test whether you can stretch a classic framework onto modern attack surface.</li>
+<li><strong>A confused-deputy vulnerability — which STRIDE category is it, and why is that subtle?</strong> It is Elevation of privilege: a trusted intermediary is tricked into using its authority on an attacker's behalf, so the attacker never directly authenticates as the higher role. It is subtle because authN succeeds and the flaw is purely in authZ/context handling. This is asked to test deep reasoning about authorization failures like SSRF and OAuth token confusion.</li>
+</ol>
+<h2 id="6-key-takeaways">6. Key Takeaways</h2>
+<ul>
+<li>STRIDE is six threat categories that are the exact inverse of six security properties — authN, integrity, non-repudiation, confidentiality, availability, authorization.</li>
+<li>You apply it against a data-flow diagram, and threats concentrate at trust boundaries where untrusted input meets trusted logic.</li>
+<li>STRIDE-per-element with a susceptibility matrix keeps enumeration efficient; STRIDE-per-interaction scales better for large systems.</li>
+<li>Map each category to its property, then to a concrete control family — that mapping is the whole point of the framework.</li>
+<li>STRIDE classifies but does not prioritize; pair it with DREAD, CVSS, or a likelihood-by-impact matrix to rank risk.</li>
+<li>Elevation of privilege and Spoofing carry the most leverage; object-level authZ and phishing-resistant authN are the highest-value controls.</li>
+<li>Know its limits: complement STRIDE with LINDDUN (privacy), attack trees / MITRE ATT&amp;CK (chains), and PASTA (risk-centric) for a complete picture.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

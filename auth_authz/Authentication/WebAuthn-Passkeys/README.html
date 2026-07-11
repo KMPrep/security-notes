@@ -1,0 +1,1312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebAuthn And Passkeys - Phishing-Resistant Authentication</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: auth_authz\Authentication\WebAuthn-Passkeys\README.md</p>
+<h1 id="webauthn-and-passkeys-phishing-resistant-authentication">WebAuthn And Passkeys - Phishing-Resistant Authentication</h1>
+<p><strong>Category:</strong> Authentication<br />
+<strong>Primary Standards:</strong> WebAuthn, CTAP, FIDO2</p>
+<h2 id="overview">Overview</h2>
+<p>WebAuthn is a web authentication standard that uses public-key cryptography and authenticators such as platform secure enclaves or hardware security keys. Passkeys are synchronized or device-bound credentials built on the same model and designed to replace passwords with a phishing-resistant user experience. Instead of sharing a secret with the server, the authenticator creates a key pair and the server stores only the public key. This removes whole classes of password theft and drastically improves resistance to phishing and credential reuse.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>Core actors and artifacts:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Relying Party</td>
+<td>Service registering or verifying the credential</td>
+</tr>
+<tr>
+<td>Authenticator</td>
+<td>Device or key that holds the private key</td>
+</tr>
+<tr>
+<td>Challenge</td>
+<td>Fresh random value to prevent replay</td>
+</tr>
+<tr>
+<td>Credential ID</td>
+<td>Identifier for the registered authenticator credential</td>
+</tr>
+<tr>
+<td>Attestation</td>
+<td>Optional evidence about the authenticator</td>
+</tr>
+</tbody>
+</table>
+<p>Security model highlights:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Origin binding</td>
+<td>Authenticator signs only for the correct origin</td>
+</tr>
+<tr>
+<td>Public-key cryptography</td>
+<td>Server never stores a reusable shared secret</td>
+</tr>
+<tr>
+<td>User verification</td>
+<td>Local biometric or PIN check can gate private-key use</td>
+</tr>
+<tr>
+<td>Replay resistance</td>
+<td>Each sign-in challenge is unique</td>
+</tr>
+</tbody>
+</table>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant RP as Relying Party
+    participant AU as Authenticator
+    U->>RP: Start registration
+    RP-->>U: Registration challenge and policy
+    U->>AU: Create credential for RP
+    AU-->>RP: Attestation, public key, and credential ID
+    RP-->>U: Registration complete
+</pre>
+<pre class="mermaid">
+flowchart TD
+    A[User starts sign-in] --> B[Server sends challenge]
+    B --> C[Authenticator checks RP origin]
+    C --> D[User verifies locally with PIN or biometric]
+    D --> E[Authenticator signs challenge]
+    E --> F[Server verifies signature and challenge]
+    F --> G[Create session]
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Weak fallback path</td>
+<td>Password or email fallback bypasses strong auth</td>
+<td>Account takeover</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Recovery abuse</td>
+<td>Lost-device recovery is weaker than passkey login</td>
+<td>Strong auth bypass</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Mis-scoped origins</td>
+<td>RP ID or origin validation is wrong</td>
+<td>Sign-in confusion or failed protection</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-trusting attestation</td>
+<td>Hardware metadata used as full trust proof</td>
+<td>Incorrect assurance decisions</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Sync trust misunderstanding</td>
+<td>Synced passkeys change device and cloud trust assumptions</td>
+<td>Threat-model gaps</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Poor device lifecycle handling</td>
+<td>Lost or revoked devices remain trusted</td>
+<td>Persistent access risk</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Usability failures</td>
+<td>Users cannot enroll or recover reliably</td>
+<td>Unsafe support overrides</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Session over-trust</td>
+<td>Strong login is followed by weak session controls</td>
+<td>Post-auth abuse</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Weak fallback path</td>
+<td>Remove or harden fallback authentication paths</td>
+<td>Identity architecture</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Recovery abuse</td>
+<td>Apply strong identity proofing and audit to recovery</td>
+<td>Recovery workflow</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Mis-scoped origins</td>
+<td>Validate RP ID and origin strictly</td>
+<td>WebAuthn verifier</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Over-trusting attestation</td>
+<td>Treat attestation as optional assurance input, not blanket trust</td>
+<td>Registration policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Sync trust misunderstanding</td>
+<td>Document whether passkeys are synced or device-bound</td>
+<td>Threat model and product design</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Poor device lifecycle handling</td>
+<td>Provide revocation, device inventory, and alerts</td>
+<td>Identity operations</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Usability failures</td>
+<td>Offer multiple phishing-resistant authenticators per user</td>
+<td>Enrollment design</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Session over-trust</td>
+<td>Pair strong auth with secure session management and step-up policy</td>
+<td>App security layer</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Harden fallback and recovery:</strong> The strongest authenticator is irrelevant if support or fallback flows let an attacker reset the account with weak proof.</li>
+<li><strong>Validate RP ID and origin correctly:</strong> WebAuthn security depends on origin binding. Implementation errors here can neutralize the phishing resistance you are trying to gain.</li>
+<li><strong>Support multiple strong authenticators:</strong> Users need resilience for device loss. Backup hardware keys or additional registered authenticators reduce pressure to create weak recovery exceptions.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>Why are passkeys considered phishing-resistant while passwords plus OTP are not?</li>
+<li>What is the difference between WebAuthn registration and authentication ceremonies?</li>
+<li>Why does origin binding matter more than just storing a public key?</li>
+<li>What trust assumptions change when passkeys are synced across devices?</li>
+<li>How should an enterprise think about attestation and authenticator policy?</li>
+<li>Why is fallback design the hardest part of a passkey rollout?</li>
+<li>How would you design recovery for users who lose all authenticators?</li>
+<li>What are the tradeoffs between platform authenticators and roaming security keys?</li>
+<li>How would you migrate a password-heavy service to passkeys at scale?</li>
+<li>What telemetry would help detect abuse in a WebAuthn deployment?</li>
+</ol>
+<h1 id="passkeys-webauthn-model-answers">Passkeys / WebAuthn Model Answers</h1>
+<h2 id="1-why-are-passkeys-considered-phishing-resistant-while-passwords-plus-otp-are-not">1. Why are passkeys considered phishing-resistant while passwords plus OTP are not?</h2>
+<p>Passkeys are phishing-resistant because they do <strong>not</strong> rely on a reusable secret that the user can type into a fake website.</p>
+<p>With password + OTP:</p>
+<pre><code class="language-text">User visits fake login page
+        ↓
+User types password
+        ↓
+User types OTP
+        ↓
+Attacker relays both to real site
+        ↓
+Login succeeds
+</code></pre>
+<p>The password and OTP are both <strong>portable secrets</strong>. If the user can type them, the attacker can capture and replay them.</p>
+<p>With passkeys:</p>
+<pre><code class="language-text">User visits website
+        ↓
+Website sends cryptographic challenge
+        ↓
+Authenticator signs challenge with private key
+        ↓
+Website verifies signature with public key
+</code></pre>
+<p>The private key stays on the user’s authenticator. The website stores only a public key. FIDO describes passkeys as cryptographic key-pair credentials designed for phishing-resistant sign-in, and WebAuthn credentials are scoped to a relying party so they can only be used by origins belonging to that relying party. (<a href="https://fidoalliance.org/passkeys/?utm_source=chatgpt.com" title="FIDO Passkeys: Passwordless Authentication">FIDO Alliance</a>)</p>
+<p>The critical difference:</p>
+<pre><code class="language-text">Password + OTP = user reveals reusable values
+Passkey = device proves possession without revealing the secret
+</code></pre>
+<h2 id="model-answer">Model answer</h2>
+<p>Passkeys are phishing-resistant because the user never types a reusable secret into the website. The authenticator signs an origin-bound challenge using a private key that does not leave the device. A fake website cannot use a passkey registered for the real website because the WebAuthn credential is scoped to the relying party. Passwords and OTPs are not phishing-resistant because attackers can capture or relay them in real time.</p>
+<hr />
+<h1 id="2-what-is-the-difference-between-webauthn-registration-and-authentication-ceremonies">2. What is the difference between WebAuthn registration and authentication ceremonies?</h1>
+<p>WebAuthn has two main ceremonies:</p>
+<pre><code class="language-text">Registration = create and register a new credential
+Authentication = use an existing credential to sign in
+</code></pre>
+<p>The WebAuthn specification explicitly treats registration and authentication as “ceremonies,” meaning they involve both protocol messages and human/user interaction. (<a href="https://www.w3.org/TR/webauthn-3/?utm_source=chatgpt.com" title="An API for accessing Public Key Credentials - Level 3">W3C</a>)</p>
+<h2 id="registration-ceremony">Registration ceremony</h2>
+<p>Registration happens when the user adds a passkey or security key to an account.</p>
+<p>Flow:</p>
+<pre><code class="language-text">User signs in or proves identity
+        ↓
+Relying party asks browser to create credential
+        ↓
+Authenticator creates public/private key pair
+        ↓
+Private key stays in authenticator
+        ↓
+Public key and credential ID go to server
+        ↓
+Server stores public key for future logins
+</code></pre>
+<p>The server stores:</p>
+<pre><code class="language-text">User ID
+Credential ID
+Public key
+Relying party ID
+Authenticator metadata if available
+Signature counter / backup status if available
+</code></pre>
+<h2 id="authentication-ceremony">Authentication ceremony</h2>
+<p>Authentication happens when the user signs in using an existing passkey.</p>
+<p>Flow:</p>
+<pre><code class="language-text">User starts login
+        ↓
+Server sends random challenge
+        ↓
+Browser asks authenticator to sign challenge
+        ↓
+User performs biometric/PIN/touch
+        ↓
+Authenticator signs challenge
+        ↓
+Server verifies signature using stored public key
+        ↓
+Login succeeds
+</code></pre>
+<h2 id="key-difference">Key difference</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Registration</th>
+<th>Authentication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Purpose</td>
+<td>Create credential</td>
+<td>Use credential</td>
+</tr>
+<tr>
+<td>Key pair</td>
+<td>Generated</td>
+<td>Reused</td>
+</tr>
+<tr>
+<td>Server receives</td>
+<td>Public key + credential ID</td>
+<td>Signed challenge</td>
+</tr>
+<tr>
+<td>Private key</td>
+<td>Created and kept private</td>
+<td>Used internally to sign</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>Fake enrollment, weak authenticator, account takeover during setup</td>
+<td>Replay, stolen device, weak session handling</td>
+</tr>
+</tbody>
+</table>
+<h2 id="model-answer_1">Model answer</h2>
+<p>Registration is the ceremony where the authenticator creates a new key pair for the relying party and the server stores the public key and credential ID. Authentication is the ceremony where the server sends a challenge and the authenticator signs it with the private key. Registration establishes trust; authentication proves possession of the previously registered private key.</p>
+<hr />
+<h1 id="3-why-does-origin-binding-matter-more-than-just-storing-a-public-key">3. Why does origin binding matter more than just storing a public key?</h1>
+<p>Storing a public key proves only that the server can verify signatures from a matching private key.</p>
+<p>But phishing resistance requires more than public-key cryptography. It requires that the credential cannot be used on the wrong website.</p>
+<p>That is where <strong>origin binding</strong> and <strong>relying party scoping</strong> matter.</p>
+<p>Example:</p>
+<pre><code class="language-text">Real site:
+login.company.com
+
+Phishing site:
+login-company.example.com
+</code></pre>
+<p>If authentication were only “sign this challenge with the private key,” a fake website could ask the authenticator to sign something and relay it to the real site.</p>
+<p>WebAuthn prevents this by binding credentials to a relying party. The W3C WebAuthn specification says public key credentials are scoped to a WebAuthn Relying Party, and after creation, the credential can only be accessed by origins belonging to that relying party. (<a href="https://www.w3.org/TR/webauthn-2/?utm_source=chatgpt.com" title="Web Authentication: An API for accessing Public Key ...">W3C</a>)</p>
+<h2 id="why-this-matters">Why this matters</h2>
+<p>A passkey for:</p>
+<pre><code class="language-text">company.com
+</code></pre>
+<p>should not work for:</p>
+<pre><code class="language-text">company-login.example.net
+</code></pre>
+<p>Even if the phishing page looks identical.</p>
+<h2 id="model-answer_2">Model answer</h2>
+<p>A public key alone proves that some private key signed the challenge. Origin binding ensures that the credential can only be used for the legitimate relying party. This is what makes WebAuthn phishing-resistant. Without origin binding, attackers could build fake sites that trick users into signing challenges and relay them to the real service.</p>
+<hr />
+<h1 id="4-what-trust-assumptions-change-when-passkeys-are-synced-across-devices">4. What trust assumptions change when passkeys are synced across devices?</h1>
+<p>Synced passkeys improve usability and recovery because a user can create a passkey on one device and use it on another device through a cloud keychain or password manager.</p>
+<p>Examples:</p>
+<pre><code class="language-text">Apple iCloud Keychain
+Google Password Manager
+Microsoft account
+1Password
+Bitwarden
+Dashlane
+</code></pre>
+<p>FIDO notes that passkeys can be either synced across devices or bound to a particular device. (<a href="https://fidoalliance.org/passkeys/?utm_source=chatgpt.com" title="FIDO Passkeys: Passwordless Authentication">FIDO Alliance</a>)</p>
+<h2 id="what-changes">What changes</h2>
+<p>With device-bound hardware keys:</p>
+<pre><code class="language-text">Private key stays on one physical authenticator
+Recovery requires backup authenticator or formal recovery
+</code></pre>
+<p>With synced passkeys:</p>
+<pre><code class="language-text">Private key material is protected and synchronized through a platform/cloud account
+Recovery depends partly on that ecosystem
+</code></pre>
+<h2 id="new-trust-assumptions">New trust assumptions</h2>
+<p>You now trust:</p>
+<pre><code class="language-text">Cloud keychain security
+Platform account recovery
+Device enrollment process
+Password manager security
+Account recovery process of Apple/Google/Microsoft/password manager
+Sync encryption model
+User’s other devices
+</code></pre>
+<h2 id="security-impact">Security impact</h2>
+<p>Synced passkeys are still phishing-resistant for login, but their <strong>assurance level</strong> depends on how hard it is for an attacker to add a device or recover the platform account.</p>
+<p>Example risk:</p>
+<pre><code class="language-text">Enterprise app requires passkey
+User’s passkey syncs through personal cloud account
+Attacker compromises cloud account recovery
+Attacker gains access to synced passkey
+</code></pre>
+<p>For standard users, synced passkeys may be a strong usability/security improvement. For privileged admins, many enterprises prefer hardware-bound or managed device-bound authenticators.</p>
+<h2 id="model-answer_3">Model answer</h2>
+<p>Synced passkeys remain phishing-resistant at the login ceremony, but the trust boundary expands. The relying party is now also depending on the cloud keychain or password manager, its account recovery process, device enrollment controls, and sync protection. For normal users this may be acceptable and highly usable. For privileged users, enterprises may require device-bound or hardware-backed authenticators to reduce dependence on consumer sync recovery.</p>
+<hr />
+<h1 id="5-how-should-an-enterprise-think-about-attestation-and-authenticator-policy">5. How should an enterprise think about attestation and authenticator policy?</h1>
+<p>Attestation helps a relying party understand <strong>what kind of authenticator created the credential</strong>.</p>
+<p>During FIDO registration, the authenticator creates a unique key pair for the relying party; attestation can provide extra information about the authenticator model or provenance. (<a href="https://fidoalliance.org/fido-attestation-enhancing-trust-privacy-and-interoperability-in-passwordless-authentication/?utm_source=chatgpt.com" title="White Paper: FIDO Attestation: Enhancing Trust, Privacy ...">FIDO Alliance</a>)</p>
+<h2 id="why-enterprises-care">Why enterprises care</h2>
+<p>A consumer app may only care that the user has a valid passkey.</p>
+<p>An enterprise may need to enforce:</p>
+<pre><code class="language-text">Only company-approved security keys
+Only hardware-backed authenticators
+Only FIPS-certified devices
+Only managed platform authenticators
+No unknown personal authenticators for admins
+User verification required
+Resident/discoverable credentials allowed or disallowed
+</code></pre>
+<p>Microsoft Entra ID, for example, supports enforcing attestation for FIDO2 security keys in authentication method policy. (<a href="https://learn.microsoft.com/en-us/entra/identity/authentication/concept-fido2-hardware-vendor?utm_source=chatgpt.com" title="Microsoft Entra ID attestation for FIDO2 security key vendors">Microsoft Learn</a>)</p>
+<h2 id="policy-examples">Policy examples</h2>
+<p>For standard workforce users:</p>
+<pre><code class="language-text">Allow platform passkeys
+Allow synced passkeys if risk accepted
+Require user verification
+Block weak fallback
+</code></pre>
+<p>For privileged admins:</p>
+<pre><code class="language-text">Require hardware security keys
+Require attestation
+Require PIN/user verification
+Require at least two keys
+Disallow SMS/email recovery
+Monitor all registration events
+</code></pre>
+<p>For regulated environments:</p>
+<pre><code class="language-text">Allow only certified hardware authenticators
+Require enterprise attestation
+Inventory keys
+Tie authenticators to asset/user lifecycle
+</code></pre>
+<h2 id="privacy-tradeoff">Privacy tradeoff</h2>
+<p>Attestation can create privacy and interoperability concerns because it reveals information about the authenticator. For consumer services, broad attestation requirements can reduce adoption. For enterprises, stronger authenticator governance may justify that tradeoff.</p>
+<h2 id="model-answer_4">Model answer</h2>
+<p>Enterprises should use authenticator policy to match account risk. For normal users, broad passkey support may maximize adoption. For privileged users, the organization may require attested, hardware-backed, phishing-resistant authenticators with user verification. Attestation helps verify authenticator type and provenance, but it introduces privacy, compatibility, and operational tradeoffs, so it should be applied mainly where assurance requirements justify it.</p>
+<hr />
+<h1 id="6-why-is-fallback-design-the-hardest-part-of-a-passkey-rollout">6. Why is fallback design the hardest part of a passkey rollout?</h1>
+<p>Fallback is hard because it can silently destroy the security benefit of passkeys.</p>
+<p>Example:</p>
+<pre><code class="language-text">Normal login:
+Passkey
+
+Fallback:
+SMS OTP or helpdesk reset
+</code></pre>
+<p>In this case, attackers do not need to break passkeys. They attack the fallback.</p>
+<h2 id="common-fallback-paths">Common fallback paths</h2>
+<pre><code class="language-text">Password fallback
+SMS OTP fallback
+Email magic-link fallback
+Helpdesk recovery
+Backup codes
+Device replacement workflow
+Temporary access pass
+</code></pre>
+<h2 id="why-fallback-is-difficult">Why fallback is difficult</h2>
+<p>You must balance:</p>
+<pre><code class="language-text">User lockout risk
+Device loss
+Authenticator migration
+Accessibility
+BYOD support
+Helpdesk capacity
+Phishing resistance
+Admin/high-value account security
+</code></pre>
+<h2 id="bad-fallback-design">Bad fallback design</h2>
+<pre><code class="language-text">Passkey login required
+But user can click “lost device”
+Receive SMS OTP
+Register new passkey
+</code></pre>
+<p>This is vulnerable to SIM swap.</p>
+<h2 id="better-fallback-design">Better fallback design</h2>
+<p>For standard users:</p>
+<pre><code class="language-text">Use backup passkey or trusted device
+Use backup codes
+Use email + risk checks
+Notify old devices/channels
+Revoke old sessions after recovery
+</code></pre>
+<p>For admins:</p>
+<pre><code class="language-text">Require backup hardware key
+Require manager/security approval
+Use temporary access pass
+Require re-enrollment of hardware key
+Revoke all sessions
+Audit recovery
+No SMS fallback
+</code></pre>
+<h2 id="model-answer_5">Model answer</h2>
+<p>Fallback design is the hardest part because fallback becomes the attacker’s preferred path. If passkey login is strong but fallback uses SMS, email-only recovery, or weak helpdesk proofing, the real assurance level is the fallback. A good rollout must design backup authenticators, recovery codes, temporary access, user notifications, session revocation, and stricter recovery for admins before enforcing passkeys.</p>
+<hr />
+<h1 id="7-how-would-you-design-recovery-for-users-who-lose-all-authenticators">7. How would you design recovery for users who lose all authenticators?</h1>
+<p>If a user loses all authenticators, they have lost the normal proof of possession.</p>
+<p>At that point, recovery must become <strong>identity re-proofing</strong>, not just “send a weaker login code.”</p>
+<h2 id="standard-user-recovery">Standard user recovery</h2>
+<p>Possible controls:</p>
+<pre><code class="language-text">Verified trusted device if one still exists
+Backup codes
+Previously registered recovery contact
+High-confidence email plus risk checks
+Government ID verification for high-risk consumer accounts
+Manager approval for enterprise accounts
+Temporary access pass
+Cooling-off period for sensitive changes
+</code></pre>
+<h2 id="enterprise-recovery-flow">Enterprise recovery flow</h2>
+<pre><code class="language-text">User reports lost authenticators
+        ↓
+Helpdesk opens recovery case
+        ↓
+Verify user through approved channel
+        ↓
+Manager approval required
+        ↓
+Issue short-lived temporary access pass
+        ↓
+User registers new passkey/security key
+        ↓
+Old authenticators revoked
+        ↓
+All sessions revoked
+        ↓
+Recovery event reviewed and logged
+</code></pre>
+<h2 id="admin-recovery-flow">Admin recovery flow</h2>
+<p>For admins:</p>
+<pre><code class="language-text">No self-service weak fallback
+No SMS
+No email-only reset
+Require security approval
+Require manager approval
+Possibly require in-person/video verification
+Issue time-limited privileged recovery
+Require hardware key registration
+Review recent account activity
+</code></pre>
+<h2 id="post-recovery-controls">Post-recovery controls</h2>
+<p>Immediately revoke:</p>
+<pre><code class="language-text">Old sessions
+Refresh tokens
+Old authenticators
+Recovery links
+Backup codes if exposed
+OAuth grants if suspicious
+API tokens if suspicious
+Remembered devices
+</code></pre>
+<h2 id="model-answer_6">Model answer</h2>
+<p>If users lose all authenticators, recovery should use high-assurance re-proofing proportional to account risk. For enterprise users, that means helpdesk workflow, verified channels, manager approval, temporary access passes, and forced re-enrollment. For admins, add security approval and possibly in-person verification. After recovery, revoke old authenticators, sessions, refresh tokens, and suspicious grants.</p>
+<hr />
+<h1 id="8-what-are-the-tradeoffs-between-platform-authenticators-and-roaming-security-keys">8. What are the tradeoffs between platform authenticators and roaming security keys?</h1>
+<h2 id="platform-authenticators">Platform authenticators</h2>
+<p>Platform authenticators are built into devices.</p>
+<p>Examples:</p>
+<pre><code class="language-text">Windows Hello
+Apple Face ID / Touch ID passkeys
+Android passkeys
+macOS Touch ID
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Very convenient
+Good adoption
+Biometric/PIN user verification
+No extra hardware for most users
+Great for consumer and general workforce rollout
+</code></pre>
+<p>Risks/tradeoffs:</p>
+<pre><code class="language-text">Tied to device or cloud sync model
+Recovery depends on device/platform ecosystem
+Device loss or replacement needs planning
+Assurance varies by platform
+Harder to enforce exact hardware model unless managed
+</code></pre>
+<h2 id="roaming-security-keys">Roaming security keys</h2>
+<p>Roaming authenticators are external keys.</p>
+<p>Examples:</p>
+<pre><code class="language-text">YubiKey
+Google Titan Security Key
+Feitian key
+Smart-card-like FIDO2 keys
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Strong device-bound assurance
+Portable across machines
+Good for admins/shared workstations
+Private keys usually non-exportable
+Can be governed with attestation
+</code></pre>
+<p>Risks/tradeoffs:</p>
+<pre><code class="language-text">Users can lose them
+Procurement and logistics required
+Need backup keys
+Less seamless on mobile depending on NFC/USB/Bluetooth
+Higher support burden
+</code></pre>
+<h2 id="comparison-table">Comparison table</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Platform Authenticator</th>
+<th>Roaming Security Key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Usability</td>
+<td>Very high</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Deployment cost</td>
+<td>Low if devices support it</td>
+<td>Higher due to hardware</td>
+</tr>
+<tr>
+<td>Admin assurance</td>
+<td>Medium to high</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Recovery</td>
+<td>Easier with sync</td>
+<td>Requires backup/recovery</td>
+</tr>
+<tr>
+<td>Device-bound control</td>
+<td>Varies</td>
+<td>Strong</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Broad workforce/consumers</td>
+<td>Admins, developers, high-risk users</td>
+</tr>
+</tbody>
+</table>
+<h2 id="model-answer_7">Model answer</h2>
+<p>Platform authenticators are highly usable and ideal for broad rollout because users can authenticate with built-in biometrics or device PINs. Roaming security keys provide stronger device-bound assurance and portability across machines, making them better for administrators and high-risk users. The tradeoff is adoption and recovery: platform authenticators are easier, while roaming keys require procurement, backup keys, and stronger lifecycle management.</p>
+<hr />
+<h1 id="9-how-would-you-migrate-a-password-heavy-service-to-passkeys-at-scale">9. How would you migrate a password-heavy service to passkeys at scale?</h1>
+<p>I would use a phased migration rather than forcing everyone immediately.</p>
+<h2 id="phase-1-prepare-the-platform">Phase 1: Prepare the platform</h2>
+<pre><code class="language-text">Implement WebAuthn registration and authentication
+Support multiple authenticators per account
+Store credential IDs and public keys
+Support user verification policy
+Support device naming and credential management
+Build recovery workflow
+Build telemetry and fraud detection
+</code></pre>
+<h2 id="phase-2-start-as-optional">Phase 2: Start as optional</h2>
+<p>After password login, prompt:</p>
+<pre><code class="language-text">“Add a passkey for faster, safer sign-in.”
+</code></pre>
+<p>Good timing:</p>
+<pre><code class="language-text">After successful MFA
+After account security checkup
+During onboarding
+When user is on compatible device/browser
+</code></pre>
+<h2 id="phase-3-use-passkeys-as-mfa-first">Phase 3: Use passkeys as MFA first</h2>
+<p>For existing password users:</p>
+<pre><code class="language-text">Password + passkey
+</code></pre>
+<p>Then gradually move to:</p>
+<pre><code class="language-text">Passkey-first
+Password fallback
+</code></pre>
+<p>Then for high-confidence users:</p>
+<pre><code class="language-text">Passkey-only with strong recovery
+</code></pre>
+<h2 id="phase-4-risk-based-enforcement">Phase 4: Risk-based enforcement</h2>
+<p>Prioritize:</p>
+<pre><code class="language-text">Admins
+High-value accounts
+Users attacked by credential stuffing
+Users with breached passwords
+Employees
+Frequent users
+</code></pre>
+<h2 id="phase-5-reduce-weak-fallback">Phase 5: Reduce weak fallback</h2>
+<p>Once adoption is high:</p>
+<pre><code class="language-text">Disable SMS fallback for high-risk users
+Require passkey for sensitive actions
+Require passkey for new devices
+Make password fallback step-up/risk-based
+Eventually remove password for eligible users
+</code></pre>
+<h2 id="phase-6-monitor-migration">Phase 6: Monitor migration</h2>
+<p>Track:</p>
+<pre><code class="language-text">Registration success rate
+Authentication success rate
+Fallback usage
+Recovery volume
+Device/browser compatibility
+Authenticator types
+Failed ceremonies
+Account takeover rate
+Helpdesk tickets
+User abandonment
+</code></pre>
+<h2 id="model-answer_8">Model answer</h2>
+<p>I would migrate by first adding WebAuthn support and strong recovery, then offering passkey enrollment after successful login. I would start with optional enrollment, then use passkeys as MFA, then make passkey-first login the default, and finally remove password fallback for eligible or high-risk users. I would prioritize admins and high-risk accounts, support multiple authenticators, monitor adoption and failures, and reduce weak recovery paths before enforcing passkeys broadly.</p>
+<hr />
+<h1 id="10-what-telemetry-would-help-detect-abuse-in-a-webauthn-deployment">10. What telemetry would help detect abuse in a WebAuthn deployment?</h1>
+<p>WebAuthn abuse detection should cover registration, authentication, recovery, device changes, and post-login behavior.</p>
+<h2 id="registration-telemetry">Registration telemetry</h2>
+<p>Collect:</p>
+<pre><code class="language-text">User ID
+Credential ID
+Authenticator type
+Attestation result
+AAGUID if available
+User verification used
+Resident/discoverable credential status
+Backup eligibility / backup state if available
+Device/browser
+IP/ASN/geo
+Registration after recovery?
+Registration after password reset?
+</code></pre>
+<p>Suspicious examples:</p>
+<pre><code class="language-text">New authenticator registered immediately after account recovery
+Admin registers unknown authenticator type
+Many accounts register authenticators from same IP/device
+Authenticator added from unusual country
+</code></pre>
+<h2 id="authentication-telemetry">Authentication telemetry</h2>
+<p>Collect:</p>
+<pre><code class="language-text">Credential ID used
+User verification result
+Authenticator sign count if available
+Device/browser
+IP/ASN/geo
+Failed assertions
+Origin/RP ID failures
+Authentication method used
+Session created
+</code></pre>
+<p>Suspicious examples:</p>
+<pre><code class="language-text">Passkey login from impossible travel location
+Passkey used after suspicious recovery
+Repeated failed WebAuthn assertions
+Unexpected authenticator for privileged account
+</code></pre>
+<h2 id="recovery-and-fallback-telemetry">Recovery and fallback telemetry</h2>
+<p>Collect:</p>
+<pre><code class="language-text">Fallback used instead of passkey
+Lost authenticator claim
+Helpdesk reset
+Temporary access pass issued
+Old credentials removed
+New credentials added
+Sessions revoked or not
+</code></pre>
+<p>High-risk pattern:</p>
+<pre><code class="language-text">Recovery completed
+        ↓
+New passkey registered
+        ↓
+Old passkeys removed
+        ↓
+Data export/API token created
+</code></pre>
+<h2 id="post-authentication-telemetry">Post-authentication telemetry</h2>
+<p>Collect:</p>
+<pre><code class="language-text">Password changed
+Recovery email/phone changed
+MFA/passkey removed
+OAuth grant added
+API token created
+Sensitive data accessed
+Admin role assumed
+Large export performed
+</code></pre>
+<h2 id="model-answer_9">Model answer</h2>
+<p>I would collect WebAuthn registration and authentication telemetry: credential ID, authenticator type, attestation result, user verification status, device/browser, IP/ASN/geo, failed assertions, and RP/origin errors. I would heavily monitor recovery and fallback events, especially new authenticator registration after recovery, authenticator removal, unusual admin authenticator types, and sensitive actions immediately after passkey changes.</p>
+<hr />
+<h1 id="final-summary-table">Final Summary Table</h1>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Strong Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Passkeys vs OTP</td>
+<td>Passkeys use origin-bound challenge signing; OTPs and passwords are reusable/relayable secrets.</td>
+</tr>
+<tr>
+<td>Registration vs authentication</td>
+<td>Registration creates and stores a public key; authentication signs a challenge using the private key.</td>
+</tr>
+<tr>
+<td>Origin binding</td>
+<td>Prevents credentials from working on phishing domains, not just verifies possession of a key.</td>
+</tr>
+<tr>
+<td>Synced passkeys</td>
+<td>Improve usability/recovery but add trust in cloud keychain, sync, and platform recovery.</td>
+</tr>
+<tr>
+<td>Attestation</td>
+<td>Helps enterprises enforce approved authenticator types, especially for admins.</td>
+</tr>
+<tr>
+<td>Fallback</td>
+<td>Weak fallback can bypass strong passkeys; design it before rollout.</td>
+</tr>
+<tr>
+<td>Lost authenticators</td>
+<td>Use high-assurance re-proofing, temporary access, revocation, and strong re-enrollment.</td>
+</tr>
+<tr>
+<td>Platform vs roaming</td>
+<td>Platform is easiest for broad adoption; roaming keys are stronger for high-risk users.</td>
+</tr>
+<tr>
+<td>Migration</td>
+<td>Optional enrollment → passkey as MFA → passkey-first → remove weak fallback by risk.</td>
+</tr>
+<tr>
+<td>Telemetry</td>
+<td>Monitor registration, authenticator type, UV, attestation, fallback, recovery, and post-login actions.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>WebAuthn and passkeys replace shared secrets with origin-bound public-key authentication.</li>
+<li>They are among the strongest mainstream defenses against phishing and credential reuse.</li>
+<li>Recovery, fallback, and device lifecycle design are the main implementation risks.</li>
+<li>Server-side private secret exposure is reduced because only public keys are stored.</li>
+<li>Strong authenticators still require strong session and authorization controls after login.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

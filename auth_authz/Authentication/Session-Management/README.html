@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Management - Maintaining Authenticated State</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: auth_authz\Authentication\Session-Management\README.md</p>
+<h1 id="session-management-maintaining-authenticated-state">Session Management - Maintaining Authenticated State</h1>
+<p><strong>Category:</strong> Authentication and post-auth security<br />
+<strong>Common Standards And Guidance:</strong> OWASP Session Management Cheat Sheet, NIST SP 800-63, RFC 6265</p>
+<h2 id="overview">Overview</h2>
+<p>Session management is the set of mechanisms that maintain authenticated state after a user has proven identity. Instead of re-running a full login flow on every request, applications issue a session identifier or token that links future requests to an authenticated context. Sessions are central to usability, but they become a high-value target because stealing a session often gives the attacker the same power as stealing the user's credentials. Strong session management covers creation, storage, rotation, expiration, revocation, and re-authentication for sensitive actions.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p>Core session properties:</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Session identifier</td>
+<td>Links requests to server-side or signed session state</td>
+</tr>
+<tr>
+<td>Expiration</td>
+<td>Limits idle and absolute lifetime</td>
+</tr>
+<tr>
+<td>Rotation</td>
+<td>Replaces session IDs after auth events or privilege changes</td>
+</tr>
+<tr>
+<td>Revocation</td>
+<td>Invalidates sessions on logout or incident response</td>
+</tr>
+<tr>
+<td>Binding</td>
+<td>Optionally ties session use to device, risk, or context</td>
+</tr>
+</tbody>
+</table>
+<p>Storage models:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server-side session store</td>
+<td>Session ID references state on the server</td>
+</tr>
+<tr>
+<td>Signed token session</td>
+<td>State is embedded in a signed token</td>
+</tr>
+<tr>
+<td>Hybrid</td>
+<td>Signed token with selective server-side revocation or state</td>
+</tr>
+</tbody>
+</table>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant A as App
+    participant S as Session Store
+    U->>A: Complete login
+    A->>S: Create new session record
+    S-->>A: Return session identifier
+    A-->>U: Set secure cookie
+    U->>A: Send follow-up request with cookie
+    A->>S: Validate session and policy
+    S-->>A: Session valid
+    A-->>U: Return protected content
+</pre>
+<pre class="mermaid">
+flowchart TD
+    A[Request arrives with session token] --> B[Validate signature or look up session]
+    B --> C[Check idle timeout and absolute lifetime]
+    C --> D{Privilege change or risk event?}
+    D -- Yes --> E[Rotate or re-authenticate]
+    D -- No --> F[Continue request]
+    E --> G[Allow or deny based on new proof]
+</pre>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Session fixation</td>
+<td>App accepts attacker-chosen session ID</td>
+<td>Account takeover after login</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Session theft</td>
+<td>Tokens leak via XSS, logs, browser storage, or network exposure</td>
+<td>Unauthorized access</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Missing rotation</td>
+<td>Session ID survives login, MFA, or privilege elevation</td>
+<td>Privilege abuse</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Weak expiry</td>
+<td>Sessions remain valid too long</td>
+<td>Long-lived compromise</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Incomplete logout</td>
+<td>Session remains usable after logout or password reset</td>
+<td>Stale access</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>6</td>
+<td>CSRF on stateful actions</td>
+<td>Browser automatically sends session cookie</td>
+<td>Unauthorized actions</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Weak cookie settings</td>
+<td>Session cookie lacks <code>Secure</code>, <code>HttpOnly</code>, or same-site protections</td>
+<td>Easier theft or abuse</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>No step-up for sensitive actions</td>
+<td>Strong login is not re-checked when risk rises</td>
+<td>High-impact abuse</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Session fixation</td>
+<td>Issue a fresh session after authentication and privilege change</td>
+<td>Session lifecycle</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Session theft</td>
+<td>Use secure cookies, XSS defenses, and short session lifetimes</td>
+<td>App and browser boundary</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Missing rotation</td>
+<td>Rotate session on login, MFA completion, and privilege elevation</td>
+<td>Auth and session layer</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Weak expiry</td>
+<td>Enforce idle and absolute timeout policies</td>
+<td>Session policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Incomplete logout</td>
+<td>Revoke server-side session state and clear client tokens</td>
+<td>Logout and incident response</td>
+</tr>
+<tr>
+<td>6</td>
+<td>CSRF on stateful actions</td>
+<td>Add CSRF protections and same-site cookie policy</td>
+<td>Web app layer</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Weak cookie settings</td>
+<td>Set <code>Secure</code>, <code>HttpOnly</code>, and appropriate <code>SameSite</code> values</td>
+<td>Cookie configuration</td>
+</tr>
+<tr>
+<td>8</td>
+<td>No step-up for sensitive actions</td>
+<td>Require re-auth for risky actions</td>
+<td>Authorization and session policy</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Rotate session identifiers at key boundaries:</strong> Session fixation and privilege carryover are prevented when the session changes after login, MFA, and major state changes.</li>
+<li><strong>Protect session storage and transport:</strong> Secure cookies, XSS reduction, and TLS are foundational because session theft is often simpler than credential theft.</li>
+<li><strong>Enforce expiration and revocation:</strong> Long-lived sessions silently widen the attack window. Both idle and absolute timeout plus incident-triggered revocation are necessary.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>Why is session theft often as damaging as credential theft?</li>
+<li>What is the difference between session fixation and session hijacking?</li>
+<li>Why should session identifiers rotate after authentication events?</li>
+<li>How do signed token sessions differ operationally from server-stored sessions?</li>
+<li>What tradeoffs exist between short session lifetimes and usability?</li>
+<li>How would you design global logout across many services?</li>
+<li>Why do strong login factors not remove the need for strong session controls?</li>
+<li>How should step-up authentication integrate with an existing session?</li>
+<li>What cookie settings matter most for browser-based sessions and why?</li>
+<li>What telemetry would help detect session abuse or theft at scale?</li>
+</ol>
+<h1 id="session-security-model-answers">Session Security Model Answers</h1>
+<h2 id="1-why-is-session-theft-often-as-damaging-as-credential-theft">1. Why is session theft often as damaging as credential theft?</h2>
+<p>Session theft is often as damaging as credential theft because a valid session usually represents a user who has <strong>already passed authentication</strong>.</p>
+<p>If an attacker steals a session cookie or token, they may not need the password, MFA code, passkey, or hardware key.</p>
+<p>Normal flow:</p>
+<pre><code class="language-text">User logs in
+        ↓
+User completes MFA
+        ↓
+Application issues session cookie/token
+        ↓
+Browser sends session on future requests
+</code></pre>
+<p>Attack flow:</p>
+<pre><code class="language-text">Attacker steals session cookie/token
+        ↓
+Attacker replays it
+        ↓
+Application thinks attacker is the authenticated user
+</code></pre>
+<p>This can bypass strong login controls.</p>
+<p>Example:</p>
+<pre><code class="language-text">Alice logs into admin portal using FIDO2 key.
+Malware steals Alice's browser session cookie.
+Attacker uses the cookie from another machine.
+If there are no session protections, attacker is now Alice.
+</code></pre>
+<h2 id="why-session-theft-is-powerful">Why session theft is powerful</h2>
+<p>A stolen session may allow the attacker to:</p>
+<pre><code class="language-text">Read user data
+Change account settings
+Create API tokens
+Approve transactions
+Access admin consoles
+Export sensitive data
+Modify MFA settings
+Persist access through OAuth grants or refresh tokens
+</code></pre>
+<h2 id="credential-theft-vs-session-theft">Credential theft vs session theft</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Credential Theft</th>
+<th>Session Theft</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What attacker steals</td>
+<td>Password/API key/private credential</td>
+<td>Session cookie/access token/refresh token</td>
+</tr>
+<tr>
+<td>MFA needed?</td>
+<td>Often yes</td>
+<td>Often no, if session already authenticated</td>
+</tr>
+<tr>
+<td>User may notice?</td>
+<td>Maybe through login alert</td>
+<td>Less likely if session appears valid</td>
+</tr>
+<tr>
+<td>Immediate access?</td>
+<td>Depends on MFA/risk checks</td>
+<td>Often yes</td>
+</tr>
+<tr>
+<td>Main defense</td>
+<td>Strong auth/MFA/passwordless</td>
+<td>Strong session controls, binding, revocation, anomaly detection</td>
+</tr>
+</tbody>
+</table>
+<h2 id="model-answer">Model answer</h2>
+<p>Session theft is often as damaging as credential theft because a session is proof that authentication has already succeeded. A stolen session token can let an attacker bypass password and MFA checks and act as the user until the session expires or is revoked. Strong authentication must therefore be paired with secure session handling, short lifetimes where appropriate, token rotation, binding, and abuse detection.</p>
+<hr />
+<h2 id="2-what-is-the-difference-between-session-fixation-and-session-hijacking">2. What is the difference between session fixation and session hijacking?</h2>
+<h2 id="session-hijacking">Session hijacking</h2>
+<p>Session hijacking is when an attacker steals or obtains an existing valid session and uses it.</p>
+<p>Example:</p>
+<pre><code class="language-text">User logs in and receives session ID: ABC123
+Attacker steals ABC123 through malware, XSS, proxy logs, or insecure transport
+Attacker uses ABC123
+Application treats attacker as user
+</code></pre>
+<p>Common causes:</p>
+<pre><code class="language-text">XSS stealing cookies
+Missing Secure cookie flag
+Session token leaked in URL
+Malware/browser extension theft
+Insecure Wi-Fi without TLS
+Server logs exposing tokens
+Weak token randomness
+</code></pre>
+<h2 id="session-fixation">Session fixation</h2>
+<p>Session fixation is when an attacker forces or tricks the victim into using a session ID that the attacker already knows.</p>
+<p>Flow:</p>
+<pre><code class="language-text">Attacker obtains session ID: FIXED123
+        ↓
+Attacker tricks victim into using FIXED123
+        ↓
+Victim logs in
+        ↓
+Application keeps same session ID after login
+        ↓
+Attacker uses FIXED123 as authenticated session
+</code></pre>
+<p>The key weakness is that the application does <strong>not rotate the session ID after authentication</strong>.</p>
+<h2 id="difference-table">Difference table</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Session Hijacking</th>
+<th>Session Fixation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attacker action</td>
+<td>Steals existing valid session</td>
+<td>Pre-sets or fixes session before login</td>
+</tr>
+<tr>
+<td>Victim state</td>
+<td>Already authenticated</td>
+<td>Often unauthenticated first</td>
+</tr>
+<tr>
+<td>Main bug</td>
+<td>Session leakage/theft</td>
+<td>Session ID not rotated after login</td>
+</tr>
+<tr>
+<td>Defense</td>
+<td>Protect tokens/cookies</td>
+<td>Rotate session after login</td>
+</tr>
+<tr>
+<td>Example</td>
+<td>Malware steals cookie</td>
+<td>Attacker sends victim link with known session ID</td>
+</tr>
+</tbody>
+</table>
+<h2 id="model-answer_1">Model answer</h2>
+<p>Session hijacking means stealing and reusing a valid authenticated session. Session fixation means making the victim authenticate using a session identifier already known to the attacker. Hijacking is mainly about token theft; fixation is mainly about failure to issue a fresh session identifier after login or privilege change.</p>
+<hr />
+<h2 id="3-why-should-session-identifiers-rotate-after-authentication-events">3. Why should session identifiers rotate after authentication events?</h2>
+<p>Session identifiers should rotate after authentication events to prevent session fixation and reduce the value of pre-authenticated session IDs.</p>
+<p>Important events include:</p>
+<pre><code class="language-text">Login
+MFA completion
+Password reset
+Account recovery
+Privilege elevation
+Admin role assumption
+Step-up authentication
+Switching tenant/account context
+</code></pre>
+<h2 id="example-problem">Example problem</h2>
+<p>Before login:</p>
+<pre><code class="language-text">Anonymous session ID: ABC123
+</code></pre>
+<p>User logs in.</p>
+<p>Bad behavior:</p>
+<pre><code class="language-text">Authenticated session ID remains ABC123
+</code></pre>
+<p>If an attacker already knew <code>ABC123</code>, they now have the authenticated session.</p>
+<p>Good behavior:</p>
+<pre><code class="language-text">Anonymous session ID: ABC123
+Login succeeds
+Server invalidates ABC123
+Server issues new session ID: XYZ789
+</code></pre>
+<h2 id="why-rotation-matters-after-privilege-changes">Why rotation matters after privilege changes</h2>
+<p>Suppose the user starts as a normal user:</p>
+<pre><code class="language-text">Session ID: USER123
+Role: standard user
+</code></pre>
+<p>Then they step up to admin:</p>
+<pre><code class="language-text">Role: admin
+</code></pre>
+<p>If the same session remains valid without stronger binding or rotation, a previously stolen lower-assurance session may become high privilege.</p>
+<p>Better:</p>
+<pre><code class="language-text">Step-up succeeds
+Old session invalidated or downgraded
+New high-assurance session issued
+Admin actions require fresh assurance
+</code></pre>
+<h2 id="model-answer_2">Model answer</h2>
+<p>Session identifiers should rotate after login, MFA, recovery, and privilege elevation because the assurance level of the session has changed. If the same identifier is reused, an attacker who fixed or stole the old session may inherit the authenticated or elevated state. Rotation ensures that pre-authentication or lower-assurance session IDs cannot become authenticated or privileged sessions.</p>
+<hr />
+<h2 id="4-how-do-signed-token-sessions-differ-operationally-from-server-stored-sessions">4. How do signed token sessions differ operationally from server-stored sessions?</h2>
+<p>There are two common session models:</p>
+<pre><code class="language-text">Server-stored session = server keeps session state
+Signed token session  = client holds signed token containing claims
+</code></pre>
+<hr />
+<h2 id="server-stored-sessions">Server-stored sessions</h2>
+<p>The browser gets a random session ID:</p>
+<pre><code class="language-text">Cookie: session_id=random_opaque_value
+</code></pre>
+<p>The server stores session data:</p>
+<pre><code class="language-text">session_id → user_id, roles, expiry, MFA state, device, risk
+</code></pre>
+<p>Example:</p>
+<pre><code class="language-text">Browser sends session_id
+Server looks up session in Redis/database
+Server decides whether session is valid
+</code></pre>
+<h2 id="benefits">Benefits</h2>
+<pre><code class="language-text">Easy revocation
+Easy global logout
+Can update session state immediately
+Tokens can be opaque and small
+Sensitive claims stay server-side
+</code></pre>
+<h2 id="downsides">Downsides</h2>
+<pre><code class="language-text">Requires session store
+Requires scaling/cache design
+Cross-region replication can be hard
+Session store outage can affect logins
+</code></pre>
+<hr />
+<h2 id="signed-token-sessions">Signed token sessions</h2>
+<p>The server issues a signed token, often a JWT.</p>
+<pre><code class="language-text">Token contains:
+- user ID
+- issuer
+- audience
+- expiry
+- scopes/roles
+- auth time
+- MFA status
+</code></pre>
+<p>The server verifies the signature without looking up session state every time.</p>
+<h2 id="benefits_1">Benefits</h2>
+<pre><code class="language-text">Stateless validation
+Good for distributed APIs
+No central session lookup on every request
+Works well across services
+</code></pre>
+<h2 id="downsides_1">Downsides</h2>
+<pre><code class="language-text">Harder immediate revocation
+Claims may become stale
+Token leakage is dangerous until expiry
+Large tokens can leak data if poorly designed
+Key rotation matters
+Logout is harder without blocklist/introspection
+</code></pre>
+<h2 id="operational-comparison">Operational comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Server-Stored Session</th>
+<th>Signed Token Session</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>State location</td>
+<td>Server-side</td>
+<td>Client-side token</td>
+</tr>
+<tr>
+<td>Revocation</td>
+<td>Easy</td>
+<td>Harder unless short TTL/blocklist</td>
+</tr>
+<tr>
+<td>Global logout</td>
+<td>Easier</td>
+<td>Requires revocation list or token versioning</td>
+</tr>
+<tr>
+<td>Scalability</td>
+<td>Needs shared store</td>
+<td>Easier stateless scaling</td>
+</tr>
+<tr>
+<td>Claim freshness</td>
+<td>Fresh from store</td>
+<td>Can become stale</td>
+</tr>
+<tr>
+<td>Token size</td>
+<td>Small opaque ID</td>
+<td>Larger</td>
+</tr>
+<tr>
+<td>Sensitive data exposure</td>
+<td>Lower</td>
+<td>Higher if claims overpacked</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Browser apps, high-control sessions</td>
+<td>APIs, distributed systems</td>
+</tr>
+</tbody>
+</table>
+<h2 id="model-answer_3">Model answer</h2>
+<p>Server-stored sessions use an opaque session ID and keep state on the server, making revocation, global logout, and claim updates easier. Signed token sessions store claims in a signed client-held token, which scales well across services but makes immediate revocation and claim freshness harder. For high-risk browser sessions, server-side state or token introspection is often safer. For distributed APIs, signed short-lived tokens with refresh-token rotation and revocation support are common.</p>
+<hr />
+<h2 id="5-what-tradeoffs-exist-between-short-session-lifetimes-and-usability">5. What tradeoffs exist between short session lifetimes and usability?</h2>
+<p>Short session lifetimes reduce attacker dwell time if a session is stolen.</p>
+<p>But they can hurt usability by forcing users to reauthenticate frequently.</p>
+<h2 id="security-benefit">Security benefit</h2>
+<p>If a session is stolen:</p>
+<pre><code class="language-text">Session lifetime: 8 hours
+Attacker may have access for hours
+
+Session lifetime: 10 minutes
+Attacker window is much smaller
+</code></pre>
+<h2 id="usability-downside">Usability downside</h2>
+<p>Too-short sessions can cause:</p>
+<pre><code class="language-text">Frequent login prompts
+User frustration
+Interrupted workflows
+More helpdesk tickets
+Users choosing weaker workarounds
+Reduced productivity
+</code></pre>
+<h2 id="better-model-risk-based-session-lifetime">Better model: risk-based session lifetime</h2>
+<p>Not all sessions need the same lifetime.</p>
+<table>
+<thead>
+<tr>
+<th>Context</th>
+<th>Suggested Session Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Managed device, low-risk app</td>
+<td>Longer session</td>
+</tr>
+<tr>
+<td>Unmanaged device</td>
+<td>Shorter session</td>
+</tr>
+<tr>
+<td>Admin console</td>
+<td>Short session + step-up</td>
+</tr>
+<tr>
+<td>Financial transaction</td>
+<td>Fresh re-auth</td>
+</tr>
+<tr>
+<td>New device/location</td>
+<td>Short session</td>
+</tr>
+<tr>
+<td>High-risk IP</td>
+<td>Step-up or deny</td>
+</tr>
+<tr>
+<td>After recovery</td>
+<td>Short session + monitoring</td>
+</tr>
+</tbody>
+</table>
+<h2 id="use-different-lifetimes">Use different lifetimes</h2>
+<pre><code class="language-text">Access token: short-lived
+Refresh token: longer-lived but rotated
+Admin session: short-lived
+Remembered device: longer but revocable
+Sensitive action: fresh step-up
+</code></pre>
+<h2 id="model-answer_4">Model answer</h2>
+<p>Short session lifetimes reduce the impact of stolen sessions but can hurt usability and increase friction. The best design is risk-based: keep low-risk sessions usable, but require shorter lifetimes and fresh step-up for privileged actions, unmanaged devices, risky locations, or post-recovery states. Pair short-lived access tokens with refresh-token rotation and anomaly detection.</p>
+<hr />
+<h2 id="6-how-would-you-design-global-logout-across-many-services">6. How would you design global logout across many services?</h2>
+<p>Global logout means:</p>
+<pre><code class="language-text">When a user logs out or is disabled, all services stop accepting their sessions/tokens.
+</code></pre>
+<p>This is easy in a monolith and hard in a distributed system.</p>
+<h2 id="design-goals">Design goals</h2>
+<pre><code class="language-text">Revoke browser sessions
+Revoke refresh tokens
+Invalidate access tokens quickly
+Remove remembered devices where needed
+Revoke OAuth grants/API tokens where appropriate
+Propagate logout to services
+Audit the event
+</code></pre>
+<hr />
+<h2 id="architecture-option-1-central-session-store">Architecture option 1: Central session store</h2>
+<p>All services validate sessions against a central session service or store.</p>
+<pre><code class="language-text">Service receives request
+        ↓
+Checks session ID with session store
+        ↓
+If revoked, deny
+</code></pre>
+<p>Benefits:</p>
+<pre><code class="language-text">Immediate revocation
+Simple mental model
+Good for browser apps
+</code></pre>
+<p>Downside:</p>
+<pre><code class="language-text">Central dependency on every request
+Needs high availability and low latency
+</code></pre>
+<hr />
+<h2 id="architecture-option-2-short-lived-access-tokens-refresh-token-revocation">Architecture option 2: Short-lived access tokens + refresh-token revocation</h2>
+<p>Common for OAuth/OIDC-style systems.</p>
+<pre><code class="language-text">Access token lifetime: 5–15 minutes
+Refresh token: stored server-side and revocable
+</code></pre>
+<p>Logout flow:</p>
+<pre><code class="language-text">User logs out
+        ↓
+Refresh token revoked
+        ↓
+New access tokens cannot be minted
+        ↓
+Existing access tokens expire soon
+</code></pre>
+<p>For urgent revocation, add token introspection or blocklist.</p>
+<hr />
+<h2 id="architecture-option-3-token-versioning">Architecture option 3: Token versioning</h2>
+<p>Store a user/session version.</p>
+<p>Token contains:</p>
+<pre><code class="language-text">user_id
+session_version
+issued_at
+</code></pre>
+<p>Server checks:</p>
+<pre><code class="language-text">Does token session_version match current user session_version?
+</code></pre>
+<p>On global logout:</p>
+<pre><code class="language-text">Increment session_version
+All old tokens become invalid
+</code></pre>
+<p>This works well if services can check current version cheaply.</p>
+<hr />
+<h2 id="global-logout-event-bus">Global logout event bus</h2>
+<p>For many services, publish logout events.</p>
+<pre><code class="language-text">Identity Provider
+        ↓
+Logout/revocation event
+        ↓
+Event bus
+        ↓
+Services clear local caches/session state
+</code></pre>
+<p>Examples of events:</p>
+<pre><code class="language-text">USER_LOGOUT_ALL
+USER_DISABLED
+PASSWORD_RESET
+MFA_RESET
+ACCOUNT_RECOVERY_COMPLETED
+ADMIN_REVOKE_SESSIONS
+</code></pre>
+<h2 id="model-answer_5">Model answer</h2>
+<p>I would design global logout with central revocation of refresh tokens, short-lived access tokens, and a logout event propagated to all services. Browser sessions should be invalidated server-side or through a session version. For immediate high-risk logout, services should check a revocation list, session store, or token version rather than relying only on token expiry. Global logout should also revoke remembered devices, OAuth grants, and API tokens when appropriate.</p>
+<hr />
+<h2 id="7-why-do-strong-login-factors-not-remove-the-need-for-strong-session-controls">7. Why do strong login factors not remove the need for strong session controls?</h2>
+<p>Strong login factors protect the <strong>authentication ceremony</strong>.</p>
+<p>They do not automatically protect the session after authentication.</p>
+<p>Example:</p>
+<pre><code class="language-text">User logs in with passkey
+        ↓
+Application issues session cookie
+        ↓
+Attacker steals cookie
+        ↓
+Attacker bypasses passkey because session already exists
+</code></pre>
+<h2 id="strong-mfa-does-not-stop">Strong MFA does not stop</h2>
+<pre><code class="language-text">Session cookie theft
+Refresh token theft
+XSS session abuse
+Malware on endpoint
+OAuth token abuse
+CSRF-like misuse
+Privilege misuse after login
+Broken authorization
+Long-lived sessions
+</code></pre>
+<h2 id="strong-session-controls-needed">Strong session controls needed</h2>
+<pre><code class="language-text">Secure cookie settings
+Session rotation after auth
+Short-lived tokens
+Refresh-token rotation
+Session revocation
+Device/risk binding
+Step-up for sensitive actions
+Anomaly detection
+Logout everywhere
+Authorization checks on every request
+</code></pre>
+<h2 id="model-answer_6">Model answer</h2>
+<p>Strong login factors prove identity at login time, but applications rely on sessions afterward. If a session token is stolen, the attacker may bypass the strong login factor entirely. That is why strong authentication must be complemented by secure cookies, token lifetimes, rotation, revocation, anomaly detection, and step-up authentication for sensitive actions.</p>
+<hr />
+<h2 id="8-how-should-step-up-authentication-integrate-with-an-existing-session">8. How should step-up authentication integrate with an existing session?</h2>
+<p>Step-up authentication should increase the assurance level of an existing session for a specific action or time window.</p>
+<p>It should not simply be a cosmetic MFA prompt.</p>
+<h2 id="good-step-up-design">Good step-up design</h2>
+<p>The session should track:</p>
+<pre><code class="language-text">Authentication time
+Authentication method
+MFA status
+Phishing-resistant MFA status
+Step-up time
+Assurance level
+Device trust
+Risk context
+</code></pre>
+<p>Example:</p>
+<pre><code class="language-text">User logged in with password + TOTP at 9:00 AM
+At 2:00 PM, user tries to create API key
+System requires fresh passkey step-up
+After success, session gets elevated assurance for 10 minutes
+</code></pre>
+<h2 id="important-design-choices">Important design choices</h2>
+<h2 id="a-scope-step-up-narrowly">A. Scope step-up narrowly</h2>
+<p>Better:</p>
+<pre><code class="language-text">Step-up valid only for creating API token for 10 minutes
+</code></pre>
+<p>Riskier:</p>
+<pre><code class="language-text">Step-up upgrades entire session to admin forever
+</code></pre>
+<h2 id="b-rotate-or-bind-elevated-session">B. Rotate or bind elevated session</h2>
+<p>After step-up:</p>
+<pre><code class="language-text">Rotate session ID
+Mark session as higher assurance
+Set short elevated lifetime
+Log the event
+</code></pre>
+<h2 id="c-require-stronger-factor-for-stronger-action">C. Require stronger factor for stronger action</h2>
+<p>Examples:</p>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Step-Up</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Change email</td>
+<td>Fresh MFA</td>
+</tr>
+<tr>
+<td>Add authenticator</td>
+<td>Existing strong MFA</td>
+</tr>
+<tr>
+<td>Create API token</td>
+<td>Phishing-resistant MFA</td>
+</tr>
+<tr>
+<td>Delete production resource</td>
+<td>Hardware key + approval</td>
+</tr>
+<tr>
+<td>View secrets</td>
+<td>Fresh admin step-up</td>
+</tr>
+</tbody>
+</table>
+<h2 id="d-downgrade-after-timeout">D. Downgrade after timeout</h2>
+<pre><code class="language-text">Step-up expires after 5–15 minutes
+Sensitive action window closes
+Normal session remains
+</code></pre>
+<h2 id="model-answer_7">Model answer</h2>
+<p>Step-up should attach fresh assurance to the existing session in a controlled way. The system should record authentication time, factor type, assurance level, and step-up time. For sensitive actions, require fresh stronger authentication, rotate or mark the session, scope the elevated state narrowly, and expire it quickly. Step-up should be logged and should not permanently upgrade the whole session.</p>
+<hr />
+<h2 id="9-what-cookie-settings-matter-most-for-browser-based-sessions-and-why">9. What cookie settings matter most for browser-based sessions and why?</h2>
+<p>For browser sessions, cookie attributes are critical.</p>
+<h2 id="most-important-cookie-settings">Most important cookie settings</h2>
+<h2 id="a-secure">A. <code>Secure</code></h2>
+<pre><code class="language-text">Secure
+</code></pre>
+<p>Means the browser only sends the cookie over HTTPS.</p>
+<p>Without it, a cookie might be sent over plaintext HTTP.</p>
+<h2 id="b-httponly">B. <code>HttpOnly</code></h2>
+<pre><code class="language-text">HttpOnly
+</code></pre>
+<p>Prevents JavaScript from reading the cookie.</p>
+<p>This helps reduce impact of XSS.</p>
+<p>Without <code>HttpOnly</code>:</p>
+<pre><code class="language-javascript">document.cookie;
+</code></pre>
+<p>may expose the session cookie.</p>
+<h2 id="c-samesite">C. <code>SameSite</code></h2>
+<p>Controls whether cookies are sent in cross-site requests.</p>
+<p>Common values:</p>
+<pre><code class="language-text">SameSite=Lax
+SameSite=Strict
+SameSite=None; Secure
+</code></pre>
+<p>Security impact:</p>
+<pre><code class="language-text">Helps reduce CSRF risk
+Limits cross-site cookie sending
+</code></pre>
+<p>For most normal apps:</p>
+<pre><code class="language-text">SameSite=Lax
+</code></pre>
+<p>is a good default.</p>
+<p>For highly sensitive apps:</p>
+<pre><code class="language-text">SameSite=Strict
+</code></pre>
+<p>may be appropriate but can break some flows.</p>
+<p>For third-party/embedded cross-site flows:</p>
+<pre><code class="language-text">SameSite=None; Secure
+</code></pre>
+<p>may be required but has more CSRF risk and needs other controls.</p>
+<h2 id="d-expiration-max-age">D. Expiration / Max-Age</h2>
+<p>Controls cookie persistence.</p>
+<pre><code class="language-text">Session cookie: expires when browser closes
+Persistent cookie: survives browser restart
+</code></pre>
+<p>Sensitive apps should be careful with long persistent cookies.</p>
+<h2 id="e-domain">E. Domain</h2>
+<p>Avoid broad cookie domains.</p>
+<p>Risky:</p>
+<pre><code class="language-text">Domain=.company.com
+</code></pre>
+<p>This may expose the cookie to many subdomains.</p>
+<p>Better:</p>
+<pre><code class="language-text">Host-only cookie for app.company.com
+</code></pre>
+<h2 id="f-path">F. Path</h2>
+<p>Restrict cookie path where useful.</p>
+<pre><code class="language-text">Path=/
+</code></pre>
+<p>is common, but narrower paths can reduce accidental exposure.</p>
+<h2 id="g-prefixes">G. Prefixes</h2>
+<p>Cookie prefixes help enforce safer rules.</p>
+<pre><code class="language-text">__Host-session
+</code></pre>
+<p>A <code>__Host-</code> cookie must be Secure, have no Domain attribute, and use Path=/.</p>
+<p>This is a strong default for session cookies.</p>
+<h2 id="recommended-session-cookie-example">Recommended session cookie example</h2>
+<pre><code class="language-http">Set-Cookie: __Host-session=abc123;
+  Path=/;
+  Secure;
+  HttpOnly;
+  SameSite=Lax
+</code></pre>
+<h2 id="model-answer_8">Model answer</h2>
+<p>The most important session cookie settings are <code>Secure</code>, so cookies are only sent over HTTPS; <code>HttpOnly</code>, so JavaScript cannot read them; <code>SameSite</code>, to reduce CSRF; careful <code>Domain</code> scoping to avoid subdomain exposure; and appropriate expiration. I prefer host-only <code>__Host-</code> prefixed cookies for sensitive browser sessions because they reduce cookie injection and overly broad domain risks.</p>
+<hr />
+<h2 id="10-what-telemetry-would-help-detect-session-abuse-or-theft-at-scale">10. What telemetry would help detect session abuse or theft at scale?</h2>
+<p>To detect session abuse, collect telemetry that connects session creation, session use, device behavior, network changes, and sensitive actions.</p>
+<h2 id="session-creation-telemetry">Session creation telemetry</h2>
+<pre><code class="language-text">Session ID or internal session handle
+User ID
+Authentication method
+MFA/passkey used
+Authentication time
+Device ID/fingerprint
+IP address
+ASN
+Geo location
+User agent
+Risk score
+</code></pre>
+<h2 id="session-usage-telemetry">Session usage telemetry</h2>
+<pre><code class="language-text">Request IP changes
+ASN changes
+Geo changes
+User-agent changes
+Device fingerprint changes
+Concurrent use from multiple locations
+Token refresh events
+Session age
+Access to sensitive endpoints
+</code></pre>
+<h2 id="suspicious-patterns">Suspicious patterns</h2>
+<pre><code class="language-text">Same session used from two countries within minutes
+Same session used by two different user agents
+Session created after recovery then used for data export
+Session used from known proxy/TOR
+Refresh token reused after rotation
+Many failed token validations
+Session continues after password/MFA reset
+Admin session used from unmanaged device
+</code></pre>
+<h2 id="high-value-detection-examples">High-value detection examples</h2>
+<h2 id="a-impossible-travel-for-same-session">A. Impossible travel for same session</h2>
+<pre><code class="language-text">Session used in Singapore at 10:00
+Same session used in Germany at 10:05
+</code></pre>
+<p>Likely stolen or proxied.</p>
+<h2 id="b-token-replay">B. Token replay</h2>
+<pre><code class="language-text">Refresh token rotated
+Old refresh token used again
+</code></pre>
+<p>This is a strong theft signal.</p>
+<h2 id="c-sessiondevice-mismatch">C. Session/device mismatch</h2>
+<pre><code class="language-text">Session created on Chrome Windows
+Later used from curl/Linux server
+</code></pre>
+<p>Suspicious.</p>
+<h2 id="d-post-auth-sensitive-actions">D. Post-auth sensitive actions</h2>
+<pre><code class="language-text">New login session
+        ↓
+MFA disabled
+        ↓
+API token created
+        ↓
+Data exported
+</code></pre>
+<p>Possible account takeover.</p>
+<h2 id="response-actions">Response actions</h2>
+<pre><code class="language-text">Revoke suspicious session
+Require step-up
+Revoke all sessions for user
+Disable refresh token family
+Notify user
+Create incident
+Block source infrastructure
+Review OAuth/API tokens
+Hunt across related accounts
+</code></pre>
+<h2 id="model-answer_9">Model answer</h2>
+<p>I would collect session creation and usage telemetry: user, auth method, MFA state, device fingerprint, IP, ASN, geo, user agent, token refresh events, and sensitive actions. Strong detections include same session used from impossible locations, refresh token reuse after rotation, sudden user-agent change, session use after recovery, and sensitive actions immediately after new session creation. At scale, detection should correlate session behavior with identity risk and post-login activity.</p>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Sessions are the post-auth credentials that actually carry user state across requests.</li>
+<li>Session fixation, theft, weak expiry, and incomplete revocation are the core risks.</li>
+<li>Strong cookies, rotation, timeouts, and re-authentication gates are the key defenses.</li>
+<li>Session design is part of authentication and authorization, not just web plumbing.</li>
+<li>A strong login flow is undermined if session handling is weak.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

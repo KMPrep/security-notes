@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seccomp — Secure Computing Mode</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: os\Unix-Linux\Seccomp\README.md</p>
+<h1 id="seccomp-secure-computing-mode">Seccomp — Secure Computing Mode</h1>
+<p><strong>Category:</strong> Unix/Linux Security, Sandboxing<br />
+<strong>Parent:</strong> <a href="../README.md">os/Unix-Linux/README.md</a></p>
+<h2 id="overview">Overview</h2>
+<p>Seccomp (Secure Computing Mode) is a Linux kernel feature that restricts which system calls a process can make. It is one of the most effective sandboxing primitives available to application developers and container runtimes because it reduces the kernel attack surface exposed to a potentially compromised process.</p>
+<p>The threat model is: <strong>a process is compromised and the attacker now controls its execution</strong>. Seccomp limits what that attacker can do by denying access to dangerous syscalls — even if the process is running as root inside a container.</p>
+<hr />
+<h2 id="seccomp-modes">Seccomp Modes</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SECCOMP_MODE_STRICT</code></td>
+<td>Only <code>read</code>, <code>write</code>, <code>_exit</code>, <code>sigreturn</code> are allowed; any other syscall kills the process</td>
+</tr>
+<tr>
+<td><code>SECCOMP_MODE_FILTER</code> (BPF)</td>
+<td>A BPF (Berkeley Packet Filter) program is loaded to evaluate each syscall; can allow, deny, log, or return an error</td>
+</tr>
+</tbody>
+</table>
+<p>Mode 2 (filter) is what all modern sandboxing uses. Mode 1 is too restrictive for any real application.</p>
+<hr />
+<h2 id="how-seccomp-bpf-works">How Seccomp-BPF Works</h2>
+<pre class="mermaid">
+flowchart TD
+    P[Process makes syscall] --> K[Kernel: is seccomp filter loaded?]
+    K -->|Yes| BPF[Run BPF filter program]
+    BPF --> R{Filter verdict}
+    R -->|ALLOW| Exec[Execute syscall normally]
+    R -->|ERRNO| Err[Return -EPERM or custom errno to process]
+    R -->|KILL| Kill[Kill process immediately with SIGSYS]
+    R -->|TRACE| Trace[Notify tracer via ptrace]
+    R -->|LOG| Log[Allow but log the syscall]
+    K -->|No| Exec
+</pre>
+<p>The BPF program evaluates the syscall number and, optionally, syscall arguments. Filters are composed as a list of BPF instructions that run in order until a terminal verdict is reached.</p>
+<hr />
+<h2 id="writing-a-seccomp-filter-with-libseccomp">Writing a Seccomp Filter with libseccomp</h2>
+<pre><code class="language-c">#include &lt;seccomp.h&gt;
+#include &lt;unistd.h&gt;
+
+int main() {
+    // Create a new filter — default action: kill process
+    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL);
+
+    // Allow only the syscalls the process needs
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read),   0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write),  0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(exit),   0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(brk),    0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mmap),   0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(fstat),  0);
+
+    // Load the filter into the kernel
+    seccomp_load(ctx);
+    seccomp_release(ctx);
+
+    // Process is now restricted to the allowlisted syscalls
+    return 0;
+}
+</code></pre>
+<hr />
+<h2 id="docker-default-seccomp-profile">Docker Default Seccomp Profile</h2>
+<p>Docker ships a default seccomp profile that <strong>blocks ~44 syscalls</strong> out of ~300+ available. Key blocked syscalls:</p>
+<table>
+<thead>
+<tr>
+<th>Blocked Syscall</th>
+<th>Why Dangerous</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ptrace</code></td>
+<td>Attach to any process; read/write memory</td>
+</tr>
+<tr>
+<td><code>kexec_load</code></td>
+<td>Load a new kernel</td>
+</tr>
+<tr>
+<td><code>create_module</code></td>
+<td>Load kernel modules</td>
+</tr>
+<tr>
+<td><code>init_module</code></td>
+<td>Load kernel modules (newer API)</td>
+</tr>
+<tr>
+<td><code>delete_module</code></td>
+<td>Unload kernel modules</td>
+</tr>
+<tr>
+<td><code>mount</code></td>
+<td>Mount filesystems (needed for escape techniques)</td>
+</tr>
+<tr>
+<td><code>unshare</code></td>
+<td>Create new namespaces</td>
+</tr>
+<tr>
+<td><code>clone</code> with <code>CLONE_NEWUSER</code></td>
+<td>Create user namespaces</td>
+</tr>
+<tr>
+<td><code>perf_event_open</code></td>
+<td>Performance monitoring; Spectre exploitation path</td>
+</tr>
+<tr>
+<td><code>bpf</code></td>
+<td>Load BPF programs; can be used to escape filters</td>
+</tr>
+<tr>
+<td><code>pivot_root</code></td>
+<td>Change root filesystem</td>
+</tr>
+<tr>
+<td><code>acct</code></td>
+<td>Enable/disable process accounting</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Check active profile:</strong></p>
+<pre><code class="language-bash">docker run --security-opt seccomp=default alpine cat /proc/1/status | grep Seccomp
+# Seccomp: 2 (means BPF filter active)
+</code></pre>
+<hr />
+<h2 id="kubernetes-seccomp">Kubernetes Seccomp</h2>
+<p>In Kubernetes, seccomp profiles are applied at the pod or container level:</p>
+<pre><code class="language-yaml"># Apply the runtime default seccomp profile (Docker/containerd default)
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault   # recommended baseline
+
+# Apply a custom profile from a node-local file
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/my-app.json
+
+# Unconfined (no seccomp) — avoid in production
+spec:
+  securityContext:
+    seccompProfile:
+      type: Unconfined
+</code></pre>
+<p><strong>Pod Security Standards</strong> (Kubernetes 1.25+):</p>
+<ul>
+<li><code>Restricted</code> profile requires <code>RuntimeDefault</code> or <code>Localhost</code> seccomp</li>
+<li><code>Baseline</code> profile allows <code>Unconfined</code> but recommends <code>RuntimeDefault</code></li>
+</ul>
+<hr />
+<h2 id="syscall-categories-to-harden-against">Syscall Categories to Harden Against</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Dangerous Syscalls</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kernel module loading</td>
+<td><code>init_module</code>, <code>finit_module</code>, <code>delete_module</code></td>
+<td>Load rootkit/backdoor into kernel</td>
+</tr>
+<tr>
+<td>Namespace creation</td>
+<td><code>unshare</code>, <code>clone</code> with ns flags</td>
+<td>Create user ns to gain caps; pivot namespaces</td>
+</tr>
+<tr>
+<td>Memory execution</td>
+<td><code>mprotect</code> with PROT_EXEC</td>
+<td>Mark heap/stack as executable for shellcode</td>
+</tr>
+<tr>
+<td>Process injection</td>
+<td><code>ptrace</code>, <code>process_vm_writev</code></td>
+<td>Inject code into other processes</td>
+</tr>
+<tr>
+<td>Filesystem evasion</td>
+<td><code>mount</code>, <code>pivot_root</code>, <code>chroot</code></td>
+<td>Change root; mount host paths</td>
+</tr>
+<tr>
+<td>Network raw access</td>
+<td><code>socket(AF_PACKET)</code></td>
+<td>Packet sniffing; ARP spoofing</td>
+</tr>
+<tr>
+<td>Kernel debug</td>
+<td><code>perf_event_open</code>, <code>kexec_load</code></td>
+<td>Side-channel; kernel replacement</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="seccomp-bypass-techniques">Seccomp Bypass Techniques</h2>
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Syscall number mismatch</strong></td>
+<td>32-bit syscall numbers differ from 64-bit; if filter checks 64-bit numbers only, use int 0x80 (32-bit ABI) with different numbers</td>
+</tr>
+<tr>
+<td><strong>Syscall argument bypass</strong></td>
+<td>Filter checks syscall number but not args; use a permitted syscall with crafted arguments to achieve denied effect</td>
+</tr>
+<tr>
+<td><strong>BPF filter race</strong></td>
+<td>Race between seccomp filter installation and syscall execution in multithreaded programs</td>
+</tr>
+<tr>
+<td><strong>New syscall not in filter</strong></td>
+<td>Kernel adds new syscalls (e.g., <code>io_uring</code>, <code>landlock</code>); old filters don't cover them</td>
+</tr>
+<tr>
+<td><strong>io_uring escape</strong></td>
+<td><code>io_uring</code> submission queue ring can perform file operations that bypass per-syscall seccomp filters</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="auditing-seccomp-coverage">Auditing Seccomp Coverage</h2>
+<pre><code class="language-bash"># Run a process under strace to capture all syscalls it makes
+strace -f -e trace=all ./myapp 2&gt;&amp;1 | awk '{print $1}' | sort -u
+
+# Use seccomp-tools to analyze BPF programs
+seccomp-tools dump ./myapp
+
+# Check if a container's process has seccomp active
+cat /proc/&lt;pid&gt;/status | grep Seccomp
+# 0 = no filter, 1 = strict mode, 2 = filter (BPF) mode
+</code></pre>
+<hr />
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Root Cause</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No seccomp profile applied</td>
+<td>Default <code>Unconfined</code> in Kubernetes</td>
+<td>All syscalls available; no kernel surface reduction</td>
+</tr>
+<tr>
+<td>Overly permissive profile</td>
+<td>All syscalls allowed except obvious ones</td>
+<td>Dangerous syscalls (ptrace, mount) still reachable</td>
+</tr>
+<tr>
+<td>32-bit syscall bypass</td>
+<td>Filter only checks 64-bit numbers</td>
+<td>Attacker uses int 0x80 to call denied syscalls</td>
+</tr>
+<tr>
+<td>New syscall not in filter</td>
+<td>io_uring or landlock added after profile written</td>
+<td>Bypass via new unfiltered syscall</td>
+</tr>
+<tr>
+<td>Profile applied in log-only mode</td>
+<td><code>SCMP_ACT_LOG</code> instead of <code>SCMP_ACT_KILL</code></td>
+<td>Violations logged but not blocked</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Seccomp reduces the kernel attack surface available to a compromised process — essential for containers.</li>
+<li>Docker's default profile blocks ~44 dangerous syscalls; it is a good baseline but not sufficient for high-security workloads.</li>
+<li>Apply <code>RuntimeDefault</code> seccomp in all Kubernetes workloads; enforce with Pod Security Admission.</li>
+<li>Audit actual syscall usage before writing a restrictive allowlist — <code>strace</code> and <code>seccomp-tools</code> are the right tools.</li>
+<li><code>io_uring</code> is a known seccomp bypass path; consider disabling or restricting it for high-security containers.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

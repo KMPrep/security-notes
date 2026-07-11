@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q3.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q3.py</h1>
+  <p class="file-path">Source: code\day6\answers\q3.py</p>
+  <p class="line-count">284 lines</p>
+  <pre><code class="language-python"># Q3 (Medium) - ACL Rule Conflict Detector
+# Given firewall ACL rules evaluated in priority order (lowest number = highest
+# priority), find all pairs that conflict (same src/dst/port, different action).
+# For each conflict, report which rule wins.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;I have a list of firewall rules. Two rules conflict when they match the
+#    same traffic (same src, dst, port) but have different actions (ALLOW vs DENY).
+#    I need to find ALL such conflicting pairs and report which rule wins.
+#    The winning rule is the one with the LOWER priority number (evaluated first).&quot;
+#
+# STEP 2 — Assumptions
+#   - Priority numbers are unique (if tied, define a tiebreak — here assume unique)
+#   - &#x27;src&#x27;, &#x27;dst&#x27;, &#x27;port&#x27; are the match keys. &#x27;action&#x27; is either &quot;ALLOW&quot; or &quot;DENY&quot;
+#   - A rule can conflict with more than one other rule
+#   - We want ALL conflicting pairs, not just the first
+#   - Input may be empty → return []
+#
+# STEP 3 — Pseudocode (O(n) grouping approach)
+#   group = dict keyed by (src, dst, port)
+#   for each rule:
+#       append to group[(rule.src, rule.dst, rule.port)]
+#   conflicts = []
+#   for key, group_rules in group.items():
+#       if any two rules in group have different actions:
+#           for each pair (r1, r2) with r1.action != r2.action:
+#               winner = min(r1, r2, key=priority)
+#               conflicts.append((r1, r2, winner))
+#   return conflicts
+#
+# STEP 4 — Why O(n) not O(n²)
+#   &quot;The dict groups rules by key in one pass O(n). Within each group,
+#    comparing all pairs is O(g²) where g = group size. In practice,
+#    g is small (few rules share same src/dst/port). Total = O(n + sum(g²)).
+#    For small groups: effectively O(n).&quot;
+#
+# STEP 5 — Naive approach
+#   &quot;Compare every pair of rules: O(n²). Fine for small rulesets.&quot;
+#
+# STEP 6 — Security framing
+#   &quot;ACL conflicts are a real security risk — a DENY rule might be shadowed by
+#    an ALLOW rule at higher priority. Tools like Batfish and Tufin detect these.
+#    In practice we want to surface: (a) shadow rules (a rule can NEVER match
+#    because a higher-priority rule always matches first), and (b) redundant rules.&quot;
+#
+# Complexity:
+#   Naive:    O(n²) time, O(1) extra space
+#   Grouped:  O(n) time,  O(n) space  ← target
+# ─────────────────────────────────────────────────────────────────────────────
+
+from itertools import combinations
+
+
+# ── APPROACH 1: Brute force O(n²) ────────────────────────────────────────────
+
+def find_conflicts_naive(rules: list) -&gt; list:
+    &quot;&quot;&quot;
+    Compare every pair of rules.
+
+    Time:  O(n²)
+    Space: O(c) where c = number of conflicts
+    &quot;&quot;&quot;
+    if not isinstance(rules, list):
+        raise TypeError(f&quot;Expected list, got {type(rules).__name__}&quot;)
+    if not rules:
+        return []
+
+    def _validate_rule(r, idx):
+        required = {&quot;priority&quot;, &quot;src&quot;, &quot;dst&quot;, &quot;port&quot;, &quot;action&quot;}
+        missing = required - set(r.keys())
+        if missing:
+            raise ValueError(f&quot;Rule at index {idx} missing fields: {missing}&quot;)
+        if r[&quot;action&quot;] not in (&quot;ALLOW&quot;, &quot;DENY&quot;):
+            raise ValueError(f&quot;Invalid action {r[&#x27;action&#x27;]!r} at index {idx}&quot;)
+
+    for i, r in enumerate(rules):
+        _validate_rule(r, i)
+
+    conflicts = []
+    n = len(rules)
+    for i in range(n):
+        for j in range(i + 1, n):
+            r1, r2 = rules[i], rules[j]
+            same_match = (r1[&quot;src&quot;] == r2[&quot;src&quot;] and
+                          r1[&quot;dst&quot;] == r2[&quot;dst&quot;] and
+                          r1[&quot;port&quot;] == r2[&quot;port&quot;])
+            if same_match and r1[&quot;action&quot;] != r2[&quot;action&quot;]:
+                winner = r1 if r1[&quot;priority&quot;] &lt; r2[&quot;priority&quot;] else r2
+                loser  = r2 if winner is r1 else r1
+                conflicts.append({
+                    &quot;rule_a&quot;:  r1,
+                    &quot;rule_b&quot;:  r2,
+                    &quot;winner&quot;:  winner,
+                    &quot;loser&quot;:   loser,
+                    &quot;key&quot;:     (r1[&quot;src&quot;], r1[&quot;dst&quot;], r1[&quot;port&quot;]),
+                })
+    return conflicts
+
+
+# ── APPROACH 2: Dict grouping O(n) ───────────────────────────────────────────
+
+def find_conflicts(rules: list) -&gt; list:
+    &quot;&quot;&quot;
+    Group rules by (src, dst, port). Within each group, find pairs with
+    different actions.
+
+    Time:  O(n + sum of g² for each group g) ≈ O(n) for small groups
+    Space: O(n)
+    &quot;&quot;&quot;
+    if not isinstance(rules, list):
+        raise TypeError(f&quot;Expected list, got {type(rules).__name__}&quot;)
+    if not rules:
+        return []
+
+    # Group by match key
+    groups: dict = {}
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f&quot;Rule at index {i} must be a dict, got {type(rule).__name__}&quot;)
+        for field in (&quot;priority&quot;, &quot;src&quot;, &quot;dst&quot;, &quot;port&quot;, &quot;action&quot;):
+            if field not in rule:
+                raise ValueError(f&quot;Rule at index {i} missing required field: {field!r}&quot;)
+        if rule[&quot;action&quot;] not in (&quot;ALLOW&quot;, &quot;DENY&quot;):
+            raise ValueError(f&quot;Invalid action {rule[&#x27;action&#x27;]!r} at index {i}&quot;)
+
+        key = (rule[&quot;src&quot;], rule[&quot;dst&quot;], rule[&quot;port&quot;])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(rule)
+
+    # Find conflicting pairs within each group
+    conflicts = []
+    for key, group_rules in groups.items():
+        # Use combinations to get all pairs
+        for r1, r2 in combinations(group_rules, 2):
+            if r1[&quot;action&quot;] != r2[&quot;action&quot;]:
+                winner = r1 if r1[&quot;priority&quot;] &lt; r2[&quot;priority&quot;] else r2
+                loser  = r2 if winner is r1 else r1
+                conflicts.append({
+                    &quot;rule_a&quot;:  r1,
+                    &quot;rule_b&quot;:  r2,
+                    &quot;winner&quot;:  winner,
+                    &quot;loser&quot;:   loser,
+                    &quot;key&quot;:     key,
+                })
+
+    # Sort by winning rule&#x27;s priority for deterministic output
+    conflicts.sort(key=lambda c: c[&quot;winner&quot;][&quot;priority&quot;])
+    return conflicts
+
+
+def format_conflict(c: dict) -&gt; str:
+    &quot;&quot;&quot;Human-readable conflict description.&quot;&quot;&quot;
+    w = c[&quot;winner&quot;]
+    l = c[&quot;loser&quot;]
+    key = c[&quot;key&quot;]
+    return (
+        f&quot;Conflict on (src={key[0]}, dst={key[1]}, port={key[2]}): &quot;
+        f&quot;priority={w[&#x27;priority&#x27;]} {w[&#x27;action&#x27;]} wins over &quot;
+        f&quot;priority={l[&#x27;priority&#x27;]} {l[&#x27;action&#x27;]}&quot;
+    )
+
+
+# ── MANUAL — no itertools, no dict.items() sugar ─────────────────────────────
+
+def find_conflicts_manual(rules: list) -&gt; list:
+    &quot;&quot;&quot;
+    Same grouping logic without itertools or built-in helpers.
+
+    Time:  O(n + sum g²)
+    Space: O(n)
+    &quot;&quot;&quot;
+    if rules is None:
+        raise ValueError(&quot;rules cannot be None&quot;)
+    n = len(rules)
+    if n == 0:
+        return []
+
+    # Manual grouping
+    keys    = []
+    buckets = []
+
+    for rule in rules:
+        key = (rule[&quot;src&quot;], rule[&quot;dst&quot;], rule[&quot;port&quot;])
+        found = False
+        for idx in range(len(keys)):
+            if keys[idx] == key:
+                buckets[idx].append(rule)
+                found = True
+                break
+        if not found:
+            keys.append(key)
+            buckets.append([rule])
+
+    conflicts = []
+    for idx in range(len(keys)):
+        key   = keys[idx]
+        group = buckets[idx]
+        gn    = len(group)
+        for i in range(gn):
+            for j in range(i + 1, gn):
+                r1, r2 = group[i], group[j]
+                if r1[&quot;action&quot;] != r2[&quot;action&quot;]:
+                    if r1[&quot;priority&quot;] &lt; r2[&quot;priority&quot;]:
+                        winner, loser = r1, r2
+                    else:
+                        winner, loser = r2, r1
+                    conflicts.append({
+                        &quot;rule_a&quot;: r1,
+                        &quot;rule_b&quot;: r2,
+                        &quot;winner&quot;: winner,
+                        &quot;loser&quot;:  loser,
+                        &quot;key&quot;:    key,
+                    })
+
+    return conflicts
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    rules = [
+        {&quot;priority&quot;: 10, &quot;src&quot;: &quot;10.0.0.0/8&quot;,     &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 443, &quot;action&quot;: &quot;ALLOW&quot;},
+        {&quot;priority&quot;: 20, &quot;src&quot;: &quot;10.0.0.0/8&quot;,     &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 443, &quot;action&quot;: &quot;DENY&quot;},
+        {&quot;priority&quot;: 5,  &quot;src&quot;: &quot;192.168.1.0/24&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 80,  &quot;action&quot;: &quot;DENY&quot;},
+        {&quot;priority&quot;: 30, &quot;src&quot;: &quot;192.168.1.0/24&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 80,  &quot;action&quot;: &quot;ALLOW&quot;},
+    ]
+
+    conflicts = find_conflicts(rules)
+    assert len(conflicts) == 2, f&quot;Expected 2 conflicts, got {len(conflicts)}&quot;
+
+    # Conflict 1: port 80  → priority 5 DENY wins over priority 30 ALLOW
+    c80 = next(c for c in conflicts if c[&quot;key&quot;][2] == 80)
+    assert c80[&quot;winner&quot;][&quot;priority&quot;] == 5
+    assert c80[&quot;winner&quot;][&quot;action&quot;]   == &quot;DENY&quot;
+
+    # Conflict 2: port 443 → priority 10 ALLOW wins over priority 20 DENY
+    c443 = next(c for c in conflicts if c[&quot;key&quot;][2] == 443)
+    assert c443[&quot;winner&quot;][&quot;priority&quot;] == 10
+    assert c443[&quot;winner&quot;][&quot;action&quot;]   == &quot;ALLOW&quot;
+
+    # Print formatted output
+    print(&quot;Conflicts found:&quot;)
+    for c in conflicts:
+        print(f&quot;  {format_conflict(c)}&quot;)
+    print()
+
+    # No conflicts
+    no_conflict_rules = [
+        {&quot;priority&quot;: 1, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 80,  &quot;action&quot;: &quot;ALLOW&quot;},
+        {&quot;priority&quot;: 2, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 443, &quot;action&quot;: &quot;ALLOW&quot;},
+    ]
+    assert find_conflicts(no_conflict_rules) == []
+
+    # Same action — not a conflict
+    same_action = [
+        {&quot;priority&quot;: 1, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 80, &quot;action&quot;: &quot;DENY&quot;},
+        {&quot;priority&quot;: 2, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;dst&quot;: &quot;any&quot;, &quot;port&quot;: 80, &quot;action&quot;: &quot;DENY&quot;},
+    ]
+    assert find_conflicts(same_action) == []
+
+    # Empty
+    assert find_conflicts([]) == []
+
+    # All approaches agree
+    for tc in [rules, no_conflict_rules, same_action, []]:
+        n = find_conflicts_naive(tc)
+        g = find_conflicts(tc)
+        m = find_conflicts_manual(tc)
+        assert len(n) == len(g) == len(m), \
+            f&quot;Count mismatch on {tc}: {len(n)}, {len(g)}, {len(m)}&quot;
+
+    print(&quot;Q3 — All assertions passed.&quot;)
+    print()
+    print(&quot;Complexity:&quot;)
+    print(&quot;  Naive:    O(n²) time, O(c) space&quot;)
+    print(&quot;  Grouped:  O(n) time, O(n) space  (O(n + g²) per group, small g in practice)&quot;)
+    print()
+    print(&quot;Security note: ACL conflicts risk ALLOW overriding intended DENY.&quot;)
+    print(&quot;  Always audit: which is the effective rule for a given flow?&quot;)
+    print(&quot;  Shadow rule: rule that can NEVER match (always blocked by higher-priority rule)&quot;)
+</code></pre>
+</body>
+</html>

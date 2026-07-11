@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q25.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q25.py</h1>
+  <p class="file-path">Source: code\day4\answers\q25.py</p>
+  <p class="line-count">313 lines</p>
+  <pre><code class="language-python"># Q25 - Design: What Algorithm Would You Use?
+# Five real-world security engineering scenarios. For each, describe the
+# best algorithm, complexity, and trade-offs — as in a system design.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# SCENARIO 1 — Search sorted blocklist of 1M IPs for a given IP
+#   Answer:  Binary search  O(log n) = ~20 comparisons for 1M entries
+#   Why:     List is sorted and static (or rarely updated) → binary search ideal
+#   Alt:     Hash set for O(1) average lookup — but uses more memory and doesn&#x27;t
+#            preserve sort order. If you need range queries (CIDR blocks),
+#            binary search on sorted prefix tree or interval tree.
+#   Don&#x27;t:   Linear scan O(n) — 1M comparisons per lookup is unacceptable.
+#
+# SCENARIO 2 — Top 10 most active scanners from 50M log entries
+#   Answer:  Frequency dict + min-heap of size k=10
+#   Step 1:  O(n) pass to build frequency dict: {ip: count}
+#   Step 2:  Iterate unique IPs (~u entries), maintain min-heap of size 10
+#            → O(u log 10) ≈ O(u) since log(10) is constant
+#   Total:   O(n + u) ≈ O(n)
+#   Alt:     Counter.most_common(10) — same O(n + u log 10) under the hood
+#   Don&#x27;t:   Sort all unique IPs — O(u log u) — worse, unnecessary.
+#
+# SCENARIO 3 — Detect exact duplicate events in a stream
+#   Answer:  Hash set (seen = set()) — O(1) average per insert and lookup
+#   Hash:    Use a canonical hash of (timestamp, source_ip, event_type, payload)
+#   Concern: Hash collisions — extremely rare with SHA-256; for security,
+#            use cryptographic hash to avoid adversarial collision attacks.
+#   Memory:  O(n) — for very large streams, use Bloom filter (probabilistic,
+#            O(1) space per element, small false-positive rate, zero false negatives)
+#   Don&#x27;t:   Sort and compare adjacent — O(n log n) and requires buffering.
+#
+# SCENARIO 4 — Merge 100 sorted streams of 10K events each (1M total)
+#   Answer:  k-way merge with min-heap (priority queue)
+#   Init:    Push first element of each stream into heap: O(k log k) = O(100 * 7) ≈ O(1)
+#   Process: Each pop + push = O(log k); N total events → O(N log k)
+#            For N=1M, k=100: O(1M * log 100) = O(1M * 7) ≈ 7M operations
+#   Alt:     Sort all 1M events together: O(N log N) = O(1M * 20) ≈ 20M operations
+#            k-way merge wins because log k &lt;&lt; log N when streams are pre-sorted.
+#   Don&#x27;t:   Merge pairs sequentially (merge sort of streams) — same O(N log k)
+#            but more complex to implement.
+#
+# SCENARIO 5 — Find first rule where priority drops (first inversion)
+#   Answer:  Linear scan O(n) — return index of first pair where priority[i] &gt; priority[i+1]
+#   Why:     You need to find the FIRST occurrence — must check from the start.
+#            No shortcut via binary search because violations aren&#x27;t monotone.
+#   Edge:    If priorities must be strictly increasing and you only need to CHECK
+#            if the list is sorted (not find the violation), you still need O(n).
+#   Binary search would work for: &quot;Is there any violation in the right half?&quot;
+#            But to find the FIRST, you must scan left-to-right regardless.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+import bisect
+import heapq
+import hashlib
+from collections import Counter
+
+
+# ══ SCENARIO 1: Search sorted blocklist ══════════════════════════════════════
+
+def search_blocklist_linear(blocklist: list, ip: str) -&gt; bool:
+    &quot;&quot;&quot;Naive O(n) — do NOT use in production for large lists.&quot;&quot;&quot;
+    return ip in blocklist
+
+
+def search_blocklist_binary(blocklist: list, ip: str) -&gt; bool:
+    &quot;&quot;&quot;
+    Binary search on sorted blocklist.
+
+    Time:  O(log n)
+    Space: O(1)
+
+    Assumes blocklist is sorted (sort semantics: lexicographic for IPs is wrong;
+    for correct IP order, store as integers. Here we demonstrate binary search logic.)
+    &quot;&quot;&quot;
+    lo, hi = 0, len(blocklist) - 1
+    while lo &lt;= hi:
+        mid = lo + (hi - lo) // 2
+        if blocklist[mid] == ip:
+            return True
+        elif blocklist[mid] &lt; ip:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return False
+
+
+def search_blocklist_set(blocklist: list, ip: str) -&gt; bool:
+    &quot;&quot;&quot;
+    Hash set lookup.
+
+    Time:  O(1) average
+    Space: O(n) for the set
+
+    Use when you have many lookups and memory is not a constraint.
+    Pre-build the set once: O(n). Each lookup: O(1).
+    &quot;&quot;&quot;
+    blocklist_set = set(blocklist)
+    return ip in blocklist_set
+
+
+# ══ SCENARIO 2: Top-10 most active scanners ═══════════════════════════════════
+
+def top_k_scanners(log_entries: list, k: int = 10) -&gt; list:
+    &quot;&quot;&quot;
+    Build frequency map + maintain min-heap of size k.
+
+    Time:  O(n + u log k)  where u = unique IP count, n = total logs
+    Space: O(u)
+    &quot;&quot;&quot;
+    if k &lt;= 0:
+        return []
+
+    freq = {}
+    for ip in log_entries:
+        freq[ip] = freq.get(ip, 0) + 1
+
+    # Min-heap of (count, ip) — heap preserves smallest count at root
+    heap = []
+    for ip, count in freq.items():
+        if len(heap) &lt; k:
+            heapq.heappush(heap, (count, ip))
+        elif count &gt; heap[0][0]:
+            heapq.heapreplace(heap, (count, ip))
+
+    # Return sorted descending by count
+    return sorted(heap, key=lambda x: -x[0])
+
+
+def top_k_scanners_builtin(log_entries: list, k: int = 10) -&gt; list:
+    &quot;&quot;&quot;
+    Counter.most_common(k) — idiomatic Python, same complexity.
+
+    Time:  O(n + u log k)  via internal heapq.nlargest
+    &quot;&quot;&quot;
+    if k &lt;= 0:
+        return []
+    return Counter(log_entries).most_common(k)
+
+
+# ══ SCENARIO 3: Detect exact duplicate events ════════════════════════════════
+
+def _event_fingerprint(event: dict) -&gt; str:
+    &quot;&quot;&quot;
+    Canonical SHA-256 fingerprint for an event.
+    Use cryptographic hash to resist adversarial collisions.
+    &quot;&quot;&quot;
+    key = f&quot;{event.get(&#x27;ts&#x27;)}:{event.get(&#x27;src&#x27;)}:{event.get(&#x27;type&#x27;)}:{event.get(&#x27;payload&#x27;)}&quot;
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def detect_duplicates(events: list) -&gt; list:
+    &quot;&quot;&quot;
+    Use a hash set to find duplicate events in O(n) time.
+
+    Time:  O(n)
+    Space: O(n)
+
+    Returns list of duplicate events (second and subsequent occurrences).
+    &quot;&quot;&quot;
+    seen = set()
+    duplicates = []
+    for event in events:
+        fp = _event_fingerprint(event)
+        if fp in seen:
+            duplicates.append(event)
+        else:
+            seen.add(fp)
+    return duplicates
+
+
+# ══ SCENARIO 4: k-way merge of sorted streams ════════════════════════════════
+
+def kway_merge(streams: list) -&gt; list:
+    &quot;&quot;&quot;
+    Merge k sorted streams into one sorted output using a min-heap.
+
+    Time:  O(N log k)  where N = total events, k = number of streams
+    Space: O(k)  for the heap + O(N) for output
+
+    heap entries: (value, stream_index, element_index)
+    &quot;&quot;&quot;
+    if not streams:
+        return []
+
+    heap   = []
+    result = []
+
+    # Seed the heap with the first element of each non-empty stream
+    for si, stream in enumerate(streams):
+        if stream:
+            heapq.heappush(heap, (stream[0], si, 0))
+
+    while heap:
+        val, si, ei = heapq.heappop(heap)
+        result.append(val)
+        next_ei = ei + 1
+        if next_ei &lt; len(streams[si]):
+            heapq.heappush(heap, (streams[si][next_ei], si, next_ei))
+
+    return result
+
+
+# ══ SCENARIO 5: Find first priority inversion ════════════════════════════════
+
+def first_priority_drop(priorities: list) -&gt; int:
+    &quot;&quot;&quot;
+    Find index i where priorities[i] &gt; priorities[i+1] (first drop).
+    Linear scan — must check from start to find FIRST occurrence.
+
+    Time:  O(n)
+    Space: O(1)
+
+    Returns index i (0-based) of the first inversion, or -1 if none.
+    &quot;&quot;&quot;
+    if not isinstance(priorities, list):
+        raise TypeError(f&quot;Expected list, got {type(priorities).__name__}&quot;)
+
+    for i in range(len(priorities) - 1):
+        if priorities[i] &gt; priorities[i + 1]:
+            return i
+    return -1
+
+
+def first_priority_drop_manual(priorities: list) -&gt; int:
+    &quot;&quot;&quot;Same logic, explicit while loop.&quot;&quot;&quot;
+    n = len(priorities)
+    i = 0
+    while i &lt; n - 1:
+        if priorities[i] &gt; priorities[i + 1]:
+            return i
+        i += 1
+    return -1
+
+
+# ══ Tests ══════════════════════════════════════════════════════════════════════
+
+if __name__ == &quot;__main__&quot;:
+    # ── Scenario 1: blocklist search
+    blocklist = sorted([&quot;10.0.0.1&quot;, &quot;192.168.1.100&quot;, &quot;172.16.0.5&quot;, &quot;8.8.8.8&quot;])
+    assert search_blocklist_binary(blocklist, &quot;192.168.1.100&quot;) is True
+    assert search_blocklist_binary(blocklist, &quot;1.2.3.4&quot;)       is False
+    assert search_blocklist_set(blocklist,    &quot;8.8.8.8&quot;)        is True
+    assert search_blocklist_set(blocklist,    &quot;9.9.9.9&quot;)        is False
+    print(&quot;Scenario 1 passed: blocklist binary search and set lookup&quot;)
+
+    # ── Scenario 2: top-k scanners
+    logs = [&quot;10.0.0.1&quot;] * 50 + [&quot;10.0.0.2&quot;] * 30 + [&quot;10.0.0.3&quot;] * 20 + \
+           [&quot;10.0.0.4&quot;] * 15 + [&quot;10.0.0.5&quot;] * 5
+    top3 = top_k_scanners(logs, k=3)
+    assert top3[0][1] == &quot;10.0.0.1&quot;    # highest count first
+    assert top3[1][1] == &quot;10.0.0.2&quot;
+    assert top3[2][1] == &quot;10.0.0.3&quot;
+    top3_builtin = top_k_scanners_builtin(logs, k=3)
+    assert top3_builtin[0][0] == &quot;10.0.0.1&quot;
+    print(&quot;Scenario 2 passed: top-k scanners with min-heap&quot;)
+
+    # ── Scenario 3: duplicate detection
+    events = [
+        {&quot;ts&quot;: 1000, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;type&quot;: &quot;login&quot;,  &quot;payload&quot;: &quot;user=admin&quot;},
+        {&quot;ts&quot;: 1001, &quot;src&quot;: &quot;10.0.0.2&quot;, &quot;type&quot;: &quot;scan&quot;,   &quot;payload&quot;: &quot;port=22&quot;},
+        {&quot;ts&quot;: 1000, &quot;src&quot;: &quot;10.0.0.1&quot;, &quot;type&quot;: &quot;login&quot;,  &quot;payload&quot;: &quot;user=admin&quot;},  # dup
+        {&quot;ts&quot;: 1002, &quot;src&quot;: &quot;10.0.0.3&quot;, &quot;type&quot;: &quot;alert&quot;,  &quot;payload&quot;: &quot;xss detected&quot;},
+    ]
+    dups = detect_duplicates(events)
+    assert len(dups) == 1
+    assert dups[0][&quot;ts&quot;] == 1000
+    print(&quot;Scenario 3 passed: duplicate event detection with SHA-256 fingerprint&quot;)
+
+    # ── Scenario 4: k-way merge
+    streams = [
+        [1, 5, 9],
+        [2, 6, 10],
+        [3, 7, 11],
+        [4, 8, 12],
+    ]
+    merged = kway_merge(streams)
+    assert merged == list(range(1, 13))
+    assert kway_merge([]) == []
+    assert kway_merge([[3, 1]]) == [3, 1]   # stream itself may not be sorted if passed unsorted
+    print(&quot;Scenario 4 passed: k-way merge with min-heap&quot;)
+
+    # ── Scenario 5: first priority drop
+    assert first_priority_drop([1, 2, 5, 3, 4]) == 2   # 5 &gt; 3 at index 2
+    assert first_priority_drop([1, 2, 3, 4, 5]) == -1  # no drop
+    assert first_priority_drop([5, 4, 3, 2, 1]) == 0   # first element already drops
+    assert first_priority_drop([])               == -1
+    assert first_priority_drop([1])              == -1
+    assert first_priority_drop_manual([1, 2, 5, 3, 4]) == 2
+    print(&quot;Scenario 5 passed: first priority drop linear scan&quot;)
+
+    print()
+    print(&quot;=&quot; * 60)
+    print(&quot;Q25 — All 5 scenario assertions passed.&quot;)
+    print(&quot;=&quot; * 60)
+    print()
+    print(&quot;Design cheat sheet:&quot;)
+    print(&quot;  1. Sorted static list of 1M IPs → binary search O(log n)&quot;)
+    print(&quot;     Or hash set for O(1) lookup if memory allows&quot;)
+    print()
+    print(&quot;  2. Top 10 of 50M logs → freq dict O(n) + min-heap O(u log k)&quot;)
+    print(&quot;     Total: O(n). Python idiom: Counter.most_common(10)&quot;)
+    print()
+    print(&quot;  3. Exact duplicate detection → hash set + SHA-256 fingerprint O(n)&quot;)
+    print(&quot;     For huge streams: Bloom filter (probabilistic, O(1) space/elem)&quot;)
+    print()
+    print(&quot;  4. Merge 100 sorted streams → min-heap k-way merge O(N log k)&quot;)
+    print(&quot;     N=1M, k=100: O(7M). Sorting all: O(20M). k-way wins.&quot;)
+    print()
+    print(&quot;  5. First priority drop → linear scan O(n), must scan from start&quot;)
+    print(&quot;     Binary search won&#x27;t help for FIRST occurrence of non-monotone property&quot;)
+</code></pre>
+</body>
+</html>

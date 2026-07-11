@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Threat Hunting</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: detection\Threat-Hunting\README.md</p>
+<h1 id="threat-hunting">Threat Hunting</h1>
+<p><strong>Category:</strong> Detection Engineering — Proactive, Hypothesis-Driven Adversary Discovery<br />
+<strong>Frameworks/refs:</strong> MITRE ATT&amp;CK, Sqrrl/TaHiTI Hunt Loop, Hunting Maturity Model (HMM), MITRE Cyber Analytics Repository (CAR), Pyramid of Pain, PEAK Threat Hunting Framework<br />
+<strong>Cross-references:</strong> <a href="../Detection-Engineering/README.md"><code>detection/Detection-Engineering</code></a> · <a href="../MITRE-ATTACK/README.md"><code>detection/MITRE-ATTACK</code></a> · <a href="../IDS-SIEM/README.md"><code>detection/IDS-SIEM</code></a> · <a href="../Anomaly-Detection/README.md"><code>detection/Anomaly-Detection</code></a></p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>Threat hunting is the <strong>proactive, hypothesis-driven search through telemetry for adversary activity that has already evaded automated detection.</strong> It assumes breach: instead of waiting for an alert to fire, a human analyst forms a testable hypothesis about how an attacker might operate in <em>this</em> environment, queries raw data to prove or disprove it, and either finds evil or produces evidence of absence. It is fundamentally a <strong>detection-gap discovery discipline</strong> — every good hunt either surfaces a live intrusion or exposes a blind spot that should become a new automated detection. At scale, where you ingest petabytes of EDR, DNS, proxy, auth, and cloud audit logs daily, hunting is the mechanism that keeps mean-time-to-detect (MTTD) from silently drifting upward as attacker tradecraft evolves faster than your rule set.</p>
+<p>Hunting is <strong>not</strong> alert triage (that's reactive SOC work), it's <strong>not</strong> incident response (that starts once you've confirmed a compromise), and it's <strong>not</strong> running a vendor's out-of-the-box detections. Those are downstream of, or orthogonal to, hunting. The defining property is that you start from a <em>question the SIEM cannot already answer with an alert</em>.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- Hunting is <strong>assume-breach</strong>: you look for what got past the tools, driven by a <strong>falsifiable hypothesis</strong>, not an alert.<br />
+- The output of a hunt is a <strong>decision</strong>: found evil → IR; found nothing → a <strong>new detection</strong> or an accepted-gap finding. A hunt that produces neither was a waste.<br />
+- Three modes: <strong>hypothesis-driven</strong> (ATT&amp;CK/intel), <strong>IOC/intel-driven</strong> (retro-hunt for known indicators), <strong>baseline/anomaly</strong> (stack-count outliers). Mature teams do all three.<br />
+- Aim high on the <strong>Pyramid of Pain</strong> — hunt for <strong>TTPs and behaviors</strong>, not hashes/IPs, because behaviors are expensive for the adversary to change.<br />
+- Measure hunts by <strong>detections shipped, dwell-time reduction, and coverage of ATT&amp;CK</strong> — not "number of hunts run."</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works-deep">2. How It Works (deep)</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>Hunting operationalizes a loop borrowed from intelligence analysis: <strong>hypothesis → data → analysis → conclusion → codify</strong>. The engine that makes it repeatable is a small set of interacting concepts.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>What it is</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hypothesis</strong></td>
+<td>A falsifiable statement: "An adversary is using <code>rundll32.exe</code> to proxy-execute a malicious DLL from a user-writable path."</td>
+<td>Bounds the hunt; without it you are just staring at logs. Must be <em>testable with data you have</em>.</td>
+</tr>
+<tr>
+<td><strong>Hunting Maturity Model (HMM)</strong></td>
+<td>HMM0 (rely on alerts only) → HMM4 (automated, continuous hunting). Ryan Stillions/Sqrrl model.</td>
+<td>Sets realistic expectations; you cannot hunt at HMM3 on HMM1 data.</td>
+</tr>
+<tr>
+<td><strong>The Hunt Loop</strong></td>
+<td>Create hypothesis → investigate via tools/data → uncover patterns/TTPs → inform &amp; enrich analytics. Sqrrl/TaHiTI.</td>
+<td>The repeatable process that turns a one-off insight into a durable detection.</td>
+</tr>
+<tr>
+<td><strong>Pyramid of Pain</strong></td>
+<td>Hashes &lt; IPs &lt; domains &lt; network/host artifacts &lt; tools &lt; <strong>TTPs</strong> — ascending order of adversary cost to change.</td>
+<td>Hunts targeting the <em>top</em> (TTPs) impose lasting cost; IOC hunts are cheap for the attacker to defeat.</td>
+</tr>
+<tr>
+<td><strong>ATT&amp;CK as hypothesis generator</strong></td>
+<td>A matrix of ~200 techniques mapped to tactics (TA00xx) with data-source requirements.</td>
+<td>Systematizes "what should I hunt next?" and gives you coverage bookkeeping.</td>
+</tr>
+<tr>
+<td><strong>Data source / analytic</strong></td>
+<td>The raw telemetry (e.g., <code>Sysmon EventID 1</code> process creation) and the query that interrogates it (MITRE CAR).</td>
+<td>The hypothesis is worthless if the required data source isn't collected and retained.</td>
+</tr>
+<tr>
+<td><strong>Stack counting (frequency analysis)</strong></td>
+<td>Aggregate a field, sort by count; the <strong>long tail of rare values</strong> is where evil hides.</td>
+<td>The workhorse technique for "unknown-unknowns" — no signature required.</td>
+</tr>
+<tr>
+<td><strong>Enrichment &amp; pivoting</strong></td>
+<td>Add context (GeoIP, WHOIS, ASN, prevalence, reputation) and traverse relationships (this hash → these hosts → this parent).</td>
+<td>Turns a weak signal into an investigative lead; cuts false positives.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The maturity progression</strong> matters in practice because it forces you to be honest about prerequisites:</p>
+<pre class="mermaid">
+flowchart LR
+  HMM0[HMM0 Initial rely on alerts] --> HMM1[HMM1 Minimal IOC search]
+  HMM1 --> HMM2[HMM2 Procedural apply others hunts]
+  HMM2 --> HMM3[HMM3 Innovative create new analytics]
+  HMM3 --> HMM4[HMM4 Leading automate the hunt]
+  HMM0 -.data quality.-> Data[Centralized retained telemetry]
+  Data -.enables.-> HMM2
+</pre>
+<p><strong>Three hunting modes</strong> — a senior engineer must distinguish them and know when each applies:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Trigger / input</th>
+<th>Strengths</th>
+<th>Weaknesses</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hypothesis-driven (TTP)</strong></td>
+<td>An ATT&amp;CK technique or threat model</td>
+<td>Finds novel activity; high on Pyramid of Pain</td>
+<td>Requires skill and rich data</td>
+<td>"Hunt for LSASS credential access via handle to <code>lsass.exe</code>" (T1003.001)</td>
+</tr>
+<tr>
+<td><strong>IOC / intel-driven (retro-hunt)</strong></td>
+<td>Fresh threat intel: hashes, domains, JA3, IPs</td>
+<td>Fast, cheap, high-confidence when it hits</td>
+<td>Low on pyramid; attacker rotates indicators trivially</td>
+<td>Sweep 90 days of DNS for a newly published C2 domain</td>
+</tr>
+<tr>
+<td><strong>Baseline / anomaly-driven</strong></td>
+<td>Statistical model of "normal"</td>
+<td>Catches unknown-unknowns; no prior intel needed</td>
+<td>Noisy; needs good baselines and tuning</td>
+<td>Stack-count parent/child process pairs; investigate the rare tail</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-concrete-configuration-queries">2.2 Concrete configuration &amp; queries</h3>
+<p>A hunt program is only as good as the telemetry it can query. First, <strong>make sure the data source exists</strong>. On Windows endpoints, hunting depends on Sysmon with a curated config (the <a href="https://github.com/SwiftOnSecurity/sysmon-config">SwiftOnSecurity</a> or Olaf Hartong <code>sysmon-modular</code> config is the de-facto standard) — you cannot hunt process lineage without EventID 1:</p>
+<pre><code class="language-xml">&lt;!-- sysmon config excerpt: capture process creation + network + DNS --&gt;
+&lt;Sysmon schemaversion=&quot;4.90&quot;&gt;
+  &lt;EventFiltering&gt;
+    &lt;RuleGroup name=&quot;proc-create&quot; groupRelation=&quot;or&quot;&gt;
+      &lt;ProcessCreate onmatch=&quot;exclude&quot;&gt;
+        &lt;!-- exclude only high-volume known-good; include everything else --&gt;
+        &lt;Image condition=&quot;is&quot;&gt;C:\Windows\System32\SearchIndexer.exe&lt;/Image&gt;
+      &lt;/ProcessCreate&gt;
+    &lt;/RuleGroup&gt;
+    &lt;RuleGroup name=&quot;dns&quot; groupRelation=&quot;or&quot;&gt;
+      &lt;DnsQuery onmatch=&quot;include&quot;/&gt;   &lt;!-- EventID 22, critical for C2 hunts --&gt;
+    &lt;/RuleGroup&gt;
+  &lt;/EventFiltering&gt;
+&lt;/Sysmon&gt;
+</code></pre>
+<p><strong>Hunt example A — rare parent/child process relationships (stack counting).</strong> The premise: <code>winword.exe</code>, <code>excel.exe</code>, <code>outlook.exe</code> almost never legitimately spawn a shell or LOLBin. This is the classic macro/phishing-payload behavior (T1204.002 User Execution, T1059 Command and Scripting Interpreter). In Splunk over Sysmon EventID 1:</p>
+<pre><code class="language-spl">index=sysmon EventCode=1
+| eval parent=lower(mvindex(split(ParentImage,&quot;\\&quot;),-1))
+| eval child=lower(mvindex(split(Image,&quot;\\&quot;),-1))
+| search parent IN (&quot;winword.exe&quot;,&quot;excel.exe&quot;,&quot;powerpnt.exe&quot;,&quot;outlook.exe&quot;,&quot;mshta.exe&quot;)
+| stats count dc(Computer) as hosts values(CommandLine) as cmds by parent child
+| sort + count
+| where hosts &lt; 5              /* rare across the fleet = suspicious */
+</code></pre>
+<p>The <code>sort + count</code> puts the <strong>rarest pairs at the top</strong> — the long tail is your hunting ground. <code>winword.exe → cmd.exe</code> on three hosts out of 40,000 is a lead; <code>winword.exe → splwow64.exe</code> on 39,000 hosts is printing. Equivalent in Microsoft Sentinel / Defender KQL:</p>
+<pre><code class="language-kusto">DeviceProcessEvents
+| where InitiatingProcessFileName in~ (&quot;winword.exe&quot;,&quot;excel.exe&quot;,&quot;powerpnt.exe&quot;,&quot;outlook.exe&quot;,&quot;mshta.exe&quot;)
+| summarize hosts = dcount(DeviceId), cmds = make_set(ProcessCommandLine, 20), first=min(Timestamp)
+    by InitiatingProcessFileName, FileName
+| where hosts &lt; 5
+| order by hosts asc
+</code></pre>
+<p><strong>Hunt example B — beaconing detection via connection-interval analysis.</strong> C2 implants (Cobalt Strike, Sliver, Mythic) "call home" on a periodic interval, often with jitter. The tell is a <strong>low variance in inter-arrival time</strong> for many connections to the same destination. Hunt in proxy/firewall/Zeek <code>conn.log</code>:</p>
+<pre><code class="language-sql">-- BigQuery / Presto over proxy or Zeek conn logs
+WITH ordered AS (
+  SELECT src_ip, dst_host, ts,
+         TIMESTAMP_DIFF(ts,
+           LAG(ts) OVER (PARTITION BY src_ip, dst_host ORDER BY ts),
+           SECOND) AS delta
+  FROM proxy_logs
+  WHERE ts &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+)
+SELECT src_ip, dst_host,
+       COUNT(*)                    AS conns,
+       AVG(delta)                  AS mean_interval,
+       STDDEV(delta)               AS jitter,
+       STDDEV(delta)/NULLIF(AVG(delta),0) AS coeff_var
+FROM ordered
+WHERE delta IS NOT NULL
+GROUP BY src_ip, dst_host
+HAVING conns &gt; 30                  -- enough beacons to be periodic
+   AND coeff_var &lt; 0.15            -- very regular = machine, not human
+   AND mean_interval BETWEEN 30 AND 3600
+ORDER BY coeff_var ASC;
+</code></pre>
+<p>A <strong>coefficient of variation &lt; 0.15</strong> with dozens of connections to a single low-reputation host is a strong beaconing signal. Enrich <code>dst_host</code> with domain age (newly registered domains, NRDs), ASN reputation, and whether it's in your DNS baseline. This is the analytic behind RITA (Real Intelligence Threat Analytics) and Zeek-based beacon hunting.</p>
+<p><strong>Hunt example C — anomalous service-account token usage in cloud audit logs.</strong> Service accounts (SAs) are non-human identities with predictable behavior; deviation is high-signal. Threat: T1078.004 Valid Accounts: Cloud Accounts / stolen SA key exfiltrated and used from a novel location. In GCP, query Cloud Audit Logs (Data Access + Admin Activity):</p>
+<pre><code class="language-sql">-- GCP Log Analytics / BigQuery export of Cloud Audit Logs
+SELECT
+  protopayload_auditlog.authenticationInfo.principalEmail AS principal,
+  protopayload_auditlog.requestMetadata.callerIp          AS caller_ip,
+  protopayload_auditlog.methodName                        AS method,
+  COUNT(*)                                                 AS calls
+FROM `myorg.logs.cloudaudit_googleapis_com_data_access`
+WHERE timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  AND principalEmail LIKE '%.gserviceaccount.com'          -- service accounts only
+  AND caller_ip NOT IN (SELECT ip FROM `myorg.baseline.sa_known_ips`)
+GROUP BY principal, caller_ip, method
+ORDER BY calls DESC;
+</code></pre>
+<p>The hunt hypothesis: "A service account key has been stolen and is being used from an IP the SA has never called from." The baseline table <code>sa_known_ips</code> is itself a hunt artifact — you build it by profiling 30 days of normal SA behavior. Extend the analytic with <strong>impossible-travel</strong> logic and <strong>new-method</strong> detection (an SA that normally only reads GCS suddenly calling <code>SetIamPolicy</code> is privilege escalation, T1098). AWS equivalent hunts CloudTrail for <code>AssumeRole</code> / <code>GetSessionToken</code> from anomalous <code>sourceIPAddress</code> and <code>userAgent</code>; Azure hunts the sign-in logs and <code>AuditLogs</code> for managed-identity anomalies.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>The Hunt Loop</strong> (Sqrrl / TaHiTI), the canonical process model:</p>
+<pre class="mermaid">
+flowchart TD
+  A[Form hypothesis from ATT&CK intel or anomaly] --> B[Identify required data sources]
+  B --> C[Query and investigate telemetry]
+  C --> D{Evidence of adversary}
+  D -- yes --> E[Escalate to incident response]
+  D -- no --> F{Detection gap found}
+  F -- yes --> G[Codify into automated detection]
+  F -- no --> H[Document accepted gap and coverage]
+  E --> I[Feed findings back enrich analytics]
+  G --> I
+  H --> I
+  I --> A
+</pre>
+<p><strong>Detection funnel</strong> — where hunting sits relative to automation:</p>
+<pre class="mermaid">
+flowchart LR
+  Tel[Raw telemetry EDR DNS proxy auth cloud] --> Auto[Automated detections rules]
+  Auto --> Alerts[Alerts to SOC triage]
+  Tel --> Hunt[Threat hunting hypothesis driven]
+  Hunt -- new analytic --> Auto
+  Hunt -- confirmed evil --> IR[Incident response]
+  Alerts -- confirmed --> IR
+  Hunt -- gap accepted --> Backlog[Coverage backlog]
+</pre>
+<p><strong>Beaconing analysis sequence</strong> — how interval analysis flags C2:</p>
+<pre class="mermaid">
+sequenceDiagram
+  participant Implant as Compromised host
+  participant Proxy as Egress proxy log
+  participant Hunt as Hunt analytic
+  participant Analyst
+  Implant->>Proxy: connect to c2 every 60s plus jitter
+  Implant->>Proxy: connect again
+  Implant->>Proxy: connect again
+  Hunt->>Proxy: aggregate intervals per src dst
+  Hunt->>Hunt: compute mean and coefficient of variation
+  Hunt-->>Analyst: low variance high count lead
+  Analyst->>Analyst: enrich domain age ASN reputation
+  Analyst->>Analyst: confirm C2 open incident
+</pre>
+<p><strong>Hunt lifecycle state view</strong> — a hunt as a state machine from backlog to shipped detection:</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Backlog
+  Backlog --> Scoped
+  Scoped --> DataCheck
+  DataCheck --> Blocked
+  Blocked --> Scoped
+  DataCheck --> Hunting
+  Hunting --> Findings
+  Findings --> IncidentResponse
+  Findings --> Detection
+  Findings --> Documented
+  Detection --> [*]
+  Documented --> [*]
+  IncidentResponse --> [*]
+</pre>
+<hr />
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<p>Threat hunting's value is clearest in breaches defined by <strong>long dwell time</strong> — cases where the intrusion sat undetected because it produced no alert, and only proactive search (or, tragically, its absence) determined the outcome.</p>
+<table>
+<thead>
+<tr>
+<th>Incident</th>
+<th>Year</th>
+<th>Root cause / tradecraft</th>
+<th>Dwell time</th>
+<th>Hunting lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SolarWinds / SUNBURST (UNC2452)</strong></td>
+<td>2020</td>
+<td>Supply-chain trojan in Orion DLL; DGA C2 to <code>avsvmcloud.com</code>; blended with legit traffic</td>
+<td>~9+ months</td>
+<td>Beaconing/DNS baseline hunts and "trusted software doing new things" hypotheses were the realistic detection path; signatures didn't exist.</td>
+</tr>
+<tr>
+<td><strong>Target POS breach</strong></td>
+<td>2013</td>
+<td>HVAC vendor creds → network → BlackPOS RAM scraper; FireEye alerted but ignored</td>
+<td>~3 weeks</td>
+<td>Alerts without a hunting/triage culture are worthless; hunting is a mindset, not just tooling.</td>
+</tr>
+<tr>
+<td><strong>APT29 / "Cozy Bear" (various)</strong></td>
+<td>2015–2021</td>
+<td>LOLBins, WMI, low-and-slow, minimal malware</td>
+<td>Months</td>
+<td>High-Pyramid-of-Pain TTP hunts (WMI event subscription T1546.003, <code>rundll32</code> proxy exec) are the only durable countermeasure.</td>
+</tr>
+<tr>
+<td><strong>NotPetya spread</strong></td>
+<td>2017</td>
+<td>EternalBlue (CVE-2017-0144) + Mimikatz + PsExec lateral movement</td>
+<td>Fast, but pre-position undetected</td>
+<td>Lateral-movement hunts (anomalous SMB admin-share writes, <code>psexesvc</code> service creation) shrink pre-detonation dwell.</td>
+</tr>
+<tr>
+<td><strong>Log4Shell exploitation (CVE-2021-44228)</strong></td>
+<td>2021</td>
+<td>JNDI lookup RCE; mass exploitation then quiet persistence</td>
+<td>Variable</td>
+<td>Retro-hunt (IOC-driven) of proxy/WAF logs for <code>${jndi:ldap://</code> and outbound LDAP from app servers found post-patch survivors.</td>
+</tr>
+<tr>
+<td><strong>Colonial Pipeline (DarkSide)</strong></td>
+<td>2021</td>
+<td>Leaked VPN cred, no MFA</td>
+<td>~1 week+</td>
+<td>Auth-log hunts for VPN logins from new geographies / impossible travel on service and remote-access accounts.</td>
+</tr>
+<tr>
+<td><strong>Volt Typhoon (living-off-the-land)</strong></td>
+<td>2023–24</td>
+<td>Chinese state actor, near-zero malware, LOTL on edge devices, valid accounts</td>
+<td>Years</td>
+<td>Only behavioral hunting (unusual <code>netsh</code>, <code>wmic</code>, <code>ntdsutil</code>, proxy chains) finds this class; IOC hunting is useless.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — SolarWinds / SUNBURST.</strong> The implant was a signed, trusted Orion component that delayed ~12 days before beaconing to a DGA-generated subdomain of <code>avsvmcloud.com</code>, using DNS as its first C2 channel and mimicking Orion Improvement Program traffic. No AV or EDR signature existed. The realistic hunting hypotheses that would have surfaced it: (1) <strong>"Does any host show periodic DNS to a newly-registered/algorithmically-named domain?"</strong> — a DNS-baseline + NRD-enrichment hunt; (2) <strong>"Is trusted software (SolarWinds) initiating outbound connections to destinations it has never contacted?"</strong> — a behavioral-baseline hunt on parent process reputation. FireEye ultimately found it during an internal investigation triggered by a suspicious MFA device enrollment — itself a form of hunting. The control that shrinks this to weeks instead of months is <strong>continuous baseline-anomaly hunting on DNS and egress</strong>, not more signatures.</p>
+<p><strong>Case study — Volt Typhoon.</strong> CISA/Microsoft (2023) documented a PRC actor maintaining access to US critical-infrastructure networks for <em>years</em> using almost exclusively living-off-the-land binaries (LOLBins) and valid stolen credentials — <code>wmic</code>, <code>netsh</code>, <code>PowerShell</code>, <code>ntdsutil</code> for NTDS.dit extraction (T1003.003), and compromised SOHO routers as proxies. Because there was essentially <strong>no malware to signature</strong>, purely automated detection failed. The activity is only discoverable by <strong>TTP hunting</strong>: hypotheses like "an account is running <code>ntdsutil</code> or <code>vssadmin</code> to snapshot the domain controller," or "administrative commands are arriving via an unusual proxy chain." This incident is the canonical modern argument for hunting: as adversaries climb the Pyramid of Pain, human hypothesis-driven search becomes the <em>primary</em>, not supplementary, detection mechanism.</p>
+<p><strong>Case study — Log4Shell retro-hunt.</strong> After CVE-2021-44228 dropped (Dec 2021), even fully-patched orgs needed to answer "were we exploited <em>before</em> we patched?" This is a textbook <strong>IOC/intel-driven retro-hunt</strong>: sweep WAF/proxy logs for <code>${jndi:ldap://</code>, <code>${jndi:rmi://</code>, and obfuscated variants (<code>${${lower:j}ndi:...}</code>), then correlate any hit with <strong>outbound LDAP/RMI from the corresponding app server</strong> (the actual exploitation confirmation, since the string alone is just a scan). The behavioral half — an internet-facing Java app suddenly making outbound LDAP — is what separated real compromise from background scanning noise.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<p>Failure modes in hunting are both <strong>adversary techniques you hunt for</strong> and <strong>program weaknesses that make hunting ineffective</strong>. This table mixes both, since a senior engineer owns the whole picture.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Failure</th>
+<th>ATT&amp;CK ID / Category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Living-off-the-land (LOLBins) evade signatures</td>
+<td>T1218 (System Binary Proxy Exec)</td>
+<td>Legit binaries, no malware to match</td>
+<td>Long dwell; missed intrusion</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C2 beaconing hidden in normal traffic</td>
+<td>T1071 (App Layer Protocol)</td>
+<td>HTTPS/DNS blends with baseline</td>
+<td>Persistent C2 undetected</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Stolen cloud SA key used remotely</td>
+<td>T1078.004 (Valid Cloud Accounts)</td>
+<td>No SA IP/behavior baseline</td>
+<td>Data access, priv-esc</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Credential dumping from LSASS</td>
+<td>T1003.001</td>
+<td>No handle-to-lsass telemetry</td>
+<td>Domain compromise</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>5</td>
+<td>WMI/scheduled-task persistence</td>
+<td>T1546.003 / T1053</td>
+<td>Rarely hunted event logs</td>
+<td>Re-entry after cleanup</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>DNS tunneling exfiltration</td>
+<td>T1048.003 / T1071.004</td>
+<td>High-entropy long subdomains ignored</td>
+<td>Data exfil</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>No data source collected</strong> (blind spot)</td>
+<td>Detection Gap</td>
+<td>Sysmon/DNS/cloud audit not ingested</td>
+<td>Un-huntable technique</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Insufficient retention</strong></td>
+<td>Detection Gap</td>
+<td>Logs aged out before retro-hunt</td>
+<td>Cannot retro-hunt intel</td>
+<td>High</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Alert fatigue / hunt outputs ignored</td>
+<td>Process failure</td>
+<td>No hunt→detection pipeline</td>
+<td>Findings rot; repeat gaps</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Hypothesis not falsifiable</td>
+<td>Process failure</td>
+<td>Vague "look for bad stuff"</td>
+<td>Unbounded, unproductive hunt</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Anomaly hunts drown in false positives</td>
+<td>Process failure</td>
+<td>No baselining / enrichment</td>
+<td>Analyst burnout, ignored</td>
+<td>High</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Timestomping / log tampering</td>
+<td>T1070 / T1070.006</td>
+<td>Attacker clears evidence</td>
+<td>Broken timeline; missed hunt</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Encrypted C2 defeats payload inspection</td>
+<td>T1573</td>
+<td>TLS everywhere, no JA3/metadata hunt</td>
+<td>Missed beaconing</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Insider slow exfil below thresholds</td>
+<td>T1020 / T1567</td>
+<td>Volume thresholds too coarse</td>
+<td>Data leak over months</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Hunting only IOCs (bottom of pyramid)</td>
+<td>Program maturity</td>
+<td>HMM1 stagnation</td>
+<td>Trivially evaded by attacker</td>
+<td>High</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Token theft / OAuth abuse in SaaS</td>
+<td>T1528 / T1550.001</td>
+<td>No token-issuance baseline</td>
+<td>Persistent cloud access</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Lateral movement via admin shares</td>
+<td>T1021.002</td>
+<td>SMB write telemetry not hunted</td>
+<td>Rapid internal spread</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Golden/silver ticket forged Kerberos</td>
+<td>T1558</td>
+<td>No abnormal TGT lifetime hunt</td>
+<td>Full domain persistence</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Cloud snapshot/backup exfil</td>
+<td>T1537</td>
+<td>Snapshot-share API not hunted</td>
+<td>Bulk data theft</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Hunt not reproducible / undocumented</td>
+<td>Program maturity</td>
+<td>No hunt library / runbooks</td>
+<td>Knowledge loss, re-work</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<p>Each threat/gap maps to a concrete control and the layer it lives at. Note that for a <em>hunting</em> note, many "controls" are really <strong>hunt analytics or program disciplines</strong> — that is the point.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat/Gap</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>LOLBins</td>
+<td>TTP hunt: rare parent/child + LOLBin command-line stack counting</td>
+<td>EDR/Sysmon EID 1</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Beaconing</td>
+<td>Interval/jitter analysis (coeff. of variation)</td>
+<td>Proxy/Zeek/firewall logs</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Stolen SA key</td>
+<td>SA baseline (IP, method, geo) + impossible-travel hunt</td>
+<td>Cloud audit logs (CloudTrail/GCP/Sentinel)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>LSASS dumping</td>
+<td>Hunt handle access to lsass (Sysmon EID 10), credential-access analytics</td>
+<td>EDR</td>
+</tr>
+<tr>
+<td>5</td>
+<td>WMI/scheduled task</td>
+<td>Hunt WMI event subscriptions, task-creation events</td>
+<td>Windows EID 4698/5861, Sysmon EID 19-21</td>
+</tr>
+<tr>
+<td>6</td>
+<td>DNS tunneling</td>
+<td>Entropy + subdomain-length + query-volume analytics</td>
+<td>DNS/passive DNS</td>
+</tr>
+<tr>
+<td>7</td>
+<td>No data source</td>
+<td>Data-source coverage audit vs ATT&amp;CK data components</td>
+<td>Ingestion/pipeline</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Retention gap</td>
+<td>Tiered retention: 90d hot, 1yr warm/cold for retro-hunt</td>
+<td>Data lake / SIEM</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Findings ignored</td>
+<td><strong>Hunt→detection pipeline</strong> with SLA to codify</td>
+<td>Detection engineering</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Weak hypothesis</td>
+<td>Hypothesis template: technique + data + expected pattern</td>
+<td>Hunt process</td>
+</tr>
+<tr>
+<td>11</td>
+<td>FP-heavy anomaly</td>
+<td>Enrichment + prevalence weighting + peer-group baselines</td>
+<td>Analytics layer</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Log tampering</td>
+<td>Immutable/append-only log store; hunt for log-clear events (EID 1102)</td>
+<td>Central logging</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Encrypted C2</td>
+<td>JA3/JA3S fingerprints, cert anomalies, SNI + metadata hunts</td>
+<td>TLS metadata / Zeek</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Insider slow exfil</td>
+<td>Per-user egress baselining, DLP + rare-destination hunts</td>
+<td>Proxy/DLP/cloud</td>
+</tr>
+<tr>
+<td>15</td>
+<td>IOC-only hunting</td>
+<td>Adopt ATT&amp;CK-driven hunt roadmap; climb the pyramid</td>
+<td>Program strategy</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Token/OAuth abuse</td>
+<td>Baseline token issuance; hunt anomalous grants/consents</td>
+<td>IdP / SaaS audit logs</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Lateral via shares</td>
+<td>Hunt admin-share writes + service creation (EID 7045)</td>
+<td>Endpoint/SMB logs</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Forged Kerberos</td>
+<td>Hunt abnormal TGT lifetimes, RC4 downgrades, encryption-type anomalies</td>
+<td>AD security logs (4768/4769)</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Snapshot exfil</td>
+<td>Hunt snapshot share/copy API calls to external accounts</td>
+<td>Cloud audit logs</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Un-reproducible hunts</td>
+<td>Hunt library (ABLE/notebooks), versioned analytics, coverage tracking</td>
+<td>Knowledge base</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-controls-in-depth">Top 5 controls in depth</h3>
+<p><strong>1. Hunt→detection pipeline (the single most important control).</strong> A hunt that finds a gap but doesn't produce a durable artifact is a leak in the bucket — you'll rediscover the same gap next quarter. The control is an explicit, SLA-bound process: every hunt with a "detection gap found" outcome creates a ticket in the detection-engineering backlog with the query, the data source, the expected true-positive shape, and a tuning plan. Technically, this means the hunt query (Splunk SPL, KQL, SQL) is refactored into a scheduled analytic with alert thresholds, deduplication, and enrichment, then tracked against ATT&amp;CK coverage. Cross-reference <a href="../Detection-Engineering/README.md"><code>detection/Detection-Engineering</code></a> — hunting is the <em>R&amp;D funnel</em> that feeds detection engineering's <em>production line</em>. <strong>Trade-off:</strong> not every hunt should be automated — high-FP anomaly hunts may stay periodic-manual because a scheduled rule would drown the SOC. Judgment call: automate when the true-positive shape is stable and the FP rate is tunable below the SOC's tolerance.</p>
+<p><strong>2. Data-source coverage mapped to ATT&amp;CK data components.</strong> You cannot hunt a technique whose required telemetry you don't collect — hunt #7 is the silent killer. The control is a coverage matrix: for each ATT&amp;CK technique in your threat model, list its ATT&amp;CK <em>data components</em> (e.g., T1003.001 needs "Process: OS API Execution" and "Process: Process Access"), then verify that source is ingested and retained. Tools like DeTT&amp;CT and the ATT&amp;CK Navigator visualize this. Implementation: run Sysmon with a modular config (EID 1, 3, 7, 8, 10, 11, 22), ship Windows Security 4688/4624/4625/4768/4769/4698/1102, enable GCP Data Access audit logs / AWS CloudTrail data events / Azure diagnostic settings, and centralize DNS + proxy. <strong>Trade-off:</strong> full data-access logging in cloud is expensive (CloudTrail data events and GCP Data Access logs can be your largest log source) — you sample or scope to sensitive resources, accepting a partial blind spot.</p>
+<p><strong>3. Baseline-anomaly analytics with enrichment (stack counting done right).</strong> The workhorse. Frequency analysis surfaces the rare tail, but raw rarity is noisy — the control is to pair it with <strong>enrichment and peer-group baselining</strong> so "rare" means "rare <em>for this population</em>." Technically: compute <code>dcount(host)</code> per artifact, join against prevalence tables, GeoIP/ASN, NRD lists, and known-good allowlists built from your own environment. For service accounts, baseline per-identity (each SA is its own peer group of one). <strong>Trade-off:</strong> baselines drift; a static allowlist becomes an attacker's hiding spot (they mimic baseline). Mitigate with rolling windows and periodic re-baselining, and never let the allowlist grow unbounded without review.</p>
+<p><strong>4. TTP hunting to climb the Pyramid of Pain.</strong> The strategic control against LOLBin/valid-account adversaries (Volt Typhoon class). Instead of hunting hashes and IPs (which the attacker rotates for free), hunt <em>behaviors</em> that are expensive to change: <code>rundll32</code>/<code>regsvr32</code>/<code>mshta</code> proxy execution, WMI persistence, LSASS access, abnormal Kerberos. Implementation is a <strong>prioritized hunt roadmap</strong> driven by ATT&amp;CK — pick tactics/techniques relevant to your threat model (per the ATT&amp;CK cross-reference), write a hunt per technique, and track coverage. <strong>Trade-off:</strong> TTP hunts demand richer data and more analyst skill than IOC sweeps, and produce more false positives, so they scale worse per-hunt — but they impose far higher adversary cost, so the ROI on <em>durable</em> security is much higher.</p>
+<p><strong>5. Tiered retention enabling retro-hunting.</strong> When fresh intel arrives (a new C2 domain, a new IOC set), you must be able to answer "were we ever hit?" — which requires that historical logs still exist. The control is a tiered retention strategy: hot/searchable for ~90 days, warm/cold (object storage, queryable via a data lake like BigQuery/Athena/Snowflake) for 1+ year. Retro-hunting Log4Shell required exactly this. Implementation: route SIEM data to cheap object storage with a query engine, and keep the <em>high-value, low-volume</em> sources (auth, cloud audit, DNS) longer than high-volume ones. <strong>Trade-off:</strong> cost vs. lookback — full-fidelity multi-year retention of EDR data is prohibitively expensive at scale, so you retain summaries/aggregates for the long tail and full fidelity only for the highest-signal sources.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<p>Hunting is data-bound. The <strong>minimum viable hunting telemetry</strong> and the fields that matter:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Key events / fields</th>
+<th>Primary hunts enabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>EDR / Sysmon</strong></td>
+<td>EID 1 (ProcessCreate: Image, ParentImage, CommandLine, Hashes, User), EID 3 (network), EID 7 (image load), EID 8 (CreateRemoteThread), EID 10 (ProcessAccess to lsass), EID 11 (file create), EID 22 (DNS)</td>
+<td>Process lineage, injection, credential access, LOLBins</td>
+</tr>
+<tr>
+<td><strong>DNS logs</strong></td>
+<td>query name, query type, response, client IP, timestamp</td>
+<td>Tunneling, DGA, C2 domains, NRD beacons</td>
+</tr>
+<tr>
+<td><strong>Proxy / egress</strong></td>
+<td>URL/host, bytes, user-agent, method, timestamp, category</td>
+<td>Beaconing, exfil, rare destinations</td>
+</tr>
+<tr>
+<td><strong>Auth / IdP</strong></td>
+<td>4624/4625/4768/4769 (Windows), Okta/Azure AD sign-in logs, source IP, MFA result</td>
+<td>Lateral movement, brute force, impossible travel, ticket forgery</td>
+</tr>
+<tr>
+<td><strong>Cloud audit</strong></td>
+<td>CloudTrail (eventName, sourceIPAddress, userIdentity, userAgent), GCP Cloud Audit (methodName, principalEmail, callerIp), Azure AuditLogs</td>
+<td>SA key theft, priv-esc, snapshot exfil, IAM tampering</td>
+</tr>
+<tr>
+<td><strong>Zeek / network metadata</strong></td>
+<td>conn.log, dns.log, ssl.log (JA3/JA3S, SNI, cert), http.log</td>
+<td>Encrypted C2 fingerprinting, beaconing, protocol anomalies</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sample-detections-hunt-analytics-promoted-to-rules">Sample detections (hunt analytics promoted to rules)</h3>
+<p><strong>Sigma rule — Office application spawning a scripting/LOLBin child</strong> (codifies Hunt A):</p>
+<pre><code class="language-yaml">title: Office Application Spawns Suspicious Child Process
+id: 9a3f2b10-office-child-lolbin
+status: experimental
+description: Detects Office apps spawning shells or LOLBins, indicative of macro payload execution
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_parent:
+    ParentImage|endswith:
+      - '\winword.exe'
+      - '\excel.exe'
+      - '\powerpnt.exe'
+      - '\outlook.exe'
+      - '\mshta.exe'
+  selection_child:
+    Image|endswith:
+      - '\cmd.exe'
+      - '\powershell.exe'
+      - '\pwsh.exe'
+      - '\wscript.exe'
+      - '\cscript.exe'
+      - '\rundll32.exe'
+      - '\regsvr32.exe'
+      - '\mshta.exe'
+  condition: selection_parent and selection_child
+falsepositives:
+  - Legitimate document automation macros (baseline and allowlist per environment)
+level: high
+tags:
+  - attack.execution
+  - attack.t1204.002
+  - attack.t1059
+</code></pre>
+<p><strong>KQL detection — anomalous service-account activity from a new IP</strong> (codifies Hunt C, Sentinel/GCP-export flavor):</p>
+<pre><code class="language-kusto">let lookback = 30d;
+let known =
+    CloudAuditLogs
+    | where TimeGenerated &gt; ago(lookback) and TimeGenerated &lt; ago(1d)
+    | where PrincipalEmail endswith &quot;.gserviceaccount.com&quot;
+    | summarize by PrincipalEmail, CallerIp;
+CloudAuditLogs
+| where TimeGenerated &gt; ago(1d)
+| where PrincipalEmail endswith &quot;.gserviceaccount.com&quot;
+| join kind=leftanti known on PrincipalEmail, CallerIp   // IP never seen for this SA
+| summarize calls=count(), methods=make_set(MethodName, 20), first=min(TimeGenerated)
+    by PrincipalEmail, CallerIp
+| extend SensitiveMethod = methods has_any (&quot;SetIamPolicy&quot;,&quot;CreateServiceAccountKey&quot;,&quot;storage.objects.get&quot;)
+| order by calls desc
+</code></pre>
+<p><strong>SQL detection — beaconing by interval regularity</strong> is given in §2.2 (Hunt B) and promotes directly to a scheduled analytic with <code>coeff_var &lt; 0.15</code> as the alert threshold plus NRD/reputation enrichment on <code>dst_host</code>.</p>
+<h3 id="response-playbook-hunt-confirms-a-compromise">Response playbook (hunt confirms a compromise)</h3>
+<p>Once a hunt crosses from "lead" to "confirmed adversary," you pivot into IR. The sequence, specific to hunt-originated findings:</p>
+<ol>
+<li><strong>Preserve, don't tip off.</strong> The adversary doesn't know you found them via hunting — a huge advantage. Before acting, snapshot volatile evidence (memory, current process list, network connections) and expand the hunt to map full scope. Premature blocking burns your visibility.</li>
+<li><strong>Scope via pivoting.</strong> From the initial indicator, pivot across all data sources: same hash → other hosts; same C2 → other beaconing sources; same SA key → all resources it touched. Build the complete blast radius <em>before</em> containing.</li>
+<li><strong>Contain.</strong> Isolate affected endpoints (EDR network-isolate), revoke the compromised credential/SA key, block C2 at proxy/DNS, disable OAuth grants/tokens. Contain the <em>whole</em> scope simultaneously to prevent the adversary re-establishing.</li>
+<li><strong>Eradicate.</strong> Remove persistence (scheduled tasks, WMI subscriptions, run keys, malicious SAs/keys), reimage where warranted, rotate all credentials in blast radius (assume Kerberos/token compromise → consider krbtgt double-reset for AD).</li>
+<li><strong>Recover.</strong> Restore from known-good, re-enable services, monitor with <strong>hunt-derived detections</strong> specifically watching for re-entry using the same TTPs.</li>
+<li><strong>Codify &amp; retro.</strong> Turn the successful hunt into a permanent detection, retro-hunt the full retention window for earlier instances, and update the hunt library and ATT&amp;CK coverage map. This closes the loop back to §2.3.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What is threat hunting and how is it different from alerting/SOC triage?</strong><br />
+Threat hunting is the proactive, hypothesis-driven search through telemetry for adversary activity that has <em>already evaded</em> automated detection — it operates on an assume-breach premise. SOC triage is reactive: it processes alerts that automated rules generated. The key distinction is the starting point: a hunt begins with a falsifiable hypothesis the SIEM cannot already answer with an alert, whereas triage begins with an alert. Hunting also has a distinct output contract — it must produce either an incident escalation or a new detection/documented gap, whereas triage produces a disposition (true/false positive).<br />
+<em>Signal: does the candidate understand hunting is proactive and gap-finding, not just "advanced alerting."</em></p>
+<p><strong>Q2. Explain the three hunting modes.</strong><br />
+Hypothesis/TTP-driven hunting starts from an ATT&amp;CK technique or threat model and searches for the behavior (e.g., LSASS handle access). IOC/intel-driven hunting (retro-hunting) takes fresh indicators — hashes, domains, JA3 — and sweeps historical logs for matches; it's fast and high-confidence but low on the Pyramid of Pain. Baseline/anomaly-driven hunting builds a statistical model of "normal" and investigates outliers via stack counting, catching unknown-unknowns with no prior intel. Mature programs run all three; over-reliance on IOC hunting alone is a maturity anti-pattern because attackers rotate indicators trivially.<br />
+<em>Signal: can they distinguish the modes and know each one's trade-offs.</em></p>
+<p><strong>Q3. What is the Pyramid of Pain and why does it matter for hunting?</strong><br />
+The Pyramid of Pain (David Bianco) ranks indicator types by how costly they are for an adversary to change: hashes (trivial) &lt; IP addresses &lt; domain names &lt; network/host artifacts &lt; tools &lt; TTPs (very costly). It matters because hunts targeting the <em>top</em> of the pyramid — behaviors and techniques — impose lasting cost on the attacker, since changing how they operate is expensive, while hunts for hashes/IPs are defeated the moment the attacker recompiles or rotates infrastructure. A senior hunter deliberately biases toward TTP hunts for durable defense.<br />
+<em>Signal: strategic thinking about durable vs. ephemeral detection.</em></p>
+<p><strong>Q4. What data sources are essential for an effective hunting program?</strong><br />
+At minimum: EDR/Sysmon (process creation with parent lineage and command line, image loads, LSASS access, DNS), DNS logs, egress proxy/firewall logs, authentication/IdP logs, and cloud audit logs (CloudTrail, GCP Cloud Audit, Azure). The critical insight is that hunting is data-bound — you cannot hunt a technique whose required ATT&amp;CK data component you don't collect and retain. So a coverage audit mapping techniques to data sources is a prerequisite, and retention (hot ~90 days, cold 1+ year) governs your retro-hunt reach.<br />
+<em>Signal: understands the data-first dependency, not just tool names.</em></p>
+<p><strong>Q5. What is stack counting and why is it useful?</strong><br />
+Stack counting (frequency analysis) aggregates a telemetry field, counts occurrences, and sorts to expose the distribution. The value is in the <strong>long tail</strong>: rare values — a parent/child process pair seen on 3 of 40,000 hosts, an unusual user-agent, a rare DLL load path — are statistically anomalous and often malicious, and it requires no signature or prior intel. It's the workhorse for unknown-unknowns. The refinement is to pair rarity with enrichment (prevalence, GeoIP, reputation) so "rare" means "rare for this peer group," reducing false positives.<br />
+<em>Signal: knows the core analytic technique and its noise pitfall.</em></p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design a hunting program for a company with 50,000 endpoints and multi-cloud. Where do you start?</strong><br />
+Start with data-source coverage, not hunts: audit which ATT&amp;CK data components you collect and retain, because un-collected telemetry makes techniques un-huntable. Deploy Sysmon with a modular config, centralize DNS/proxy/auth, and enable cloud audit logging (accepting that full data-access logging is your biggest cost, so scope it to sensitive resources). Next, build a prioritized hunt roadmap from ATT&amp;CK filtered by your threat model — bias toward TTP hunts high on the Pyramid of Pain. Establish the hunt→detection pipeline so every gap becomes a tracked detection ticket with an SLA. Instrument metrics that measure outcomes (detections shipped, dwell-time reduction, ATT&amp;CK coverage) not activity (hunts run). Staff with people who can both write queries and reason about adversary behavior, and invest in baselines/enrichment infrastructure so anomaly hunts aren't drowned in false positives. Iterate: hunts feed detections, detections free hunters to climb the pyramid.<br />
+<em>Signal: prioritizes data and process over flashy analytics; thinks about cost and outcomes.</em></p>
+<p><strong>Q7. How do you decide whether a successful hunt should become an automated detection?</strong><br />
+Automate when the true-positive shape is stable and the false-positive rate can be tuned below the SOC's tolerance; keep it as a periodic manual hunt otherwise. Concretely, a rare-parent/child LOLBin hunt with a crisp, low-FP signature (Office spawning <code>cmd.exe</code>) is an easy automation candidate. A broad anomaly hunt — say, "any statistically rare outbound destination" — might generate hundreds of daily leads that require human judgment and enrichment; scheduling it as an alert would cause alert fatigue and get muted, which is worse than not automating. The decision hinges on FP tunability, the availability of enrichment to raise precision, the severity of the true positive (high-severity, low-frequency events justify more FP tolerance), and maintenance cost (baselines drift). The governing principle: automation should <em>free</em> hunters to climb the pyramid, not flood the SOC.<br />
+<em>Signal: understands the automation/FP trade-off and alert fatigue.</em></p>
+<p><strong>Q8. How would you hunt for C2 beaconing in an all-HTTPS environment where you can't inspect payloads?</strong><br />
+Pivot from content to metadata and timing. The strongest signal is temporal: aggregate connections per source/destination pair and compute inter-arrival intervals; low variance (coefficient of variation &lt; ~0.15) across many connections indicates machine-driven periodicity — a beacon. Combine with metadata: JA3/JA3S TLS fingerprints to identify known implant stacks, SNI and certificate anomalies (self-signed, newly issued, mismatched), destination reputation, domain age (NRDs), and ASN. Enrich the destination — a regular beacon to a 3-day-old domain on a bulletproof-hosting ASN is high-confidence. Account for jitter (attackers randomize intervals) by using distributional statistics rather than exact-period matching, and filter legitimate periodic traffic (software update checks, telemetry) via baselining. This is precisely how RITA/Zeek beacon analysis works.<br />
+<em>Signal: knows encrypted-traffic hunting relies on timing/metadata, not payload.</em></p>
+<p><strong>Q9. Walk through hunting for a compromised cloud service-account key.</strong><br />
+Hypothesis: a service-account key has been exfiltrated and is being used from infrastructure the SA has never legitimately called from (T1078.004). Service accounts are ideal hunt targets because their behavior is narrow and predictable. Build a 30-day baseline per SA of caller IPs, user agents, geolocations, and the specific API methods it invokes. Then hunt for deviations: a <code>leftanti</code> join against the known-IP baseline surfaces calls from novel IPs; layer impossible-travel logic and a "new sensitive method" check (an SA that only reads GCS suddenly calling <code>SetIamPolicy</code> or <code>CreateServiceAccountKey</code> is privilege escalation/persistence, T1098). Enrich the novel IP with ASN/geo/reputation and correlate with whether a key was recently created or downloaded. In AWS the analog hunts CloudTrail <code>AssumeRole</code>/<code>GetSessionToken</code> by anomalous <code>sourceIPAddress</code>/<code>userAgent</code>; in Azure, managed-identity sign-in anomalies. The baseline table itself is a durable hunt artifact you maintain.<br />
+<em>Signal: cloud-native hunting, per-identity baselining, understands SA threat model.</em></p>
+<p><strong>Q10. How do you measure the success of a hunting program? What are good and bad metrics?</strong><br />
+Good metrics measure outcomes and coverage: number of confirmed incidents found by hunting, <strong>new detections shipped</strong> per hunt cycle (the hunt→detection conversion rate), reduction in mean-time-to-detect / dwell time, ATT&amp;CK technique coverage gained, and data-source coverage improvements. Bad metrics measure raw activity: "number of hunts run" or "hours spent hunting" incentivize busywork over impact, and "number of alerts generated" rewards noise. A subtle but important metric is the <strong>negative-result value</strong> — a hunt that confidently proves absence of a technique is a legitimate success (it converts an unknown into a known-good and documents coverage), so a program that only counts "evil found" will undervalue rigorous hunts. Track findings-to-detection SLA to ensure the pipeline doesn't leak.<br />
+<em>Signal: outcome-oriented; understands negative results have value; avoids vanity metrics.</em></p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. How does ATT&amp;CK generate hunt hypotheses, and what's the limitation of ATT&amp;CK-driven hunting?</strong><br />
+ATT&amp;CK provides a structured library of ~200 techniques mapped to tactics, each annotated with data components required to observe it and known procedures. This systematizes hypothesis generation: filter the matrix to techniques relevant to your threat model, and each becomes a hunt ("hunt for T1546.003 WMI event-subscription persistence"), with the data-component annotation telling you exactly what telemetry you need — enabling coverage bookkeeping via Navigator/DeTT&amp;CT. The limitation is that ATT&amp;CK is a <em>catalog of known techniques</em> — it's inherently backward-looking and doesn't describe novel tradecraft, environment-specific attack paths, or the <em>chaining</em> of techniques into a campaign. Over-indexing on ATT&amp;CK can produce a checklist mentality that misses genuinely new behavior; it should anchor but not bound your hypotheses. Baseline-anomaly hunting complements it by catching what ATT&amp;CK doesn't yet name (e.g., pre-Volt-Typhoon LOTL patterns).<br />
+<em>Signal: uses ATT&amp;CK properly but sees its backward-looking blind spot.</em></p>
+<p><strong>Q12. Design a beaconing detection that's robust to jitter and long sleep intervals. What defeats naive interval analysis?</strong><br />
+Naive interval analysis (exact-period matching) is defeated by jitter (attacker randomizes ±30–50% around the base interval) and by long sleeps (a 24-hour beacon looks like normal daily traffic). A robust design uses distributional statistics over a long window: compute the set of inter-arrival deltas per src/dst pair, then measure regularity via coefficient of variation, or better, use a Fourier/autocorrelation approach to detect a dominant frequency even under jitter, and Median Absolute Deviation (MAD) for outlier-resistant spread. To handle long sleeps, extend the window (multi-day) and lower the connection-count threshold accordingly. Complement timing with <strong>size regularity</strong> (beacons often have consistent request/response byte sizes) and connection-count-to-time-span ratios. Defeats/evasions to acknowledge: high-jitter + low-and-slow (Volt Typhoon style) can fall below any statistical threshold, and domain-fronting/CDN-shared destinations blur per-destination aggregation — so pair timing analysis with destination reputation and metadata, and accept that a determined low-and-slow C2 may only be findable via TTP hunts on the host side (the implant's persistence/execution), not its network beacon.<br />
+<em>Signal: deep understanding of beaconing math and its evasion limits.</em></p>
+<p><strong>Q13. An APT is using only living-off-the-land binaries and valid accounts (Volt Typhoon profile). How do you hunt when there's no malware to signature?</strong><br />
+This is the hardest and most important hunting problem, because IOC and signature approaches are structurally useless — there is no malware and the credentials are legitimate. You hunt behavior and context. First, <strong>command-line intent</strong>: LOLBins like <code>wmic</code>, <code>netsh</code>, <code>ntdsutil</code>, <code>vssadmin</code>, <code>certutil</code>, <code>rundll32</code> are legitimate but rare on most hosts and rarely used in the specific patterns attackers need — e.g., <code>ntdsutil ... create full</code> or <code>vssadmin create shadow</code> (NTDS.dit theft, T1003.003), <code>netsh</code> portproxy (tunneling), <code>certutil -urlcache -f</code> (download). Stack-count these command lines and investigate the rare tail. Second, <strong>context anomaly</strong>: a valid admin account is suspicious when it authenticates from a new source, at an unusual time, via an unusual path (e.g., admin commands arriving through a proxy chain from an edge device). Third, <strong>sequence/graph</strong>: individually-benign actions form a malicious chain — recon → credential access → lateral movement — so hunt for the <em>sequence</em> across hosts, not single events. Fourth, <strong>infrastructure</strong>: Volt Typhoon proxied through compromised SOHO routers, so hunt for internal admin traffic sourced from unexpected network segments. The meta-point: against LOTL, human hypothesis-driven TTP hunting becomes the <em>primary</em> detection mechanism, and your data richness (full command-line capture, auth context, network metadata) is the binding constraint.<br />
+<em>Signal: elite — understands why LOTL breaks automation and how behavioral/contextual/graph hunting responds.</em></p>
+<p><strong>Q14. How do you keep baselines from becoming a place for attackers to hide, and handle baseline drift at scale?</strong><br />
+Baselines are double-edged: an attacker who studies or slowly shifts "normal" can operate inside the allowlist (baseline poisoning), and static allowlists ossify into blind spots. Mitigations: (1) use <strong>rolling windows</strong> and periodic re-baselining rather than frozen allowlists, so the baseline reflects recent reality but you also diff <em>changes</em> to the baseline itself — a sudden shift in "normal" is its own signal. (2) Cap allowlist growth and require review for additions, since an ever-growing allowlist is an ever-growing hiding spot. (3) Baseline at the right granularity — per-identity/per-peer-group, not global — so an attacker must match a <em>specific</em> narrow profile, not just blend into aggregate noise. (4) Hunt the baseline-building process for poisoning: was a "new normal" established during a plausible compromise window? (5) Keep some hunts <em>baseline-independent</em> (pure TTP signatures) so an adversary can't defeat your entire program by manipulating statistics. At scale, drift is managed with automated re-baselining pipelines, versioned baselines (so you can diff and roll back), and alerting on baseline volatility. The philosophical point: never let any single detection philosophy — signature, anomaly, or baseline — be your only layer.<br />
+<em>Signal: recognizes baseline poisoning and drift as adversarial problems, defends in depth.</em></p>
+<p><strong>Q15. Describe the end-to-end lifecycle of turning a one-off successful hunt into durable, automated, continuously-improving detection — including the failure modes at each stage.</strong><br />
+The lifecycle: (1) <strong>Hunt</strong> produces a confirmed finding + a query. Failure mode: the query is a one-off notebook cell that's never captured — knowledge evaporates. Fix: a versioned hunt library (ABLE/notebook format) recording hypothesis, data source, query, and result. (2) <strong>Codify</strong>: refactor the ad-hoc query into a scheduled analytic with thresholds, deduplication, and enrichment, mapped to an ATT&amp;CK technique. Failure mode: the raw hunt query is too FP-heavy to schedule as-is and gets shipped anyway, causing alert fatigue; or it's never prioritized in the backlog and rots. Fix: an SLA-bound hunt→detection pipeline and an explicit "automate vs. keep-manual" decision gate based on FP tunability. (3) <strong>Deploy &amp; tune</strong>: run in monitor mode, measure precision/recall, tune. Failure mode: no feedback loop, so the rule silently degrades as the environment changes (a new legitimate tool starts triggering it). Fix: periodic detection health review and drift monitoring. (4) <strong>Retro-hunt</strong>: sweep the full retention window for earlier instances of the newly-understood technique. Failure mode: insufficient retention means you can't look back far enough — the intrusion predates your logs. Fix: tiered retention. (5) <strong>Coverage &amp; iteration</strong>: update the ATT&amp;CK coverage map, which reveals the <em>next</em> gap to hunt, closing the loop. Failure mode: measuring activity (hunts run) instead of outcomes (coverage gained, dwell-time reduced) so the program optimizes the wrong thing. The through-line: hunting is the R&amp;D funnel and detection engineering is the production line (<a href="../Detection-Engineering/README.md">cross-ref</a>); the value is realized only when the pipeline between them has no leaks.<br />
+<em>Signal: staff-level systems thinking — sees the whole pipeline, its failure modes, and the metrics that keep it honest.</em></p>
+<hr />
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<p>Hunting telemetry and tooling translated across clouds and platforms so knowledge ports:</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>AWS</th>
+<th>Azure</th>
+<th>GCP</th>
+<th>On-prem / open source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cloud audit log (control plane)</td>
+<td>CloudTrail (management events)</td>
+<td>Azure Activity Log</td>
+<td>Cloud Audit Logs — Admin Activity</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Data-access audit</td>
+<td>CloudTrail data events</td>
+<td>Azure diagnostic settings / resource logs</td>
+<td>Cloud Audit Logs — Data Access</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Identity / sign-in logs</td>
+<td>IAM + CloudTrail, GuardDuty</td>
+<td>Entra ID sign-in / AuditLogs</td>
+<td>Cloud Identity / Workspace audit</td>
+<td>AD Security logs (4624/4768/4769)</td>
+</tr>
+<tr>
+<td>SIEM / hunt platform</td>
+<td>Security Lake + Athena, OpenSearch</td>
+<td>Microsoft Sentinel (KQL)</td>
+<td>Chronicle (Google SecOps), BigQuery</td>
+<td>Splunk, Elastic, OpenSearch</td>
+</tr>
+<tr>
+<td>Endpoint telemetry</td>
+<td>— (3rd-party EDR)</td>
+<td>Defender for Endpoint (KQL)</td>
+<td>— (3rd-party EDR)</td>
+<td>Sysmon + Winlogbeat, osquery, Velociraptor</td>
+</tr>
+<tr>
+<td>Network metadata</td>
+<td>VPC Flow Logs, GuardDuty</td>
+<td>NSG flow logs, Traffic Analytics</td>
+<td>VPC Flow Logs, Packet Mirroring</td>
+<td>Zeek, Suricata, RITA</td>
+</tr>
+<tr>
+<td>Threat detection service</td>
+<td>GuardDuty, Detective</td>
+<td>Defender for Cloud, Sentinel UEBA</td>
+<td>Security Command Center, Chronicle</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Query language</td>
+<td>SQL (Athena), OpenSearch DSL</td>
+<td>KQL</td>
+<td>UDM search / SQL (BigQuery)</td>
+<td>SPL (Splunk), EQL, KQL</td>
+</tr>
+<tr>
+<td>Hunt notebook / library</td>
+<td>SageMaker / Jupyter</td>
+<td>Sentinel notebooks (Jupyter)</td>
+<td>Colab / BigQuery notebooks</td>
+<td>Jupyter + ABLE, msticpy</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Hunting is assume-breach and gap-finding.</strong> It starts from a falsifiable hypothesis the SIEM can't already answer, not from an alert. If you're processing alerts, that's triage, not hunting.</li>
+<li><strong>Every hunt must produce a decision</strong>: escalate to IR, ship a detection, or document an accepted gap. A hunt that produces none was wasted — the <strong>hunt→detection pipeline</strong> is the highest-value control.</li>
+<li><strong>Climb the Pyramid of Pain.</strong> Hunt TTPs and behaviors, not hashes and IPs; behaviors are expensive for adversaries to change and give durable defense. IOC-only hunting is a maturity anti-pattern.</li>
+<li><strong>Hunting is data-bound.</strong> You cannot hunt a technique whose ATT&amp;CK data component you don't collect and retain. Coverage audits and tiered retention are prerequisites, not afterthoughts.</li>
+<li><strong>Three modes, use all three</strong>: hypothesis/TTP-driven, IOC/intel-driven (retro-hunt), and baseline/anomaly (stack counting). Each has distinct strengths; mature programs blend them.</li>
+<li><strong>Stack counting finds unknown-unknowns</strong> — the rare tail is where evil hides — but raw rarity is noisy; pair it with enrichment and peer-group baselining so "rare" means "rare for this population."</li>
+<li><strong>Against LOTL/valid-account adversaries (Volt Typhoon), human TTP hunting is the primary detection</strong>, because there's no malware to signature and credentials are legitimate. Behavioral, contextual, and graph-based hunting is the only answer.</li>
+<li><strong>Measure outcomes, not activity</strong>: detections shipped, dwell-time reduction, ATT&amp;CK coverage — never "number of hunts run." Negative results (proving absence) are legitimate wins.</li>
+<li><strong>Beaconing hunts rely on timing and metadata</strong>, not payload — coefficient of variation on inter-arrival intervals plus JA3/reputation/domain-age enrichment defeats even encrypted C2, within limits.</li>
+<li><strong>Baselines are adversarial artifacts</strong> — guard against poisoning and drift with rolling windows, capped allowlists, per-identity granularity, and baseline-independent TTP hunts as a backstop.</li>
+</ul>
+<hr />
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>MITRE ATT&amp;CK — Enterprise Matrix and Data Sources: https://attack.mitre.org/</li>
+<li>MITRE Cyber Analytics Repository (CAR): https://car.mitre.org/</li>
+<li>David Bianco — <em>The Pyramid of Pain</em>: https://detect-respond.blogspot.com/2013/03/the-pyramid-of-pain.html</li>
+<li>Sqrrl — <em>A Framework for Cyber Threat Hunting</em> (Hunt Loop, Hunting Maturity Model): https://www.threathunting.net/files/framework-for-threat-hunting-whitepaper.pdf</li>
+<li>TaHiTI — <em>Targeted Hunting integrating Threat Intelligence</em> methodology: https://www.betaalvereniging.nl/en/safety/tahiti/</li>
+<li>SANS — <em>The Who, What, Where, When, Why and How of Effective Threat Hunting</em> (Robert M. Lee, Rob Lee)</li>
+<li>SANS PEAK Threat Hunting Framework (David Bianco, 2023): https://www.splunk.com/en_us/blog/security/peak-threat-hunting-framework.html</li>
+<li>CISA/NSA/FBI Advisory AA24-038A — <em>PRC State-Sponsored Actors (Volt Typhoon) Living off the Land</em>: https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-038a</li>
+<li>CISA Advisory AA20-352A — <em>Advanced Persistent Threat Compromise (SolarWinds/SUNBURST)</em></li>
+<li>Sysmon (Microsoft Sysinternals) + SwiftOnSecurity / Olaf Hartong <code>sysmon-modular</code> configs: https://github.com/olafhartong/sysmon-modular</li>
+<li>DeTT&amp;CT — <em>Detect Tactics, Techniques &amp; Combat Threats</em> (data-source coverage scoring): https://github.com/rabobank-cdc/DeTTECT</li>
+<li>Active Countermeasures — RITA (Real Intelligence Threat Analytics) beacon analysis: https://www.activecountermeasures.com/free-tools/rita/</li>
+<li>Roberto Rodriguez — <em>ThreatHunter-Playbook</em> / Mordor / OTRF: https://github.com/OTRF/ThreatHunter-Playbook</li>
+<li>Sigma detection rules project: https://github.com/SigmaHQ/sigma</li>
+<li>NIST SP 800-53 / 800-92 (log management) and NIST SP 800-137 (Information Security Continuous Monitoring)</li>
+<li>Cross-references in this repo: <a href="../Detection-Engineering/README.md"><code>detection/Detection-Engineering</code></a>, <a href="../MITRE-ATTACK/README.md"><code>detection/MITRE-ATTACK</code></a>, <a href="../IDS-SIEM/README.md"><code>detection/IDS-SIEM</code></a>, <a href="../Anomaly-Detection/README.md"><code>detection/Anomaly-Detection</code></a></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

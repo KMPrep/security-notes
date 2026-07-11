@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 32 — SaaS Webhook Security — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario32-saas-webhook-security-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-32-saas-webhook-security-threat-exploitation-and-blue-team-control-review">Scenario 32 — SaaS Webhook Security — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario32-saas-webhook-security.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario32-saas-webhook-security-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> High-throughput SaaS webhook delivery to customer endpoints carrying PII and transactional events. Key risks: SSRF via endpoint registration, replay during retries, signed-secret compromise, and retry storms.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>Map the scenario to attacker-centric chains and concrete blue-team controls: for every threat provide STRIDE, attacker steps, precise controls with log fields/event IDs, safe purple-team validation commands, and mermaid attack trees.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>The single most consequential decision is how outbound delivery is constrained: allowing webhook workers to resolve and call arbitrary customer-supplied endpoints without send-time DNS/Egress validation effectively grants attackers the ability to pivot into internal networks or cloud metadata endpoints. Preferred safe choice: deny-by-default egress with policy-driven allowlist and per-endpoint risk scoring; dangerous alternative: permit arbitrary HTTPS endpoints validated only at registration.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): stopped/contained states.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business impact.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>SSRF via malicious endpoint registration</td>
+<td>Critical likelihood, High</td>
+<td>Registration logs &amp; egress gateway denies</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>DNS rebinding of approved hostname</td>
+<td>High likelihood, High</td>
+<td>DNS resolver logs &amp; egress anomalies</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Missing or weak signature verification</td>
+<td>High likelihood, High</td>
+<td>Signature verification telemetry</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Replay attacks across retry windows</td>
+<td>High likelihood, High</td>
+<td>Replay counters &amp; event_id ingestion logs</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Retry storm / DLQ amplification</td>
+<td>High likelihood, High</td>
+<td>Queue depth &amp; retry metrics</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Signed secret compromise &amp; reuse</td>
+<td>Medium likelihood, Critical</td>
+<td>Secret rotation logs and cross-tenant use</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Logging/leakage of payloads</td>
+<td>Medium likelihood, High</td>
+<td>DLP hits in observability indices</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Support override or insider endpoint edit</td>
+<td>Low/Medium likelihood, High</td>
+<td>Support audit logs</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Insecure webhook callback reception</td>
+<td>Medium likelihood, High</td>
+<td>Webhook delivery logs</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>DLQ over-retention exposing PII</td>
+<td>Medium likelihood, Medium</td>
+<td>DLQ inventory and retention metrics</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    S0[Attacker registers endpoint]:::attack --> S1[Event triggers outbound POST]:::attack
+    S1 --> C1{DNS resolves to private/metadata IP?}:::control
+    C1 -->|Yes| S2[SSRF to internal target]:::attack
+    C1 -->|No| S3[Request sent to attacker endpoint]:::attack
+    S3 --> C2{Signature verification at receiver?}:::control
+    C2 -->|No| S4[Attacker accepts PII]:::impact
+    C2 -->|Yes| S5[Receiver rejects forged payload]:::blocked
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-ssrf-via-malicious-endpoint-registration">T1 — SSRF via malicious endpoint registration</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Critical likelihood, High impact<br />
+<strong>Attacker objective:</strong> Make delivery workers call internal metadata or private services and exfiltrate data.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: ability to register a webhook endpoint (tenant admin or attacker uses compromised tenant).</li>
+<li>Initial action: register endpoint pointing to internal IP or cloud metadata URL (e.g., <code>http://169.254.169.254/latest/meta-data</code>).</li>
+<li>Core exploitation: worker resolves hostname and performs POST, retrieving internal data or commanding lateral actions.</li>
+<li>Escalation: use returned data (tokens, metadata) to access platform services.</li>
+<li>Impact realization: secrets leakage, lateral movement into cloud resources.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: reject endpoints using disallowed IP ranges (RFC 1918, link-local, metadata IPs) and non-HTTPS schemes at registration and dispatch.</li>
+<li>Preventive: host-based egress firewall rules and egress gateway blocking internal ranges; require allowlist exceptions via ticketed process.</li>
+<li>Detective: egress gateway logs for blocked attempts and registration logs mapping tenant -&gt; endpoint.</li>
+<li>Corrective: automated endpoint disable and tenant notification when SSRF attempt detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>RegistrationLogs</code>: fields <code>tenant_id</code>, <code>endpoint_url</code>, <code>actor</code>, <code>timestamp</code>.</li>
+<li><code>EgressGatewayLogs</code>: fields <code>src_service</code>, <code>dst_ip</code>, <code>dst_port</code>, <code>action</code> (<code>DENY</code>/<code>ALLOW</code>).</li>
+<li>SIEM rule <code>WebhookSSRFAttempt</code>: destination in private range attempted from worker.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Attempt to register a webhook pointing at metadata endpoint (lab)
+curl -X POST -H &quot;Authorization: Bearer &lt;admin&gt;&quot; https://platform.example.com/webhooks -d '{&quot;url&quot;:&quot;http://169.254.169.254/latest/meta-data&quot;}'
+</code></pre>
+<pre><code class="language-kql"># Detect SSRF attempts in egress logs
+EgressGatewayLogs
+| where dst_ip startswith &quot;169.254.&quot; or dst_ip startswith &quot;10.&quot; or dst_ip startswith &quot;192.168.&quot;
+| where action == &quot;DENY&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Register endpoint to internal IP]:::attack --> A2[Worker dispatch attempts POST]:::attack
+    A2 --> C1{Egress gateway blocks private destinations?}:::control
+    C1 -->|Yes| B1[Request blocked & endpoint disabled]:::blocked
+    C1 -->|No| A3[SSRF returns metadata -> exfiltrate]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-dns-rebinding-of-approved-hostname">T2 — DNS rebinding of approved hostname</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Register a benign hostname that later resolves to internal/private IP via DNS rebinding.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker-controlled DNS with short TTL and capability to change A/AAAA records.</li>
+<li>Initial action: register <code>attacker.example.com</code>, pass verification, then update DNS to return internal IPs.</li>
+<li>Core exploitation: subsequent deliveries post-rebind hit internal resources.</li>
+<li>Escalation: automate rebinds to evade temporary checks.</li>
+<li>Impact realization: SSRF-like reachability to internal resources.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: at-send-time DNS resolve and check that resolved IPs are in allowed public ranges; cache resolution results only briefly and re-resolve before each dispatch.</li>
+<li>Preventive: require TLS validation and, for high-risk endpoints, require mTLS or certificate pinning to avoid host impersonation.</li>
+<li>Detective: DNS monitoring to detect quick changes in resolution and alert for hosts resolving to private ranges.</li>
+<li>Corrective: disable endpoints when DNS rebind patterns detected and notify tenant.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>DNSResolverLogs: hostname, resolved_ips[], ttl, resolve_timestamp.</li>
+<li>EgressGatewayLogs: correlation of <code>dst_ip</code> to <code>endpoint_url</code> event.</li>
+<li>DNS monitoring alert: <code>DNSRebindingWebhookHost</code> when endpoint resolves to disallowed ranges after approval.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Simulate DNS rebind: change A record for approved host to internal IP and observe delivery
+nsupdate &lt;&lt;'EOF'
+server dns.example
+zone example.com
+update delete attacker.example.com A
+update add attacker.example.com 60 A 10.0.0.5
+send
+EOF
+</code></pre>
+<pre><code class="language-kql"># Detect host resolving to private range after registration
+DNSResolverLogs
+| where hostname == &quot;attacker.example.com&quot; and resolved_ip startswith &quot;10.&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    B1[Host approved]:::attack --> B2[DNS rebind to private IP]:::attack
+    B2 --> C1{Send-time resolution checks?}:::control
+    C1 -->|Yes| B3[Block & disable endpoint]:::blocked
+    C1 -->|No| B4[Worker hits internal IP]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-missing-or-weak-signature-verification-by-receiver">T3 — Missing or weak signature verification by receiver</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Receive and accept forged events because receiver does not verify HMAC signature, timestamp, or event id.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: receiver endpoint implemented incorrectly or lacks SDK verification.</li>
+<li>Initial action: replay previously captured payloads or craft forged payloads with guessed fields.</li>
+<li>Core exploitation: receiver processes forged payload leading to unauthorized actions (e.g., fake refund).</li>
+<li>Escalation: chain forged events to create mixed malicious sequences.</li>
+<li>Impact realization: fraudulent or unauthorized actions at customer systems.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: enforce per-tenant HMAC signing with timestamp and event_id headers; publish reference SDKs for verification.</li>
+<li>Preventive: recommend mTLS for high-assurance tenants.</li>
+<li>Detective: monitor signature verification failures reported by receivers (if receivers send telemetry) and signature mismatch spikes.</li>
+<li>Corrective: rotate compromised secrets and notify tenant to update verification keys.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SignatureVerificationTelemetry: <code>event_id</code>, <code>tenant_id</code>, <code>signature_result</code> (PASS/FAIL), <code>timestamp</code>.</li>
+<li>Receiver telemetry (if provided): number of signature failures by tenant.</li>
+<li>SIEM rule: <code>SignatureFailureSpike</code> for sudden increase.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Send a forged payload without valid signature to a test endpoint and ensure receiver rejects
+curl -X POST -H &quot;X-Signature: invalid&quot; -d '{&quot;event&quot;:&quot;test&quot;}' https://customer.example/webhook
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    C1[Attacker crafts forged payload]:::attack --> C2[POST to customer endpoint]:::attack
+    C2 --> C3{Receiver verifies signature & timestamp?}:::control
+    C3 -->|Yes| B1[Reject forged payload]:::blocked
+    C3 -->|No| C4[Process forged event -> fraudulent action]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-replay-attacks-across-retry-windows">T4 — Replay attacks across retry windows</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Re-deliver valid payloads captured on the wire or scraped from logs during allowed time window and cause duplicate side effects.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: capture payloads or have access to log archives; receiver does not enforce idempotency.</li>
+<li>Initial action: replay captured <code>event_id</code> within the server's retry window.</li>
+<li>Core exploitation: receiver processes duplicated events leading to duplicated transactions.</li>
+<li>Escalation: programmatically replay high-value events in bursts.</li>
+<li>Impact realization: financial losses, duplicate orders, or double charges.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: include <code>event_id</code> and timestamp in signature; publish short acceptance window (e.g., 2 minutes) and require receiver to enforce idempotency keys.</li>
+<li>Detective: monitor <code>event_id</code> reuse counts and <code>SignatureFailure</code> anomalies; alert on repeated deliveries beyond allowed window.</li>
+<li>Corrective: revoke windowed keys and perform forced idempotency reconciliation when replay detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>ReplayCounters: counts of seen <code>event_id</code> beyond window per tenant.</li>
+<li>DeliveryLogs: <code>event_id</code>, <code>attempt</code>, <code>timestamp</code>, <code>response_code</code>.</li>
+<li>SIEM: <code>ReplayEventBurst</code> rule when same <code>event_id</code> seen by receiver more than one allowed attempt.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Replay captured event to test receiver idempotency handling
+curl -X POST -H &quot;X-Signature: &lt;valid&gt;&quot; -d '@event.json' https://customer.example/webhook
+sleep 60
+curl -X POST -H &quot;X-Signature: &lt;valid&gt;&quot; -d '@event.json' https://customer.example/webhook
+</code></pre>
+<pre><code class="language-kql"># Detect repeated event_id deliveries beyond allowed window
+DeliveryLogs
+| where event_id == &quot;&lt;event&gt;&quot;
+| summarize cnt=count() by bin(timestamp, 1m)
+| where cnt &gt; 1
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    D1[Attacker replays captured payload]:::attack --> D2[Receiver accepts duplicate event]:::attack
+    D2 --> C1{Receiver enforces idempotency & timestamp window?}:::control
+    C1 -->|Yes| B1[Duplicate ignored]:::blocked
+    C1 -->|No| D3[Duplicate processing occurs]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-retry-storm-dlq-amplification">T5 — Retry storm / DLQ amplification</h3>
+<p><strong>STRIDE category:</strong> Denial of Service<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Cause many endpoints to fail or slow, creating retry amplification that overwhelms delivery workers and storage.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: either the attacker controls many endpoints or triggers transient failures on popular endpoints.</li>
+<li>Initial action: trigger conditions that cause repeated failures (e.g., return 500 quickly) across many tenants.</li>
+<li>Core exploitation: queue grows, workers busy reattempting, other jobs starve.</li>
+<li>Escalation: saturate DLQ storage with many failed payloads containing PII.</li>
+<li>Impact realization: platform outages and potential PII exposure in long-lived DLQs.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: cap retries per tenant and implement exponential backoff with jitter and circuit breaker thresholds.</li>
+<li>Preventive: isolate tenant queues and use rate-limited worker pools per tenant to avoid noisy neighbour effects.</li>
+<li>Detective: monitor DLQ growth, oldest item age, and per-tenant retry counts; trigger automatic quarantine for high DLQ growth.</li>
+<li>Corrective: auto-throttle offending tenants and notify owners; escalate to manual review for DLQ purge with forensics.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>QueueMetrics: <code>queue_depth</code>, <code>oldest_age</code>, <code>attempts_per_event</code>, per-tenant breakdown.</li>
+<li>DLQInventory: object counts, retention ages, and storage usage.</li>
+<li>SIEM: <code>RetryStormTenant</code> alerts when <code>attempts_per_event</code> &gt; threshold.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Simulate endpoint failure to generate retries (lab only)
+for i in {1..100}; do curl -X POST -H &quot;Authorization: Bearer &lt;admin&gt;&quot; https://platform.example.com/webhooks/test -d '{&quot;event&quot;:&quot;failtest&quot;}' &amp; done
+</code></pre>
+<pre><code class="language-kql"># Detect DLQ growth anomaly
+DLQInventory | where record_count &gt; 1000 and oldest_age &gt; 24h
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    E1[Many endpoints return failure]:::attack --> E2[Retry attempts flood queue]:::attack
+    E2 --> C1{Per-tenant queue isolation & retry caps?}:::control
+    C1 -->|Yes| B1[Offending tenant throttled]:::blocked
+    C1 -->|No| E3[Delivery workers saturated -> DoS]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-signed-secret-compromise-reuse">T6 — Signed secret compromise &amp; reuse</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use compromised signing secret to forge events accepted by receivers.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: tenant or platform secret leak (logs, misconfig, insider).</li>
+<li>Initial action: craft payloads signed with stolen HMAC and send to receivers.</li>
+<li>Core exploitation: receivers accept payloads as legitimate; attacker causes actions.</li>
+<li>Escalation: use forged events to seed further compromise within customers.</li>
+<li>Impact realization: fraudulent behavior at scale, undetected if receiver lacks replay or timestamp checks.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: minimize secret exposure (no logging of secrets), rotate keys periodically and on suspicion, and store secrets in KMS with access controls.</li>
+<li>Detective: monitor for cross-tenant secret use (same key used across multiple tenants) and unexpected signing patterns.</li>
+<li>Corrective: immediate rotation and forced handshake with tenant to verify new key; notify receivers to reject old signatures.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>KeyUsageLogs: <code>key_id</code>, <code>tenant_id</code>, <code>timestamp</code>, <code>usage_count</code>.</li>
+<li>SIEM: <code>CrossTenantSecretUsage</code> when same key used by different tenant contexts.</li>
+<li>Secret rotation events with correlated key material change logs.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Attempt to sign payload with rotated/old key and ensure receiver rejects
+curl -X POST -H &quot;X-Signature: &lt;old-key&gt;&quot; -d '@event.json' https://customer.example/webhook
+</code></pre>
+<pre><code class="language-kql"># Detect same key used for multiple tenant contexts
+KeyUsageLogs | summarize tenants=count(distinct tenant_id) by key_id | where tenants &gt; 1
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    F1[Secret leaked]:::attack --> F2[Attacker signs payloads]:::attack
+    F2 --> C1{Receiver checks signature & key_id validity?}:::control
+    C1 -->|Yes| B1[Reject invalid key_id]:::blocked
+    C1 -->|No| F3[Forged events accepted]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-loggingleakage-of-payloads-and-secrets">T7 — Logging/leakage of payloads and secrets</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Leak payloads or signing secrets through logs, debug endpoints, or telemetry indices.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: logs or telemetry sinks retain full payloads or secrets and are accessible.</li>
+<li>Initial action: query logs for PII-containing webhook payloads or search for signing secret patterns.</li>
+<li>Core exploitation: exfiltrate payloads or secrets from observability backends.</li>
+<li>Escalation: combine leaked secrets to forge events.</li>
+<li>Impact realization: PII exposure and large-scale fraud.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: redact payloads and secrets in logs before ingestion; avoid logging entire payloads in plain text.</li>
+<li>Detective: DLP on logs to detect PII fields and secrets patterns with automatic masking and alerting.</li>
+<li>Corrective: purge leaked logs and rotate secrets if leakage found.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>LogIngestionMetrics: <code>redaction_count</code>, <code>DLP_hits</code>, <code>retention_age</code>.</li>
+<li>SIEM DLP alerts with payload fields and source index.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Search internal logs for webhook payload fields (lab only — ensure permissions)
+rg &quot;credit_card|ssn|X-Signature&quot; /var/log/observability/* || true
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    G1[Webhook payload logged in plain text]:::attack --> G2[Attacker queries log index]:::attack
+    G2 --> C1{DLP redaction in ingest?}:::control
+    C1 -->|Yes| B1[Payload redacted]:::blocked
+    C1 -->|No| G3[Extract PII or secrets]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-support-override-or-insider-endpoint-edit">T8 — Support override or insider endpoint edit</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Low/Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Insider or compromised support tooling changes endpoint configuration or secrets to route data to attacker-controlled endpoints.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: support tool privileges and weak approval workflows.</li>
+<li>Initial action: edit endpoint URL or replace signing secret using support interface without proper ticket or approval.</li>
+<li>Core exploitation: subsequent events routed to attacker endpoint or forged events signed by rotated key.</li>
+<li>Escalation: cover tracks by deleting audit entries or manipulating logs.</li>
+<li>Impact realization: large-scale exfiltration or persistent forged events.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Preventive: enforce ticket binding and dual-approval for support changes to endpoint or signing keys.</li>
+<li>Detective: alert on support edits without ticket_id or outside on-call windows.</li>
+<li>Corrective: require post-change verification handshake and automated rollback if no verification succeeds.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SupportAuditLogs: <code>actor</code>, <code>ticket_id</code>, <code>change_type</code>, <code>pre</code>/<code>post</code> config snapshot.</li>
+<li>SIEM: <code>SupportOverrideWithoutApproval</code> when missing ticket.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Attempt support override without ticket in staging and ensure system blocks or flags
+support-cli update-endpoint --tenant &lt;tenant&gt; --url &quot;https://attacker.example/webhook&quot; --no-ticket
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    H1[Support edits endpoint without ticket]:::attack --> H2[Events now route to attacker]:::attack
+    H2 --> C1{Dual-approval & ticket required?}:::control
+    C1 -->|Yes| B1[Change blocked/pending]:::blocked
+    C1 -->|No| H3[Exfiltration occurs]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-insecure-webhook-callback-reception-receiver-side">T9 — Insecure webhook callback reception (receiver-side)</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Receiver fails to validate signatures or replay windows, allowing attackers to accept forged or stale webhook data.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: poorly implemented receiver lacking signature or timestamp checks.</li>
+<li>Initial action: send forged payloads or replay old ones.</li>
+<li>Core exploitation: receiver performs unauthorized actions or duplicates transactions.</li>
+<li>Impact realization: fraud, data corruption, or business action duplication.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Best practice: publish verification SDK and encourage or require receivers to perform signature+timestmap+idempotency checks.</li>
+<li>Detective: request telemetry or sample verification metrics from major customers and flag those with high signature failure rates (indicates misimplementation).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SignatureVerificationTelemetry from receiver or integration tests; <code>signature_result</code> pass/fail rates.</li>
+<li>Support tickets indicating missing idempotency behavior.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Send an unsigned test payload to check if receiver accepts it
+curl -X POST -d '{&quot;event&quot;:&quot;test&quot;}' https://customer.example/webhook
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    I1[Attacker sends forged/replayed payload]:::attack --> I2[Receiver lacks verification]:::attack
+    I2 --> C1{Receiver verifies signature/timestamp/idempotency?}:::control
+    C1 -->|Yes| B1[Reject & alert]:::blocked
+    C1 -->|No| I3[Process malicious event]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-dlq-over-retention-exposing-pii">T10 — DLQ over-retention exposing PII</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> When many failed events accumulate in DLQ, an insider or attacker with storage access reads PII.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: DLQ storage accessible via misconfigured ACLs or insider with access.</li>
+<li>Initial action: enumerate DLQ objects and download payloads.</li>
+<li>Core exploitation: extract PII from retained failed payloads.</li>
+<li>Impact realization: data leakage and compliance violations.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Storage: encrypt DLQ objects with tenant-scoped keys and enforce minimal retention; enforce access control and use encrypted staging buckets.</li>
+<li>Detective: DLQ retention monitoring and alert on objects older than policy thresholds.</li>
+<li>Corrective: automated purging and secure archive with limited-forensics-only access.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>DLQInventory and KMS access logs indicating decryption operations.</li>
+<li>Retention alerts for objects older than policy.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List DLQ objects older than retention policy
+dlq-cli list --older-than 7d --bucket prod-dlq
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    J1[DLQ grows and retention exceeded]:::attack --> J2[Attacker with storage access reads objects]:::attack
+    J2 --> C1{Encryption per-tenant and ACLs enforced?}:::control
+    C1 -->|Yes| B1[Objects unreadable without key]:::blocked
+    C1 -->|No| J3[PII exposure]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Register endpoint to private IP in staging; ensure registration or send-time block</td>
+<td>Registration rejected or send-time BLOCK</td>
+<td>Worker attempted outbound call to private address</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Simulate DNS rebind for approved host and verify block at send-time</td>
+<td>Delivery blocked &amp; endpoint disabled</td>
+<td>Delivery reaches private IP after rebind</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Send forged payload to test receiver without valid signature</td>
+<td>Receiver rejects and logs failure</td>
+<td>Receiver processes forged event</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Replay captured event to test receiver idempotency</td>
+<td>Duplicate ignored or rejected</td>
+<td>Duplicate processed</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Create failing endpoints to trigger retries and DLQ</td>
+<td>Tenant-level throttling engaged</td>
+<td>Queue saturated and platform throttled</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Attempt to use rotated secret to sign payloads</td>
+<td>Receiver rejects old-key signatures</td>
+<td>Old-key signatures accepted</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Search observability logs for payload fields and secrets</td>
+<td>No PII in non-secure logs; DLP hits masked</td>
+<td>PII or secrets visible in logs</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Attempt support override without ticket in staging</td>
+<td>Action blocked or flagged</td>
+<td>Change accepted without ticket</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Send unsigned test payload to sample customer endpoint</td>
+<td>Endpoint rejects</td>
+<td>Endpoint accepts unsigned payload</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Check DLQ for items older than retention and verify purge</td>
+<td>DLQ cleaned automatically</td>
+<td>DLQ contains old payloads</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Registration &amp; onboarding</td>
+<td>T1, T2, T8</td>
+<td>Need automation for high-risk exceptions</td>
+</tr>
+<tr>
+<td>Egress &amp; DNS enforcement</td>
+<td>T1, T2, T5</td>
+<td>Send-time re-resolve and egress gateway logging</td>
+</tr>
+<tr>
+<td>Signature &amp; anti-replay</td>
+<td>T3, T4, T6</td>
+<td>SDK adoption rate and optional mTLS for critical tenants</td>
+</tr>
+<tr>
+<td>Observability &amp; DLP</td>
+<td>T7</td>
+<td>Ensure redaction before ingestion</td>
+</tr>
+<tr>
+<td>Queueing &amp; DLQ hygiene</td>
+<td>T5, T10</td>
+<td>Per-tenant isolation and retention automation</td>
+</tr>
+<tr>
+<td>Support governance</td>
+<td>T8</td>
+<td>Dual-approval + ticket binding mandatory</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Block private/link-local IPs at registration and egress</strong> — implement egress gateway deny rules and send-time re-resolution. (Closes T1,T2)</li>
+<li><strong>Publish verification SDKs + require HMAC with timestamp and event_id</strong> — enforce idempotency and narrow acceptance windows. (Closes T3,T4)</li>
+<li><strong>Implement per-tenant DLQ encryption and short retention</strong> — purge automatically and monitor DLQ growth. (Closes T10)</li>
+<li><strong>Per-tenant retry caps and queue isolation</strong> — avoid noisy-neighbour retry storms. (Closes T5)</li>
+<li><strong>DLP at log ingest + no full payload logging in clear</strong> — redact PII before storage. (Closes T7)</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario32-saas-webhook-security.md | Scenario 32 review — Attack-Review-Enhanced</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

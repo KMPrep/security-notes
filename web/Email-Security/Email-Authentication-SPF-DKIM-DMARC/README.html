@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Email Authentication — SPF, DKIM, DMARC (+ BIMI, MTA-STS, TLS-RPT, ARC)</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Email-Security\Email-Authentication-SPF-DKIM-DMARC\README.md</p>
+<h1 id="email-authentication-spf-dkim-dmarc-bimi-mta-sts-tls-rpt-arc">Email Authentication — SPF, DKIM, DMARC (+ BIMI, MTA-STS, TLS-RPT, ARC)</h1>
+<p><strong>Category:</strong> Email Security — Sender Authentication &amp; Anti-Spoofing<br />
+<strong>RFCs:</strong> RFC 5321/5322 (SMTP &amp; message format), RFC 7208 (SPF), RFC 6376 (DKIM), RFC 7489 (DMARC), RFC 8617 (ARC), RFC 8461 (MTA-STS), RFC 8460 (TLS-RPT), RFC 8463 (Ed25519 DKIM)<br />
+<strong>MITRE ATT&amp;CK:</strong> T1566 (Phishing), T1566.001/.002 (Spearphishing Attachment/Link), T1534 (Internal Spearphishing), T1585.002 (Email Accounts), T1656 (Impersonation)<br />
+<strong>Cross-refs:</strong> <code>network/Layer7/DNS/README.md</code> (all three controls live in DNS TXT records), <code>web/Email-Security/Phishing-and-BEC/README.md</code> (the attacks these controls defend against)</p>
+<h2 id="overview">Overview</h2>
+<p>SMTP was designed in 1982 (RFC 821) for a small, mutually trusting network of academic mail hosts and has <strong>no built-in authentication of the sender</strong>. Any host that can open TCP/25 to a receiver can claim to be sending mail <em>from</em> any domain — <code>MAIL FROM:&lt;ceo@yourbank.com&gt;</code> and a <code>From:</code> header reading <code>CEO &lt;ceo@yourbank.com&gt;</code> are accepted verbatim. SPF, DKIM, and DMARC are three layered DNS-published controls bolted onto this trust-by-default protocol to answer three questions: <em>Is this IP allowed to send for the domain? (SPF)</em>, <em>Was this message cryptographically signed by the domain and unmodified in transit? (DKIM)</em>, and <em>Do those results align with the domain the human actually sees, and what should the receiver do if not? (DMARC)</em>.</p>
+<p>At scale this is existential. Google, Microsoft, and Yahoo each process hundreds of billions of messages daily; without sender authentication, spoofed mail purporting to be from <code>paypal.com</code>, <code>irs.gov</code>, or your own corporate domain would flood inboxes. As of February 2024, <strong>Google and Yahoo require bulk senders (5,000+ messages/day) to publish SPF, DKIM, and a DMARC policy</strong> or have their mail rejected/spam-foldered — turning what was a best practice into a deliverability mandate. DMARC is also the single most effective control against <strong>exact-domain spoofing</strong>, the technique behind Business Email Compromise (BEC) that the FBI's IC3 attributes to over $2.9 billion in reported losses in 2023 alone.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- <strong>SPF</strong> authorizes <em>sending IPs</em> for the <code>MAIL FROM</code> (envelope/Return-Path) domain via a DNS TXT record; it breaks on forwarding and has a hard <strong>10 DNS-lookup limit</strong> (exceeding it = <code>permerror</code>).<br />
+- <strong>DKIM</strong> attaches a cryptographic signature (<code>DKIM-Signature</code> header) over selected headers + body; the verifier fetches the public key from <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code> in DNS. It <strong>survives forwarding</strong> but not body modification.<br />
+- <strong>DMARC</strong> ties SPF/DKIM back to the visible <code>From:</code> header domain via <strong>alignment</strong>, publishes a policy (<code>p=none|quarantine|reject</code>), and requests <strong>aggregate (rua) and forensic (ruf) reports</strong>. DMARC passes if <em>at least one</em> of aligned-SPF or aligned-DKIM passes.<br />
+- Roll out <strong>p=none → quarantine → reject</strong> using aggregate reports to find and authorize every legitimate sender before enforcing.<br />
+- <strong>ARC</strong> preserves authentication results across trusted intermediaries (mailing lists, forwarders) that break SPF/DKIM; <strong>MTA-STS/TLS-RPT</strong> enforce and report on transport TLS.</p>
+</blockquote>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>The critical, notable subtlety is that email has <strong>two different "from" identities</strong>, and each control checks a different one:</p>
+<table>
+<thead>
+<tr>
+<th>Identity</th>
+<th>Where it lives</th>
+<th>RFC</th>
+<th>Who sees it</th>
+<th>Checked by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Envelope sender / Return-Path / <code>MAIL FROM</code></td>
+<td>SMTP envelope (transport)</td>
+<td>RFC 5321</td>
+<td>Mail servers only</td>
+<td><strong>SPF</strong></td>
+</tr>
+<tr>
+<td>Header <code>From:</code> (a.k.a. RFC5322.From)</td>
+<td>Message headers</td>
+<td>RFC 5322</td>
+<td>The <strong>human recipient</strong></td>
+<td><strong>DMARC alignment</strong></td>
+</tr>
+<tr>
+<td><code>d=</code> domain in DKIM-Signature</td>
+<td>Message header, signed</td>
+<td>RFC 6376</td>
+<td>Signature covers it</td>
+<td><strong>DKIM</strong></td>
+</tr>
+<tr>
+<td><code>DKIM-Signature</code> selector <code>s=</code></td>
+<td>Header, points to DNS key</td>
+<td>RFC 6376</td>
+<td>—</td>
+<td>DKIM key lookup</td>
+</tr>
+</tbody>
+</table>
+<p>Spoofing exploits the gap: an attacker can pass SPF using a domain they own in the <em>envelope</em> while forging a <em>header From</em> of your bank. SPF and DKIM alone don't require these to match — <strong>DMARC's entire purpose is to require the authenticated identity to <em>align</em> with the header From the user sees.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Definition</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SPF mechanism</td>
+<td>Directive in the SPF record (<code>a</code>, <code>mx</code>, <code>ip4</code>, <code>ip6</code>, <code>include</code>, <code>all</code>) evaluated left-to-right</td>
+<td>First match wins</td>
+</tr>
+<tr>
+<td>SPF qualifier</td>
+<td><code>+</code> pass (default), <code>-</code> fail (hardfail), <code>~</code> softfail, <code>?</code> neutral</td>
+<td><code>-all</code> vs <code>~all</code> is the key policy choice</td>
+</tr>
+<tr>
+<td>SPF result</td>
+<td><code>pass</code>, <code>fail</code>, <code>softfail</code>, <code>neutral</code>, <code>none</code>, <code>permerror</code>, <code>temperror</code></td>
+<td><code>permerror</code> from &gt;10 lookups</td>
+</tr>
+<tr>
+<td>DKIM selector</td>
+<td>Label choosing which key pair; enables multiple/rotated keys</td>
+<td><code>s=selector1</code> → <code>selector1._domainkey.d</code></td>
+</tr>
+<tr>
+<td>DKIM canonicalization</td>
+<td><code>simple</code> or <code>relaxed</code> for header/body (<code>c=relaxed/relaxed</code>)</td>
+<td><code>relaxed</code> tolerates whitespace/case changes</td>
+</tr>
+<tr>
+<td>DKIM <code>bh=</code></td>
+<td>Base64 hash of the (canonicalized, <code>l=</code>-limited) body</td>
+<td>Body-integrity check</td>
+</tr>
+<tr>
+<td>DKIM <code>b=</code></td>
+<td>The RSA/Ed25519 signature over signed headers</td>
+<td><code>h=</code> lists which headers are signed</td>
+</tr>
+<tr>
+<td>DMARC alignment</td>
+<td><code>From</code> domain must match SPF/DKIM domain; <code>strict</code> (exact) or <code>relaxed</code> (org domain)</td>
+<td><code>aspf=</code>/<code>adkim=</code>, default relaxed</td>
+</tr>
+<tr>
+<td>DMARC policy</td>
+<td><code>p=none|quarantine|reject</code>; <code>sp=</code> for subdomains; <code>pct=</code> phased %</td>
+<td>Receiver enforces</td>
+</tr>
+<tr>
+<td>Aggregate report (RUA)</td>
+<td>Daily XML per-source-IP pass/fail counts</td>
+<td>The rollout workhorse</td>
+</tr>
+<tr>
+<td>Forensic report (RUF)</td>
+<td>Per-message redacted failure sample (AFRF)</td>
+<td>Rare today (privacy)</td>
+</tr>
+<tr>
+<td>ARC</td>
+<td>Chain of <code>ARC-Seal</code>/<code>ARC-Message-Signature</code>/<code>ARC-Authentication-Results</code></td>
+<td>Preserves auth across hops</td>
+</tr>
+<tr>
+<td>Organizational domain</td>
+<td>The registrable domain via the Public Suffix List</td>
+<td>Basis of relaxed alignment</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Evaluation/decision logic</strong> at a receiving MTA (e.g., Gmail's inbound path) proceeds: (1) accept the SMTP transaction and record the connecting IP + <code>MAIL FROM</code> domain; (2) evaluate SPF against that IP; (3) verify each <code>DKIM-Signature</code> by fetching the public key and recomputing hashes; (4) look up the DMARC record for the <strong>header From</strong> org domain; (5) test whether SPF-domain or DKIM-<code>d=</code> <strong>aligns</strong> with the header From; (6) DMARC passes if <em>any</em> aligned method passed; (7) if it fails, apply the published policy (subject to <code>pct</code> and any local override such as ARC or a known-forwarder allowlist); (8) emit an aggregate report row.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete Configuration</h3>
+<p><strong>SPF record</strong> — a single TXT record at the domain apex. There must be <strong>exactly one</strong> SPF record per domain (multiple <code>v=spf1</code> records = <code>permerror</code>):</p>
+<pre><code class="language-dns">; example.com apex TXT record
+example.com.   IN TXT &quot;v=spf1 ip4:203.0.113.0/24 ip4:198.51.100.7 include:_spf.google.com include:sendgrid.net -all&quot;
+</code></pre>
+<ul>
+<li><code>ip4:203.0.113.0/24</code> — authorize your own mail egress range directly (costs 0 DNS lookups; prefer this).</li>
+<li><code>include:_spf.google.com</code> — delegate to Google Workspace's SPF (counts as <strong>1 lookup</strong>, and recursively expands its own includes, each counted).</li>
+<li><code>-all</code> — <strong>hardfail</strong>: anything not listed is unauthorized. Use <code>-all</code> in production; <code>~all</code> (softfail) is a safe stepping stone but does not itself cause rejection.</li>
+</ul>
+<p>The <strong>10-lookup limit</strong> (RFC 7208 §4.6.4): SPF evaluation must not require more than 10 DNS-querying mechanisms (<code>include</code>, <code>a</code>, <code>mx</code>, <code>ptr</code>, <code>exists</code>, and the <code>redirect</code> modifier). <code>ip4</code>/<code>ip6</code>/<code>all</code> cost nothing. Exceed 10 and the result is <code>permerror</code>, which under DMARC counts as an SPF failure. Real records blow this budget fast because each <code>include</code> recursively expands — a single <code>include:spf.protection.outlook.com</code> can consume 2-3, and marketing tools chain further. <strong>Fix by flattening</strong> (replacing includes with the resolved <code>ip4</code> ranges, at the cost of manual maintenance) or using an SPF-flattening/macro service. Inspect with:</p>
+<pre><code class="language-bash"># Count SPF lookups and see the expansion tree
+dig +short TXT example.com
+# Tooling: use an SPF checker, or a script that recursively resolves includes
+python3 -c &quot;import checkdmarc; import json; print(json.dumps(checkdmarc.get_spf_record('example.com'), default=str))&quot;
+</code></pre>
+<p><strong>DKIM</strong> — generate a key pair, publish the public half in DNS under a selector, configure the signer with the private half. With OpenDKIM/Postfix:</p>
+<pre><code class="language-bash"># Generate a 2048-bit key with selector &quot;s1&quot; for example.com
+opendkim-genkey -b 2048 -d example.com -s s1 -v
+# Produces s1.private (keep secret on the MTA) and s1.txt (the DNS record)
+</code></pre>
+<pre><code class="language-dns">; Publish the public key. Selector &quot;s1&quot; -&gt; queried at s1._domainkey.example.com
+s1._domainkey.example.com. IN TXT ( &quot;v=DKIM1; k=rsa; t=y; &quot;
+  &quot;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1x...snip...QIDAQAB&quot; )
+</code></pre>
+<p>A resulting outbound signature header looks like:</p>
+<pre><code>DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=s1;
+    t=1720310400; h=from:to:subject:date:message-id;
+    bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;
+    b=Cg8bW...base64signature...==
+</code></pre>
+<p>Key operational points: <code>t=y</code> marks the key as <strong>testing</strong> (verifiers should not treat failures as significant) — remove it once confident. <code>h=from:...</code> <strong>must include <code>from</code></strong> (DMARC requires the From header be signed). <code>l=</code> (body-length limit) is a footgun — it lets an attacker append content below the signed portion; <strong>omit <code>l=</code></strong>. <strong>Rotate keys</strong> by publishing a new selector (<code>s2</code>) first, switching the signer to sign with <code>s2</code>, then removing <code>s1</code> after the mail-in-flight window (a few days). Never reuse a selector for a new key.</p>
+<p><strong>DMARC</strong> — a TXT record at the <code>_dmarc</code> subdomain of the org domain:</p>
+<pre><code class="language-dns">; Monitoring phase — collect data, enforce nothing
+_dmarc.example.com. IN TXT &quot;v=DMARC1; p=none; rua=mailto:dmarc-agg@example.com; ruf=mailto:dmarc-forensic@example.com; fo=1; adkim=r; aspf=r; pct=100&quot;
+
+; Enforcement phase — full reject with strict DKIM alignment and subdomain reject
+_dmarc.example.com. IN TXT &quot;v=DMARC1; p=reject; sp=reject; rua=mailto:dmarc-agg@example.com; adkim=s; aspf=r; pct=100&quot;
+</code></pre>
+<ul>
+<li><code>p=</code> policy for the org domain; <code>sp=</code> policy for subdomains (if omitted, subdomains inherit <code>p</code>). Set <code>sp=reject</code> explicitly to block spoofing of unused subdomains like <code>no-reply.marketing.example.com</code>.</li>
+<li><code>adkim</code>/<code>aspf</code>: <code>r</code> (relaxed — org domain match) or <code>s</code> (strict — exact FQDN). Relaxed is the pragmatic default; strict prevents subdomain-based alignment tricks.</li>
+<li><code>fo=1</code> requests a forensic report if <em>any</em> underlying mechanism fails (default <code>fo=0</code> = only if all fail).</li>
+<li><code>pct=</code> samples the policy — <code>pct=25</code> applies <code>p</code> to 25% of failing mail (rest falls back to the next-lower policy). Useful when moving to <code>reject</code>. Note: <code>pct</code> was <strong>removed in the DMARCbis draft</strong> (RFC 7489 successor) because it caused inconsistent enforcement — modern advice is to use <code>pct</code> briefly if at all.</li>
+</ul>
+<p>If a <strong>receiver at a different org</strong> hosts your <code>rua</code>, add authorization at <em>their</em> domain: <code>example.com._report._dmarc.thirdparty.com IN TXT "v=DMARC1"</code>.</p>
+<p><strong>MTA-STS</strong> (RFC 8461) — enforces TLS for inbound SMTP so an active attacker can't strip STARTTLS. It needs a DNS TXT record <em>and</em> an HTTPS-served policy file:</p>
+<pre><code class="language-dns">_mta-sts.example.com. IN TXT &quot;v=STSv1; id=20240601000000Z&quot;
+</code></pre>
+<pre><code># Served at https://mta-sts.example.com/.well-known/mta-sts.txt
+version: STSv1
+mode: enforce
+mx: mx1.example.com
+mx: mx2.example.com
+max_age: 604800
+</code></pre>
+<p><strong>TLS-RPT</strong> (RFC 8460) — asks partners to report TLS-delivery failures so you detect downgrade attacks or broken certs:</p>
+<pre><code class="language-dns">_smtp._tls.example.com. IN TXT &quot;v=TLSRPTv1; rua=mailto:tls-reports@example.com&quot;
+</code></pre>
+<p><strong>BIMI</strong> — publishes a brand logo (and, with a Verified Mark Certificate, a checkmark) shown by supporting clients <em>only when DMARC is at enforcement</em> (<code>quarantine</code>/<code>reject</code>):</p>
+<pre><code class="language-dns">default._bimi.example.com. IN TXT &quot;v=BIMI1; l=https://example.com/bimi/logo.svg; a=https://example.com/bimi/vmc.pem&quot;
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — The two "from" identities SMTP carries</strong></p>
+<pre class="mermaid">
+flowchart LR
+    A[Sending MTA] --> B[SMTP envelope MAIL FROM]
+    A --> C[Message headers From]
+    B --> D[SPF checks this IP and domain]
+    C --> E[User sees this in the client]
+    D --> F[DMARC alignment ties them together]
+    E --> F
+    F --> G[Policy decision]
+</pre>
+<p><strong>Diagram B — DKIM signing and verification</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant S as Sending MTA
+    participant DNS as DNS
+    participant R as Receiving MTA
+    S->>S: Canonicalize headers and body
+    S->>S: Compute body hash bh
+    S->>S: Sign selected headers with private key
+    S->>R: Message with DKIM-Signature header
+    R->>DNS: TXT s1 dot domainkey dot domain
+    DNS-->>R: Public key p equals
+    R->>R: Recompute bh and verify b
+    R->>R: Result pass or fail
+</pre>
+<p><strong>Diagram C — DMARC evaluation flow at the receiver</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Message arrives] --> B[Evaluate SPF on envelope domain]
+    A --> C[Verify DKIM signatures]
+    B --> D[Look up DMARC for header From org domain]
+    C --> D
+    D --> E{DMARC record present}
+    E -->|No| F[No DMARC policy apply local heuristics]
+    E -->|Yes| G{SPF pass and aligned}
+    G -->|Yes| H[DMARC pass deliver]
+    G -->|No| I{DKIM pass and aligned}
+    I -->|Yes| H
+    I -->|No| J[DMARC fail apply policy]
+    J --> K{Policy value}
+    K -->|none| L[Deliver and report]
+    K -->|quarantine| M[Spam folder and report]
+    K -->|reject| N[Reject and report]
+</pre>
+<p><strong>Diagram D — Phased DMARC rollout state machine</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Monitor
+    Monitor --> Authorizing: aggregate reports reveal legit senders
+    Authorizing --> Quarantine: all legit sources pass and align
+    Quarantine --> RejectPartial: quarantine stable no false positives
+    RejectPartial --> RejectFull: pct raised to 100
+    RejectFull --> [*]
+    Quarantine --> Authorizing: unexpected legit source found
+    RejectPartial --> Quarantine: regression detected
+</pre>
+<p><strong>Diagram E — Why forwarding breaks SPF but ARC repairs it</strong></p>
+<pre class="mermaid">
+flowchart LR
+    A[Origin sender] --> B[Mailing list or forwarder]
+    B --> C[Final recipient]
+    A --> D[SPF passes for origin IP]
+    B --> E[SPF now fails forwarder IP not in origin SPF]
+    B --> F[List may alter subject or body breaking DKIM]
+    B --> G[ARC seals original auth results]
+    G --> C
+    C --> H[Receiver trusts ARC chain overrides DMARC fail]
+</pre>
+<h2 id="real-world-incidents-cves">Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sony Pictures BEC-adjacent phishing</td>
+<td>2014</td>
+<td>No enforcement; spoofed internal mail</td>
+<td>Enforcement + user training needed</td>
+</tr>
+<tr>
+<td>US DHS BOD 18-01 mandate</td>
+<td>2017</td>
+<td>Federal agencies had no DMARC</td>
+<td>Government forced <code>p=reject</code> in 1 year</td>
+</tr>
+<tr>
+<td>Ubiquiti Networks BEC</td>
+<td>2015</td>
+<td>CEO/CFO impersonation via lookalike/spoofed domain</td>
+<td>$46.7M lost; DMARC + domain monitoring</td>
+</tr>
+<tr>
+<td>Toyota Boshoku BEC</td>
+<td>2019</td>
+<td>Spoofed vendor payment instruction</td>
+<td>$37M lost; verify banking changes out-of-band</td>
+</tr>
+<tr>
+<td>"SubdoMailing" campaign</td>
+<td>2024</td>
+<td>Abandoned SPF <code>include</code>/subdomains of trusted brands</td>
+<td>Prune stale SPF includes; monitor org domain</td>
+</tr>
+<tr>
+<td>Gmail DKIM replay abuse</td>
+<td>2023-24</td>
+<td>Valid DKIM signature replayed to new recipients at scale</td>
+<td>DKIM proves origin, not intent; add <code>l=</code> avoidance, expiry</td>
+</tr>
+<tr>
+<td>CVE-2024-7208 / CVE-2024-7209 (Proofpoint)</td>
+<td>2024</td>
+<td>Hosted-email routing let spoofed mail get signed &amp; pass DMARC ("EchoSpoofing")</td>
+<td>Lock down relay authorization; validate tenant identity</td>
+</tr>
+<tr>
+<td>Zimbra / Exim SPF-parsing bugs (various)</td>
+<td>2020-21</td>
+<td>Library flaws (e.g., libspf2 CVE-2021-33912/33913 buffer overflows)</td>
+<td>Patch SPF parsers; they process attacker input</td>
+</tr>
+<tr>
+<td>DMARC <code>pct</code> inconsistent enforcement</td>
+<td>ongoing</td>
+<td>Receivers implement <code>pct</code> differently</td>
+<td>DMARCbis deprecates <code>pct</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study — Ubiquiti Networks (2015, $46.7M).</strong> Attackers impersonated executives and an outside entity, emailing the finance department with wire-transfer instructions to attacker-controlled overseas accounts. This is textbook BEC (ATT&amp;CK T1656/T1566). The technical enabler is that the recipient's client rendered a trusted-looking <code>From:</code>, and either the domain had no DMARC enforcement (allowing exact-domain spoofing) or a lookalike domain (<code>ubnt-corp.com</code>) was used. <strong>DMARC at <code>p=reject</code> stops exact-domain spoofing outright.</strong> Lookalike domains require complementary controls: brand/domain monitoring, and receiver-side display-name/cousin-domain heuristics — DMARC does <em>not</em> protect domains you don't own. See <code>web/Email-Security/Phishing-and-BEC/README.md</code>.</p>
+<p><strong>Case study — "EchoSpoofing" via Proofpoint (2024).</strong> Researchers found that a permissive Proofpoint hosted-email relay configuration allowed spammers to route millions of spoofed messages (impersonating Disney, IBM, Nike, etc.) <em>through</em> the relay, where they were <strong>DKIM-signed and passed SPF/DMARC</strong> because the relay was an authorized sender for those tenants. Millions of "perfectly authenticated" phishing messages reached inboxes daily. Root cause: the relay didn't verify that the connecting tenant was actually authorized to send <em>as</em> the claimed domain. <strong>Lesson: authentication is only as strong as the weakest authorized path.</strong> A DMARC pass means "an authorized sender signed this," not "the legitimate business intended it" — you must lock down every relay/ESP that can sign for you, and scope third-party authorizations tightly.</p>
+<p><strong>Case study — DMARC's DHS success (2017-2018).</strong> US DHS Binding Operational Directive 18-01 mandated all federal <code>.gov</code> domains publish DMARC and reach <code>p=reject</code> within one year. Adoption jumped from ~34% to ~85% of agencies at enforcement, and Agari/Valimail reporting showed a measurable drop in <code>.gov</code>-spoofing phishing. <strong>Lesson: DMARC works at scale when enforcement is mandated and reports are actually monitored</strong> — the same playbook Google/Yahoo now impose on bulk senders.</p>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / Category</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Exact-domain spoofing (no DMARC or <code>p=none</code>)</td>
+<td>T1566.002</td>
+<td>No enforcement policy</td>
+<td>BEC, credential phishing as your brand</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Envelope/header From mismatch abuse</td>
+<td>T1566</td>
+<td>SPF/DKIM don't check header From</td>
+<td>Passes SPF with attacker's domain, forges brand</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SPF &gt;10 DNS lookups → permerror</td>
+<td>Misconfiguration</td>
+<td>Include sprawl</td>
+<td>SPF treated as fail; legit mail rejected under DMARC</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SPF <code>~all</code> (softfail) left in prod</td>
+<td>Design weakness</td>
+<td>Never hardened to <code>-all</code></td>
+<td>Spoofed mail only softfailed, often delivered</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Missing DKIM or <code>from</code> not signed</td>
+<td>Misconfiguration</td>
+<td>Signer misconfig</td>
+<td>DMARC can only rely on fragile SPF</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>6</td>
+<td>DKIM key too short (512/768-bit)</td>
+<td>Cryptographic weakness</td>
+<td>Legacy keys</td>
+<td>Key factored, signatures forged</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>7</td>
+<td>DKIM <code>l=</code> body-length tag set</td>
+<td>Design weakness</td>
+<td>Copy-paste config</td>
+<td>Attacker appends malicious body below signature</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>DKIM replay attack</td>
+<td>T1566</td>
+<td>Signature proves origin not recipient/intent</td>
+<td>One valid message re-sent to millions</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Forwarding/mailing list breaks SPF+DKIM</td>
+<td>Detection gap</td>
+<td>Path &amp; body rewriting</td>
+<td>Legit mail DMARC-fails, gets rejected</td>
+<td>High</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Subdomain spoofing (<code>sp</code> not set)</td>
+<td>T1566.002</td>
+<td>Only org domain protected</td>
+<td>Spoof <code>mktg.example.com</code></td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Abandoned/dangling SPF include</td>
+<td>Misconfiguration</td>
+<td>Decommissioned ESP still in record</td>
+<td>Attacker registers freed resource, sends authorized mail</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Cousin / lookalike domain</td>
+<td>T1656</td>
+<td>DMARC only covers owned domains</td>
+<td>Users fooled by <code>paypa1.com</code></td>
+<td>High</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Display-name spoofing</td>
+<td>T1656</td>
+<td>Client shows friendly name only</td>
+<td><code>CEO &lt;random@gmail.com&gt;</code> passes DMARC</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Third-party ESP over-authorization</td>
+<td>Identity/trust</td>
+<td>Broad <code>include</code> for marketing tools</td>
+<td>Compromised ESP sends as you</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Relay/hosted-email spoofing (EchoSpoofing)</td>
+<td>Trust boundary</td>
+<td>Relay signs unauthenticated tenant mail</td>
+<td>Spoofed mail passes DMARC</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td>STARTTLS stripping / downgrade</td>
+<td>T1557</td>
+<td>Opportunistic TLS, no MTA-STS</td>
+<td>Passive/active interception of mail</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Aggregate reports ignored</td>
+<td>Detection gap</td>
+<td>No parsing pipeline</td>
+<td>Spoofing/misconfig invisible; stuck at p=none</td>
+<td>High</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Forensic (ruf) reports leak PII</td>
+<td>Privacy/compliance</td>
+<td><code>fo=1</code> with full samples</td>
+<td>GDPR exposure via report body</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>19</td>
+<td>ARC chain forgery / trust of untrusted sealer</td>
+<td>Trust boundary</td>
+<td>Blindly trusting any ARC</td>
+<td>Attacker seals fake "pass"</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Homograph/IDN From domain</td>
+<td>T1656</td>
+<td>Unicode lookalikes</td>
+<td>Visual spoof of ASCII brand</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from above)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Exact-domain spoofing</td>
+<td>DMARC <code>p=reject</code></td>
+<td>DNS <code>_dmarc</code> TXT</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Envelope/header mismatch</td>
+<td>DMARC alignment (<code>adkim</code>/<code>aspf</code>)</td>
+<td>Receiver policy engine</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SPF permerror</td>
+<td>Flatten SPF; stay ≤10 lookups</td>
+<td>SPF TXT record</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Softfail in prod</td>
+<td>Move <code>~all</code> → <code>-all</code></td>
+<td>SPF TXT record</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Missing/weak DKIM</td>
+<td>Sign all outbound incl. <code>from</code> header</td>
+<td>Outbound MTA/ESP</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Short key</td>
+<td>2048-bit RSA or Ed25519 (RFC 8463)</td>
+<td>DKIM key generation</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>l=</code> tag</td>
+<td>Omit body-length limit</td>
+<td>DKIM signer config</td>
+</tr>
+<tr>
+<td>8</td>
+<td>DKIM replay</td>
+<td>Short <code>x=</code> expiry, per-recipient rate limits, oversign</td>
+<td>Signer + receiver</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Forwarding breakage</td>
+<td>Implement/honor <strong>ARC</strong>; SRS for forwarders</td>
+<td>Forwarders &amp; receivers</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Subdomain spoof</td>
+<td><code>sp=reject</code>; DMARC on wildcards</td>
+<td>DNS <code>_dmarc</code></td>
+</tr>
+<tr>
+<td>11</td>
+<td>Dangling include</td>
+<td>Quarterly SPF audit; remove stale ESPs</td>
+<td>SPF governance</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Lookalike domain</td>
+<td>Defensive registration + brand monitoring</td>
+<td>Registrar / TI feed</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Display-name spoof</td>
+<td>Receiver display-name &amp; anti-impersonation rules</td>
+<td>Secure email gateway</td>
+</tr>
+<tr>
+<td>14</td>
+<td>ESP over-authorization</td>
+<td>Scope subdomains per ESP; least privilege</td>
+<td>SPF/DKIM delegation</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Relay spoofing</td>
+<td>Verify tenant identity; restrict relay authorization</td>
+<td>Hosted-email config</td>
+</tr>
+<tr>
+<td>16</td>
+<td>TLS downgrade</td>
+<td><strong>MTA-STS enforce</strong> + <strong>TLS-RPT</strong> + DANE</td>
+<td>DNS + HTTPS policy</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Ignored reports</td>
+<td>Automated RUA parsing + dashboard</td>
+<td>DMARC analytics</td>
+</tr>
+<tr>
+<td>18</td>
+<td>RUF PII leak</td>
+<td>Prefer aggregate; redact; <code>fo</code> scoping</td>
+<td>Report handling</td>
+</tr>
+<tr>
+<td>19</td>
+<td>ARC forgery</td>
+<td>Trust only vetted sealer domains</td>
+<td>Receiver ARC policy</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Homograph From</td>
+<td>IDN/punycode detection &amp; display</td>
+<td>Client/gateway</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-controls-in-depth">Top 5 Controls in Depth</h3>
+<p><strong>1. DMARC at <code>p=reject</code> with monitored aggregate reports.</strong> This is the keystone. Technically, when a receiver evaluates a message whose header-From org domain publishes <code>p=reject</code>, and neither aligned-SPF nor aligned-DKIM passes, the receiver rejects (5xx) or discards. Implementation is the phased record evolution shown in §2.2 (<code>none</code> → <code>quarantine</code> → <code>reject</code>), driven entirely by RUA data. <strong>Trade-off:</strong> enforcement can break legitimate mail you didn't know about (a marketing tool, a helpdesk system, a forwarder). This is why you <em>never</em> jump straight to reject — you spend weeks at <code>p=none</code> inventorying senders from reports, authorizing each in SPF/DKIM, then tighten. <strong>Limit:</strong> DMARC protects only domains you own and publish records for; it does nothing against lookalike domains or display-name spoofing.</p>
+<p><strong>2. Keep SPF under the 10-lookup ceiling.</strong> Each DNS-querying mechanism counts; blow the budget and SPF returns <code>permerror</code>, which DMARC treats as a fail — potentially rejecting your own mail. Implementation: audit with <code>checkdmarc</code>/<code>spfquery</code>, replace expensive <code>include:</code> chains with direct <code>ip4:</code>/<code>ip6:</code> ranges ("flattening"), and remove decommissioned ESPs. <strong>Trade-off:</strong> flattened records are brittle — if an ESP changes its egress IPs, mail breaks silently until you re-flatten, so this needs monitoring or an automated flattening service. <strong>Limit:</strong> flattening can leave you dependent on a vendor whose IPs change without notice; the cleanest fix is fewer senders and using DKIM (which is lookup-free) as the primary alignment method.</p>
+<p><strong>3. DKIM signing everything, 2048-bit, <code>from</code> signed, <code>l=</code> omitted, rotated.</strong> DKIM is more robust than SPF because it survives IP changes and simple forwarding. The signer canonicalizes (<code>relaxed/relaxed</code> recommended) and signs <code>h=from:to:subject:date:...</code> plus the body hash. <strong>Oversigning</strong> (listing a header twice in <code>h=</code>) prevents an attacker from <em>adding</em> a second <code>From</code> header the verifier ignores. Rotate via new selectors quarterly. <strong>Trade-off:</strong> DKIM proves the domain signed the message, not that the domain <em>intended this recipient</em> — hence replay abuse; mitigate with short <code>x=</code> expiry and per-message controls. <strong>Limit:</strong> body modification by mailing lists breaks DKIM; that gap is what ARC fills.</p>
+<p><strong>4. ARC (Authenticated Received Chain) for intermediaries.</strong> Forwarders and mailing lists legitimately break SPF (new source IP) and often DKIM (they rewrite subjects/footers). ARC lets each hop <strong>seal</strong> the authentication results it observed (<code>ARC-Authentication-Results</code>), cryptographically chained (<code>ARC-Seal</code>, <code>ARC-Message-Signature</code>) so a downstream receiver can see "when this arrived at the trusted list server, DMARC passed" and choose to honor that despite a current DMARC fail. Implementation is on the MTA (Gmail, Office 365 both seal and evaluate). <strong>Trade-off:</strong> ARC is only as trustworthy as the sealer — you must maintain an allowlist of intermediaries you trust; blindly honoring any ARC chain reintroduces spoofing. <strong>Limit:</strong> adoption is uneven, so ARC reduces but doesn't eliminate forwarding false-positives.</p>
+<p><strong>5. MTA-STS + TLS-RPT (transport integrity).</strong> SPF/DKIM/DMARC authenticate <em>content and sender</em>, not the <em>channel</em>. Opportunistic STARTTLS can be stripped by an on-path attacker (T1557), enabling interception. MTA-STS publishes an <code>enforce</code>-mode policy (DNS TXT pointer + HTTPS-hosted policy file listing valid MX and requiring TLS with a valid cert); compliant senders refuse to deliver if TLS can't be negotiated to a listed MX. TLS-RPT collects failure reports so you spot downgrade attempts or expired certs. <strong>Trade-off:</strong> a broken MTA-STS policy or lapsed cert can <em>block</em> inbound mail — start in <code>testing</code> mode and watch TLS-RPT before <code>enforce</code>. <strong>Limit:</strong> MTA-STS trusts the web PKI (a mis-issued cert defeats it); <strong>DANE (DNSSEC-anchored TLSA)</strong> is stronger but requires DNSSEC (see <code>network/Layer7/DNS/README.md</code>).</p>
+<h2 id="detection-response">Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<ul>
+<li><strong>DMARC aggregate (RUA) reports</strong> — daily XML, one <code>&lt;record&gt;</code> per source IP with <code>&lt;row&gt;&lt;policy_evaluated&gt;</code> (disposition, dkim, spf) and <code>&lt;auth_results&gt;</code>. This is the primary source for finding spoofing and unauthorized senders.</li>
+<li><strong>DMARC forensic (RUF) reports</strong> — per-message redacted failure samples (AFRF); rich but privacy-sensitive and rarely sent by major receivers.</li>
+<li><strong>Inbound MTA logs / <code>Authentication-Results</code> headers</strong> — your own receivers' <code>spf=</code>, <code>dkim=</code>, <code>dmarc=</code> verdicts per message (Gmail, Postfix+OpenDMARC, Exchange headers).</li>
+<li><strong>TLS-RPT reports</strong> — JSON summaries of TLS delivery success/failure per sending MTA.</li>
+<li><strong>SIEM email telemetry</strong> — sender IP, header From vs envelope From, auth verdicts, message-id, subject; correlate with URL/attachment detonation.</li>
+<li><strong>DNS change logs</strong> — alert on modifications to <code>_dmarc</code>, <code>_domainkey</code>, and apex SPF records (an attacker who can edit DNS can neuter all three).</li>
+</ul>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>A — SQL over parsed DMARC aggregate reports: find IPs spoofing you.</strong> Assume RUA XML is parsed into a table <code>dmarc_agg(report_date, source_ip, header_from, count, disposition, spf_result, spf_aligned, dkim_result, dkim_aligned, sending_domain)</code>.</p>
+<pre><code class="language-sql">-- Sources sending as our domain that FAIL DMARC (unauthorized or misconfigured legit sender)
+SELECT source_ip,
+       header_from,
+       SUM(count)                          AS volume,
+       MAX(report_date)                    AS last_seen,
+       SUM(CASE WHEN spf_aligned  THEN count ELSE 0 END) AS spf_ok,
+       SUM(CASE WHEN dkim_aligned THEN count ELSE 0 END) AS dkim_ok
+FROM   dmarc_agg
+WHERE  report_date &gt;= CURRENT_DATE - INTERVAL '7' DAY
+  AND  disposition IN ('quarantine','reject')       -- or dkim/spf both != pass at p=none
+GROUP  BY source_ip, header_from
+HAVING SUM(count) &gt; 50                                -- tune threshold
+ORDER  BY volume DESC;
+</code></pre>
+<p>Triage: an unknown IP with high failing volume and no alignment → likely spoofing (or a forgotten legit sender to authorize). A <em>known</em> corporate/ESP IP failing → misconfiguration to fix before enforcement.</p>
+<p><strong>B — Sigma rule: inbound message failing DMARC while spoofing an internal/high-value domain.</strong></p>
+<pre><code class="language-yaml">title: Inbound mail fails DMARC impersonating protected domain
+id: 4a3f9e21-emailauth-dmarc-fail
+status: experimental
+logsource:
+  product: email
+  service: gateway
+detection:
+  selection_header_from:
+    header_from_domain:
+      - 'example.com'          # our own domain(s)
+      - 'finance.example.com'
+  selection_failed:
+    dmarc_result: 'fail'
+  filter_known_forwarders:
+    arc_result: 'pass'
+    arc_sealer:
+      - 'google.com'
+      - 'protection.outlook.com'
+  condition: selection_header_from and selection_failed and not filter_known_forwarders
+fields:
+  - source_ip
+  - envelope_from
+  - header_from
+  - subject
+  - message_id
+level: high
+</code></pre>
+<p><strong>C — KQL (Microsoft 365 / Defender) for display-name impersonation of executives.</strong></p>
+<pre><code class="language-kql">EmailEvents
+| where Timestamp &gt; ago(1d)
+| where SenderFromDomain !in (&quot;example.com&quot;)            // external sender...
+| extend DisplayName = tostring(SenderDisplayName)
+| where DisplayName has_any (&quot;CEO&quot;,&quot;CFO&quot;,&quot;Jane Doe&quot;,&quot;John Smith&quot;)  // exec name list
+| where AuthenticationDetails has &quot;dmarc&quot; and AuthenticationDetails !has &quot;dmarc=pass&quot;
+| project Timestamp, SenderFromAddress, DisplayName, Subject, RecipientEmailAddress, AuthenticationDetails
+</code></pre>
+<h3 id="response-playbook">Response playbook</h3>
+<ol>
+<li><strong>Contain:</strong> if aggregate reports show sustained spoofing of your domain, confirm your DMARC is at <code>p=reject</code>; if still at <code>none</code>/<code>quarantine</code>, move to enforcement (after verifying no legit sender is collateral). Notify the SEG/mail team to block the spoofing source IPs and quarantine matching in-flight messages.</li>
+<li><strong>Identify blast radius:</strong> query mail logs for delivered messages matching the spoof pattern (source IP, subject, header From) during the window before enforcement; list recipients who received/opened.</li>
+<li><strong>Eradicate:</strong> for a compromised authorized sender (ESP, relay), revoke/rotate its DKIM selector and remove it from SPF; for a dangling include, delete it; for a compromised DNS account, restore records and rotate DNS provider credentials.</li>
+<li><strong>Recover:</strong> send targeted user warnings to recipients of spoofed mail; force password resets if credential phishing; verify any financial transaction touched by BEC out-of-band before it settles (recall wires within the 72-hour window — the FBI IC3 Financial Fraud Kill Chain).</li>
+<li><strong>Harden:</strong> raise <code>pct</code> to 100 and <code>sp=reject</code>; add <code>-all</code>; deploy MTA-STS <code>enforce</code>; register defensive lookalike domains; add SEG anti-impersonation rules for exec display names and cousin domains.</li>
+<li><strong>Report &amp; learn:</strong> file with IC3 for BEC losses; feed the spoofing IPs/domains into TI; add a detection for the specific pattern; schedule a quarterly SPF/DKIM/DMARC posture review.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. Why does email need SPF/DKIM/DMARC at all — what's wrong with SMTP?</strong><br />
+SMTP (RFC 5321) has no authentication of the sender: any host can issue <code>MAIL FROM</code> and set a <code>From:</code> header for any domain, and the receiver historically accepted it. This lets attackers spoof trusted brands and internal executives for phishing and BEC. SPF, DKIM, and DMARC are DNS-published controls layered on top: SPF authorizes sending IPs, DKIM cryptographically signs the message, and DMARC ties those results to the visible From header and tells receivers what to do on failure.<br />
+<em>Signal:</em> Do they understand these are bolt-ons to an inherently trust-based protocol, not part of SMTP itself.</p>
+<p><strong>Q2. What identity does SPF check, and what identity does DMARC care about?</strong><br />
+SPF authenticates the <strong>envelope sender</strong> (<code>MAIL FROM</code> / Return-Path), which mail servers see but users don't. DMARC cares about the <strong>header <code>From:</code></strong> — the address the human recipient actually reads. The two can legitimately differ, so SPF passing doesn't mean the visible From is genuine; DMARC's alignment requirement is what forces the authenticated identity to match the header From.<br />
+<em>Signal:</em> The single most important conceptual distinction; separates people who've operated these from those who've read a blog.</p>
+<p><strong>Q3. Explain the SPF 10-lookup limit and one consequence of exceeding it.</strong><br />
+SPF evaluation may trigger at most 10 DNS-querying mechanisms (<code>include</code>, <code>a</code>, <code>mx</code>, <code>ptr</code>, <code>exists</code>, <code>redirect</code>); <code>ip4</code>/<code>ip6</code>/<code>all</code> are free. Nested <code>include</code>s expand recursively and count too. Exceeding 10 yields <code>permerror</code>, which DMARC treats as an SPF failure — meaning a bloated SPF record can cause your <em>own</em> legitimate mail to fail DMARC and be rejected.<br />
+<em>Signal:</em> Knowing it's a real operational failure mode, not trivia.</p>
+<p><strong>Q4. What is a DKIM selector and why do selectors exist?</strong><br />
+A selector is a label in the <code>DKIM-Signature</code> (<code>s=</code>) that tells the verifier which public key to fetch — from <code>&lt;selector&gt;._domainkey.&lt;d-domain&gt;</code>. Selectors let a domain publish multiple keys simultaneously: for different ESPs/systems and, crucially, for <strong>key rotation</strong> (publish a new selector's key, switch signing to it, retire the old one) without a flag-day cutover.<br />
+<em>Signal:</em> Understands DKIM key lifecycle, not just the concept.</p>
+<p><strong>Q5. What are the three DMARC policies and what does each instruct receivers to do?</strong><br />
+<code>p=none</code> = monitor only; deliver as normal but send reports (used to gather data). <code>p=quarantine</code> = treat failing mail as suspicious, typically route to spam/junk. <code>p=reject</code> = refuse failing mail outright (5xx). Alongside sits <code>sp=</code> for subdomains and <code>pct=</code> for phased sampling.<br />
+<em>Signal:</em> Baseline fluency and awareness of the phased-rollout intent behind <code>none</code>.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System Design / Trade-offs</h3>
+<p><strong>Q6. Design a safe DMARC rollout for a company with 20 sending systems and no current records. Walk the phases.</strong><br />
+Start by publishing DKIM on every legitimate sending system and a correct SPF (≤10 lookups), then publish <code>p=none</code> with <code>rua</code> pointing to a monitored mailbox/analytics platform. Spend 2-6 weeks parsing aggregate reports to build a complete inventory of sources sending as your domain, authorizing each legitimate one (add to SPF, enable DKIM) and investigating unknowns. Once essentially all legitimate volume passes <em>and aligns</em>, move to <code>p=quarantine</code> — optionally with <code>pct</code> to sample — and watch reports for false positives (forwarders, forgotten tools). When quarantine is stable, go to <code>p=reject</code>, add <code>sp=reject</code>, harden SPF to <code>-all</code>, and keep the reporting pipeline running permanently. The whole point of the phased approach is that enforcement blocks legitimate mail you didn't know existed, so reports drive every promotion.<br />
+<em>Signal:</em> Do they treat reports as the engine and refuse to jump to reject; do they mention alignment, not just pass.</p>
+<p><strong>Q7. A partner says your legitimate mail lands in their spam after they enabled DMARC on their side — actually your mail to a mailing list gets rejected. Why, and how do you fix it?</strong><br />
+Mailing lists and forwarders break both underlying mechanisms: they relay from their own IP (so SPF fails for the original domain) and often rewrite the subject or add footers (so the body hash breaks DKIM). With no aligned pass, DMARC fails and a strict receiver rejects. Fixes: the list can rewrite the From to its own domain (<code>From: "Alice via list" &lt;list@lists.example&gt;</code>) so DMARC applies to the list's domain; forwarders can implement <strong>SRS</strong> to rewrite the envelope so SPF passes; and the ecosystem's real answer is <strong>ARC</strong>, where the list seals the authentication results it saw so downstream receivers can honor the original pass despite the current failure. On your side, ensure DKIM signs a minimal, stable header set and omit <code>l=</code>.<br />
+<em>Signal:</em> Deep understanding of the forwarding problem and ARC/SRS as the fixes.</p>
+<p><strong>Q8. SPF vs DKIM — if you could only rely on one for DMARC alignment, which and why?</strong><br />
+DKIM, because it's far more robust: the signature travels with the message and survives IP changes, relaying, and simple forwarding, whereas SPF fails the moment mail is forwarded or the sending IP isn't in the record, and it's fragile against the 10-lookup limit. DKIM also doesn't consume the SPF lookup budget. SPF still has value (it's cheap and catches direct spoofing from unauthorized IPs), and you want <em>both</em> for redundancy since DMARC passes if either aligns — but if forced to pick the primary alignment method, DKIM wins.<br />
+<em>Signal:</em> An opinion backed by the forwarding and lookup-limit realities.</p>
+<p><strong>Q9. How would you architect a pipeline to consume DMARC aggregate reports for 500 domains and surface spoofing?</strong><br />
+Receive <code>rua</code> at a dedicated mailbox or provider endpoint; ingest the (often gzip/zip) XML, validate and parse each <code>&lt;record&gt;</code> into a normalized table keyed by report_date, domain, source_ip, header_from, disposition, spf/dkim result and alignment, and count. Enrich source_ip with ASN/geo/rDNS and cross-reference known-good sender inventories (your ESPs, egress ranges). Build dashboards for per-domain pass-rate trends and alerts for new high-volume failing sources, sudden pass-rate drops (a broken key or SPF change), and enforcement readiness (percentage of aligned volume). The goal is to (a) find unauthorized senders/spoofing and (b) safely advance each domain's policy. Retain history for trend analysis and compliance.<br />
+<em>Signal:</em> Systems thinking: parsing, enrichment, inventory correlation, alerting — not just "read the XML."</p>
+<p><strong>Q10. Google/Yahoo's 2024 bulk-sender rules — what do they require and why does it matter architecturally?</strong><br />
+As of February 2024, senders of 5,000+ messages/day to Gmail/Yahoo must: authenticate with <strong>both SPF and DKIM</strong>, have a <strong>DMARC record</strong> (at minimum <code>p=none</code>) with alignment, keep <strong>spam complaint rates low</strong> (under ~0.3%), support <strong>one-click unsubscribe</strong> (RFC 8058), and send from domains with valid forward/reverse DNS over TLS. Architecturally this forces every marketing/transactional system to have proper DKIM signing and be inventoried in SPF, and it effectively mandates DMARC for anyone doing bulk mail — non-compliant mail is spam-foldered or rejected. It codified best practice into a deliverability requirement.<br />
+<em>Signal:</em> Awareness of the current mandate and its practical push toward enforcement.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / Deep-Dive</h3>
+<p><strong>Q11. Explain the DKIM replay attack and why a valid signature doesn't imply a legitimate message.</strong><br />
+DKIM proves that the signing domain's key signed the covered headers and body — it says nothing about the intended recipient or the sender's <em>intent</em>. In a replay attack, an adversary obtains one legitimately DKIM-signed message (e.g., by getting a benign email through a large provider that signs all outbound), then re-sends that exact message — signature intact and valid — to millions of new recipients. Because the signature verifies and aligns, it passes DMARC at the big provider's expense. Mitigations: sign a tight header set and include recipient-context where feasible, set a short signature expiry (<code>x=</code>), rate-limit and monitor for the same <code>bh=</code>/message being sent at scale, avoid <code>l=</code>, and providers must add anti-abuse heuristics beyond DKIM. The 2023-24 Gmail replay wave made this concrete.<br />
+<em>Signal:</em> Understands DKIM's semantics precisely — origin proof, not intent or authorization.</p>
+<p><strong>Q12. Walk through DKIM canonicalization and the <code>l=</code> tag risks.</strong><br />
+Canonicalization normalizes the message before hashing so trivial in-transit changes don't break the signature. <code>simple</code> is strict (almost no changes tolerated); <code>relaxed</code> tolerates header case/whitespace folding and body trailing-whitespace/empty-line changes — <code>c=relaxed/relaxed</code> is the practical choice for surviving benign MTA rewrites. The <code>bh=</code> body hash covers the canonicalized body, optionally limited to the first <code>l=</code> bytes. <code>l=</code> is dangerous: it signs only a prefix of the body, so an attacker can <em>append</em> arbitrary content (malicious links, different message) after the signed portion and the signature still verifies — a content-injection vector. Best practice: omit <code>l=</code> entirely and oversign headers (list <code>from</code> twice in <code>h=</code>) so an attacker can't add an unsigned duplicate <code>From</code> that some clients display.<br />
+<em>Signal:</em> Cryptographic-protocol depth and knowledge of real footguns.</p>
+<p><strong>Q13. Compare MTA-STS and DANE for SMTP transport security. When would you choose each?</strong><br />
+Both prevent STARTTLS downgrade, but their trust anchors differ. <strong>MTA-STS</strong> (RFC 8461) publishes a policy via DNS TXT pointer plus an HTTPS-hosted policy file; senders cache it and refuse cleartext/invalid-cert delivery to listed MX. It relies on the <strong>web PKI</strong> and TOFU-style caching — deployable without DNSSEC, which is why Google/Microsoft adopted it, but a mis-issued CA cert or a first-contact attacker can undermine it. <strong>DANE</strong> (RFC 7672) publishes a <strong>TLSA</strong> record binding the MX cert/key, anchored in <strong>DNSSEC</strong> — cryptographically stronger and not dependent on the CA ecosystem, but it requires DNSSEC on both sides, which many operators lack. Choose MTA-STS for broad interoperability today (especially with the big mailbox providers); choose DANE where you control DNSSEC end-to-end and want the stronger guarantee. Pair either with <strong>TLS-RPT</strong> to detect failures. See <code>network/Layer7/DNS/README.md</code> for DNSSEC.<br />
+<em>Signal:</em> Knows both, their PKI vs DNSSEC trust models, and the pragmatic deployment reality.</p>
+<p><strong>Q14. DMARC gives you <code>p=reject</code> on your owned domains. What classes of email impersonation does it NOT stop, and how do you cover them?</strong><br />
+DMARC only protects domains that publish records and are the header From — so it does nothing against (1) <strong>lookalike/cousin domains</strong> (<code>paypa1.com</code>, <code>example-support.com</code>) which are attacker-owned and can have their <em>own</em> passing DMARC; (2) <strong>display-name spoofing</strong> (<code>"Your CEO" &lt;random@gmail.com&gt;</code>), which passes DMARC for gmail.com; (3) <strong>homograph/IDN</strong> visual spoofs; and (4) <strong>compromised legitimate accounts</strong> sending real authenticated mail. Coverage requires complementary controls: defensive domain registration and brand/domain monitoring for lookalikes, secure-email-gateway anti-impersonation rules keyed on executive display names and cousin domains, IDN/punycode detection, external-sender banners, and account-takeover detection plus MFA. DMARC is necessary but not sufficient — it's the anti-<em>exact-domain-spoof</em> layer only.<br />
+<em>Signal:</em> Realistic scoping of DMARC's limits and the surrounding defense-in-depth.</p>
+<p><strong>Q15. How does ARC actually preserve authentication, and what's the trust model risk?</strong><br />
+ARC (RFC 8617) adds three header sets at each participating hop: <code>ARC-Authentication-Results</code> (the SPF/DKIM/DMARC verdict that hop observed), <code>ARC-Message-Signature</code> (a DKIM-like signature over the message as that hop saw it), and <code>ARC-Seal</code> (a signature over the chain of prior ARC headers, giving tamper-evidence for the whole chain). A downstream receiver that would otherwise DMARC-fail a forwarded message can validate the ARC chain, see that DMARC passed when the message entered a trusted intermediary (e.g., a mailing list), and override the failure to deliver. The trust-model risk is that ARC is only meaningful if you trust the sealer: any MTA can seal a chain asserting "DMARC passed," so blindly honoring arbitrary ARC chains reintroduces the spoofing DMARC prevents. Receivers therefore honor ARC only from an allowlist of vetted intermediaries and still weigh reputation. ARC reduces forwarding false-positives but must never be a blanket bypass.<br />
+<em>Signal:</em> Deep protocol knowledge plus the security-critical caveat about sealer trust.</p>
+<h2 id="provider-ecosystem-mapping">Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Google Workspace / GCP</th>
+<th>Microsoft 365 / Azure</th>
+<th>Amazon SES / AWS</th>
+<th>Standalone / OSS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Outbound SPF include</td>
+<td><code>include:_spf.google.com</code></td>
+<td><code>include:spf.protection.outlook.com</code></td>
+<td><code>include:amazonses.com</code></td>
+<td><code>ip4:</code>/<code>ip6:</code> direct</td>
+</tr>
+<tr>
+<td>DKIM signing</td>
+<td>Workspace DKIM (2048-bit, admin console)</td>
+<td>Auto DKIM per tenant/domain</td>
+<td>Easy DKIM (CNAME-based rotating keys)</td>
+<td>OpenDKIM / rspamd</td>
+</tr>
+<tr>
+<td>DMARC hosting</td>
+<td>DNS (Cloud DNS) TXT</td>
+<td>DNS (Azure DNS) TXT</td>
+<td>Route 53 TXT</td>
+<td>Any DNS</td>
+</tr>
+<tr>
+<td>Inbound DMARC enforcement</td>
+<td>Gmail native</td>
+<td>Exchange Online Protection</td>
+<td>WorkMail / SES inbound</td>
+<td>OpenDMARC</td>
+</tr>
+<tr>
+<td>ARC sealing</td>
+<td>Gmail seals &amp; evaluates</td>
+<td>EOP seals &amp; evaluates</td>
+<td>Limited</td>
+<td>rspamd ARC module</td>
+</tr>
+<tr>
+<td>MTA-STS</td>
+<td>Supported (sender &amp; receiver)</td>
+<td>Supported</td>
+<td>Manual policy hosting (S3+CloudFront)</td>
+<td>Postfix + policy daemon</td>
+</tr>
+<tr>
+<td>RUA analytics</td>
+<td>Third-party (Valimail, Dmarcian, Postmark)</td>
+<td>Same third parties + EOP reports</td>
+<td>Same</td>
+<td>parsedmarc (OSS)</td>
+</tr>
+<tr>
+<td>Anti-impersonation</td>
+<td>Gmail heuristics + Security Sandbox</td>
+<td>Defender for Office 365 anti-phish</td>
+<td>GuardDuty (not email-specific)</td>
+<td>SEG appliances</td>
+</tr>
+</tbody>
+</table>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li><strong>SMTP trusts by default; SPF/DKIM/DMARC are DNS-published bolt-ons</strong> that add sender authorization, message integrity, and a policy tying both to the visible From.</li>
+<li><strong>SPF checks the envelope; DMARC checks the header From — alignment is the linchpin.</strong> SPF or DKIM passing alone doesn't protect the identity the user sees.</li>
+<li><strong>SPF has a hard 10-DNS-lookup limit</strong>; blowing it causes <code>permerror</code> and can reject your <em>own</em> mail. Prefer direct <code>ip4:</code> and <code>-all</code> in production.</li>
+<li><strong>DKIM is the more robust alignment method</strong> — it survives forwarding and IP changes — but proves <em>origin, not intent</em> (hence replay abuse). Use 2048-bit/Ed25519, sign <code>from</code>, omit <code>l=</code>, rotate via selectors.</li>
+<li><strong>DMARC passes if either aligned-SPF or aligned-DKIM passes</strong>; roll out <strong><code>p=none</code> → <code>quarantine</code> → <code>reject</code></strong> driven entirely by aggregate reports. Set <code>sp=reject</code> too.</li>
+<li><strong>Forwarding and mailing lists break SPF and DKIM; ARC repairs this</strong> by sealing prior authentication results — but only trust sealers on an allowlist.</li>
+<li><strong>MTA-STS + TLS-RPT (or DANE) secure the transport channel</strong>, which the content-authentication controls do not.</li>
+<li><strong>DMARC stops exact-domain spoofing only</strong> — cousin domains, display-name spoofing, and account takeover need SEG anti-impersonation, brand monitoring, and MFA.</li>
+<li><strong>Google/Yahoo's Feb 2024 bulk-sender rules made SPF+DKIM+DMARC a deliverability mandate</strong> for anyone sending 5,000+ messages/day.</li>
+<li><strong>Aggregate-report parsing is the operational heart</strong> of the program — without it you're blind to spoofing and stuck at <code>p=none</code>.</li>
+</ul>
+<h2 id="references">References</h2>
+<ul>
+<li>RFC 5321 / RFC 5322 — SMTP and Internet Message Format (the trust-by-default substrate).</li>
+<li>RFC 7208 — Sender Policy Framework (SPF), incl. §4.6.4 the 10-lookup limit.</li>
+<li>RFC 6376 — DomainKeys Identified Mail (DKIM) Signatures; RFC 8463 — Ed25519 DKIM.</li>
+<li>RFC 7489 — Domain-based Message Authentication, Reporting, and Conformance (DMARC); DMARCbis draft (successor, deprecates <code>pct</code>).</li>
+<li>RFC 8617 — Authenticated Received Chain (ARC).</li>
+<li>RFC 8461 — SMTP MTA Strict Transport Security (MTA-STS); RFC 8460 — SMTP TLS Reporting (TLS-RPT); RFC 7672 — SMTP DANE.</li>
+<li>RFC 8058 — One-Click Unsubscribe (Google/Yahoo bulk-sender requirement).</li>
+<li>Google "Email sender guidelines" and Yahoo "Sender best practices" (2024 bulk-sender requirements).</li>
+<li>US DHS CISA Binding Operational Directive 18-01 — federal DMARC mandate and outcomes.</li>
+<li>FBI IC3 Business Email Compromise reports (annual) and the Financial Fraud Kill Chain.</li>
+<li>Proofpoint "EchoSpoofing" research (2024); CVE-2024-7208 / CVE-2024-7209.</li>
+<li>M3AAWG DMARC and email authentication best-practices documents.</li>
+<li>OSS tooling: <code>parsedmarc</code>, <code>checkdmarc</code>, OpenDKIM, OpenDMARC, rspamd.</li>
+<li>MITRE ATT&amp;CK: T1566 (Phishing), T1656 (Impersonation), T1557 (Adversary-in-the-Middle).</li>
+<li>Repo cross-references: <code>network/Layer7/DNS/README.md</code> (DNS/DNSSEC), <code>web/Email-Security/Phishing-and-BEC/README.md</code> (the attacks defended against).</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

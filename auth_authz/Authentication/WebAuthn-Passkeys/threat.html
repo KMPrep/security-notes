@@ -1,0 +1,2542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebAuthn / FIDO2 Threat Modeling Report</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: auth_authz\Authentication\WebAuthn-Passkeys\threat.md</p>
+<h1 id="webauthn-fido2-threat-modeling-report">WebAuthn / FIDO2 Threat Modeling Report</h1>
+<h2 id="windows-end-user-environment-with-google-chrome-browser">Windows End-User Environment with Google Chrome Browser</h2>
+<h2 id="1-executive-summary">1. Executive Summary</h2>
+<p>This report provides a security threat model for a WebAuthn/FIDO2 deployment where end users authenticate from <strong>Windows endpoints using Google Chrome</strong>. The main components are:</p>
+<ul>
+<li><strong>Browser / Client:</strong> Google Chrome on Windows</li>
+<li><strong>Operating system layer:</strong> Windows WebAuthn platform APIs</li>
+<li><strong>Authenticator:</strong> Windows Hello, Windows Hello for Business, platform passkeys, or external FIDO2 security keys</li>
+<li><strong>Relying Party:</strong> Web application and backend server</li>
+<li><strong>Identity layer:</strong> Optional IdP, SSO, Conditional Access, or enterprise IAM</li>
+</ul>
+<p>WebAuthn is a W3C API that allows web applications to create and use scoped public-key credentials. These credentials are bound to a relying party and are only usable by origins belonging to that relying party, which is a core reason WebAuthn is phishing-resistant. (<a href="https://www.w3.org/TR/webauthn-3/?utm_source=chatgpt.com" title="An API for accessing Public Key Credentials - Level 3">W3C</a>)</p>
+<p>FIDO2 is the broader standard family that includes <strong>WebAuthn</strong> and <strong>CTAP2</strong>. CTAP2 enables a browser or platform to communicate with external authenticators such as FIDO security keys, mobile devices, and other authenticators over transports such as USB, NFC, or BLE. (<a href="https://fidoalliance.org/specifications/?utm_source=chatgpt.com" title="User Authentication Specifications Overview">FIDO Alliance</a>)</p>
+<p>In Windows environments, WebAuthn can use <strong>Windows Hello</strong>, <strong>Windows Hello for Business</strong>, or <strong>FIDO2 security keys</strong>. Microsoft describes Windows Hello for Business as using a device-specific credential combined with a PIN or biometric gesture. (<a href="https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/?utm_source=chatgpt.com" title="Windows Hello for Business overview">Microsoft Learn</a>)</p>
+<hr />
+<h2 id="2-scope">2. Scope</h2>
+<h3 id="21-in-scope">2.1 In Scope</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Included</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Browser</td>
+<td>Google Chrome on managed or unmanaged Windows endpoints</td>
+</tr>
+<tr>
+<td>OS</td>
+<td>Windows WebAuthn platform layer</td>
+</tr>
+<tr>
+<td>Authenticator</td>
+<td>Windows Hello, Windows Hello for Business, platform authenticator, FIDO2 security key</td>
+</tr>
+<tr>
+<td>RP server</td>
+<td>WebAuthn registration, authentication, credential lifecycle, session management</td>
+</tr>
+<tr>
+<td>Enterprise controls</td>
+<td>Device compliance, Chrome policies, extension controls, monitoring</td>
+</tr>
+<tr>
+<td>Threat categories</td>
+<td>Phishing, replay, registration abuse, session theft, malicious extensions, endpoint compromise, weak recovery</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-out-of-scope">2.2 Out of Scope</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Non-browser native apps</td>
+<td>Focus is browser-based WebAuthn</td>
+</tr>
+<tr>
+<td>Mobile-only passkey flows</td>
+<td>Mentioned only where relevant</td>
+</tr>
+<tr>
+<td>Deep cryptographic proof analysis</td>
+<td>Focus is design-review threat modeling</td>
+</tr>
+<tr>
+<td>Vendor-specific implementation bugs</td>
+<td>Included only as general browser/OS compromise risk</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-system-context">3. System Context</h2>
+<pre class="mermaid">
+flowchart LR
+    User[End User]
+
+    subgraph Endpoint[Windows End-User Machine]
+        Chrome[Google Chrome Browser]
+        WinAPI[Windows WebAuthn Platform APIs]
+        WHFB[Windows Hello / WHfB]
+        TPM[TPM / Secure Hardware]
+        ExtKey[External FIDO2 Security Key]
+    end
+
+    subgraph RP[Relying Party Environment]
+        WebApp[Web Application]
+        RPServer[RP Backend Server]
+        CredDB[(Credential Database)]
+        SessionStore[(Session Store)]
+        Audit[(Audit Logs)]
+    end
+
+    subgraph Enterprise[Enterprise Security Controls]
+        MDM[Intune / MDM]
+        CA[Conditional Access]
+        EDR[EDR / Defender]
+        SIEM[SIEM / Detection]
+        ChromePolicy[Chrome Enterprise Policies]
+    end
+
+    User --> Chrome
+    Chrome --> WinAPI
+    WinAPI --> WHFB
+    WHFB --> TPM
+    WinAPI --> ExtKey
+
+    Chrome --> WebApp
+    WebApp --> RPServer
+    RPServer --> CredDB
+    RPServer --> SessionStore
+    RPServer --> Audit
+
+    MDM --> Endpoint
+    CA --> RPServer
+    EDR --> Endpoint
+    SIEM --> Audit
+    ChromePolicy --> Chrome
+</pre>
+<hr />
+<h2 id="4-key-security-properties-of-webauthn">4. Key Security Properties of WebAuthn</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public-key authentication</td>
+<td>RP stores public key; authenticator keeps private key</td>
+</tr>
+<tr>
+<td>Origin binding</td>
+<td>Credential is scoped to the RP origin / RP ID</td>
+</tr>
+<tr>
+<td>Phishing resistance</td>
+<td>Fake domains cannot use credentials scoped to the legitimate RP</td>
+</tr>
+<tr>
+<td>Replay resistance</td>
+<td>RP challenge prevents reuse of old authentication responses</td>
+</tr>
+<tr>
+<td>User presence</td>
+<td>Authenticator confirms a human interacted with it</td>
+</tr>
+<tr>
+<td>User verification</td>
+<td>Authenticator confirms local verification, such as PIN or biometric</td>
+</tr>
+<tr>
+<td>Attestation</td>
+<td>Optional evidence about authenticator type/model/security properties</td>
+</tr>
+<tr>
+<td>Credential lifecycle</td>
+<td>Registration, authentication, update, revocation, recovery, monitoring</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-webauthn-vs-fido2-context">5. WebAuthn vs FIDO2 Context</h2>
+<pre class="mermaid">
+flowchart TD
+    FIDO2[FIDO2 Standard Family]
+
+    WebAuthn[WebAuthn<br/>W3C Browser API]
+    CTAP2[CTAP2<br/>Client-to-Authenticator Protocol]
+
+    RP[Relying Party Web App / Server]
+    Browser[Chrome / Browser / Platform]
+    Authenticator[Authenticator<br/>Windows Hello / Security Key]
+
+    FIDO2 --> WebAuthn
+    FIDO2 --> CTAP2
+
+    RP <-->|Registration and Authentication Options| Browser
+    Browser <-->|WebAuthn API| WebAuthn
+    Browser <-->|CTAP2 / Platform APIs| Authenticator
+</pre>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>WebAuthn</td>
+<td>Browser-facing API used by web applications</td>
+</tr>
+<tr>
+<td>CTAP2</td>
+<td>Protocol between browser/platform and authenticator</td>
+</tr>
+<tr>
+<td>FIDO2</td>
+<td>Overall standard family including WebAuthn and CTAP2</td>
+</tr>
+<tr>
+<td>Authenticator</td>
+<td>Windows Hello, Windows Hello for Business, passkey provider, security key</td>
+</tr>
+<tr>
+<td>Relying Party</td>
+<td>Application that registers and verifies public-key credentials</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-trust-boundaries">6. Trust Boundaries</h2>
+<pre class="mermaid">
+flowchart TD
+    A[User]
+    B[Chrome Browser]
+    C[Windows WebAuthn API]
+    D[Authenticator]
+    E[Relying Party Web App]
+    F[RP Backend Server]
+    G[(Credential DB)]
+    H[(Session Store)]
+    I[Enterprise IAM / Conditional Access]
+
+    A -->|Human interaction| B
+    B -->|Browser security boundary| C
+    C -->|OS / authenticator boundary| D
+    B -->|HTTPS / Origin boundary| E
+    E -->|Application trust boundary| F
+    F -->|Data access boundary| G
+    F -->|Session boundary| H
+    F -->|Policy decision boundary| I
+</pre>
+<table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Main Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User to browser</td>
+<td>Phishing, fake prompts, social engineering</td>
+</tr>
+<tr>
+<td>Browser to Windows</td>
+<td>Browser compromise, malicious extension, origin confusion</td>
+</tr>
+<tr>
+<td>Windows to authenticator</td>
+<td>Malware, local privilege escalation, weak endpoint posture</td>
+</tr>
+<tr>
+<td>Browser to RP</td>
+<td>TLS interception, malicious proxy, replay attempt</td>
+</tr>
+<tr>
+<td>RP app to RP server</td>
+<td>Broken validation, API abuse, CSRF</td>
+</tr>
+<tr>
+<td>RP server to credential DB</td>
+<td>Credential tampering, public key replacement</td>
+</tr>
+<tr>
+<td>RP server to session store</td>
+<td>Strong authentication but weak session management</td>
+</tr>
+<tr>
+<td>RP to recovery process</td>
+<td>Account takeover through weak fallback</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-primary-assets">7. Primary Assets</h2>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Security Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authenticator private key</td>
+<td>Must never leave authenticator or protected key store</td>
+</tr>
+<tr>
+<td>Public key</td>
+<td>Must be stored accurately and protected from tampering</td>
+</tr>
+<tr>
+<td>Credential ID</td>
+<td>Must be bound to correct user and RP</td>
+</tr>
+<tr>
+<td>RP ID</td>
+<td>Must be narrowly defined and validated</td>
+</tr>
+<tr>
+<td>Challenge</td>
+<td>Must be random, single-use, and short-lived</td>
+</tr>
+<tr>
+<td><code>clientDataJSON.origin</code></td>
+<td>Must match approved RP origins</td>
+</tr>
+<tr>
+<td><code>authenticatorData.rpIdHash</code></td>
+<td>Must match SHA-256 hash of expected RP ID</td>
+</tr>
+<tr>
+<td>UP flag</td>
+<td>Must be checked when user presence is required</td>
+</tr>
+<tr>
+<td>UV flag</td>
+<td>Must be checked when user verification is required</td>
+</tr>
+<tr>
+<td>Attestation data</td>
+<td>Must be validated if assurance policy depends on it</td>
+</tr>
+<tr>
+<td>Sign counter</td>
+<td>Must be tracked where meaningful</td>
+</tr>
+<tr>
+<td>Session token / cookie</td>
+<td>Must be protected after successful WebAuthn login</td>
+</tr>
+<tr>
+<td>Recovery flow</td>
+<td>Must not bypass phishing-resistant authentication</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-registration-flow">8. Registration Flow</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant User as User
+    participant Chrome as Chrome on Windows
+    participant Win as Windows WebAuthn Platform
+    participant Auth as Authenticator
+    participant RP as RP Server
+    participant DB as Credential DB
+
+    User->>Chrome: Start passkey / WebAuthn registration
+    Chrome->>RP: Request registration options
+    RP->>RP: Generate random challenge
+    RP->>Chrome: challenge, rpId, userHandle, policy
+    Chrome->>Win: navigator.credentials.create()
+    Win->>Auth: Create credential
+    Auth->>Auth: Generate key pair
+    Auth->>Win: Attestation object + public key + credential ID
+    Win->>Chrome: Credential response
+    Chrome->>RP: Send registration response
+    RP->>RP: Validate challenge, origin, rpIdHash, flags, attestation policy
+    RP->>DB: Store public key, credential ID, user binding, metadata
+</pre>
+<hr />
+<h2 id="9-authentication-flow">9. Authentication Flow</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant User as User
+    participant Chrome as Chrome on Windows
+    participant Win as Windows WebAuthn Platform
+    participant Auth as Authenticator
+    participant RP as RP Server
+    participant DB as Credential DB
+    participant Session as Session Store
+
+    User->>Chrome: Login with passkey / security key
+    Chrome->>RP: Request authentication options
+    RP->>RP: Generate random challenge
+    RP->>Chrome: challenge, rpId, allowed credentials, UV policy
+    Chrome->>Win: navigator.credentials.get()
+    Win->>Auth: Get assertion
+    Auth->>Auth: Verify user presence / user verification
+    Auth->>Win: Signed assertion
+    Win->>Chrome: Assertion response
+    Chrome->>RP: Send assertion response
+    RP->>DB: Retrieve public key by credential ID
+    RP->>RP: Verify signature, challenge, origin, rpIdHash, flags
+    RP->>Session: Create new authenticated session
+    RP->>Chrome: Secure session cookie
+</pre>
+<hr />
+<h2 id="10-user-presence-vs-user-verification">10. User Presence vs User Verification</h2>
+<p>WebAuthn authenticator data contains flags including <strong>UP</strong>, <strong>UV</strong>, <strong>BE</strong>, and <strong>BS</strong>. The WebAuthn Level 3 specification describes backup eligibility and backup state using BE and BS flags, and the same authenticator data structure includes the flags used by the RP to evaluate authenticator behavior. (<a href="https://www.w3.org/TR/webauthn-3/?utm_source=chatgpt.com" title="An API for accessing Public Key Credentials - Level 3">W3C</a>)</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Flag</th>
+<th>Meaning</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User Presence</td>
+<td><code>UP</code></td>
+<td>Someone interacted with the authenticator</td>
+<td>Touching a USB security key</td>
+</tr>
+<tr>
+<td>User Verification</td>
+<td><code>UV</code></td>
+<td>Authenticator locally verified the user</td>
+<td>Windows Hello PIN, face, fingerprint, FIDO2 PIN</td>
+</tr>
+</tbody>
+</table>
+<h3 id="101-user-presence">10.1 User Presence</h3>
+<p>User Presence means:</p>
+<blockquote>
+<p>A human interacted with the authenticator during the ceremony.</p>
+</blockquote>
+<p>Examples:</p>
+<ul>
+<li>Touching a FIDO2 security key</li>
+<li>Tapping an NFC security key</li>
+<li>Confirming a platform authenticator prompt</li>
+</ul>
+<p>User Presence does <strong>not</strong> prove the correct user was verified. It only proves someone was physically present.</p>
+<h3 id="102-user-verification">10.2 User Verification</h3>
+<p>User Verification means:</p>
+<blockquote>
+<p>The authenticator locally verified the user before using the credential.</p>
+</blockquote>
+<p>Examples:</p>
+<ul>
+<li>Windows Hello PIN</li>
+<li>Windows Hello biometric</li>
+<li>FIDO2 security key PIN</li>
+<li>Security key biometric verification</li>
+</ul>
+<p>For passwordless and privileged access, the RP should require:</p>
+<pre><code class="language-json">{
+  &quot;userVerification&quot;: &quot;required&quot;
+}
+</code></pre>
+<p>And the server must verify that the <code>UV</code> flag is present in the returned <code>authenticatorData</code>.</p>
+<hr />
+<h2 id="11-does-registration-bind-to-a-device">11. Does Registration Bind to a Device?</h2>
+<h3 id="111-what-webauthn-registration-binds">11.1 What WebAuthn Registration Binds</h3>
+<p>WebAuthn registration primarily creates a <strong>credential binding</strong>, not a full enterprise device binding.</p>
+<p>The RP normally stores:</p>
+<table>
+<thead>
+<tr>
+<th>Data</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Credential ID</td>
+<td>Identifies the registered credential</td>
+</tr>
+<tr>
+<td>Public key</td>
+<td>Verifies future signatures</td>
+</tr>
+<tr>
+<td>User handle</td>
+<td>Binds credential to account</td>
+</tr>
+<tr>
+<td>RP ID / RP ID hash</td>
+<td>Binds credential to relying party</td>
+</tr>
+<tr>
+<td>Sign counter</td>
+<td>Helps detect cloned authenticators where supported</td>
+</tr>
+<tr>
+<td>AAGUID</td>
+<td>Identifies authenticator model/type</td>
+</tr>
+<tr>
+<td>Attestation data</td>
+<td>Optional authenticator assurance evidence</td>
+</tr>
+<tr>
+<td>Transports</td>
+<td>USB, NFC, BLE, internal, hybrid, where available</td>
+</tr>
+<tr>
+<td>Backup flags</td>
+<td>Whether credential is backup eligible or backed up</td>
+</tr>
+</tbody>
+</table>
+<h3 id="112-what-webauthn-does-not-automatically-provide">11.2 What WebAuthn Does Not Automatically Provide</h3>
+<p>WebAuthn registration does <strong>not normally prove</strong>:</p>
+<ul>
+<li>Windows hostname</li>
+<li>Laptop serial number</li>
+<li>Exact corporate asset ID</li>
+<li>TPM endorsement key identity</li>
+<li>MAC address</li>
+<li>Intune device ID</li>
+<li>Whether device is currently compliant</li>
+<li>Whether this is the same physical laptop as last time</li>
+</ul>
+<h3 id="113-how-to-add-stronger-enterprise-device-binding">11.3 How to Add Stronger Enterprise Device Binding</h3>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Only corporate Windows devices</td>
+<td>Entra ID / AD join requirement</td>
+</tr>
+<tr>
+<td>Only compliant endpoints</td>
+<td>Conditional Access device compliance</td>
+</tr>
+<tr>
+<td>Only managed browsers</td>
+<td>Chrome Enterprise policies</td>
+</tr>
+<tr>
+<td>TPM-backed platform credential</td>
+<td>Windows Hello for Business</td>
+</tr>
+<tr>
+<td>Known authenticator type</td>
+<td>Attestation and AAGUID policy</td>
+</tr>
+<tr>
+<td>Privileged-user hard binding</td>
+<td>Hardware security key or WHfB on privileged access workstation</td>
+</tr>
+<tr>
+<td>Prevent unmanaged synced passkeys</td>
+<td>Policy restrictions and backup flag evaluation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="12-threat-model-browser-google-chrome">12. Threat Model: Browser / Google Chrome</h1>
+<p>Chrome Enterprise provides policies that allow organizations to manage Chrome browser behavior. Extension governance is especially important because Chrome policies can be used to control extension installation, block extensions by default, and allow only approved extensions. (<a href="https://chromeenterprise.google/policies/?utm_source=chatgpt.com" title="Chrome Enterprise Policy List &amp; Management">Chrome Enterprise</a>)</p>
+<h2 id="121-browser-threat-table">12.1 Browser Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B-01</td>
+<td>Phishing via lookalike domain</td>
+<td>User visits <code>login-example.com</code> instead of <code>login.example.com</code></td>
+<td>Password/recovery theft; WebAuthn credential should not work but fallback may be abused</td>
+<td>HSTS, domain monitoring, disable password-only fallback, user education, RP origin validation</td>
+</tr>
+<tr>
+<td>B-02</td>
+<td>Malicious browser extension</td>
+<td>Extension reads DOM, injects JS, steals tokens or recovery codes</td>
+<td>Data theft after successful login</td>
+<td>Extension allowlist, block sideloading, review extension permissions, Chrome Enterprise policies</td>
+</tr>
+<tr>
+<td>B-03</td>
+<td>Browser compromise</td>
+<td>Chrome vulnerability exploited</td>
+<td>Session theft or ceremony manipulation</td>
+<td>Force Chrome auto-update, patch SLA, EDR, browser hardening</td>
+</tr>
+<tr>
+<td>B-04</td>
+<td>Fake WebAuthn prompt</td>
+<td>User tricked into approving wrong action or registration</td>
+<td>Unauthorized credential registration or social engineering</td>
+<td>Clear UX, transaction context, step-up for credential changes</td>
+</tr>
+<tr>
+<td>B-05</td>
+<td>Session theft after login</td>
+<td>Extension or malware steals access token/session</td>
+<td>Account takeover</td>
+<td>HttpOnly/Secure/SameSite cookies, short sessions, re-auth for sensitive actions</td>
+</tr>
+<tr>
+<td>B-06</td>
+<td>Clickjacking</td>
+<td>RP login or credential management page framed</td>
+<td>User tricked into action</td>
+<td><code>CSP frame-ancestors</code>, <code>X-Frame-Options</code>, anti-CSRF tokens</td>
+</tr>
+<tr>
+<td>B-07</td>
+<td>Origin confusion</td>
+<td>RP misuses or over-broadly trusts origin</td>
+<td>Credential accepted from wrong origin</td>
+<td>Strict <code>clientDataJSON.origin</code> allowlist</td>
+</tr>
+<tr>
+<td>B-08</td>
+<td>Weak browser profile separation</td>
+<td>Personal and corporate profiles mixed</td>
+<td>Extension/data leakage</td>
+<td>Managed Chrome profile, separate work profile, enterprise browser controls</td>
+</tr>
+<tr>
+<td>B-09</td>
+<td>Developer mode extension abuse</td>
+<td>User installs unpacked malicious extension</td>
+<td>DOM/session theft</td>
+<td>Disable developer-mode extensions where possible</td>
+</tr>
+<tr>
+<td>B-10</td>
+<td>Browser cache/history leakage</td>
+<td>Sensitive URLs or tokens exposed</td>
+<td>Information disclosure</td>
+<td>Avoid tokens in URLs, secure cache headers, no sensitive query params</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="13-threat-model-windows-endpoint">13. Threat Model: Windows Endpoint</h1>
+<h2 id="131-windows-endpoint-threat-table">13.1 Windows Endpoint Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>W-01</td>
+<td>Stolen laptop</td>
+<td>Attacker physically obtains Windows device</td>
+<td>Attempted local login or passkey use</td>
+<td>BitLocker, TPM, Windows Hello lockout, remote wipe</td>
+</tr>
+<tr>
+<td>W-02</td>
+<td>Weak Windows Hello PIN</td>
+<td>User chooses guessable PIN</td>
+<td>Local attacker may unlock authenticator</td>
+<td>PIN complexity, lockout, WHfB policy</td>
+</tr>
+<tr>
+<td>W-03</td>
+<td>Malware on endpoint</td>
+<td>Malware runs in user context after login</td>
+<td>Session riding, transaction abuse</td>
+<td>EDR, Defender, ASR rules, application control</td>
+</tr>
+<tr>
+<td>W-04</td>
+<td>Local privilege escalation</td>
+<td>Attacker gets admin/SYSTEM</td>
+<td>Browser/session/credential metadata compromise</td>
+<td>Patch OS, remove local admin, LAPS, EDR</td>
+</tr>
+<tr>
+<td>W-05</td>
+<td>Shared Windows profile</td>
+<td>Multiple users share one account/profile</td>
+<td>Wrong user uses registered authenticator</td>
+<td>One user per profile, disable shared accounts</td>
+</tr>
+<tr>
+<td>W-06</td>
+<td>Non-compliant device</td>
+<td>Old/unmanaged Windows machine used</td>
+<td>Higher compromise risk</td>
+<td>Conditional Access, MDM compliance, minimum OS version</td>
+</tr>
+<tr>
+<td>W-07</td>
+<td>Disabled security controls</td>
+<td>Secure Boot/TPM/BitLocker off</td>
+<td>Credential/session exposure</td>
+<td>Device compliance checks</td>
+</tr>
+<tr>
+<td>W-08</td>
+<td>Remote access abuse</td>
+<td>Attacker uses remote-control tool on unlocked session</td>
+<td>Authenticated actions from valid session</td>
+<td>Block unauthorized remote tools, EDR, step-up for sensitive actions</td>
+</tr>
+<tr>
+<td>W-09</td>
+<td>Clipboard/screenshot leakage</td>
+<td>Sensitive data copied after auth</td>
+<td>Data leakage</td>
+<td>DLP, browser isolation for sensitive apps</td>
+</tr>
+<tr>
+<td>W-10</td>
+<td>Passkey provider confusion</td>
+<td>User chooses unmanaged passkey provider</td>
+<td>Credential available outside enterprise controls</td>
+<td>Restrict allowed authenticators/providers for workforce/admin use</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="14-threat-model-authenticator">14. Threat Model: Authenticator</h1>
+<p>Windows Hello for Business uses a device-specific credential and combines it with PIN or biometric gesture. With suitable hardware, the private key is protected by the device security module. (<a href="https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/?utm_source=chatgpt.com" title="Windows Hello for Business overview">Microsoft Learn</a>)</p>
+<p>Windows supports passkeys and provides native passkey management experiences on supported Windows clients. (<a href="https://learn.microsoft.com/en-us/windows/security/identity-protection/passkeys/?utm_source=chatgpt.com" title="Support for Passkeys in Windows">Microsoft Learn</a>)</p>
+<h2 id="141-authenticator-threat-table">14.1 Authenticator Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A-01</td>
+<td>Authenticator theft</td>
+<td>Security key stolen</td>
+<td>Unauthorized login if PIN known or UV not required</td>
+<td>Require UV, revoke lost keys, enforce PIN/biometric</td>
+</tr>
+<tr>
+<td>A-02</td>
+<td>Weak UV policy</td>
+<td>RP accepts presence-only assertion</td>
+<td>Stolen key may be enough</td>
+<td>Set <code>userVerification: required</code>; verify UV server-side</td>
+</tr>
+<tr>
+<td>A-03</td>
+<td>Platform authenticator on unmanaged device</td>
+<td>User registers passkey from personal Windows device</td>
+<td>Enterprise loses control</td>
+<td>Conditional Access, device compliance, registration restrictions</td>
+</tr>
+<tr>
+<td>A-04</td>
+<td>Synced passkey risk</td>
+<td>Credential becomes available on unmanaged device</td>
+<td>Broader attack surface</td>
+<td>Evaluate BE/BS flags, restrict synced passkeys for admins</td>
+</tr>
+<tr>
+<td>A-05</td>
+<td>Cloned authenticator</td>
+<td>Weak authenticator or compromise copies private key</td>
+<td>Attacker can authenticate</td>
+<td>Certified authenticators, attestation policy, sign-counter monitoring</td>
+</tr>
+<tr>
+<td>A-06</td>
+<td>Counter rollback ignored</td>
+<td>RP does not check sign counter</td>
+<td>Clone may go undetected</td>
+<td>Store and compare sign counter where meaningful</td>
+</tr>
+<tr>
+<td>A-07</td>
+<td>Untrusted authenticator model</td>
+<td>Unknown authenticator used for privileged account</td>
+<td>Lower assurance</td>
+<td>Approved AAGUID list, attestation validation</td>
+</tr>
+<tr>
+<td>A-08</td>
+<td>Shared security key</td>
+<td>Team shares one key</td>
+<td>Non-repudiation failure</td>
+<td>One authenticator per user, inventory, access reviews</td>
+</tr>
+<tr>
+<td>A-09</td>
+<td>Lost only authenticator</td>
+<td>User locked out</td>
+<td>Availability impact</td>
+<td>Require backup authenticator, controlled recovery</td>
+</tr>
+<tr>
+<td>A-10</td>
+<td>Supply-chain risk</td>
+<td>Fake/tampered security key issued</td>
+<td>Credential compromise</td>
+<td>Approved vendors, procurement controls, attestation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="15-threat-model-relying-party-registration">15. Threat Model: Relying Party Registration</h1>
+<h2 id="151-registration-threat-table">15.1 Registration Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-REG-01</td>
+<td>Challenge reuse</td>
+<td>Attacker replays old registration response</td>
+<td>Unauthorized registration</td>
+<td>Random, single-use, short-lived challenge</td>
+</tr>
+<tr>
+<td>R-REG-02</td>
+<td>Registration CSRF</td>
+<td>Attacker tricks user into registering attacker-controlled credential</td>
+<td>Persistent account takeover</td>
+<td>CSRF protection, authenticated session, step-up before registration</td>
+</tr>
+<tr>
+<td>R-REG-03</td>
+<td>Missing origin validation</td>
+<td>RP accepts response from malicious origin</td>
+<td>Phishing bypass</td>
+<td>Validate <code>clientDataJSON.origin</code> strictly</td>
+</tr>
+<tr>
+<td>R-REG-04</td>
+<td>Missing RP ID hash validation</td>
+<td>RP accepts credential scoped to wrong RP</td>
+<td>Authentication bypass</td>
+<td>Validate <code>authenticatorData.rpIdHash</code></td>
+</tr>
+<tr>
+<td>R-REG-05</td>
+<td>Weak account binding</td>
+<td>Credential registered to wrong user</td>
+<td>Account takeover or account mix-up</td>
+<td>Bind challenge to user session and immutable user ID</td>
+</tr>
+<tr>
+<td>R-REG-06</td>
+<td>Duplicate credential registration</td>
+<td>Same credential reused unexpectedly</td>
+<td>Credential lifecycle confusion</td>
+<td>Use <code>excludeCredentials</code>; detect duplicates</td>
+</tr>
+<tr>
+<td>R-REG-07</td>
+<td>Untrusted authenticator accepted</td>
+<td>Low-assurance authenticator registered for admin</td>
+<td>Admin compromise risk</td>
+<td>Attestation/AAGUID policy for privileged users</td>
+</tr>
+<tr>
+<td>R-REG-08</td>
+<td>Attestation blindly trusted</td>
+<td>Fake or unverified attestation accepted</td>
+<td>False assurance</td>
+<td>Validate attestation chain and metadata</td>
+</tr>
+<tr>
+<td>R-REG-09</td>
+<td>Registration without recent auth</td>
+<td>Hijacked session adds passkey</td>
+<td>Persistent access</td>
+<td>Require recent WebAuthn UV step-up</td>
+</tr>
+<tr>
+<td>R-REG-10</td>
+<td>Poor registration logging</td>
+<td>No visibility into credential creation</td>
+<td>Investigation gap</td>
+<td>Audit new credential events with user/device/session context</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="16-threat-model-relying-party-authentication">16. Threat Model: Relying Party Authentication</h1>
+<h2 id="161-authentication-threat-table">16.1 Authentication Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-AUTH-01</td>
+<td>Signature validation failure</td>
+<td>RP accepts invalid signature</td>
+<td>Full authentication bypass</td>
+<td>Use mature WebAuthn library; negative testing</td>
+</tr>
+<tr>
+<td>R-AUTH-02</td>
+<td>Challenge replay</td>
+<td>Old assertion replayed</td>
+<td>Authentication bypass</td>
+<td>Single-use, short-lived challenges</td>
+</tr>
+<tr>
+<td>R-AUTH-03</td>
+<td>Origin not checked</td>
+<td>RP accepts assertion from wrong origin</td>
+<td>Phishing or malicious site acceptance</td>
+<td>Strict origin allowlist</td>
+</tr>
+<tr>
+<td>R-AUTH-04</td>
+<td>RP ID hash not checked</td>
+<td>Credential for another RP accepted</td>
+<td>Authentication bypass</td>
+<td>Validate RP ID hash</td>
+</tr>
+<tr>
+<td>R-AUTH-05</td>
+<td>UP flag ignored</td>
+<td>Silent/non-present use accepted</td>
+<td>User interaction bypass</td>
+<td>Require and verify UP where applicable</td>
+</tr>
+<tr>
+<td>R-AUTH-06</td>
+<td>UV flag ignored</td>
+<td>Passwordless/admin login allowed without local verification</td>
+<td>Stolen authenticator risk</td>
+<td>Require and verify UV</td>
+</tr>
+<tr>
+<td>R-AUTH-07</td>
+<td>Credential-user mismatch</td>
+<td>Credential ID accepted for wrong account</td>
+<td>Account takeover</td>
+<td>Credential ID must map to correct user</td>
+</tr>
+<tr>
+<td>R-AUTH-08</td>
+<td>Algorithm confusion</td>
+<td>Weak/unsupported algorithm accepted</td>
+<td>Crypto downgrade</td>
+<td>Restrict allowed COSE algorithms</td>
+</tr>
+<tr>
+<td>R-AUTH-09</td>
+<td>Counter rollback ignored</td>
+<td>Cloned credential not detected</td>
+<td>Persistent compromise</td>
+<td>Monitor sign counter where meaningful</td>
+</tr>
+<tr>
+<td>R-AUTH-10</td>
+<td>User enumeration</td>
+<td>Error reveals account/credential existence</td>
+<td>Privacy and targeting risk</td>
+<td>Generic errors, rate limiting</td>
+</tr>
+<tr>
+<td>R-AUTH-11</td>
+<td>Brute-force ceremony abuse</td>
+<td>Many login attempts flood RP</td>
+<td>DoS or probing</td>
+<td>Rate limits, bot detection, WAF</td>
+</tr>
+<tr>
+<td>R-AUTH-12</td>
+<td>Session fixation</td>
+<td>Existing attacker-controlled session persists after login</td>
+<td>Account takeover</td>
+<td>Rotate session ID after authentication</td>
+</tr>
+<tr>
+<td>R-AUTH-13</td>
+<td>Weak session after strong auth</td>
+<td>Token stolen after login</td>
+<td>Account takeover</td>
+<td>Secure cookies, short TTL, step-up, device binding where possible</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="17-threat-model-credential-lifecycle-and-recovery">17. Threat Model: Credential Lifecycle and Recovery</h1>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> NotRegistered
+    NotRegistered --> Registered: User registers authenticator
+    Registered --> Active: RP validates and stores credential
+    Active --> Suspicious: Counter anomaly / risk event
+    Suspicious --> Active: Investigation clears
+    Suspicious --> Revoked: Confirmed compromise
+    Active --> Revoked: User/admin removes credential
+    Active --> Recovery: User loses authenticator
+    Recovery --> Active: Secure recovery and new credential registration
+    Recovery --> Locked: Recovery fails or fraud suspected
+    Revoked --> [*]
+</pre>
+<h2 id="171-lifecycle-threat-table">17.1 Lifecycle Threat Table</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L-01</td>
+<td>Weak recovery bypass</td>
+<td>Attacker uses email/password reset to bypass WebAuthn</td>
+<td>Account takeover</td>
+<td>Phishing-resistant recovery, no email-only recovery for admins</td>
+</tr>
+<tr>
+<td>L-02</td>
+<td>Helpdesk social engineering</td>
+<td>Attacker convinces support to reset authenticator</td>
+<td>Account takeover</td>
+<td>Strong identity proofing, approval workflow</td>
+</tr>
+<tr>
+<td>L-03</td>
+<td>Add passkey from hijacked session</td>
+<td>Attacker registers own credential</td>
+<td>Persistent compromise</td>
+<td>Recent UV step-up before adding credential</td>
+</tr>
+<tr>
+<td>L-04</td>
+<td>Remove victim authenticator</td>
+<td>Attacker locks user out</td>
+<td>DoS/account takeover</td>
+<td>Step-up, notifications, recovery delay for risky events</td>
+</tr>
+<tr>
+<td>L-05</td>
+<td>No user notification</td>
+<td>Victim unaware of new credential</td>
+<td>Persistent access</td>
+<td>Email/push notification for credential changes</td>
+</tr>
+<tr>
+<td>L-06</td>
+<td>Recovery codes stolen</td>
+<td>Backup codes used for login</td>
+<td>Account takeover</td>
+<td>Hash recovery codes, display once, rotate after use</td>
+</tr>
+<tr>
+<td>L-07</td>
+<td>No authenticator inventory</td>
+<td>User/admin cannot review credentials</td>
+<td>Persistent unknown access</td>
+<td>Credential management page and periodic review</td>
+</tr>
+<tr>
+<td>L-08</td>
+<td>Break-glass abuse</td>
+<td>Emergency account used silently</td>
+<td>Privileged compromise</td>
+<td>Hardware key, vaulting, approval, SIEM alert</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="18-threat-model-session-management-after-webauthn">18. Threat Model: Session Management After WebAuthn</h1>
+<p>WebAuthn authenticates the user, but the RP still has to protect the session. A common failure is <strong>strong authentication followed by weak session management</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S-01</td>
+<td>Session token theft</td>
+<td>Malware/extension steals token</td>
+<td>Account takeover</td>
+<td>HttpOnly cookies, Secure, SameSite</td>
+</tr>
+<tr>
+<td>S-02</td>
+<td>Long-lived sessions</td>
+<td>Stolen session remains valid for days/weeks</td>
+<td>Persistent access</td>
+<td>Short idle timeout, absolute timeout</td>
+</tr>
+<tr>
+<td>S-03</td>
+<td>No step-up for sensitive actions</td>
+<td>Attacker changes password/passkeys after login</td>
+<td>Persistent compromise</td>
+<td>Re-auth with WebAuthn UV</td>
+</tr>
+<tr>
+<td>S-04</td>
+<td>No global logout</td>
+<td>User cannot revoke stolen sessions</td>
+<td>Persistent access</td>
+<td>Session inventory and global logout</td>
+</tr>
+<tr>
+<td>S-05</td>
+<td>CSRF after login</td>
+<td>Browser performs unwanted authenticated action</td>
+<td>Unauthorized changes</td>
+<td>CSRF tokens, SameSite, origin checks</td>
+</tr>
+<tr>
+<td>S-06</td>
+<td>Session fixation</td>
+<td>Pre-auth session reused post-auth</td>
+<td>Account takeover</td>
+<td>Rotate session ID after login</td>
+</tr>
+<tr>
+<td>S-07</td>
+<td>Weak admin session</td>
+<td>Admin session treated like normal user</td>
+<td>Privilege abuse</td>
+<td>Short admin sessions, step-up, PAW, continuous risk evaluation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="19-threat-model-attestation-and-authenticator-assurance">19. Threat Model: Attestation and Authenticator Assurance</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ATT-01</td>
+<td>No attestation for admins</td>
+<td>Any authenticator allowed for privileged account</td>
+<td>Weak authenticator risk</td>
+<td>Require enterprise attestation or approved AAGUIDs</td>
+</tr>
+<tr>
+<td>ATT-02</td>
+<td>Overly strict attestation</td>
+<td>Legitimate users cannot register</td>
+<td>Availability/user friction</td>
+<td>Different policies for standard vs admin users</td>
+</tr>
+<tr>
+<td>ATT-03</td>
+<td>Fake attestation trusted</td>
+<td>RP does not verify chain</td>
+<td>False assurance</td>
+<td>Validate attestation format, chain, root trust</td>
+</tr>
+<tr>
+<td>ATT-04</td>
+<td>Metadata not maintained</td>
+<td>Deprecated authenticator remains allowed</td>
+<td>Security degradation</td>
+<td>Maintain approved authenticator inventory</td>
+</tr>
+<tr>
+<td>ATT-05</td>
+<td>Privacy issue</td>
+<td>RP collects unnecessary device details</td>
+<td>Privacy/compliance risk</td>
+<td>Minimize attestation collection for standard users</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="20-stride-summary">20. STRIDE Summary</h1>
+<table>
+<thead>
+<tr>
+<th>STRIDE Category</th>
+<th>Browser</th>
+<th>Windows Endpoint</th>
+<th>Authenticator</th>
+<th>RP Server</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spoofing</td>
+<td>Fake login page, fake prompt</td>
+<td>Shared Windows account</td>
+<td>Stolen key/device</td>
+<td>Weak recovery impersonation</td>
+</tr>
+<tr>
+<td>Tampering</td>
+<td>DOM injection, extension abuse</td>
+<td>OS policy tampering</td>
+<td>Authenticator metadata manipulation</td>
+<td>Credential DB public key replacement</td>
+</tr>
+<tr>
+<td>Repudiation</td>
+<td>User denies browser action</td>
+<td>Shared endpoint</td>
+<td>Shared security key</td>
+<td>Poor audit logs</td>
+</tr>
+<tr>
+<td>Information Disclosure</td>
+<td>Extension reads app data</td>
+<td>Malware steals session data</td>
+<td>Metadata leakage</td>
+<td>Excessive credential logging</td>
+</tr>
+<tr>
+<td>Denial of Service</td>
+<td>Browser blocked/broken</td>
+<td>Device lockout</td>
+<td>Lost key</td>
+<td>Credential deletion, login flood</td>
+</tr>
+<tr>
+<td>Elevation of Privilege</td>
+<td>Session riding</td>
+<td>Local admin compromise</td>
+<td>Weak UV policy</td>
+<td>Admin API abuse</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="21-attack-trees">21. Attack Trees</h1>
+<h2 id="211-account-takeover-attack-tree">21.1 Account Takeover Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A[Goal: Account Takeover]
+
+    A --> B[Bypass WebAuthn]
+    A --> C[Abuse Registration]
+    A --> D[Steal Session]
+    A --> E[Exploit Recovery]
+    A --> F[Compromise Endpoint]
+
+    B --> B1[RP fails origin validation]
+    B --> B2[RP fails signature validation]
+    B --> B3[RP ignores UV flag]
+    B --> B4[RP allows password fallback]
+
+    C --> C1[CSRF credential registration]
+    C --> C2[Hijacked session adds passkey]
+    C --> C3[Weak step-up for credential changes]
+
+    D --> D1[Malicious browser extension]
+    D --> D2[Malware steals token]
+    D --> D3[No HttpOnly cookie]
+    D --> D4[Long-lived session]
+
+    E --> E1[Email-only recovery]
+    E --> E2[Helpdesk social engineering]
+    E --> E3[Stolen recovery codes]
+
+    F --> F1[Local privilege escalation]
+    F --> F2[Remote access tool abuse]
+    F --> F3[Stolen unlocked device]
+</pre>
+<h2 id="212-privileged-admin-compromise-attack-tree">21.2 Privileged Admin Compromise Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A[Goal: Privileged Admin Compromise]
+
+    A --> B[Use Weak Authenticator]
+    A --> C[Register Attacker Authenticator]
+    A --> D[Steal Admin Session]
+    A --> E[Abuse Recovery]
+    A --> F[Use Unmanaged Device]
+
+    B --> B1[No UV required]
+    B --> B2[No attestation policy]
+    B --> B3[Shared security key]
+
+    C --> C1[No recent WebAuthn step-up]
+    C --> C2[No approval workflow]
+    C --> C3[No alert on new credential]
+
+    D --> D1[Malicious extension]
+    D --> D2[Admin uses normal workstation]
+    D --> D3[Long admin session]
+
+    E --> E1[Helpdesk reset]
+    E --> E2[Break-glass abuse]
+    E --> E3[Email-only recovery]
+
+    F --> F1[No Conditional Access]
+    F --> F2[No device compliance]
+    F --> F3[BYOD passkey registration]
+</pre>
+<hr />
+<h1 id="22-recommended-control-architecture">22. Recommended Control Architecture</h1>
+<pre class="mermaid">
+flowchart TD
+    A[Managed Windows Endpoint]
+    B[Managed Chrome Browser]
+    C[Windows Hello for Business / FIDO2 Key]
+    D[WebAuthn Ceremony]
+    E[RP Server Validation]
+    F[Conditional Access / Device Compliance]
+    G[Secure Session]
+    H[Step-Up for Sensitive Actions]
+    I[Monitoring and Audit]
+    J[Secure Recovery]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    F --> E
+    E --> G
+    G --> H
+    H --> I
+    J --> I
+</pre>
+<hr />
+<h1 id="23-minimum-server-side-webauthn-validation">23. Minimum Server-Side WebAuthn Validation</h1>
+<p>For every authentication assertion, the RP should verify:</p>
+<pre><code class="language-text">1. Challenge matches server-issued challenge.
+2. Challenge is single-use.
+3. Challenge is not expired.
+4. clientDataJSON.type is expected.
+5. clientDataJSON.origin is in approved origin allowlist.
+6. authenticatorData.rpIdHash equals SHA-256(expected RP ID).
+7. Credential ID exists and belongs to the expected user.
+8. Signature verifies using the stored public key.
+9. UP flag is present if user presence is required.
+10. UV flag is present if user verification is required.
+11. COSE algorithm is approved.
+12. Sign counter is evaluated where meaningful.
+13. Session ID is rotated after successful login.
+14. Authentication event is logged.
+</code></pre>
+<hr />
+<h1 id="24-recommended-policy-by-user-type">24. Recommended Policy by User Type</h1>
+<table>
+<thead>
+<tr>
+<th>User Type</th>
+<th>Authenticator</th>
+<th>User Verification</th>
+<th>Attestation</th>
+<th>Device Requirement</th>
+<th>Recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard user</td>
+<td>Windows Hello / passkey / FIDO2 key</td>
+<td>Required for passwordless</td>
+<td>Optional</td>
+<td>Preferred managed device</td>
+<td>Self-service with safeguards</td>
+</tr>
+<tr>
+<td>Developer</td>
+<td>WHfB or FIDO2 key</td>
+<td>Required</td>
+<td>Preferred</td>
+<td>Managed compliant device</td>
+<td>Helpdesk with identity proofing</td>
+</tr>
+<tr>
+<td>Production admin</td>
+<td>Approved hardware key or WHfB on PAW</td>
+<td>Required</td>
+<td>Required</td>
+<td>Managed PAW only</td>
+<td>Security-approved recovery</td>
+</tr>
+<tr>
+<td>Break-glass admin</td>
+<td>Two approved hardware keys</td>
+<td>Required</td>
+<td>Required</td>
+<td>Controlled emergency process</td>
+<td>Manual, logged, approved</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="25-specific-controls-for-privileged-administrators">25. Specific Controls for Privileged Administrators</h1>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Required Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authenticator type</td>
+<td>Approved enterprise FIDO2 security key or WHfB on privileged access workstation</td>
+</tr>
+<tr>
+<td>User verification</td>
+<td>Mandatory <code>UV</code></td>
+</tr>
+<tr>
+<td>Registration</td>
+<td>Requires existing WebAuthn step-up and approval</td>
+</tr>
+<tr>
+<td>Attestation</td>
+<td>Required or approved AAGUID allowlist</td>
+</tr>
+<tr>
+<td>Device posture</td>
+<td>Managed, compliant, encrypted Windows device</td>
+</tr>
+<tr>
+<td>Browser</td>
+<td>Managed Chrome, no unapproved extensions</td>
+</tr>
+<tr>
+<td>Session</td>
+<td>Short idle timeout, short absolute timeout</td>
+</tr>
+<tr>
+<td>Sensitive actions</td>
+<td>Step-up required</td>
+</tr>
+<tr>
+<td>Recovery</td>
+<td>No email-only recovery</td>
+</tr>
+<tr>
+<td>Monitoring</td>
+<td>Immediate alert for new credential, credential removal, recovery, admin login from new device</td>
+</tr>
+<tr>
+<td>Break-glass</td>
+<td>Hardware key, secure storage, dual approval, audit trail</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="26-browser-and-chrome-enterprise-controls">26. Browser and Chrome Enterprise Controls</h1>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Force Chrome auto-update</td>
+<td>Reduce browser exploit risk</td>
+</tr>
+<tr>
+<td>Extension allowlist</td>
+<td>Prevent malicious extensions</td>
+</tr>
+<tr>
+<td>Block sideloaded extensions</td>
+<td>Prevent unmanaged extension installation</td>
+</tr>
+<tr>
+<td>Disable developer-mode extensions</td>
+<td>Reduce local extension abuse</td>
+</tr>
+<tr>
+<td>Managed Chrome profile</td>
+<td>Separate corporate and personal browsing</td>
+</tr>
+<tr>
+<td>Safe Browsing enforcement</td>
+<td>Reduce phishing/malware exposure</td>
+</tr>
+<tr>
+<td>Enterprise policy monitoring</td>
+<td>Detect policy drift</td>
+</tr>
+<tr>
+<td>Block password managers where inappropriate</td>
+<td>Prevent unmanaged credential/passkey sync</td>
+</tr>
+<tr>
+<td>Disable insecure browser flags</td>
+<td>Reduce bypass risk</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="27-windows-endpoint-controls">27. Windows Endpoint Controls</h1>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows Hello for Business</td>
+<td>Strong device-bound credential model</td>
+</tr>
+<tr>
+<td>TPM 2.0</td>
+<td>Hardware-backed protection</td>
+</tr>
+<tr>
+<td>Secure Boot</td>
+<td>Boot integrity</td>
+</tr>
+<tr>
+<td>BitLocker</td>
+<td>Protect data at rest</td>
+</tr>
+<tr>
+<td>EDR / Microsoft Defender</td>
+<td>Detect endpoint compromise</td>
+</tr>
+<tr>
+<td>Attack Surface Reduction rules</td>
+<td>Reduce malware execution paths</td>
+</tr>
+<tr>
+<td>Remove local admin</td>
+<td>Reduce privilege escalation</td>
+</tr>
+<tr>
+<td>LAPS</td>
+<td>Manage local admin password securely</td>
+</tr>
+<tr>
+<td>Intune / MDM compliance</td>
+<td>Enforce endpoint posture</td>
+</tr>
+<tr>
+<td>Remote wipe</td>
+<td>Respond to lost devices</td>
+</tr>
+<tr>
+<td>Screen lock policy</td>
+<td>Reduce stolen unlocked session risk</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="28-relying-party-controls">28. Relying Party Controls</h1>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mature WebAuthn library</td>
+<td>Avoid parser/crypto validation mistakes</td>
+</tr>
+<tr>
+<td>Strict origin validation</td>
+<td>Prevent malicious origin acceptance</td>
+</tr>
+<tr>
+<td>Strict RP ID validation</td>
+<td>Prevent wrong-domain credential use</td>
+</tr>
+<tr>
+<td>Challenge lifecycle management</td>
+<td>Prevent replay</td>
+</tr>
+<tr>
+<td>UV enforcement</td>
+<td>Ensure local user verification</td>
+</tr>
+<tr>
+<td>Attestation policy</td>
+<td>Enforce authenticator assurance</td>
+</tr>
+<tr>
+<td>Credential inventory</td>
+<td>Let users/admins review authenticators</td>
+</tr>
+<tr>
+<td>Secure credential lifecycle</td>
+<td>Prevent malicious add/remove actions</td>
+</tr>
+<tr>
+<td>Secure recovery</td>
+<td>Prevent bypassing WebAuthn</td>
+</tr>
+<tr>
+<td>Session hardening</td>
+<td>Protect post-authentication state</td>
+</tr>
+<tr>
+<td>Audit logging</td>
+<td>Support detection and investigation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="29-detection-and-monitoring">29. Detection and Monitoring</h1>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Detection Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New passkey registered</td>
+<td>Detect unauthorized credential addition</td>
+</tr>
+<tr>
+<td>Passkey removed</td>
+<td>Detect account takeover or lockout attempt</td>
+</tr>
+<tr>
+<td>Admin passkey change</td>
+<td>High-priority alert</td>
+</tr>
+<tr>
+<td>Authentication from new device/location</td>
+<td>Risk signal</td>
+</tr>
+<tr>
+<td>Failed UV attempts</td>
+<td>Possible stolen authenticator or brute force</td>
+</tr>
+<tr>
+<td>Sign counter rollback</td>
+<td>Possible cloned authenticator</td>
+</tr>
+<tr>
+<td>Recovery process started</td>
+<td>Fraud monitoring</td>
+</tr>
+<tr>
+<td>Helpdesk reset</td>
+<td>Insider/social engineering monitoring</td>
+</tr>
+<tr>
+<td>Login from unmanaged device</td>
+<td>Policy violation</td>
+</tr>
+<tr>
+<td>Extension policy drift</td>
+<td>Browser compromise risk</td>
+</tr>
+<tr>
+<td>Session reuse from unusual location</td>
+<td>Token theft indicator</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="30-security-test-cases">30. Security Test Cases</h1>
+<table>
+<thead>
+<tr>
+<th>Test Case</th>
+<th>Expected Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Register credential from unapproved origin</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Authenticate from lookalike domain</td>
+<td>WebAuthn credential does not work</td>
+</tr>
+<tr>
+<td>Replay old registration response</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Replay old authentication assertion</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Modify <code>clientDataJSON.origin</code></td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Modify <code>authenticatorData.rpIdHash</code></td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Remove <code>UP</code> flag</td>
+<td>RP rejects if UP required</td>
+</tr>
+<tr>
+<td>Remove <code>UV</code> flag</td>
+<td>RP rejects if UV required</td>
+</tr>
+<tr>
+<td>Use unsupported COSE algorithm</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Use credential ID from another user</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Add passkey without recent auth</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Remove all credentials without step-up</td>
+<td>RP rejects or triggers recovery workflow</td>
+</tr>
+<tr>
+<td>Use unmanaged device for admin login</td>
+<td>Conditional Access blocks</td>
+</tr>
+<tr>
+<td>Use unapproved authenticator for admin</td>
+<td>RP/IdP blocks</td>
+</tr>
+<tr>
+<td>Steal old session before login</td>
+<td>Session rotated after auth</td>
+</tr>
+<tr>
+<td>Attempt CSRF on credential registration</td>
+<td>Request blocked</td>
+</tr>
+<tr>
+<td>Login with lost/stolen key without PIN</td>
+<td>Should fail if UV required</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="31-risk-register">31. Risk Register</h1>
+<table>
+<thead>
+<tr>
+<th>Risk ID</th>
+<th>Risk</th>
+<th style="text-align: right;">Likelihood</th>
+<th style="text-align: right;">Impact</th>
+<th style="text-align: right;">Severity</th>
+<th>Recommended Treatment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RR-01</td>
+<td>Weak recovery bypasses WebAuthn</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Redesign recovery with phishing-resistant controls</td>
+</tr>
+<tr>
+<td>RR-02</td>
+<td>Malicious Chrome extension steals session</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Extension allowlist and HttpOnly cookies</td>
+</tr>
+<tr>
+<td>RR-03</td>
+<td>RP fails UV validation</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Server-side UV enforcement</td>
+</tr>
+<tr>
+<td>RR-04</td>
+<td>Admin registers weak authenticator</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Attestation/AAGUID policy</td>
+</tr>
+<tr>
+<td>RR-05</td>
+<td>Endpoint malware abuses valid session</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>EDR, step-up, PAW for admins</td>
+</tr>
+<tr>
+<td>RR-06</td>
+<td>Session fixation after login</td>
+<td style="text-align: right;">Low</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Rotate session after authentication</td>
+</tr>
+<tr>
+<td>RR-07</td>
+<td>Challenge replay</td>
+<td style="text-align: right;">Low</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Single-use short-lived challenge</td>
+</tr>
+<tr>
+<td>RR-08</td>
+<td>Subdomain takeover affects RP ID trust</td>
+<td style="text-align: right;">Low</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>DNS hygiene and subdomain scanning</td>
+</tr>
+<tr>
+<td>RR-09</td>
+<td>Lost authenticator causes lockout</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td>Backup authenticator and recovery process</td>
+</tr>
+<tr>
+<td>RR-10</td>
+<td>Excessive attestation data collection</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td>Data minimization</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="32-recommended-implementation-baseline">32. Recommended Implementation Baseline</h1>
+<h2 id="321-standard-users">32.1 Standard Users</h2>
+<pre><code class="language-json">{
+  &quot;registration&quot;: {
+    &quot;attestation&quot;: &quot;none&quot;,
+    &quot;authenticatorSelection&quot;: {
+      &quot;userVerification&quot;: &quot;required&quot;,
+      &quot;residentKey&quot;: &quot;preferred&quot;
+    }
+  },
+  &quot;authentication&quot;: {
+    &quot;userVerification&quot;: &quot;required&quot;
+  }
+}
+</code></pre>
+<h2 id="322-privileged-users">32.2 Privileged Users</h2>
+<pre><code class="language-json">{
+  &quot;registration&quot;: {
+    &quot;attestation&quot;: &quot;enterprise&quot;,
+    &quot;authenticatorSelection&quot;: {
+      &quot;userVerification&quot;: &quot;required&quot;,
+      &quot;residentKey&quot;: &quot;required&quot;
+    }
+  },
+  &quot;authentication&quot;: {
+    &quot;userVerification&quot;: &quot;required&quot;
+  },
+  &quot;policy&quot;: {
+    &quot;approvedAuthenticatorsOnly&quot;: true,
+    &quot;managedDeviceRequired&quot;: true,
+    &quot;stepUpForCredentialChanges&quot;: true
+  }
+}
+</code></pre>
+<hr />
+<h1 id="33-practical-server-side-validation-pseudocode">33. Practical Server-Side Validation Pseudocode</h1>
+<pre><code class="language-pseudo">function verifyWebAuthnAssertion(assertion, expectedUser, expectedChallenge, expectedRpId, allowedOrigins):
+
+    clientData = parseClientDataJSON(assertion.clientDataJSON)
+    authenticatorData = parseAuthenticatorData(assertion.authenticatorData)
+
+    require clientData.type == &quot;webauthn.get&quot;
+    require clientData.challenge == expectedChallenge
+    require challengeNotExpired(expectedChallenge)
+    require challengeNotUsedBefore(expectedChallenge)
+
+    require clientData.origin in allowedOrigins
+
+    expectedRpIdHash = SHA256(expectedRpId)
+    require authenticatorData.rpIdHash == expectedRpIdHash
+
+    credential = credentialRepository.find(assertion.credentialId)
+    require credential is not null
+    require credential.userId == expectedUser.id
+    require credential.status == &quot;ACTIVE&quot;
+
+    require verifySignature(
+        publicKey = credential.publicKey,
+        signedData = assertion.authenticatorData + SHA256(assertion.clientDataJSON),
+        signature = assertion.signature
+    )
+
+    require authenticatorData.flags.UP == true
+
+    if policy.requiresUserVerification:
+        require authenticatorData.flags.UV == true
+
+    if credential.signCountSupported:
+        require authenticatorData.signCount &gt;= credential.previousSignCount
+        update credential.previousSignCount
+
+    markChallengeUsed(expectedChallenge)
+
+    rotateSessionId()
+    createAuthenticatedSession(expectedUser)
+
+    logAuthenticationSuccess(expectedUser, credential, authenticatorData.flags)
+</code></pre>
+<hr />
+<h1 id="34-design-review-questions">34. Design Review Questions</h1>
+<p>Use these during architecture review:</p>
+<h2 id="browser-endpoint">Browser / Endpoint</h2>
+<ul>
+<li>Is Chrome enterprise-managed?</li>
+<li>Are extensions allowlisted?</li>
+<li>Are sideloaded and developer-mode extensions blocked?</li>
+<li>Is Chrome forced to auto-update?</li>
+<li>Is the endpoint managed and compliant?</li>
+<li>Is BitLocker enabled?</li>
+<li>Is EDR active?</li>
+<li>Are local admin rights removed?</li>
+</ul>
+<h2 id="authenticator">Authenticator</h2>
+<ul>
+<li>Are Windows Hello / WHfB policies enforced?</li>
+<li>Is user verification required?</li>
+<li>Are security keys PIN/biometric protected?</li>
+<li>Are approved authenticators defined?</li>
+<li>Is attestation required for privileged users?</li>
+<li>Are synced passkeys allowed or restricted?</li>
+<li>Are backup authenticators required?</li>
+</ul>
+<h2 id="relying-party">Relying Party</h2>
+<ul>
+<li>Does the server verify challenge, origin, RP ID hash, signature, UP, and UV?</li>
+<li>Are challenges single-use and short-lived?</li>
+<li>Is credential registration protected by step-up?</li>
+<li>Is credential removal protected by step-up?</li>
+<li>Is recovery phishing-resistant?</li>
+<li>Are sessions rotated after authentication?</li>
+<li>Are credential lifecycle events logged?</li>
+<li>Are admin accounts treated differently?</li>
+</ul>
+<hr />
+<h1 id="35-final-recommended-security-posture">35. Final Recommended Security Posture</h1>
+<p>For a Windows + Google Chrome enterprise deployment, the strongest practical WebAuthn posture is:</p>
+<pre class="mermaid">
+flowchart TD
+    A[Managed Windows Device]
+    B[Chrome Enterprise Managed Browser]
+    C[Approved Authenticator]
+    D[WebAuthn with UV Required]
+    E[RP Strict Validation]
+    F[Conditional Access]
+    G[Secure Session]
+    H[Step-Up for Sensitive Actions]
+    I[Secure Credential Lifecycle]
+    J[SIEM Monitoring]
+    K[Phishing-Resistant Recovery]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    F --> E
+    E --> G
+    G --> H
+    H --> I
+    I --> J
+    K --> J
+</pre>
+<h2 id="non-negotiable-controls">Non-Negotiable Controls</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Why It Is Critical</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Verify challenge</td>
+<td>Prevent replay</td>
+</tr>
+<tr>
+<td>Verify origin</td>
+<td>Prevent malicious site acceptance</td>
+</tr>
+<tr>
+<td>Verify RP ID hash</td>
+<td>Enforce relying-party binding</td>
+</tr>
+<tr>
+<td>Verify signature</td>
+<td>Prove possession of private key</td>
+</tr>
+<tr>
+<td>Verify UP</td>
+<td>Confirm human interaction</td>
+</tr>
+<tr>
+<td>Verify UV</td>
+<td>Confirm local user verification</td>
+</tr>
+<tr>
+<td>Rotate session after login</td>
+<td>Prevent session fixation</td>
+</tr>
+<tr>
+<td>Secure recovery</td>
+<td>Prevent bypassing WebAuthn</td>
+</tr>
+<tr>
+<td>Step-up before credential changes</td>
+<td>Prevent persistent account takeover</td>
+</tr>
+<tr>
+<td>Managed Chrome extensions</td>
+<td>Prevent post-login browser compromise</td>
+</tr>
+<tr>
+<td>Managed Windows device</td>
+<td>Reduce endpoint compromise</td>
+</tr>
+<tr>
+<td>Strong admin policy</td>
+<td>Prevent privileged account compromise</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="36-conclusion">36. Conclusion</h1>
+<p>WebAuthn/FIDO2 provides strong phishing-resistant authentication, but the overall system is only as strong as the surrounding controls.</p>
+<p>The highest-risk areas are usually not the WebAuthn cryptography itself. They are:</p>
+<ol>
+<li>Weak account recovery</li>
+<li>Weak passkey registration controls</li>
+<li>Ignoring the <code>UV</code> flag</li>
+<li>Malicious browser extensions</li>
+<li>Compromised Windows endpoints</li>
+<li>Weak session management after successful login</li>
+<li>Over-permissive fallback authentication</li>
+<li>No special controls for privileged administrators</li>
+</ol>
+<p>For your environment, the recommended model is:</p>
+<blockquote>
+<p>Use WebAuthn with user verification required, validate all server-side ceremony fields, restrict privileged users to approved authenticators on managed Windows devices, govern Chrome extensions, secure the session layer, and protect credential lifecycle and recovery flows with step-up authentication and monitoring.</p>
+</blockquote>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q61_q70_log_correlation_ip_utils.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q61_q70_log_correlation_ip_utils.py</h1>
+  <p class="file-path">Source: code\practice\medium\q61_q70_log_correlation_ip_utils.py</p>
+  <p class="line-count">724 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q61–Q70
+Topic: Log Correlation, IOC Matching, IP Extraction &amp; CIDR Utilities
+&quot;&quot;&quot;
+
+from collections import defaultdict
+from typing import List, Dict, Optional, Set, Iterator
+import re
+import ipaddress
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q61 — Merge Logs from Multiple Sources
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given multiple lists of log dicts (each with a &quot;ts&quot; timestamp field),
+  merge them into a single time-sorted list.
+
+Clarifying questions:
+  1. Are all timestamps already in the same format (ISO 8601)?
+  2. How many sources and how large is each log list?
+  3. Should ties be broken by source priority?
+
+Security angle:
+  Log correlation requires events from different systems (firewall, auth,
+  DNS) to be time-sorted. Merging is the prerequisite for building a
+  coherent attack timeline. Attackers who tamper with timestamps will
+  produce anomalous ordering.
+&quot;&quot;&quot;
+
+import heapq
+
+
+def merge_logs_naive(log_sources: List[List[Dict]], ts_field: str = &quot;ts&quot;) -&gt; List[Dict]:
+    &quot;&quot;&quot;Concatenate all and sort by timestamp. O(N log N).&quot;&quot;&quot;
+    combined = [e for src in log_sources for e in src]
+    combined.sort(key=lambda e: e.get(ts_field) or &quot;&quot;)
+    return combined
+
+
+def merge_logs(log_sources: List[List[Dict]], ts_field: str = &quot;ts&quot;) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: k-way merge using heapq.merge on pre-sorted per-source lists,
+    or sort+merge if sources are not pre-sorted.
+    If each source is already sorted (common in append-only logs),
+    heapq.merge is O(N log k) vs O(N log N) for brute-force sort.
+    Falls back to sort if sources are unsorted.
+    O(N log k) time where k = number of sources, N = total events.
+    &quot;&quot;&quot;
+    # heapq.merge requires each iterable to be sorted.
+    # Sort each source first, then merge.
+    sorted_sources = [
+        sorted(src, key=lambda e: e.get(ts_field) or &quot;&quot;)
+        for src in log_sources
+    ]
+    return list(heapq.merge(*sorted_sources, key=lambda e: e.get(ts_field) or &quot;&quot;))
+
+
+def test_q61():
+    auth_logs = [
+        {&quot;src&quot;: &quot;auth&quot;, &quot;ts&quot;: &quot;2026-05-29T08:00:01Z&quot;, &quot;event&quot;: &quot;login&quot;},
+        {&quot;src&quot;: &quot;auth&quot;, &quot;ts&quot;: &quot;2026-05-29T08:00:05Z&quot;, &quot;event&quot;: &quot;logout&quot;},
+    ]
+    net_logs = [
+        {&quot;src&quot;: &quot;fw&quot;,   &quot;ts&quot;: &quot;2026-05-29T08:00:02Z&quot;, &quot;event&quot;: &quot;allow&quot;},
+        {&quot;src&quot;: &quot;fw&quot;,   &quot;ts&quot;: &quot;2026-05-29T08:00:03Z&quot;, &quot;event&quot;: &quot;deny&quot;},
+    ]
+    dns_logs = [
+        {&quot;src&quot;: &quot;dns&quot;,  &quot;ts&quot;: &quot;2026-05-29T08:00:00Z&quot;, &quot;event&quot;: &quot;query&quot;},
+    ]
+    merged = merge_logs([auth_logs, net_logs, dns_logs])
+    assert len(merged) == 5
+    timestamps = [e[&quot;ts&quot;] for e in merged]
+    assert timestamps == sorted(timestamps)
+    assert merged[0][&quot;event&quot;] == &quot;query&quot;
+    print(&quot;Q61 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q62 — Correlate Auth Logs and Network Logs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Join auth login events with network flow events on src_ip to find IPs that
+  both logged in AND sent outbound traffic to external hosts in the same session.
+
+Clarifying questions:
+  1. What is the join key? (src_ip)
+  2. What time window constitutes &quot;same session&quot;?
+  3. Should we use an inner join (only IPs in both) or left join?
+
+Security angle:
+  Correlating auth + network lets you detect:
+  - Data exfiltration after login.
+  - Insider threat: authenticated user immediately transferring data.
+  - Compromised account: login from new IP followed by bulk outbound traffic.
+&quot;&quot;&quot;
+
+
+def correlate_auth_network(
+    auth_events: List[Dict],
+    net_flows: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: hash join — build a set of authenticated IPs from auth logs,
+    then scan network flows for matching IPs.
+    O(a + n) time where a = auth events, n = network flows.
+
+    Data structure: dict keyed by src_ip for O(1) lookup.
+    &quot;&quot;&quot;
+    # Build lookup: src_ip → auth event details
+    authed: Dict[str, Dict] = {}
+    for e in auth_events:
+        ip = e.get(&quot;src_ip&quot;)
+        if ip and e.get(&quot;result&quot;) == &quot;success&quot;:
+            authed[ip] = e
+
+    correlations = []
+    for flow in net_flows:
+        ip = flow.get(&quot;src_ip&quot;)
+        if ip in authed:
+            correlations.append({
+                &quot;src_ip&quot;:      ip,
+                &quot;auth_user&quot;:   authed[ip].get(&quot;user&quot;),
+                &quot;auth_ts&quot;:     authed[ip].get(&quot;ts&quot;),
+                &quot;net_dst_ip&quot;:  flow.get(&quot;dst_ip&quot;),
+                &quot;net_bytes&quot;:   flow.get(&quot;bytes_out&quot;),
+                &quot;net_ts&quot;:      flow.get(&quot;ts&quot;),
+            })
+    return correlations
+
+
+def test_q62():
+    auth = [
+        {&quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;result&quot;: &quot;success&quot;, &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.6&quot;, &quot;user&quot;: &quot;bob&quot;,   &quot;result&quot;: &quot;failure&quot;, &quot;ts&quot;: &quot;T2&quot;},
+    ]
+    flows = [
+        {&quot;src_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_ip&quot;: &quot;203.0.113.50&quot;, &quot;bytes_out&quot;: 50_000, &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.7&quot;, &quot;dst_ip&quot;: &quot;8.8.8.8&quot;,       &quot;bytes_out&quot;: 1_000,  &quot;ts&quot;: &quot;T4&quot;},
+    ]
+    results = correlate_auth_network(auth, flows)
+    assert len(results) == 1
+    assert results[0][&quot;auth_user&quot;] == &quot;alice&quot;
+    assert results[0][&quot;src_ip&quot;] == &quot;10.0.0.5&quot;
+    print(&quot;Q62 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q63 — Join CloudTrail Events with IAM Metadata
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Enrich CloudTrail events by joining with an IAM metadata table on
+  principal ARN, adding account ID, role name, and MFA status.
+
+Clarifying questions:
+  1. Is the join key the full ARN or just the username portion?
+  2. Is the IAM metadata a dict (pre-loaded) or a second event list?
+  3. Should events without a matching IAM record be kept or dropped?
+
+Security angle:
+  Raw CloudTrail events lack context: is this principal a human user, a
+  service role, or a compromised credential? Enriching with IAM metadata
+  lets analysts quickly assess privilege level and whether MFA was enrolled.
+&quot;&quot;&quot;
+
+
+def join_cloudtrail_iam(
+    ct_events: List[Dict],
+    iam_metadata: Dict[str, Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: IAM metadata keyed by principal ARN for O(1) lookup per event.
+    O(n) time for enrichment pass.
+    &quot;&quot;&quot;
+    enriched = []
+    for event in ct_events:
+        principal = event.get(&quot;principal&quot;) or &quot;&quot;
+        meta = iam_metadata.get(principal) or {}
+        enriched.append({
+            **event,
+            &quot;account_id&quot;: meta.get(&quot;account_id&quot;),
+            &quot;role_name&quot;:  meta.get(&quot;role_name&quot;),
+            &quot;mfa_enrolled&quot;: meta.get(&quot;mfa_enrolled&quot;),
+            &quot;is_admin&quot;:   meta.get(&quot;is_admin&quot;, False),
+        })
+    return enriched
+
+
+def test_q63():
+    events = [
+        {&quot;event_name&quot;: &quot;GetSecretValue&quot;, &quot;principal&quot;: &quot;arn:aws:iam::123:user/alice&quot;, &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;event_name&quot;: &quot;ListBuckets&quot;,    &quot;principal&quot;: &quot;arn:aws:iam::123:user/bob&quot;,   &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;event_name&quot;: &quot;DescribeInstances&quot;, &quot;principal&quot;: &quot;arn:aws:iam::123:role/lambda&quot;, &quot;ts&quot;: &quot;T3&quot;},
+    ]
+    iam = {
+        &quot;arn:aws:iam::123:user/alice&quot;: {&quot;account_id&quot;: &quot;123&quot;, &quot;role_name&quot;: &quot;admin&quot;,  &quot;mfa_enrolled&quot;: True,  &quot;is_admin&quot;: True},
+        &quot;arn:aws:iam::123:user/bob&quot;:   {&quot;account_id&quot;: &quot;123&quot;, &quot;role_name&quot;: &quot;viewer&quot;, &quot;mfa_enrolled&quot;: False, &quot;is_admin&quot;: False},
+    }
+    result = join_cloudtrail_iam(events, iam)
+    assert result[0][&quot;is_admin&quot;] is True
+    assert result[0][&quot;mfa_enrolled&quot;] is True
+    assert result[1][&quot;mfa_enrolled&quot;] is False
+    assert result[2][&quot;role_name&quot;] is None   # no IAM metadata for lambda role
+    print(&quot;Q63 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q64 — Convert Flat Logs to Aggregated Summary
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given flat log events with src_ip and status_code, aggregate into a summary:
+  per src_ip: total requests, distinct paths, error count, error rate.
+
+Clarifying questions:
+  1. What constitutes an &quot;error&quot;? (4xx, 5xx, or both?)
+  2. What is the grouping key — only src_ip, or (src_ip, endpoint)?
+  3. Should the output be sorted?
+
+Security angle:
+  Aggregation is the most common transformation before applying detection
+  thresholds. Counting per-IP error rates is faster and more actionable
+  than scanning raw logs for anomalies.
+&quot;&quot;&quot;
+
+
+def aggregate_logs(
+    events: List[Dict],
+    error_range: tuple = (400, 599),
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single pass with per-IP accumulator dict.
+    O(n) time, O(i) space where i = unique IPs.
+    &quot;&quot;&quot;
+    stats: Dict[str, Dict] = defaultdict(
+        lambda: {&quot;total&quot;: 0, &quot;errors&quot;: 0, &quot;paths&quot;: set()}
+    )
+
+    for e in events:
+        ip = e.get(&quot;src_ip&quot;) or &quot;unknown&quot;
+        status = e.get(&quot;status&quot;) or 0
+        path = (e.get(&quot;path&quot;) or &quot;&quot;).split(&quot;?&quot;)[0]
+
+        rec = stats[ip]
+        rec[&quot;total&quot;] += 1
+        rec[&quot;paths&quot;].add(path)
+        if error_range[0] &lt;= status &lt;= error_range[1]:
+            rec[&quot;errors&quot;] += 1
+
+    return sorted(
+        [
+            {
+                &quot;src_ip&quot;: ip,
+                &quot;total_requests&quot;: v[&quot;total&quot;],
+                &quot;distinct_paths&quot;: len(v[&quot;paths&quot;]),
+                &quot;error_count&quot;: v[&quot;errors&quot;],
+                &quot;error_rate&quot;: round(v[&quot;errors&quot;] / v[&quot;total&quot;], 3) if v[&quot;total&quot;] else 0,
+            }
+            for ip, v in stats.items()
+        ],
+        key=lambda r: -r[&quot;total_requests&quot;],
+    )
+
+
+def test_q64():
+    events = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;status&quot;: 200, &quot;path&quot;: &quot;/home&quot;},
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;status&quot;: 404, &quot;path&quot;: &quot;/admin&quot;},
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;status&quot;: 403, &quot;path&quot;: &quot;/secret&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;status&quot;: 200, &quot;path&quot;: &quot;/home&quot;},
+    ]
+    results = aggregate_logs(events)
+    by_ip = {r[&quot;src_ip&quot;]: r for r in results}
+    assert by_ip[&quot;1.1.1.1&quot;][&quot;total_requests&quot;] == 3
+    assert by_ip[&quot;1.1.1.1&quot;][&quot;error_count&quot;] == 2
+    assert abs(by_ip[&quot;1.1.1.1&quot;][&quot;error_rate&quot;] - 0.667) &lt; 0.001
+    assert by_ip[&quot;2.2.2.2&quot;][&quot;error_count&quot;] == 0
+    print(&quot;Q64 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q65 — Build IOC Matcher
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of IOCs (Indicators of Compromise — IP addresses, domains,
+  and file hashes), and a list of log events, return events that contain
+  any matching IOC.
+
+Clarifying questions:
+  1. What IOC types are we matching? (IP, domain, MD5/SHA256)
+  2. Should domain matching be exact or include subdomains?
+  3. Should we return the matched IOC alongside the event?
+
+Security angle:
+  IOC matching is the backbone of threat intel integration. Every SIEM
+  product applies threat intel feeds as lookup tables against log streams.
+  The key insight: store IOCs in a frozenset/dict for O(1) lookup instead
+  of iterating the full IOC list per event (which would be O(E * I)).
+&quot;&quot;&quot;
+
+
+def build_ioc_matcher(
+    iocs: List[Dict],
+) -&gt; Dict[str, Set[str]]:
+    &quot;&quot;&quot;
+    Build lookup sets per IOC type: ips, domains, hashes.
+    O(i) time and space.
+    &quot;&quot;&quot;
+    matcher: Dict[str, Set[str]] = {&quot;ip&quot;: set(), &quot;domain&quot;: set(), &quot;hash&quot;: set()}
+    for ioc in iocs:
+        ioc_type = (ioc.get(&quot;type&quot;) or &quot;&quot;).lower()
+        value = (ioc.get(&quot;value&quot;) or &quot;&quot;).lower()
+        if ioc_type in matcher and value:
+            matcher[ioc_type].add(value)
+    # Freeze for immutability after build
+    return {k: frozenset(v) for k, v in matcher.items()}
+
+
+def match_iocs(
+    events: List[Dict],
+    matcher: Dict[str, Set[str]],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: O(1) frozenset lookup per event field.
+    O(E) time where E = number of events.
+    &quot;&quot;&quot;
+    hits = []
+    for e in events:
+        matched_ioc = None
+        matched_type = None
+
+        src_ip = (e.get(&quot;src_ip&quot;) or &quot;&quot;).lower()
+        domain = (e.get(&quot;query&quot;) or e.get(&quot;domain&quot;) or &quot;&quot;).lower()
+        file_hash = (e.get(&quot;hash&quot;) or e.get(&quot;sha256&quot;) or &quot;&quot;).lower()
+
+        if src_ip in matcher.get(&quot;ip&quot;, frozenset()):
+            matched_ioc, matched_type = src_ip, &quot;ip&quot;
+        elif domain in matcher.get(&quot;domain&quot;, frozenset()):
+            matched_ioc, matched_type = domain, &quot;domain&quot;
+        elif file_hash in matcher.get(&quot;hash&quot;, frozenset()):
+            matched_ioc, matched_type = file_hash, &quot;hash&quot;
+
+        if matched_ioc:
+            hits.append({**e, &quot;ioc_match&quot;: matched_ioc, &quot;ioc_type&quot;: matched_type})
+    return hits
+
+
+def test_q65():
+    iocs = [
+        {&quot;type&quot;: &quot;ip&quot;,     &quot;value&quot;: &quot;5.5.5.5&quot;},
+        {&quot;type&quot;: &quot;domain&quot;, &quot;value&quot;: &quot;evil-c2.example.org&quot;},
+        {&quot;type&quot;: &quot;hash&quot;,   &quot;value&quot;: &quot;aabbccdd1122334455667788990011aa&quot;},
+    ]
+    events = [
+        {&quot;src_ip&quot;: &quot;5.5.5.5&quot;,  &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;,  &quot;query&quot;: &quot;evil-c2.example.org&quot;,          &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;,  &quot;hash&quot;: &quot;aabbccdd1122334455667788990011aa&quot;, &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;src_ip&quot;: &quot;9.9.9.9&quot;,  &quot;ts&quot;: &quot;T4&quot;},  # no match
+    ]
+    m = build_ioc_matcher(iocs)
+    results = match_iocs(events, m)
+    assert len(results) == 3
+    types = {r[&quot;ioc_type&quot;] for r in results}
+    assert types == {&quot;ip&quot;, &quot;domain&quot;, &quot;hash&quot;}
+    assert not any(r[&quot;src_ip&quot;] == &quot;9.9.9.9&quot; for r in results)
+    print(&quot;Q65 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q66 — Extract URLs from Text
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a block of text (log message, email body, document), extract all URLs.
+
+Clarifying questions:
+  1. Should we extract only http/https, or also ftp, file, etc.?
+  2. Should we extract URLs from inside HTML attributes (href, src)?
+  3. Should we normalise to lowercase?
+
+Security angle:
+  URL extraction from log messages enables automated IOC enrichment:
+  - Phishing URL detection from email body.
+  - Malware download URL extraction from PCAP/proxy logs.
+  - C2 URL extraction from memory dumps.
+&quot;&quot;&quot;
+
+URL_RE = re.compile(
+    r&quot;https?://[^\s\&quot;&#x27;&lt;&gt;\])\}]+&quot;,
+    re.IGNORECASE,
+)
+
+
+def extract_urls_naive(text: str) -&gt; List[str]:
+    return URL_RE.findall(text)
+
+
+def extract_urls(text: str) -&gt; List[str]:
+    &quot;&quot;&quot;
+    Optimal: compiled regex findall. Deduplicate while preserving order.
+    O(n) time where n = text length.
+    &quot;&quot;&quot;
+    seen: Set[str] = set()
+    results = []
+    for url in URL_RE.findall(text):
+        url_clean = url.rstrip(&quot;.,;:&quot;)  # strip common trailing punctuation
+        if url_clean not in seen:
+            seen.add(url_clean)
+            results.append(url_clean)
+    return results
+
+
+def test_q66():
+    text = (
+        &quot;User clicked http://evil.com/phish?token=abc123 and was redirected to &quot;
+        &quot;https://legit.example.com/callback. The same URL http://evil.com/phish?token=abc123 &quot;
+        &quot;appeared again in the next hop.&quot;
+    )
+    urls = extract_urls(text)
+    assert &quot;http://evil.com/phish?token=abc123&quot; in urls
+    assert &quot;https://legit.example.com/callback&quot; in urls
+    # Deduplication
+    assert len([u for u in urls if &quot;evil.com&quot; in u]) == 1
+    print(&quot;Q66 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q67 — Extract IPs from Text
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Extract all valid IPv4 and IPv6 addresses from a freeform text string.
+
+Clarifying questions:
+  1. Should we validate that the extracted IP is a valid address (not 999.999.999.999)?
+  2. Should we deduplicate?
+  3. Should private IPs be separated from public IPs?
+
+Security angle:
+  IP extraction is used in:
+  - PCAP carving: extracting IP addresses from payload strings.
+  - Email header parsing: extracting source IPs from Received headers.
+  - Malware report scraping: extracting IOC IPs from threat intel PDFs.
+&quot;&quot;&quot;
+
+IPV4_RE = re.compile(
+    r&quot;\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b&quot;
+)
+
+IPV6_RE = re.compile(
+    r&quot;\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b&quot;
+    r&quot;|\b(?:[0-9a-fA-F]{1,4}:){1,7}:\b&quot;
+    r&quot;|\b::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}\b&quot;
+)
+
+
+def extract_ips(text: str, deduplicate: bool = True) -&gt; Dict[str, List[str]]:
+    &quot;&quot;&quot;
+    Optimal: separate compiled regexes for IPv4 and IPv6.
+    Validates each match via ipaddress.ip_address.
+    O(n) time.
+
+    Data structure: two lists (v4, v6) to keep results typed.
+    &quot;&quot;&quot;
+    v4: List[str] = []
+    v6: List[str] = []
+    seen: Set[str] = set()
+
+    for match in IPV4_RE.finditer(text):
+        ip = match.group(0)
+        try:
+            ipaddress.IPv4Address(ip)
+            if not deduplicate or ip not in seen:
+                v4.append(ip)
+                seen.add(ip)
+        except ValueError:
+            pass
+
+    for match in IPV6_RE.finditer(text):
+        ip = match.group(0).strip(&quot;:&quot;)
+        try:
+            ipaddress.IPv6Address(ip)
+            if not deduplicate or ip not in seen:
+                v6.append(ip)
+                seen.add(ip)
+        except ValueError:
+            pass
+
+    return {&quot;ipv4&quot;: v4, &quot;ipv6&quot;: v6}
+
+
+def test_q67():
+    text = (
+        &quot;Connection from 192.168.1.5 to 10.0.0.1 on port 443. &quot;
+        &quot;Also seen: 203.0.113.50 and duplicate 192.168.1.5. &quot;
+        &quot;Invalid: 999.999.999.999&quot;
+    )
+    result = extract_ips(text)
+    assert &quot;192.168.1.5&quot; in result[&quot;ipv4&quot;]
+    assert &quot;10.0.0.1&quot; in result[&quot;ipv4&quot;]
+    assert &quot;203.0.113.50&quot; in result[&quot;ipv4&quot;]
+    # Deduplicated
+    assert result[&quot;ipv4&quot;].count(&quot;192.168.1.5&quot;) == 1
+    # Invalid IP not included
+    assert &quot;999.999.999.999&quot; not in result[&quot;ipv4&quot;]
+    print(&quot;Q67 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q68 — Extract Hashes from Text
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Extract MD5, SHA1, and SHA256 hashes from a freeform text string.
+
+Clarifying questions:
+  1. Should we distinguish hash types by length?
+  2. Should we validate that the hash contains only hex characters?
+  3. Should hashes be returned normalised to lowercase?
+
+Security angle:
+  File hashes are the most portable IOC type — they survive IP/domain
+  rotation. Hash extraction is used in:
+  - Malware report parsing to build IOC feeds.
+  - EDR log parsing to correlate with threat intel.
+  - VirusTotal/CIRCL lookups during incident response.
+&quot;&quot;&quot;
+
+HASH_RE = re.compile(
+    r&quot;\b([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\b&quot;
+)
+
+HASH_LEN_TYPE = {32: &quot;md5&quot;, 40: &quot;sha1&quot;, 64: &quot;sha256&quot;}
+
+
+def extract_hashes(text: str) -&gt; List[Dict[str, str]]:
+    &quot;&quot;&quot;
+    Optimal: single regex that matches all three hash lengths.
+    Type is inferred from length. Deduplicates.
+    O(n) time.
+    &quot;&quot;&quot;
+    seen: Set[str] = set()
+    results = []
+    for m in HASH_RE.finditer(text):
+        h = m.group(0).lower()
+        if h not in seen:
+            seen.add(h)
+            results.append({
+                &quot;hash&quot;: h,
+                &quot;type&quot;: HASH_LEN_TYPE.get(len(h), &quot;unknown&quot;),
+            })
+    return results
+
+
+def test_q68():
+    text = (
+        &quot;MD5: d41d8cd98f00b204e9800998ecf8427e &quot;
+        &quot;SHA1: da39a3ee5e6b4b0d3255bfef95601890afd80709 &quot;
+        &quot;SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 &quot;
+        &quot;Repeated: d41d8cd98f00b204e9800998ecf8427e&quot;
+    )
+    results = extract_hashes(text)
+    assert len(results) == 3   # deduplicated
+    types = {r[&quot;type&quot;] for r in results}
+    assert types == {&quot;md5&quot;, &quot;sha1&quot;, &quot;sha256&quot;}
+    print(&quot;Q68 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q69 — Validate CIDR Membership
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of CIDR blocks and an IP address, return whether the IP
+  falls within any of the CIDR blocks.
+
+Clarifying questions:
+  1. Should we support both IPv4 and IPv6?
+  2. Should overlapping CIDRs be de-duped before matching?
+  3. Should we return WHICH CIDR matched?
+
+Security angle:
+  CIDR membership is used for:
+  - Determining if a src_ip is internal vs external.
+  - Allowlisting known corporate egress IPs.
+  - Checking if a destination is in a cloud provider IP range (AWS/GCP/Azure).
+  - Detecting traffic to/from geo-blocked IP ranges.
+&quot;&quot;&quot;
+
+
+def ip_in_cidrs(
+    ip_str: str,
+    cidrs: List[str],
+) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Optimal: use ipaddress stdlib for correct CIDR arithmetic.
+    Returns matching CIDR string or None.
+    O(c) time where c = number of CIDRs.
+    &quot;&quot;&quot;
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return None
+
+    for cidr in cidrs:
+        try:
+            network = ipaddress.ip_network(cidr, strict=False)
+            if addr in network:
+                return cidr
+        except ValueError:
+            continue
+    return None
+
+
+def filter_ips_by_cidr(
+    ips: List[str],
+    cidrs: List[str],
+) -&gt; Dict[str, Optional[str]]:
+    &quot;&quot;&quot;
+    Check each IP against CIDR list. O(n * c) time.
+    For large n, pre-build a sorted prefix tree; stdlib is fine for
+    moderate-size IOC lists (&lt; 10k CIDRs).
+    &quot;&quot;&quot;
+    return {ip: ip_in_cidrs(ip, cidrs) for ip in ips}
+
+
+def test_q69():
+    cidrs = [&quot;10.0.0.0/8&quot;, &quot;192.168.0.0/16&quot;, &quot;172.16.0.0/12&quot;]
+    assert ip_in_cidrs(&quot;10.1.2.3&quot;,     cidrs) == &quot;10.0.0.0/8&quot;
+    assert ip_in_cidrs(&quot;192.168.5.10&quot;, cidrs) == &quot;192.168.0.0/16&quot;
+    assert ip_in_cidrs(&quot;172.20.0.1&quot;,   cidrs) == &quot;172.16.0.0/12&quot;
+    assert ip_in_cidrs(&quot;203.0.113.50&quot;, cidrs) is None
+    print(&quot;Q69 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q70 — Group IPs by /24 Subnet
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of IP addresses, group them by their /24 subnet
+  (i.e., first three octets) and return a dict of subnet → list of IPs.
+
+Clarifying questions:
+  1. IPv4 only or also IPv6 (/48 prefix)?
+  2. Should we return sorted results?
+  3. Should the subnet key include the /24 suffix?
+
+Security angle:
+  /24 grouping is used for:
+  - Detecting distributed scanning from the same /24 (shared hosting attack).
+  - Geo-blocking by IP range.
+  - Identifying cloud provider allocations (e.g., AWS uses /18s allocated per region).
+  - Correlating multiple attacker IPs that share infrastructure.
+&quot;&quot;&quot;
+
+
+def group_by_subnet24_naive(ips: List[str]) -&gt; Dict[str, List[str]]:
+    &quot;&quot;&quot;Naive: take first three octets as key.&quot;&quot;&quot;
+    groups: Dict[str, List[str]] = defaultdict(list)
+    for ip in ips:
+        parts = ip.split(&quot;.&quot;)
+        if len(parts) == 4:
+            subnet = &quot;.&quot;.join(parts[:3]) + &quot;.0/24&quot;
+            groups[subnet].append(ip)
+    return dict(groups)
+
+
+def group_by_subnet24(ips: List[str]) -&gt; Dict[str, List[str]]:
+    &quot;&quot;&quot;
+    Optimal: use ipaddress.ip_network with supernet_of logic.
+    Validates the IP, computes /24 via ipaddress for correctness.
+    O(n) time.
+
+    Data structure: defaultdict(list) keyed by subnet string.
+    &quot;&quot;&quot;
+    groups: Dict[str, List[str]] = defaultdict(list)
+    for ip_str in ips:
+        try:
+            addr = ipaddress.IPv4Address(ip_str)
+            # Get the /24 network containing this address
+            subnet = str(ipaddress.ip_network(f&quot;{addr}/24&quot;, strict=False))
+            groups[subnet].append(ip_str)
+        except (ValueError, ipaddress.AddressValueError):
+            groups[&quot;invalid&quot;].append(ip_str)
+    return dict(groups)
+
+
+def test_q70():
+    ips = [
+        &quot;10.0.0.1&quot;, &quot;10.0.0.2&quot;, &quot;10.0.0.100&quot;,
+        &quot;10.0.1.5&quot;,
+        &quot;192.168.1.10&quot;, &quot;192.168.1.20&quot;,
+        &quot;not-an-ip&quot;,
+    ]
+    result = group_by_subnet24(ips)
+    assert &quot;10.0.0.0/24&quot; in result
+    assert len(result[&quot;10.0.0.0/24&quot;]) == 3
+    assert &quot;10.0.1.0/24&quot; in result
+    assert &quot;192.168.1.0/24&quot; in result
+    assert &quot;not-an-ip&quot; in result.get(&quot;invalid&quot;, [])
+    print(&quot;Q70 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q61()
+    test_q62()
+    test_q63()
+    test_q64()
+    test_q65()
+    test_q66()
+    test_q67()
+    test_q68()
+    test_q69()
+    test_q70()
+    print(&quot;\nAll Q61–Q70 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

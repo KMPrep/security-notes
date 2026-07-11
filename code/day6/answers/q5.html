@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q5.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q5.py</h1>
+  <p class="file-path">Source: code\day6\answers\q5.py</p>
+  <p class="line-count">346 lines</p>
+  <pre><code class="language-python"># Q5 (Hard) - Minimal Covering Policy (Set Cover)
+# Given required permissions and a set of roles (each granting a subset of
+# permissions), find the minimum number of roles that together cover ALL
+# required permissions.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;I have a set of permissions a user needs. I have a catalog of roles, each
+#    granting a subset of permissions. I want to find the MINIMUM NUMBER of roles
+#    that together cover every required permission. If coverage is impossible,
+#    say so. This is the classic Set Cover problem.&quot;
+#
+# STEP 2 — Assumptions
+#   - Permissions and role names are strings
+#   - A role&#x27;s permissions may exceed required (extra perms are fine)
+#   - &#x27;required&#x27; is a set — no duplicates
+#   - Roles dict values are sets of permissions
+#   - If no subset of roles can cover required → return None / raise
+#   - If required is empty → return [] (no roles needed)
+#
+# STEP 3 — Critical key insight: NP-hard
+#   &quot;SET COVER IS NP-HARD. The exact optimal solution requires checking ALL 2^n
+#    subsets of roles — exponential. Mention this explicitly to the reviewer:
+#
+#    &#x27;This is Set Cover, which is NP-hard. For small M (number of roles),
+#     exact brute-force is feasible. For large M, the greedy algorithm gives a
+#     (1 + ln(|required|))-approximation guarantee — it&#x27;s within a log factor
+#     of optimal and runs in polynomial time.&#x27;&quot;
+#
+# STEP 4 — Greedy approach
+#   &quot;At each step, pick the role that covers the MOST uncovered permissions.
+#    Repeat until all required permissions are covered.
+#
+#    Pseudocode:
+#      uncovered = set(required)
+#      chosen = []
+#      while uncovered:
+#          best_role = role with max |role_perms ∩ uncovered|
+#          if max coverage == 0: return None  ← impossible
+#          chosen.append(best_role)
+#          uncovered -= role_perms[best_role]
+#      return chosen&quot;
+#
+# STEP 5 — Is greedy always optimal?
+#   &quot;NO. Greedy gives (1 + ln k) approximation where k = |required|.
+#    Example where greedy fails: required = {a,b,c,d}, roles:
+#      R1 = {a,b},  R2 = {c,d},  R3 = {a,b,c,d}
+#    Greedy might pick R1 first (covers 2), then R2 (covers 2). Answer: 2 roles.
+#    Optimal is also 2 (or 1 if R3 is available). In adversarial cases, greedy
+#    takes O(log n) times the optimal number of sets.&quot;
+#
+# STEP 6 — Exact brute force (for small M)
+#   &quot;Check all 2^M subsets. Pick smallest covering subset.
+#    Time: O(2^M * M * P) where M = #roles, P = #permissions.
+#    Only feasible for M &lt;= 20 or so.&quot;
+#
+# STEP 7 — Security framing
+#   &quot;Least-privilege principle: we want the MINIMUM roles covering required
+#    permissions. Over-permissioned users = attack surface expansion.
+#    Privilege escalation: an attacker grants themselves extra roles → monitor
+#    delta between required and actual permissions.
+#    Role explosion: too many fine-grained roles → governance problem.&quot;
+#
+# Complexity:
+#   Brute force: O(2^M * M * P)
+#   Greedy:      O(M * P) per step, O(M² * P) total  ← target
+# ─────────────────────────────────────────────────────────────────────────────
+
+from itertools import combinations
+
+
+# ── APPROACH 1: Brute force exact (enumerate all subsets) ────────────────────
+
+def min_roles_exact(required: set, roles: dict) -&gt; list | None:
+    &quot;&quot;&quot;
+    Check all subsets of roles from smallest to largest.
+    Returns the first (smallest) subset that covers all required permissions.
+
+    Time:  O(2^M * M * P) — only feasible for small M (&lt; 20 roles)
+    Space: O(M)
+    &quot;&quot;&quot;
+    if not isinstance(required, set):
+        required = set(required)
+    if not isinstance(roles, dict):
+        raise TypeError(f&quot;roles must be a dict, got {type(roles).__name__}&quot;)
+    if not required:
+        return []
+
+    role_names = list(roles.keys())
+    M = len(role_names)
+
+    # Try subsets of increasing size
+    for size in range(1, M + 1):
+        for subset in combinations(role_names, size):
+            covered = set()
+            for role in subset:
+                covered |= roles[role]
+            if required.issubset(covered):
+                return list(subset)
+
+    return None   # impossible to cover
+
+
+# ── APPROACH 2: Greedy (polynomial, approximately optimal) ────────────────────
+
+def min_roles_greedy(required: set, roles: dict) -&gt; list | None:
+    &quot;&quot;&quot;
+    At each step, pick the role covering the most UNCOVERED permissions.
+    Guaranteed to cover if a solution exists (complete coverage test at end).
+
+    Approximation ratio: O(1 + ln(|required|))
+    NOT always optimal — but polynomial time and practical.
+
+    Time:  O(M² * P)  — M greedy steps, each scans M roles and P permissions
+    Space: O(M + P)
+    &quot;&quot;&quot;
+    if not isinstance(required, set):
+        required = set(required)
+    if not isinstance(roles, dict):
+        raise TypeError(f&quot;roles must be a dict, got {type(roles).__name__}&quot;)
+    if not required:
+        return []
+
+    # Validate all role permissions are sets
+    for name, perms in roles.items():
+        if not isinstance(perms, (set, frozenset)):
+            roles = {k: set(v) for k, v in roles.items()}
+            break
+
+    uncovered = set(required)
+    chosen    = []
+    remaining = dict(roles)    # roles not yet chosen
+
+    while uncovered:
+        if not remaining:
+            # No more roles but still uncovered permissions
+            return None
+
+        # Pick role with max intersection with uncovered
+        best_role  = None
+        best_cover = set()
+
+        for role_name, role_perms in remaining.items():
+            covered_by_this = role_perms &amp; uncovered
+            if len(covered_by_this) &gt; len(best_cover):
+                best_role  = role_name
+                best_cover = covered_by_this
+
+        if not best_cover:
+            # No role covers any remaining uncovered permission
+            return None
+
+        chosen.append(best_role)
+        uncovered -= best_cover
+        del remaining[best_role]
+
+    return chosen
+
+
+# ── APPROACH 3: Greedy with coverage explanation ──────────────────────────────
+
+def min_roles_greedy_explained(required: set, roles: dict) -&gt; dict:
+    &quot;&quot;&quot;
+    Same greedy, but returns detailed step-by-step coverage breakdown.
+    Useful for audit reports: &quot;why was this role assigned?&quot;
+
+    Time:  O(M² * P)
+    &quot;&quot;&quot;
+    if not isinstance(required, set):
+        required = set(required)
+    if not required:
+        return {&quot;chosen&quot;: [], &quot;coverage_steps&quot;: [], &quot;covered&quot;: set()}
+
+    uncovered = set(required)
+    chosen    = []
+    steps     = []
+    remaining = {k: set(v) for k, v in roles.items()}
+
+    while uncovered:
+        if not remaining:
+            return {&quot;chosen&quot;: None, &quot;error&quot;: &quot;Cannot cover all required permissions&quot;,
+                    &quot;uncovered&quot;: uncovered}
+
+        best_role  = None
+        best_cover = set()
+        for name, perms in remaining.items():
+            c = perms &amp; uncovered
+            if len(c) &gt; len(best_cover):
+                best_role  = name
+                best_cover = c
+
+        if not best_cover:
+            return {&quot;chosen&quot;: None, &quot;error&quot;: &quot;Cannot cover all required permissions&quot;,
+                    &quot;uncovered&quot;: uncovered}
+
+        chosen.append(best_role)
+        steps.append({
+            &quot;role&quot;:           best_role,
+            &quot;newly_covered&quot;:  best_cover,
+            &quot;remaining_after&quot;: uncovered - best_cover,
+        })
+        uncovered -= best_cover
+        del remaining[best_role]
+
+    return {&quot;chosen&quot;: chosen, &quot;coverage_steps&quot;: steps, &quot;covered&quot;: set(required)}
+
+
+# ── MANUAL — no sets/frozensets for operations (manual intersection) ──────────
+
+def _manual_intersection(set_a: set, set_b: set) -&gt; set:
+    &quot;&quot;&quot;Return elements in both set_a and set_b without using &amp; operator.&quot;&quot;&quot;
+    result = set()
+    for item in set_a:
+        found = False
+        for b in set_b:
+            if item == b:
+                found = True
+                break
+        if found:
+            result.add(item)
+    return result
+
+
+def min_roles_manual(required: set, roles: dict) -&gt; list | None:
+    &quot;&quot;&quot;
+    Greedy set cover without set operators (manual intersection).
+
+    Time:  O(M² * P²) — manual intersection is O(P²)
+    Space: O(M + P)
+    &quot;&quot;&quot;
+    if not required:
+        return []
+
+    uncovered = set(required)
+    chosen    = []
+    remaining = {k: set(v) for k, v in roles.items()}
+
+    while uncovered:
+        if not remaining:
+            return None
+
+        best_role  = None
+        best_count = 0
+        best_cover = set()
+
+        for name, perms in remaining.items():
+            covered_by_this = _manual_intersection(perms, uncovered)
+            if len(covered_by_this) &gt; best_count:
+                best_role  = name
+                best_count = len(covered_by_this)
+                best_cover = covered_by_this
+
+        if not best_cover:
+            return None
+
+        chosen.append(best_role)
+        for perm in best_cover:
+            uncovered.discard(perm)
+        del remaining[best_role]
+
+    return chosen
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    # Example 1: single role covers all
+    required1 = {&quot;read&quot;, &quot;write&quot;, &quot;exec&quot;, &quot;admin&quot;}
+    roles1 = {
+        &quot;viewer&quot;:    {&quot;read&quot;},
+        &quot;editor&quot;:    {&quot;read&quot;, &quot;write&quot;},
+        &quot;developer&quot;: {&quot;read&quot;, &quot;write&quot;, &quot;exec&quot;},
+        &quot;admin&quot;:     {&quot;read&quot;, &quot;write&quot;, &quot;exec&quot;, &quot;admin&quot;},
+    }
+    result1_exact  = min_roles_exact(required1, roles1)
+    result1_greedy = min_roles_greedy(required1, roles1)
+    assert len(result1_exact)  == 1, f&quot;Expected 1 role, got {result1_exact}&quot;
+    assert len(result1_greedy) == 1, f&quot;Expected 1 role, got {result1_greedy}&quot;
+    assert result1_exact[0]  == &quot;admin&quot;
+    assert result1_greedy[0] == &quot;admin&quot;
+    print(f&quot;Example 1: exact={result1_exact}, greedy={result1_greedy}&quot;)
+
+    # Example 2: harder input — no single role covers all
+    required2 = {&quot;read&quot;, &quot;write&quot;, &quot;exec&quot;, &quot;audit&quot;, &quot;deploy&quot;}
+    roles2 = {
+        &quot;viewer&quot;:    {&quot;read&quot;},
+        &quot;editor&quot;:    {&quot;read&quot;, &quot;write&quot;},
+        &quot;developer&quot;: {&quot;read&quot;, &quot;write&quot;, &quot;exec&quot;},
+        &quot;auditor&quot;:   {&quot;audit&quot;, &quot;read&quot;},
+        &quot;deployer&quot;:  {&quot;deploy&quot;, &quot;exec&quot;},
+    }
+    result2_exact  = min_roles_exact(required2, roles2)
+    result2_greedy = min_roles_greedy(required2, roles2)
+    # Verify coverage
+    for result in [result2_exact, result2_greedy]:
+        covered = set()
+        for role in result:
+            covered |= roles2[role]
+        assert required2.issubset(covered), \
+            f&quot;Result {result} does not cover required={required2}&quot;
+    print(f&quot;Example 2: exact={result2_exact}, greedy={result2_greedy}&quot;)
+
+    # Example 3: impossible — required has permission not in any role
+    required3 = {&quot;read&quot;, &quot;root_shell&quot;}
+    result3 = min_roles_greedy(required3, roles1)
+    assert result3 is None, f&quot;Expected None (impossible), got {result3}&quot;
+
+    # Example 4: empty required → no roles needed
+    assert min_roles_greedy(set(), roles1) == []
+    assert min_roles_exact(set(),  roles1) == []
+
+    # Example 5: single required permission
+    required5 = {&quot;read&quot;}
+    result5 = min_roles_greedy(required5, roles1)
+    assert len(result5) == 1
+    assert &quot;read&quot; in roles1[result5[0]]
+
+    # Manual agrees with greedy on examples 1 and 2
+    m1 = min_roles_manual(required1, roles1)
+    assert len(m1) == 1
+
+    m2 = min_roles_manual(required2, roles2)
+    covered_m2 = set()
+    for role in m2:
+        covered_m2 |= roles2[role]
+    assert required2.issubset(covered_m2)
+
+    # Explained output
+    explained = min_roles_greedy_explained(required2, roles2)
+    assert &quot;chosen&quot; in explained
+    print(f&quot;\nGreedy steps for Example 2:&quot;)
+    for step in explained[&quot;coverage_steps&quot;]:
+        print(f&quot;  → assign &#x27;{step[&#x27;role&#x27;]}&#x27;, covers: {sorted(step[&#x27;newly_covered&#x27;])}&quot;)
+
+    print(&quot;\nQ5 — All assertions passed.&quot;)
+    print()
+    print(&quot;CRITICAL note:&quot;)
+    print(&quot;  Set Cover is NP-hard. Exact solution: O(2^M). Only feasible M &lt; 20.&quot;)
+    print(&quot;  Greedy: O(M²P), gives (1 + ln k) approximation (k = |required|).&quot;)
+    print(&quot;  For M=100 roles, P=50 perms: greedy is practical; exact is not.&quot;)
+    print()
+    print(&quot;Security principle: minimum roles = least privilege.&quot;)
+    print(&quot;  Audit delta(required, actual) to detect over-provisioned accounts.&quot;)
+    print(&quot;  Role explosion risk: 1000s of fine-grained roles → use ABAC instead.&quot;)
+</code></pre>
+</body>
+</html>

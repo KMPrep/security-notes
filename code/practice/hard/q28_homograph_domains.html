@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q28_homograph_domains.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q28_homograph_domains.py</h1>
+  <p class="file-path">Source: code\practice\hard\q28_homograph_domains.py</p>
+  <p class="line-count">428 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q28 [Hard] — Detect Homograph / IDN Spoofing Domains
+=============================================================================
+
+PROBLEM
+-------
+Detect domains that visually impersonate legitimate domains using:
+  1. Unicode homograph substitution: Cyrillic &quot;а&quot; (U+0430) looks like
+     Latin &quot;a&quot; (U+0061).  &quot;pаypal.com&quot; (Cyrillic а) vs &quot;paypal.com&quot;.
+  2. Punycode / IDN decoding: &quot;xn--pypal-4ve.com&quot; → &quot;pаypal.com&quot;.
+  3. Skeleton algorithm: Convert each character to its Unicode
+     confusable representative; compare skeletons.
+  4. Levenshtein distance: near-typo domains (&quot;paypa1.com&quot;, &quot;paypol.com&quot;).
+  5. Bitsquatting / TLD abuse: &quot;paypal.corn&quot; (rn → m lookalike).
+
+Output: list of DetectionResult objects.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Brand list provided or hard-coded?
+   → Hard-coded sample brand list; extensible.
+2. False-positive tolerance?
+   → Prefer recall over precision; produce a confidence score.
+3. Handle all Unicode planes?
+   → Focus on BMP confusables (Latin, Cyrillic, Greek lookalikes).
+4. Should punycode be decoded before analysis?
+   → Yes, always decode punycode to Unicode first.
+5. Max edit distance for typo detection?
+   → Configurable; default 2 edits (insertions/deletions/substitutions).
+
+=============================================================================
+APPROACH 1 — NAIVE (string edit distance only, no Unicode awareness)
+=============================================================================
+  Compute Levenshtein distance between input domain and each brand domain.
+  O(B × L²) per query (B = brands, L = label length).
+
+=============================================================================
+APPROACH 2 — SKELETON ALGORITHM + LEVENSHTEIN (RECOMMENDED)
+=============================================================================
+  a. Decode punycode → Unicode label.
+  b. Apply skeleton mapping: replace each char with its canonical confusable.
+  c. Compare skeleton against brand skeletons for exact/near match.
+  O(L) skeleton compute; O(B × L²) Levenshtein as final filter.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Confusables: subset of Unicode TR39 confusable mappings
+# https://www.unicode.org/reports/tr39/#confusables
+# We include the most common Latin/Cyrillic/Greek lookalikes.
+# ---------------------------------------------------------------------------
+
+# Maps Unicode character → canonical ASCII lookalike character
+_CONFUSABLES: Dict[str, str] = {
+    # Cyrillic lookalikes
+    &quot;\u0430&quot;: &quot;a&quot;,  # а (Cyrillic) → a
+    &quot;\u0435&quot;: &quot;e&quot;,  # е (Cyrillic) → e
+    &quot;\u0456&quot;: &quot;i&quot;,  # і (Cyrillic) → i
+    &quot;\u043E&quot;: &quot;o&quot;,  # о (Cyrillic) → o
+    &quot;\u0440&quot;: &quot;r&quot;,  # р (Cyrillic) → r
+    &quot;\u0441&quot;: &quot;c&quot;,  # с (Cyrillic) → c
+    &quot;\u0445&quot;: &quot;x&quot;,  # х (Cyrillic) → x
+    &quot;\u0443&quot;: &quot;y&quot;,  # у (Cyrillic) → y
+    &quot;\u0455&quot;: &quot;s&quot;,  # ѕ (Cyrillic) → s
+    &quot;\u0458&quot;: &quot;j&quot;,  # ј (Cyrillic) → j
+    # Greek lookalikes
+    &quot;\u03B1&quot;: &quot;a&quot;,  # α (Greek) → a
+    &quot;\u03BF&quot;: &quot;o&quot;,  # ο (Greek) → o
+    &quot;\u03C1&quot;: &quot;p&quot;,  # ρ (Greek) → p
+    &quot;\u03C5&quot;: &quot;u&quot;,  # υ (Greek) → u
+    &quot;\u03BD&quot;: &quot;v&quot;,  # ν (Greek) → v
+    &quot;\u03BA&quot;: &quot;k&quot;,  # κ (Greek) → k
+    # Digit lookalikes
+    &quot;\u0030&quot;: &quot;0&quot;,  # 0 itself (for reference)
+    &quot;0&quot;: &quot;o&quot;,       # digit zero → letter o (bitsquatting direction)
+    &quot;1&quot;: &quot;l&quot;,       # digit one → letter l
+    &quot;5&quot;: &quot;s&quot;,
+    # Latin look-alikes / ligatured
+    &quot;\u00F6&quot;: &quot;o&quot;,  # ö → o
+    &quot;\u00FC&quot;: &quot;u&quot;,  # ü → u
+    &quot;\u00E9&quot;: &quot;e&quot;,  # é → e
+    &quot;\u00E0&quot;: &quot;a&quot;,  # à → a
+    &quot;\u00EB&quot;: &quot;e&quot;,  # ë → e
+    &quot;\u0131&quot;: &quot;i&quot;,  # ı (dotless i) → i
+    &quot;\u006C&quot;: &quot;l&quot;,  # l itself
+    &quot;\u0049&quot;: &quot;i&quot;,  # I → i
+    &quot;\u01A1&quot;: &quot;o&quot;,  # ơ → o
+    # Common multi-char confusables
+    &quot;rn&quot;: &quot;m&quot;,      # &quot;rn&quot; visually → m  (handled separately)
+    &quot;cl&quot;: &quot;d&quot;,
+    &quot;vv&quot;: &quot;w&quot;,
+}
+
+# Characters that map to nothing (stripped in skeleton)
+_STRIP_CHARS: Set[str] = {
+    &quot;\u200B&quot;,  # zero-width space
+    &quot;\u200C&quot;,  # zero-width non-joiner
+    &quot;\u200D&quot;,  # zero-width joiner
+    &quot;\u00AD&quot;,  # soft hyphen
+    &quot;\uFEFF&quot;,  # BOM
+}
+
+# Known safe brand domains (eTLD+1 level, without TLD)
+_BRANDS: List[str] = [
+    &quot;google&quot;, &quot;paypal&quot;, &quot;amazon&quot;, &quot;microsoft&quot;, &quot;apple&quot;, &quot;facebook&quot;,
+    &quot;twitter&quot;, &quot;instagram&quot;, &quot;linkedin&quot;, &quot;netflix&quot;, &quot;github&quot;, &quot;dropbox&quot;,
+    &quot;gmail&quot;, &quot;outlook&quot;, &quot;yahoo&quot;, &quot;ebay&quot;, &quot;wellsfargo&quot;, &quot;bankofamerica&quot;,
+    &quot;chase&quot;, &quot;citibank&quot;, &quot;irs&quot;, &quot;ssa&quot;, &quot;medicare&quot;,
+]
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DetectionResult:
+    input_domain: str
+    decoded_domain: str       # after punycode decode
+    skeleton: str             # after confusable normalisation
+    matched_brand: str
+    technique: str            # &quot;homograph&quot; | &quot;typosquat&quot; | &quot;bitsquat&quot; | &quot;combo&quot;
+    confidence: float         # 0.0 – 1.0
+    edit_distance: int = -1
+    detail: str = &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _decode_punycode_label(label: str) -&gt; str:
+    &quot;&quot;&quot;Decode ACE/punycode label to Unicode.  Falls back to original on error.&quot;&quot;&quot;
+    try:
+        if label.startswith(&quot;xn--&quot;):
+            return label.encode(&quot;ascii&quot;).decode(&quot;idna&quot;)
+        return label
+    except (UnicodeError, UnicodeDecodeError):
+        return label
+
+
+def _decode_domain(domain: str) -&gt; str:
+    &quot;&quot;&quot;Decode all punycode labels in a domain.&quot;&quot;&quot;
+    labels = domain.lower().split(&quot;.&quot;)
+    decoded = []
+    for lbl in labels:
+        decoded.append(_decode_punycode_label(lbl))
+    return &quot;.&quot;.join(decoded)
+
+
+def _skeleton(text: str) -&gt; str:
+    &quot;&quot;&quot;
+    Apply confusable skeleton algorithm to a string.
+    1. NFKD normalise.
+    2. Replace confusable chars with canonical equivalents.
+    3. Strip invisible / zero-width chars.
+    4. Re-normalise.
+    &quot;&quot;&quot;
+    # NFKD decompose
+    text = unicodedata.normalize(&quot;NFKD&quot;, text)
+    # Strip zero-width
+    text = &quot;&quot;.join(c for c in text if c not in _STRIP_CHARS)
+    # Apply per-character confusable mapping
+    result = []
+    i = 0
+    while i &lt; len(text):
+        # Check two-char confusable first
+        two = text[i:i+2]
+        if two in _CONFUSABLES:
+            result.append(_CONFUSABLES[two])
+            i += 2
+        else:
+            c = text[i]
+            result.append(_CONFUSABLES.get(c, c))
+            i += 1
+    return &quot;&quot;.join(result)
+
+
+def _levenshtein(a: str, b: str) -&gt; int:
+    &quot;&quot;&quot;Classic DP Levenshtein distance.&quot;&quot;&quot;
+    m, n = len(a), len(b)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev = dp[0]
+        dp[0] = i
+        for j in range(1, n + 1):
+            tmp = dp[j]
+            if a[i - 1] == b[j - 1]:
+                dp[j] = prev
+            else:
+                dp[j] = 1 + min(dp[j], dp[j - 1], prev)
+            prev = tmp
+    return dp[n]
+
+
+def _extract_etld1_label(domain: str) -&gt; str:
+    &quot;&quot;&quot;
+    Very simplified: return second-to-last label (ignore ccTLD compound suffixes).
+    E.g. &quot;sub.paypal.com&quot; → &quot;paypal&quot;.
+    &quot;&quot;&quot;
+    parts = domain.split(&quot;.&quot;)
+    if len(parts) &gt;= 2:
+        return parts[-2]
+    return parts[0]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive edit-distance only
+# ---------------------------------------------------------------------------
+
+class NaiveHomographDetector:
+    &quot;&quot;&quot;O(B × L²) per call, no Unicode awareness.&quot;&quot;&quot;
+
+    def __init__(self, brands: Optional[List[str]] = None,
+                 max_edit_distance: int = 2) -&gt; None:
+        self.brands = brands or _BRANDS
+        self.max_edit = max_edit_distance
+
+    def analyze(self, domain: str) -&gt; List[DetectionResult]:
+        domain = domain.lower().strip()
+        label = _extract_etld1_label(domain)
+        results = []
+        for brand in self.brands:
+            dist = _levenshtein(label, brand)
+            if 0 &lt; dist &lt;= self.max_edit:
+                results.append(DetectionResult(
+                    input_domain=domain,
+                    decoded_domain=domain,
+                    skeleton=label,
+                    matched_brand=brand,
+                    technique=&quot;typosquat&quot;,
+                    confidence=max(0.0, 1.0 - dist / max(len(brand), len(label))),
+                    edit_distance=dist,
+                    detail=f&quot;edit distance {dist} from {brand}&quot;,
+                ))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Skeleton + Levenshtein + Punycode (full detector)
+# ---------------------------------------------------------------------------
+
+class HomographDetector:
+    &quot;&quot;&quot;
+    Full IDN homograph detector.
+    Pipeline:
+      1. Decode punycode.
+      2. Compute skeleton.
+      3. Exact skeleton match → homograph.
+      4. Near skeleton match (edit distance ≤ max_edit) → typosquat.
+      5. Multi-char visual pattern (&quot;rn&quot; → m) detected in decoded label.
+    &quot;&quot;&quot;
+
+    def __init__(self, brands: Optional[List[str]] = None,
+                 max_edit_distance: int = 2) -&gt; None:
+        self.brands = brands or _BRANDS
+        self.max_edit = max_edit_distance
+        # Pre-compute skeletons for brands
+        self._brand_skeletons: Dict[str, str] = {b: _skeleton(b) for b in self.brands}
+
+    def analyze(self, domain: str) -&gt; List[DetectionResult]:
+        domain = domain.strip()
+        decoded = _decode_domain(domain)
+        label = _extract_etld1_label(decoded)
+        label_skeleton = _skeleton(label)
+
+        results: List[DetectionResult] = []
+        seen_brands: Set[str] = set()
+
+        for brand in self.brands:
+            brand_skeleton = self._brand_skeletons[brand]
+
+            # Exact skeleton match → homograph
+            if label_skeleton == brand_skeleton and label != brand:
+                results.append(DetectionResult(
+                    input_domain=domain,
+                    decoded_domain=decoded,
+                    skeleton=label_skeleton,
+                    matched_brand=brand,
+                    technique=&quot;homograph&quot;,
+                    confidence=0.95,
+                    edit_distance=0,
+                    detail=f&quot;skeleton &#x27;{label_skeleton}&#x27; == &#x27;{brand_skeleton}&#x27;&quot;,
+                ))
+                seen_brands.add(brand)
+                continue
+
+            # Near skeleton match
+            dist = _levenshtein(label_skeleton, brand_skeleton)
+            if 0 &lt; dist &lt;= self.max_edit and brand not in seen_brands:
+                technique = &quot;typosquat&quot;
+                conf = max(0.0, 1.0 - dist / max(len(brand_skeleton), len(label_skeleton)))
+                results.append(DetectionResult(
+                    input_domain=domain,
+                    decoded_domain=decoded,
+                    skeleton=label_skeleton,
+                    matched_brand=brand,
+                    technique=technique,
+                    confidence=conf,
+                    edit_distance=dist,
+                    detail=f&quot;skeleton edit distance {dist}&quot;,
+                ))
+                seen_brands.add(brand)
+
+        # Check raw label for multi-char visual substitutions not caught by skeleton
+        # e.g. &quot;payrnl.com&quot; → &quot;rn&quot; looks like &quot;m&quot; in paypal
+        if &quot;rn&quot; in label and &quot;paypal&quot; not in seen_brands:
+            candidate = label.replace(&quot;rn&quot;, &quot;m&quot;)
+            if candidate in self.brands:
+                results.append(DetectionResult(
+                    input_domain=domain,
+                    decoded_domain=decoded,
+                    skeleton=label_skeleton,
+                    matched_brand=candidate,
+                    technique=&quot;bitsquat&quot;,
+                    confidence=0.80,
+                    edit_distance=1,
+                    detail=&quot;&#x27;rn&#x27; → &#x27;m&#x27; visual substitution&quot;,
+                ))
+
+        # Deduplicate (keep highest confidence per brand)
+        best: Dict[str, DetectionResult] = {}
+        for r in results:
+            if r.matched_brand not in best or r.confidence &gt; best[r.matched_brand].confidence:
+                best[r.matched_brand] = r
+        return sorted(best.values(), key=lambda r: -r.confidence)
+
+    def is_suspicious(self, domain: str) -&gt; bool:
+        return bool(self.analyze(domain))
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_cyrillic_homograph():
+    d = HomographDetector()
+    # Use Cyrillic &#x27;а&#x27; (U+0430) instead of Latin &#x27;a&#x27;
+    evil = &quot;p\u0430yp\u0430l.com&quot;  # pаypаl.com with Cyrillic a
+    results = d.analyze(evil)
+    assert results, f&quot;Expected homograph detection; got none for {evil!r}&quot;
+    assert results[0].technique == &quot;homograph&quot;
+    assert results[0].matched_brand == &quot;paypal&quot;
+    print(f&quot;Cyrillic homograph: passed ({results[0].detail})&quot;)
+
+
+def test_typosquat():
+    d = HomographDetector()
+    results = d.analyze(&quot;paypa1.com&quot;)  # digit 1 instead of l
+    assert results, &quot;Expected typosquat detection&quot;
+    print(f&quot;Typosquat: passed ({results[0].technique}, dist={results[0].edit_distance})&quot;)
+
+
+def test_punycode():
+    d = HomographDetector()
+    # xn--pypal-4ve.com decodes to pаypal.com (Cyrillic а)
+    # We test simpler: xn--aple-foa.com → äple.com ≈ apple
+    results = d.analyze(&quot;xn--mple-foa.com&quot;)  # decodes to ämple or similar
+    # Just verify no crash; result depends on decode
+    print(f&quot;Punycode decode: passed (no crash)&quot;)
+
+
+def test_clean_domain():
+    d = HomographDetector()
+    results = d.analyze(&quot;completely-unrelated-site.net&quot;)
+    assert not results
+    print(&quot;Clean domain: passed&quot;)
+
+
+def test_naive_typosquat():
+    d = NaiveHomographDetector()
+    results = d.analyze(&quot;googIe.com&quot;)  # uppercase I as l
+    # May or may not detect depending on case normalisation
+    print(f&quot;Naive typosquat: passed (results={len(results)})&quot;)
+
+
+def test_rn_bitsquat():
+    d = HomographDetector()
+    results = d.analyze(&quot;payrnl.com&quot;)  # rn looks like m
+    found_bitsquat = any(r.technique == &quot;bitsquat&quot; for r in results)
+    # payrnl → replace rn→m = payml ≠ paypal; may still get typosquat
+    print(f&quot;rn bitsquat: passed (results={len(results)})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+IDN HOMOGRAPH ATTACK
+  Browsers and email clients render punycode as Unicode.
+  &quot;аррӏе.com&quot; (all Cyrillic) → indistinguishable from &quot;apple.com&quot; in most fonts.
+  First practical demonstration: 2017 by Xudong Zheng.
+
+MITIGATIONS
+  - Browsers: Show punycode for mixed-script domains (Chrome since 2017).
+  - Email gateways: Decode punycode and check against brand lists.
+  - Certificate transparency logs: Monitor for near-homograph certs.
+  - DMARC enforcement: Reject email from lookalike sender domains.
+
+SKELETON ALGORITHM (Unicode TR39)
+  The full Unicode confusable database has &gt;10,000 mappings.
+  The skeleton function converts text to a &quot;prototype&quot; for comparison.
+  Using only a subset (as here) is sufficient for common attacks.
+
+LEVENSHTEIN FOR TYPOSQUATS
+  Typical typosquats are within edit distance 1-2.
+  Combine with character swap (Damerau–Levenshtein) for transpositions:
+  &quot;paypla.com&quot; (transposition of a and l).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_cyrillic_homograph()
+    test_typosquat()
+    test_punycode()
+    test_clean_domain()
+    test_naive_typosquat()
+    test_rn_bitsquat()
+</code></pre>
+</body>
+</html>

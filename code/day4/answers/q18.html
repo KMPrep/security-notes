@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q18.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q18.py</h1>
+  <p class="file-path">Source: code\day4\answers\q18.py</p>
+  <p class="line-count">246 lines</p>
+  <pre><code class="language-python"># Q18 - Binary Search on Answer: Minimum Scan Threshold
+# Find the minimum alert threshold T such that the number of alerts with
+# score &gt;= T is exactly &lt;= K. Given sorted scores, find T using binary search
+# on the answer (value space), not on the index space.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Clarify
+#   &quot;We want the MINIMUM T such that count(score &gt;= T) &lt;= K.
+#    Since lowering T includes more alerts (count goes up), and raising T
+#    includes fewer, we want the smallest T where count is still within K.
+#    Scores are sorted ascending. Can scores be negative? Can K be 0?&quot;
+#
+# STEP 2 — Naive approach
+#   &quot;Try every unique score value as a candidate T. For each, count how many
+#    scores are &gt;= T. O(n²) if we do a linear count for each of n candidates.&quot;
+#
+# STEP 3 — Binary search on the INDEX space
+#   &quot;Since scores are sorted, for a given T I can binary search (bisect_left)
+#    to find the first index where score &gt;= T.
+#    Count = len(scores) - that_index.
+#    But I still need to try each value of T — that&#x27;s the outer search.&quot;
+#
+# STEP 4 — Binary search on the VALUE space (the key insight)
+#   &quot;The answer T lives somewhere in the range [scores[0], scores[-1]].
+#    If I try T = mid_value:
+#      - count(score &gt;= mid) using bisect_left = n - bisect_left(scores, mid)
+#      - If count &lt;= K: T = mid might work, but maybe smaller T also works
+#        → try lower (hi = mid)
+#      - If count &gt; K: T = mid is too low (too many alerts) → go higher (lo = mid+1)
+#    This is binary search on the VALUE space.
+#    Time: O(log(max_score - min_score) * log n)&quot;
+#
+# STEP 5 — Simpler interpretation: binary search on INDEX
+#   &quot;Actually, the cleaner approach: we want index p (0-based from left) such
+#    that scores[p] is the K-th largest score from the right.
+#    That index is n - K (0-based). T = scores[n - K].
+#    This is O(1) after O(log n) verification.&quot;
+#
+# STEP 6 — Edge cases
+#   - K &gt;= n: T = scores[0] (all alerts qualify, threshold is minimum)
+#   - K == 0: T = scores[-1] + 1 (no alert qualifies)
+#   - K == 1: T = scores[-1] (only max qualifies)
+#   - All scores equal: T = that score
+#   - Duplicates: count(score &gt;= T) may jump
+#
+# Complexity:
+#   Index-based: O(1) lookup after sorted input
+#   Value binary search: O(log(V) * log n) where V = value range
+# ─────────────────────────────────────────────────────────────────────────────
+
+import bisect
+
+
+# ── APPROACH 1: Naive — try every value as T ─────────────────────────────────
+
+def min_threshold_naive(scores: list, k: int) -&gt; int:
+    &quot;&quot;&quot;
+    Try each unique score as a candidate threshold.
+    For each T, count alerts &gt;= T linearly. O(n²) time.
+    &quot;&quot;&quot;
+    if not isinstance(scores, list) or not isinstance(k, int):
+        raise TypeError(&quot;scores must be list, k must be int&quot;)
+    if k &lt; 0:
+        raise ValueError(f&quot;k must be &gt;= 0, got {k}&quot;)
+    if not scores:
+        raise ValueError(&quot;scores must not be empty&quot;)
+    if k &gt;= len(scores):
+        return scores[0]        # all alerts qualify
+
+    n = len(scores)
+    # Try each unique score as T, sorted in ascending order
+    candidates = sorted(set(scores))
+    best_T = scores[-1] + 1     # sentinel: no alerts qualify
+
+    for T in candidates:
+        count = sum(1 for s in scores if s &gt;= T)
+        if count &lt;= k:
+            best_T = T
+            break               # first (smallest) T that satisfies count &lt;= k
+
+    return best_T
+
+
+# ── APPROACH 2: Index-based O(1) answer ──────────────────────────────────────
+
+def min_threshold_index(scores: list, k: int) -&gt; int:
+    &quot;&quot;&quot;
+    Direct index calculation.
+
+    Sorted ascending: scores[n-k] is the (n-k)-th smallest = k-th largest.
+    All scores at index &gt;= n-k are &gt;= scores[n-k].
+    Count of scores &gt;= scores[n-k] is exactly k (or more if duplicates).
+
+    Time:  O(1) given sorted input
+    Space: O(1)
+    &quot;&quot;&quot;
+    if not isinstance(scores, list) or not isinstance(k, int):
+        raise TypeError(&quot;scores must be list, k must be int&quot;)
+    if k &lt; 0:
+        raise ValueError(f&quot;k must be &gt;= 0, got {k}&quot;)
+    if not scores:
+        raise ValueError(&quot;scores must not be empty&quot;)
+
+    n = len(scores)
+    if k == 0:
+        return scores[-1] + 1       # threshold above max → 0 alerts qualify
+    if k &gt;= n:
+        return scores[0]            # all alerts qualify
+
+    return scores[n - k]            # k-th largest score from the right
+
+
+# ── APPROACH 3: Binary search on value space ─────────────────────────────────
+
+def min_threshold_bsearch(scores: list, k: int) -&gt; int:
+    &quot;&quot;&quot;
+    Binary search on the value range [min_score, max_score+1].
+    Counts are monotone: higher T → fewer alerts above T.
+
+    Find smallest T such that count(score &gt;= T) &lt;= k.
+
+    Time:  O(log(V) * log n)  where V = max - min value range
+    Space: O(1)
+    &quot;&quot;&quot;
+    if not isinstance(scores, list) or not isinstance(k, int):
+        raise TypeError(&quot;scores must be list, k must be int&quot;)
+    if k &lt; 0:
+        raise ValueError(f&quot;k must be &gt;= 0, got {k}&quot;)
+    if not scores:
+        raise ValueError(&quot;scores must not be empty&quot;)
+
+    n = len(scores)
+    if k &gt;= n:
+        return scores[0]
+
+    def count_gte(T: int) -&gt; int:
+        &quot;&quot;&quot;Number of scores &gt;= T using binary search.&quot;&quot;&quot;
+        idx = bisect.bisect_left(scores, T)
+        return n - idx
+
+    lo = scores[0]
+    hi = scores[-1] + 1     # exclusive upper bound (ensures count = 0 at hi)
+    result = hi
+
+    while lo &lt;= hi:
+        mid = lo + (hi - lo) // 2
+        if count_gte(mid) &lt;= k:
+            result = mid        # valid T; try smaller
+            hi = mid - 1
+        else:
+            lo = mid + 1        # too many alerts; raise T
+
+    return result
+
+
+# ── MANUAL — no bisect ────────────────────────────────────────────────────────
+
+def min_threshold_manual(scores: list, k: int) -&gt; int:
+    &quot;&quot;&quot;
+    Binary search on value space without bisect.
+    Manual count_gte using binary search.
+
+    Time:  O(log(V) * log n)
+    Space: O(1)
+    &quot;&quot;&quot;
+    if scores is None:
+        raise ValueError(&quot;scores cannot be None&quot;)
+    n = len(scores)
+    if n == 0:
+        raise ValueError(&quot;scores must not be empty&quot;)
+    if k &lt; 0:
+        raise ValueError(f&quot;k must be &gt;= 0, got {k}&quot;)
+    if k &gt;= n:
+        return scores[0]
+
+    def count_gte(T: int) -&gt; int:
+        &quot;&quot;&quot;Binary search for first index &gt;= T.&quot;&quot;&quot;
+        lo_i, hi_i = 0, n
+        while lo_i &lt; hi_i:
+            mid_i = lo_i + (hi_i - lo_i) // 2
+            if scores[mid_i] &lt; T:
+                lo_i = mid_i + 1
+            else:
+                hi_i = mid_i
+        return n - lo_i
+
+    lo = scores[0]
+    hi = scores[-1] + 1
+    result = hi
+
+    while lo &lt;= hi:
+        mid = lo + (hi - lo) // 2
+        if count_gte(mid) &lt;= k:
+            result = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+
+    return result
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    scores = [1, 3, 5, 7, 9, 11]
+
+    # Problem example: K=3 → T=7  (7,9,11 qualify — exactly 3 alerts)
+    assert min_threshold_index(scores, 3)   == 7
+    assert min_threshold_bsearch(scores, 3) == 7
+    assert min_threshold_manual(scores, 3)  == 7
+    assert min_threshold_naive(scores, 3)   == 7
+
+    # K=1 → only max qualifies, T=11
+    assert min_threshold_index(scores, 1) == 11
+
+    # K=6 → all qualify, T = scores[0] = 1
+    assert min_threshold_index(scores, 6) == 1
+    assert min_threshold_index(scores, 10) == 1  # k &gt;= n
+
+    # K=0 → no alerts qualify, T above max
+    assert min_threshold_index(scores, 0) == 12  # scores[-1]+1
+
+    # Duplicates
+    dup = [1, 3, 3, 5, 7, 7, 9]
+    # K=3: top 3 are 7,7,9. T=7. count(&gt;=7) = 3. ✓
+    assert min_threshold_index(dup, 3) == 7
+    assert min_threshold_bsearch(dup, 3) == 7
+
+    # All approaches agree across multiple K values
+    for k_val in range(1, 7):
+        idx = min_threshold_index(scores, k_val)
+        bs  = min_threshold_bsearch(scores, k_val)
+        man = min_threshold_manual(scores, k_val)
+        naive = min_threshold_naive(scores, k_val)
+        assert idx == bs == man == naive, \
+            f&quot;Mismatch at k={k_val}: idx={idx}, bs={bs}, man={man}, naive={naive}&quot;
+
+    print(&quot;Q18 — All assertions passed.&quot;)
+    print(f&quot;min_threshold([1,3,5,7,9,11], k=3) = {min_threshold_index(scores, 3)}&quot;)  # 7
+    print()
+    print(&quot;Explanation:&quot;)
+    print(&quot;  scores = [1,3,5,7,9,11], k=3&quot;)
+    print(&quot;  n-k = 6-3 = 3  → scores[3] = 7&quot;)
+    print(&quot;  count(score &gt;= 7) = 3  (7,9,11) ✓&quot;)
+</code></pre>
+</body>
+</html>

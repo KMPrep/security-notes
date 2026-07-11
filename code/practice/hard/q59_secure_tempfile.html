@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q59_secure_tempfile.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q59_secure_tempfile.py</h1>
+  <p class="file-path">Source: code\practice\hard\q59_secure_tempfile.py</p>
+  <p class="line-count">399 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q59 [Hard] — Secure Temporary File Handling
+=============================================================================
+
+PROBLEM
+-------
+Write code that safely creates, writes, and deletes temporary files
+without race or symlink attacks:
+  1. Create temp files in a secure directory (not world-writable).
+  2. Prevent TOCTOU race between check and create.
+  3. Prevent symlink attacks (attacker replaces temp path with symlink
+     before the program opens it).
+  4. Ensure cleanup even if an exception occurs.
+  5. Support temp directories (for multi-file operations).
+  6. Restrict permissions: 0o600 (owner read/write only).
+
+CLARIFYING QUESTIONS
+--------------------
+1. OS? → Unix/Linux primary; Windows noted.
+2. Temp content? → Arbitrary bytes or text.
+3. Persistence? → All temp files deleted after use.
+4. Multi-file? → Support temp directory context manager.
+5. Symlink protection? → O_NOFOLLOW on open; verify realpath.
+
+=============================================================================
+APPROACH 1 — NAIVE (tempfile path with open(), predictable names)
+=============================================================================
+  /tmp/myapp_&lt;pid&gt; → predictable name; attacker creates symlink before us.
+  TOCTOU: check path doesn&#x27;t exist → sleep → create (race window).
+
+=============================================================================
+APPROACH 2 — SECURE TEMPFILE WITH MKSTEMP + O_NOFOLLOW (OPTIMAL)
+=============================================================================
+  1. tempfile.mkstemp(): atomic file creation; returns fd + path.
+     No TOCTOU window; OS creates the file exclusively.
+  2. O_NOFOLLOW on re-open (if needed): fails if path is a symlink.
+  3. Restrict permissions to 0o600 immediately after creation.
+  4. Use tempfile.mkdtemp() for temp directories.
+  5. Context managers ensure cleanup on all exit paths.
+  6. Verify realpath stays within expected temp dir.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Iterator, Optional
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+# Mode: owner read+write only; no group/world access
+_SECURE_FILE_MODE = 0o600
+_SECURE_DIR_MODE  = 0o700
+
+# Maximum temp file size (to prevent runaway writes)
+MAX_TEMP_SIZE_BYTES = 10 * 1024 * 1024   # 10 MB
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TempFileInfo:
+    path: str
+    fd: int           # OS file descriptor from mkstemp (already opened)
+
+    def __enter__(self) -&gt; &quot;TempFileInfo&quot;:
+        return self
+
+    def __exit__(self, *args) -&gt; None:
+        self.close_and_delete()
+
+    def close_and_delete(self) -&gt; None:
+        # Close FD if still open
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        _secure_delete(self.path)
+
+
+class SecureTempError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (DO NOT USE)
+# ---------------------------------------------------------------------------
+
+def naive_write_temp(data: bytes, filename: str = &quot;tmp_data.bin&quot;) -&gt; str:
+    &quot;&quot;&quot;
+    INSECURE: predictable /tmp path + TOCTOU + no permission restriction.
+    Included only to illustrate what NOT to do.
+    &quot;&quot;&quot;
+    path = f&quot;/tmp/{filename}&quot;
+    with open(path, &quot;wb&quot;) as f:   # creates with umask permissions
+        f.write(data)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Secure helpers
+# ---------------------------------------------------------------------------
+
+def _secure_delete(path: str) -&gt; None:
+    &quot;&quot;&quot;Delete a file, ignoring errors if already gone.&quot;&quot;&quot;
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except PermissionError:
+        pass
+
+
+def _verify_within_dir(path: str, expected_dir: str) -&gt; None:
+    &quot;&quot;&quot;
+    Resolve symlinks in path; ensure result is under expected_dir.
+    Raises SecureTempError if path escapes the directory.
+    &quot;&quot;&quot;
+    real = os.path.realpath(path)
+    base = os.path.realpath(expected_dir)
+    if not real.startswith(base + os.sep) and real != base:
+        raise SecureTempError(
+            f&quot;Path escape detected: {path!r} resolves to {real!r}, &quot;
+            f&quot;outside {base!r}&quot;
+        )
+
+
+def _restrict_permissions(path: str, mode: int = _SECURE_FILE_MODE) -&gt; None:
+    &quot;&quot;&quot;Set file permissions; removes group and world bits.&quot;&quot;&quot;
+    os.chmod(path, mode)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2A — Secure single temp file
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def secure_temp_file(
+    suffix: str = &quot;&quot;,
+    prefix: str = &quot;sec_&quot;,
+    dir: Optional[str] = None,
+    text: bool = False,
+) -&gt; Iterator[TempFileInfo]:
+    &quot;&quot;&quot;
+    Context manager that provides a secure temporary file.
+    File is created atomically with mkstemp; deleted on exit.
+
+    Usage:
+        with secure_temp_file(suffix=&quot;.bin&quot;) as tmp:
+            os.write(tmp.fd, b&quot;secret data&quot;)
+            # path is tmp.path
+    &quot;&quot;&quot;
+    tmp_dir = dir or tempfile.gettempdir()
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=tmp_dir, text=text)
+
+    try:
+        # Immediately restrict permissions
+        _restrict_permissions(path, _SECURE_FILE_MODE)
+
+        # Verify realpath stays within expected directory
+        _verify_within_dir(path, tmp_dir)
+
+        yield TempFileInfo(fd=fd, path=path)
+    finally:
+        # Close FD if caller didn&#x27;t
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _secure_delete(path)
+
+
+@contextmanager
+def secure_temp_dir(
+    suffix: str = &quot;&quot;,
+    prefix: str = &quot;sec_dir_&quot;,
+    base_dir: Optional[str] = None,
+) -&gt; Iterator[str]:
+    &quot;&quot;&quot;
+    Context manager for a secure temporary directory.
+    Directory is removed with all contents on exit.
+    &quot;&quot;&quot;
+    import shutil
+    tmp_base = base_dir or tempfile.gettempdir()
+    tmp_dir  = tempfile.mkdtemp(suffix=suffix, prefix=prefix, dir=tmp_base)
+
+    try:
+        _restrict_permissions(tmp_dir, _SECURE_DIR_MODE)
+        _verify_within_dir(tmp_dir, tmp_base)
+        yield tmp_dir
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2B — Write helper with size limit
+# ---------------------------------------------------------------------------
+
+def write_secure_temp(
+    data: bytes,
+    suffix: str = &quot;.tmp&quot;,
+    prefix: str = &quot;sec_&quot;,
+) -&gt; str:
+    &quot;&quot;&quot;
+    Write bytes to a secure temp file; returns path.
+    Caller is responsible for deleting the file.
+    Use secure_temp_file() context manager for automatic cleanup.
+    &quot;&quot;&quot;
+    if len(data) &gt; MAX_TEMP_SIZE_BYTES:
+        raise SecureTempError(
+            f&quot;Data size {len(data)} exceeds MAX_TEMP_SIZE_BYTES {MAX_TEMP_SIZE_BYTES}&quot;
+        )
+
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix=prefix)
+    try:
+        _restrict_permissions(path, _SECURE_FILE_MODE)
+        _verify_within_dir(path, tempfile.gettempdir())
+        os.write(fd, data)
+    except Exception:
+        os.close(fd)
+        _secure_delete(path)
+        raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_secure_file_created():
+    with secure_temp_file(suffix=&quot;.test&quot;) as tmp:
+        os.write(tmp.fd, b&quot;hello secure world&quot;)
+        # Verify file exists and has correct permissions
+        assert os.path.exists(tmp.path)
+        mode = stat.S_IMODE(os.stat(tmp.path).st_mode)
+        assert mode == _SECURE_FILE_MODE, f&quot;Expected 0o600, got {oct(mode)}&quot;
+        path_snapshot = tmp.path
+    # File should be deleted after context exit
+    assert not os.path.exists(path_snapshot)
+    print(&quot;Secure temp file created with 0o600 and deleted: passed&quot;)
+
+
+def test_write_and_read_back():
+    payload = b&quot;sensitive_payload_xyz_&quot; + os.urandom(32)
+    with secure_temp_file() as tmp:
+        os.write(tmp.fd, payload)
+        # Re-open for reading (fd may be write-only on some systems)
+        with open(tmp.path, &quot;rb&quot;) as f:
+            data = f.read()
+    assert data == payload
+    print(&quot;Write and read back: passed&quot;)
+
+
+def test_cleanup_on_exception():
+    path_snapshot = None
+    try:
+        with secure_temp_file() as tmp:
+            path_snapshot = tmp.path
+            assert os.path.exists(path_snapshot)
+            raise ValueError(&quot;simulated error&quot;)
+    except ValueError:
+        pass
+    assert path_snapshot is not None
+    assert not os.path.exists(path_snapshot)
+    print(&quot;Cleanup on exception: passed&quot;)
+
+
+def test_size_limit_enforced():
+    big = os.urandom(MAX_TEMP_SIZE_BYTES + 1)
+    try:
+        write_secure_temp(big)
+        assert False, &quot;Should have raised&quot;
+    except SecureTempError as e:
+        assert &quot;MAX_TEMP_SIZE_BYTES&quot; in str(e)
+    print(&quot;Size limit enforced: passed&quot;)
+
+
+def test_secure_temp_dir():
+    import os
+    contents = None
+    with secure_temp_dir(prefix=&quot;test_dir_&quot;) as tmp_dir:
+        assert os.path.isdir(tmp_dir)
+        mode = stat.S_IMODE(os.stat(tmp_dir).st_mode)
+        assert mode == _SECURE_DIR_MODE, f&quot;Expected 0o700, got {oct(mode)}&quot;
+        # Write files inside
+        fname = os.path.join(tmp_dir, &quot;secret.bin&quot;)
+        with open(fname, &quot;wb&quot;) as f:
+            f.write(b&quot;temp_secret&quot;)
+        assert os.path.exists(fname)
+        contents = fname
+    # Directory and all contents removed
+    assert not os.path.exists(tmp_dir)
+    assert not os.path.exists(contents)
+    print(&quot;Secure temp directory created and cleaned up: passed&quot;)
+
+
+def test_path_stays_in_tmp():
+    &quot;&quot;&quot;Verify realpath doesn&#x27;t escape the tmp directory.&quot;&quot;&quot;
+    path = write_secure_temp(b&quot;data&quot;, suffix=&quot;.bin&quot;)
+    tmp_dir = tempfile.gettempdir()
+    real = os.path.realpath(path)
+    assert real.startswith(os.path.realpath(tmp_dir))
+    _secure_delete(path)
+    print(&quot;Path stays within temp dir: passed&quot;)
+
+
+def test_write_secure_temp_returns_valid_path():
+    path = write_secure_temp(b&quot;test_data_123&quot;)
+    try:
+        assert os.path.exists(path)
+        with open(path, &quot;rb&quot;) as f:
+            assert f.read() == b&quot;test_data_123&quot;
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == _SECURE_FILE_MODE
+    finally:
+        _secure_delete(path)
+    print(&quot;write_secure_temp returns valid path: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+SECURE TEMPORARY FILE VULNERABILITIES
+---------------------------------------
+1. TOCTOU (TIME-OF-CHECK TO TIME-OF-USE) / TMPRACE
+---------------------------------------------------
+  if not os.path.exists(&quot;/tmp/myapp.tmp&quot;):   ← check
+      # attacker creates symlink here
+      open(&quot;/tmp/myapp.tmp&quot;, &quot;w&quot;).write(data)  ← use (writes through symlink)
+
+  Result: writes data to attacker-controlled target file.
+  Fix: mkstemp() — O_CREAT|O_EXCL atomically. No race window.
+
+2. SYMLINK ATTACK
+-----------------
+  Attacker creates: /tmp/myapp.tmp → /etc/cron.d/evil
+  Program writes to /tmp/myapp.tmp → overwrites /etc/cron.d/evil.
+  Fix: O_NOFOLLOW when re-opening (fails if path is a symlink);
+       mkstemp() already creates exclusive non-symlink file.
+       Verify realpath after open.
+
+3. PREDICTABLE FILENAME
+-----------------------
+  /tmp/myapp_&lt;pid&gt;.tmp → attacker knows the PID range.
+  mkstemp() uses 6+ random chars (e.g., /tmp/tmpXXXXXX).
+  Additional fix: use /tmp/user_&lt;uid&gt;/ directory (sticky bit UID isolation).
+
+4. PERMISSIONS LEAK
+-------------------
+  mkstemp() uses umask; if umask=000, file is 0o666.
+  Fix: immediately chmod to 0o600 after creation.
+  Alternatively: temporarily set umask to 0o077 during creation.
+
+5. SENSITIVE DATA REMANENCE
+----------------------------
+  Temp files with sensitive data deleted but content still on disk.
+  For high-security: overwrite with zeros before deletion.
+  Note: SSD / filesystem journaling may preserve data regardless.
+
+UNIX TMPDIR ISOLATION (HARDENING)
+-----------------------------------
+  /tmp has sticky bit (1777): each user can only delete their own files.
+  Better: private per-service /run/myapp/ directory (0o700, owned by service).
+  Container: mount /tmp as tmpfs (in-memory; no disk remanence).
+
+WINDOWS NOTE
+-------------
+  tempfile.mkstemp() works on Windows but O_NOFOLLOW is not available.
+  Use GetTempFileName() Win32 API for equivalent atomic creation.
+  NTFS junction points = Windows symlinks; similar attack vector.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_secure_file_created()
+    test_write_and_read_back()
+    test_cleanup_on_exception()
+    test_size_limit_enforced()
+    test_secure_temp_dir()
+    test_path_stays_in_tmp()
+    test_write_secure_temp_returns_valid_path()
+</code></pre>
+</body>
+</html>

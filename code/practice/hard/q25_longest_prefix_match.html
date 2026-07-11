@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q25_longest_prefix_match.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q25_longest_prefix_match.py</h1>
+  <p class="file-path">Source: code\practice\hard\q25_longest_prefix_match.py</p>
+  <p class="line-count">367 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q25 [Hard] — Longest Prefix Match for Firewall Rules
+=============================================================================
+
+PROBLEM
+-------
+Implement a firewall rule engine that:
+  1. Stores rules of the form: (src_cidr, dst_cidr, proto, dst_port, action)
+     where action ∈ {ALLOW, DENY} and fields may be wildcards (*).
+  2. Given a packet (src_ip, dst_ip, proto, dst_port), returns the FIRST
+     matching rule in priority order (most specific match wins; for equal
+     specificity, insertion order wins).
+  3. Default action when no rule matches is configurable (default: DENY).
+  4. Support deletion and listing of rules.
+  5. Fast lookup for high-throughput scenarios.
+
+Specificity ordering (tiebreaker):
+  - More specific CIDR (longer prefix) &gt; less specific
+  - Specific port &gt; wildcard port
+  - Specific protocol &gt; wildcard protocol
+
+CLARIFYING QUESTIONS
+--------------------
+1. Port range or single port?
+   → Single port or wildcard; port ranges can be added as an extension.
+2. Stateful or stateless firewall?
+   → Stateless; each packet evaluated independently.
+3. IPv4 + IPv6?
+   → IPv4 focus; structure supports IPv6 extension.
+4. Priority ties broken by insertion order?
+   → Yes; earlier-inserted rule wins on equal specificity.
+5. Up to how many rules?
+   → Up to ~100K rules; O(W) per lookup is required.
+
+=============================================================================
+APPROACH 1 — NAIVE (linear scan, first-match)
+=============================================================================
+  Store rules in a list sorted by priority.
+  Scan until a match is found.
+  O(R) lookup, O(1) insert.
+  Acceptable for small rule sets (&lt; 500 rules).
+
+=============================================================================
+APPROACH 2 — DUAL TRIE LOOKUP + RULE PRIORITY SORT (RECOMMENDED)
+=============================================================================
+  - Two CIDR tries (src, dst) for IP matching.
+  - For each lookup, find candidate rules from both tries.
+  - Intersect candidates; return highest-priority matching rule.
+  Alternatively: use CIDRTrie from Q24 for IP matching; supplement with
+  port/proto hash.
+  O(W) for CIDR lookup + O(K) to find best matching complete rule
+  (K = candidates sharing the matched CIDR).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import ipaddress
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from q24_cidr_trie import CIDRTrie, CIDREntry
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+class Action(Enum):
+    ALLOW = &quot;ALLOW&quot;
+    DENY = &quot;DENY&quot;
+
+
+@dataclass
+class FirewallRule:
+    rule_id: int
+    src_cidr: str      # &quot;10.0.0.0/8&quot; or &quot;*&quot; (any)
+    dst_cidr: str
+    proto: str         # &quot;tcp&quot; | &quot;udp&quot; | &quot;icmp&quot; | &quot;*&quot;
+    dst_port: str      # &quot;443&quot; | &quot;*&quot;
+    action: Action
+    comment: str = &quot;&quot;
+
+    # Priority score: higher is more specific (evaluated first)
+    @property
+    def specificity(self) -&gt; int:
+        score = 0
+        if self.src_cidr != &quot;*&quot;:
+            score += ipaddress.ip_network(self.src_cidr, strict=False).prefixlen
+        if self.dst_cidr != &quot;*&quot;:
+            score += ipaddress.ip_network(self.dst_cidr, strict=False).prefixlen
+        if self.proto != &quot;*&quot;:
+            score += 8
+        if self.dst_port != &quot;*&quot;:
+            score += 8
+        return score
+
+    def matches(self, src_ip: str, dst_ip: str, proto: str, dst_port: str) -&gt; bool:
+        # IP checks
+        if self.src_cidr != &quot;*&quot;:
+            net = ipaddress.ip_network(self.src_cidr, strict=False)
+            if ipaddress.ip_address(src_ip) not in net:
+                return False
+        if self.dst_cidr != &quot;*&quot;:
+            net = ipaddress.ip_network(self.dst_cidr, strict=False)
+            if ipaddress.ip_address(dst_ip) not in net:
+                return False
+        # Proto and port
+        if self.proto != &quot;*&quot; and self.proto.lower() != proto.lower():
+            return False
+        if self.dst_port != &quot;*&quot; and self.dst_port != str(dst_port):
+            return False
+        return True
+
+
+@dataclass
+class Verdict:
+    action: Action
+    rule: Optional[FirewallRule]
+    default: bool = False  # True if default policy applied
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive linear scan
+# ---------------------------------------------------------------------------
+
+class NaiveFirewall:
+    &quot;&quot;&quot;O(R) lookup; rules pre-sorted by decreasing specificity.&quot;&quot;&quot;
+
+    def __init__(self, default_action: Action = Action.DENY) -&gt; None:
+        self.default_action = default_action
+        self._rules: List[FirewallRule] = []
+        self._next_id = 1
+
+    def add_rule(self, src_cidr: str, dst_cidr: str, proto: str,
+                 dst_port: str, action: Action, comment: str = &quot;&quot;) -&gt; int:
+        rule = FirewallRule(
+            rule_id=self._next_id, src_cidr=src_cidr, dst_cidr=dst_cidr,
+            proto=proto, dst_port=dst_port, action=action, comment=comment,
+        )
+        self._next_id += 1
+        self._rules.append(rule)
+        # Keep sorted: highest specificity first; ties by rule_id (insertion order)
+        self._rules.sort(key=lambda r: (-r.specificity, r.rule_id))
+        return rule.rule_id
+
+    def lookup(self, src_ip: str, dst_ip: str, proto: str, dst_port: str) -&gt; Verdict:
+        for rule in self._rules:
+            if rule.matches(src_ip, dst_ip, proto, dst_port):
+                return Verdict(action=rule.action, rule=rule)
+        return Verdict(action=self.default_action, rule=None, default=True)
+
+    def delete_rule(self, rule_id: int) -&gt; bool:
+        before = len(self._rules)
+        self._rules = [r for r in self._rules if r.rule_id != rule_id]
+        return len(self._rules) &lt; before
+
+    def list_rules(self) -&gt; List[FirewallRule]:
+        return list(self._rules)
+
+    def __len__(self) -&gt; int:
+        return len(self._rules)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Dual CIDR trie + priority-sorted candidate lookup
+# ---------------------------------------------------------------------------
+
+class Firewall:
+    &quot;&quot;&quot;
+    Trie-accelerated firewall.
+
+    Index: 
+      - `_dst_trie`: CIDRTrie; each entry&#x27;s `tag` is a set of rule_ids.
+      - Rules stored in `_rules` dict by rule_id.
+      - On lookup: find candidate rules from dst_trie, filter by src, proto, port.
+      - Pick highest-specificity rule among candidates.
+
+    O(W) for trie lookup + O(K) rule evaluation, where K = rules per CIDR.
+    &quot;&quot;&quot;
+
+    def __init__(self, default_action: Action = Action.DENY) -&gt; None:
+        self.default_action = default_action
+        self._rules: Dict[int, FirewallRule] = {}
+        self._dst_trie: CIDRTrie = CIDRTrie()
+        # Wildcard-dst rules must be checked separately
+        self._wildcard_dst_rules: List[int] = []
+        self._next_id = 1
+
+    def add_rule(
+        self,
+        src_cidr: str = &quot;*&quot;,
+        dst_cidr: str = &quot;*&quot;,
+        proto: str = &quot;*&quot;,
+        dst_port: str = &quot;*&quot;,
+        action: Action = Action.DENY,
+        comment: str = &quot;&quot;,
+    ) -&gt; int:
+        rid = self._next_id
+        self._next_id += 1
+        rule = FirewallRule(
+            rule_id=rid, src_cidr=src_cidr, dst_cidr=dst_cidr,
+            proto=proto, dst_port=dst_port, action=action, comment=comment,
+        )
+        self._rules[rid] = rule
+
+        if dst_cidr == &quot;*&quot;:
+            self._wildcard_dst_rules.append(rid)
+        else:
+            # Insert into trie with tag=rule_id
+            self._dst_trie.insert(dst_cidr, tag=rid)
+
+        return rid
+
+    def lookup(self, src_ip: str, dst_ip: str, proto: str, dst_port: str) -&gt; Verdict:
+        # Gather candidate rule IDs via dst trie
+        candidate_ids: Set[int] = set()
+        for entry in self._dst_trie.lookup(dst_ip):
+            candidate_ids.add(entry.tag)
+        candidate_ids.update(self._wildcard_dst_rules)
+
+        # Evaluate candidates
+        best_rule: Optional[FirewallRule] = None
+        for rid in candidate_ids:
+            rule = self._rules.get(rid)
+            if rule and rule.matches(src_ip, dst_ip, proto, dst_port):
+                if best_rule is None:
+                    best_rule = rule
+                elif rule.specificity &gt; best_rule.specificity:
+                    best_rule = rule
+                elif rule.specificity == best_rule.specificity and rule.rule_id &lt; best_rule.rule_id:
+                    best_rule = rule  # earlier insertion wins ties
+
+        if best_rule:
+            return Verdict(action=best_rule.action, rule=best_rule)
+        return Verdict(action=self.default_action, rule=None, default=True)
+
+    def delete_rule(self, rule_id: int) -&gt; bool:
+        if rule_id not in self._rules:
+            return False
+        rule = self._rules.pop(rule_id)
+        if rule.dst_cidr == &quot;*&quot;:
+            self._wildcard_dst_rules.remove(rule_id)
+        else:
+            self._dst_trie.delete(rule.dst_cidr)
+        return True
+
+    def list_rules(self) -&gt; List[FirewallRule]:
+        return sorted(self._rules.values(), key=lambda r: (-r.specificity, r.rule_id))
+
+    def __len__(self) -&gt; int:
+        return len(self._rules)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _test_impl(name: str, Cls):
+    fw = Cls(default_action=Action.DENY)
+
+    # Allow HTTPS to DMZ subnet
+    fw.add_rule(src_cidr=&quot;*&quot;, dst_cidr=&quot;192.168.10.0/24&quot;,
+                proto=&quot;tcp&quot;, dst_port=&quot;443&quot;, action=Action.ALLOW,
+                comment=&quot;allow-https-dmz&quot;)
+    # Deny known-bad source
+    fw.add_rule(src_cidr=&quot;10.200.0.0/16&quot;, dst_cidr=&quot;*&quot;,
+                proto=&quot;*&quot;, dst_port=&quot;*&quot;, action=Action.DENY,
+                comment=&quot;block-bad-src&quot;)
+    # Allow SSH from admin range to specific host
+    fw.add_rule(src_cidr=&quot;10.1.0.0/24&quot;, dst_cidr=&quot;192.168.10.50/32&quot;,
+                proto=&quot;tcp&quot;, dst_port=&quot;22&quot;, action=Action.ALLOW,
+                comment=&quot;admin-ssh&quot;)
+
+    # Test 1: HTTPS to DMZ → ALLOW
+    v = fw.lookup(&quot;1.2.3.4&quot;, &quot;192.168.10.99&quot;, &quot;tcp&quot;, &quot;443&quot;)
+    assert v.action == Action.ALLOW, f&quot;{name}: Expected ALLOW; got {v.action}&quot;
+
+    # Test 2: HTTP to DMZ (port 80 not in rules) → DENY (default)
+    v = fw.lookup(&quot;1.2.3.4&quot;, &quot;192.168.10.99&quot;, &quot;tcp&quot;, &quot;80&quot;)
+    assert v.action == Action.DENY and v.default, f&quot;{name}: Expected default DENY&quot;
+
+    # Test 3: Bad source to anywhere → DENY (explicit rule)
+    v = fw.lookup(&quot;10.200.1.5&quot;, &quot;8.8.8.8&quot;, &quot;tcp&quot;, &quot;80&quot;)
+    assert v.action == Action.DENY, f&quot;{name}: Expected DENY for bad src&quot;
+
+    # Test 4: Admin SSH to specific host → ALLOW (most specific)
+    v = fw.lookup(&quot;10.1.0.10&quot;, &quot;192.168.10.50&quot;, &quot;tcp&quot;, &quot;22&quot;)
+    assert v.action == Action.ALLOW, f&quot;{name}: Expected ALLOW for admin SSH&quot;
+
+    # Test 5: Delete the HTTPS rule → DENY
+    rid = fw.list_rules()[0].rule_id
+    # Find the https rule
+    https_rule = next((r for r in fw.list_rules() if r.comment == &quot;allow-https-dmz&quot;), None)
+    if https_rule:
+        fw.delete_rule(https_rule.rule_id)
+    v = fw.lookup(&quot;1.2.3.4&quot;, &quot;192.168.10.99&quot;, &quot;tcp&quot;, &quot;443&quot;)
+    assert v.action == Action.DENY, f&quot;{name}: After delete, expected DENY&quot;
+
+    print(f&quot;{name}: all tests passed&quot;)
+
+
+def test_naive():
+    _test_impl(&quot;NaiveFirewall&quot;, NaiveFirewall)
+
+
+def test_trie_firewall():
+    _test_impl(&quot;Firewall&quot;, Firewall)
+
+
+def test_default_allow():
+    fw = Firewall(default_action=Action.ALLOW)
+    fw.add_rule(src_cidr=&quot;10.0.0.0/8&quot;, dst_cidr=&quot;*&quot;,
+                proto=&quot;tcp&quot;, dst_port=&quot;22&quot;, action=Action.DENY)
+    v = fw.lookup(&quot;8.8.8.8&quot;, &quot;1.1.1.1&quot;, &quot;tcp&quot;, &quot;80&quot;)
+    assert v.action == Action.ALLOW and v.default
+    v2 = fw.lookup(&quot;10.1.2.3&quot;, &quot;1.1.1.1&quot;, &quot;tcp&quot;, &quot;22&quot;)
+    assert v2.action == Action.DENY
+    print(&quot;Default ALLOW + explicit DENY: passed&quot;)
+
+
+def test_most_specific_wins():
+    fw = Firewall(default_action=Action.DENY)
+    fw.add_rule(dst_cidr=&quot;192.168.0.0/16&quot;, proto=&quot;*&quot;, dst_port=&quot;*&quot;, action=Action.DENY)
+    fw.add_rule(dst_cidr=&quot;192.168.1.0/24&quot;, proto=&quot;tcp&quot;, dst_port=&quot;80&quot;, action=Action.ALLOW)
+    v = fw.lookup(&quot;1.2.3.4&quot;, &quot;192.168.1.50&quot;, &quot;tcp&quot;, &quot;80&quot;)
+    assert v.action == Action.ALLOW, &quot;More specific rule should win&quot;
+    print(&quot;Most specific wins: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+FIREWALL RULE ORDERING
+  Security mis-configurations often arise from rule ordering bugs:
+  - DENY rule after ALLOW rule: the DENY never fires.
+  - Over-broad ALLOW before specific DENY: attackers exploit the gap.
+
+LONGEST-PREFIX-MATCH SIGNIFICANCE
+  Network firewalls (iptables, nftables, cloud SGs) apply rules in order.
+  Firewalls using TCAM hardware use LPM to match the &quot;most specific&quot; rule.
+  If an ALLOW /32 is in the table alongside a DENY /8, the /32 wins for
+  that specific host — this is intentional for overrides.
+
+COMMON MISCONFIGURATIONS
+  - Allow * → * on internal segments (flat network).
+  - Allow * → 0.0.0.0/0 on egress → exfiltration risk.
+  - Shadowed rules: a rule that can never match because an earlier rule
+    always matches first (Q26 detects this).
+
+CLOUD SECURITY GROUPS
+  AWS SGs: stateful; implicit DENY at end; rules evaluated as a set (most
+  permissive wins — counter-intuitive).
+  GCP Firewall: priority-ordered; lower number = higher priority.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive()
+    test_trie_firewall()
+    test_default_allow()
+    test_most_specific_wins()
+</code></pre>
+</body>
+</html>

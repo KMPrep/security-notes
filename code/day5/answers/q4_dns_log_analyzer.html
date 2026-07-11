@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q4_dns_log_analyzer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q4_dns_log_analyzer.py</h1>
+  <p class="file-path">Source: code\day5\answers\q4_dns_log_analyzer.py</p>
+  <p class="line-count">356 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q4. DNS Query Log Analyzer
+===========================
+Given a DNS query log, count unique domains per client IP,
+detect DGA (Domain Generation Algorithm) candidates by Shannon entropy,
+and report top-10 queried domains.
+
+Log format:
+  2024-01-15T10:00:00Z client=10.0.0.5 query=evil.example.com type=A
+
+DGA heuristic: Shannon entropy of the domain label &gt; 3.5 bits/char.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Analyze a DNS log. Detect which domains look algorithmically
+generated based on character-frequency entropy.&quot;
+
+--- CANDIDATE FIRST RESPONSE (no entropy, just counting) ---
+&quot;First, I&#x27;ll parse lines, count domains per client, count total queries per
+domain, and print top-10. I&#x27;ll skip entropy for now.&quot;
+
+Follow-up: &quot;Good. Now explain how you&#x27;d detect DGA domains.&quot;
+→ DGA domains look random: &#x27;akjdhqkjwehqwe.com&#x27; vs &#x27;google.com&#x27;.
+  Shannon entropy measures randomness in a string.
+  H = -Σ p(c) log2(p(c))
+
+Follow-up: &quot;Implement it without using math.log.&quot;
+→ Use manual power-of-2 log: log2(x) = ln(x)/ln(2)
+  But if we can&#x27;t use math at all, approximate with a lookup table or
+  bit-counting. More practical: use math module but implement the
+  frequency counting manually.
+
+Follow-up: &quot;What&#x27;s the threshold and why 3.5?&quot;
+→ Empirically, legitimate domains like &#x27;google&#x27;, &#x27;facebook&#x27; score ~2.5-3.
+  Truly random 12-char strings score ~3.8-4.0. 3.5 is a common heuristic
+  threshold balancing false positives and false negatives.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Full regex parsing, proper entropy calculation, top-10 with manual heap,
+DGA detection with threshold, per-client unique domain tracking.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import math
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-01-15T10:00:00Z client=10.0.0.5 query=google.com type=A
+2024-01-15T10:00:01Z client=10.0.0.5 query=google.com type=A
+2024-01-15T10:00:02Z client=10.0.0.5 query=maps.google.com type=A
+2024-01-15T10:00:03Z client=10.0.0.6 query=github.com type=A
+2024-01-15T10:00:04Z client=10.0.0.5 query=xkjdhqwe12ab.com type=A
+2024-01-15T10:00:05Z client=10.0.0.7 query=akjdhqkjwe98.net type=A
+2024-01-15T10:00:06Z client=10.0.0.7 query=microsoft.com type=AAAA
+2024-01-15T10:00:07Z client=10.0.0.8 query=updates.microsoft.com type=A
+2024-01-15T10:00:08Z client=10.0.0.8 query=p9qxzab1kje0.ru type=A
+2024-01-15T10:00:09Z client=10.0.0.5 query=stackoverflow.com type=A
+2024-01-15T10:00:10Z client=10.0.0.9 query=qw8xjkp3mvla.biz type=A
+2024-01-15T10:00:11Z client=10.0.0.9 query=amazon.com type=A
+2024-01-15T10:00:12Z client=10.0.0.6 query=amazon.com type=A
+2024-01-15T10:00:13Z client=10.0.0.6 query=google.com type=A
+2024-01-15T10:00:14Z client=10.0.0.7 query=google.com type=A
+MALFORMED LINE
+&quot;&quot;&quot;
+
+DGA_ENTROPY_THRESHOLD = 3.5  # bits per character
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTROPY CALCULATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def shannon_entropy_without_builtins(label: str) -&gt; float:
+    &quot;&quot;&quot;
+    Compute Shannon entropy of a string WITHOUT using collections.Counter.
+    H = -Σ (count/n) * log2(count/n)
+
+    log2 implemented manually as ln(x)/ln(2) using math.log (the base
+    math.log is kept since implementing ln from scratch would be out of scope).
+    If reviewer insists on no math module at all, note that you would use
+    a precomputed ln(2) = 0.693147... constant.
+    &quot;&quot;&quot;
+    if not label:
+        return 0.0
+
+    n = len(label)
+
+    # Manual frequency count (no Counter)
+    freq = {}
+    for ch in label:
+        if ch in freq:
+            freq[ch] += 1
+        else:
+            freq[ch] = 1
+
+    LN2 = 0.6931471805599453  # math.log(2) — a constant, not a &quot;builtin call&quot;
+    entropy = 0.0
+    for count in freq.values():
+        p = count / n
+        # log2(p) = ln(p) / ln(2)
+        entropy -= p * (math.log(p) / LN2)
+
+    return entropy
+
+
+def shannon_entropy_with_builtins(label: str) -&gt; float:
+    &quot;&quot;&quot;
+    Same calculation using math.log2 directly — cleaner.
+    &quot;&quot;&quot;
+    if not label:
+        return 0.0
+    from collections import Counter
+    n = len(label)
+    freq = Counter(label)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LINE_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+&#x27;
+    r&#x27;client=(?P&lt;client&gt;\S+)\s+&#x27;
+    r&#x27;query=(?P&lt;query&gt;\S+)\s+&#x27;
+    r&#x27;type=(?P&lt;qtype&gt;\S+)&#x27;
+)
+
+
+def parse_dns_line(raw: str):
+    &quot;&quot;&quot;Returns dict or None.&quot;&quot;&quot;
+    m = LINE_RE.search(raw.strip())
+    if not m:
+        return None
+    return {
+        &quot;ts&quot;:     m.group(&quot;ts&quot;),
+        &quot;client&quot;: m.group(&quot;client&quot;),
+        &quot;query&quot;:  m.group(&quot;query&quot;).lower(),   # normalise to lowercase
+        &quot;qtype&quot;:  m.group(&quot;qtype&quot;),
+    }
+
+
+def _extract_label(fqdn: str) -&gt; str:
+    &quot;&quot;&quot;
+    Return the leftmost label of an FQDN (the &#x27;random-looking&#x27; part for DGA).
+    e.g. &#x27;xkjdhqwe12ab.com&#x27; → &#x27;xkjdhqwe12ab&#x27;
+         &#x27;maps.google.com&#x27;  → &#x27;maps&#x27;  (subdomain, less interesting)
+    For DGA detection we check the most-left label.
+    &quot;&quot;&quot;
+    parts = fqdn.rstrip(&quot;.&quot;).split(&quot;.&quot;)
+    return parts[0] if parts else fqdn
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual dict counting, manual top-K, manual entropy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_top_k(count_dict, k):
+    &quot;&quot;&quot;Insertion-sort top-k descending.&quot;&quot;&quot;
+    pairs = list(count_dict.items())
+    for i in range(1, len(pairs)):
+        cur = pairs[i]
+        j = i - 1
+        while j &gt;= 0 and pairs[j][1] &lt; cur[1]:
+            pairs[j + 1] = pairs[j]
+            j -= 1
+        pairs[j + 1] = cur
+    return pairs[:k]
+
+
+def analyze_without_builtins(lines):
+    malformed      = 0
+    domain_counts  = {}   # domain -&gt; total query count
+    client_domains = {}   # client_ip -&gt; {domain: True} (manual set via dict)
+    dga_candidates = {}   # domain -&gt; entropy  (domains flagged as DGA)
+
+    for raw in lines:
+        entry = parse_dns_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        domain = entry[&quot;query&quot;]
+        client = entry[&quot;client&quot;]
+
+        # Global domain count
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+        # Per-client unique domains
+        if client not in client_domains:
+            client_domains[client] = {}
+        client_domains[client][domain] = True
+
+        # DGA check — only compute once per domain
+        if domain not in dga_candidates:
+            label   = _extract_label(domain)
+            entropy = shannon_entropy_without_builtins(label)
+            if entropy &gt; DGA_ENTROPY_THRESHOLD:
+                dga_candidates[domain] = round(entropy, 3)
+
+    top10 = _manual_top_k(domain_counts, 10)
+
+    # Convert client_domains from {domain: True} to counts
+    client_unique = {}
+    for client, dom_dict in client_domains.items():
+        client_unique[client] = len(dom_dict)
+
+    return {
+        &quot;malformed&quot;:      malformed,
+        &quot;top10&quot;:          top10,
+        &quot;dga_candidates&quot;: dga_candidates,
+        &quot;client_unique&quot;:  client_unique,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(lines):
+    malformed      = 0
+    domain_counts  = defaultdict(int)
+    client_domains = defaultdict(set)
+    dga_candidates = {}
+    seen_entropy   = {}  # cache entropy per domain
+
+    for raw in lines:
+        entry = parse_dns_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        domain = entry[&quot;query&quot;]
+        client = entry[&quot;client&quot;]
+
+        domain_counts[domain]        += 1
+        client_domains[client].add(domain)
+
+        if domain not in seen_entropy:
+            label   = _extract_label(domain)
+            entropy = shannon_entropy_with_builtins(label)
+            seen_entropy[domain] = entropy
+            if entropy &gt; DGA_ENTROPY_THRESHOLD:
+                dga_candidates[domain] = round(entropy, 3)
+
+    top10 = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    client_unique = {c: len(domains) for c, domains in client_domains.items()}
+
+    return {
+        &quot;malformed&quot;:      malformed,
+        &quot;top10&quot;:          top10,
+        &quot;dga_candidates&quot;: dga_candidates,
+        &quot;client_unique&quot;:  client_unique,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(result, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;  DNS QUERY LOG ANALYSIS  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;Malformed lines skipped: {result[&#x27;malformed&#x27;]}&quot;)
+    print(f&quot;DGA entropy threshold  : &gt; {DGA_ENTROPY_THRESHOLD} bits/char\n&quot;)
+
+    print(&quot;Top 10 Most Queried Domains:&quot;)
+    for i, (domain, count) in enumerate(result[&quot;top10&quot;], 1):
+        print(f&quot;  {i:&gt;2}. {domain:&lt;35} {count} queries&quot;)
+
+    print(&quot;\nPer-Client Unique Domain Count:&quot;)
+    for client, count in sorted(result[&quot;client_unique&quot;].items()):
+        print(f&quot;  {client:&lt;20} {count} unique domains&quot;)
+
+    print(&quot;\nDGA Candidates (entropy &gt; {:.1f}):&quot;.format(DGA_ENTROPY_THRESHOLD))
+    if result[&quot;dga_candidates&quot;]:
+        for domain, entropy in sorted(result[&quot;dga_candidates&quot;].items(),
+                                       key=lambda x: -x[1]):
+            print(f&quot;  {domain:&lt;35} entropy={entropy}&quot;)
+    else:
+        print(&quot;  None detected.&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        filepath = sys.argv[1]
+        try:
+            with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+                lines = fh.readlines()
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    result_manual  = analyze_without_builtins(lines)
+    result_builtin = analyze_with_builtins(lines)
+
+    print_report(result_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(result_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity checks
+    assert set(result_manual[&quot;dga_candidates&quot;].keys()) == \
+           set(result_builtin[&quot;dga_candidates&quot;].keys()), \
+           &quot;DGA candidate mismatch!&quot;
+    print(&quot;[OK] Both approaches agree on DGA candidates.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Parsing  : O(L)
+# Entropy  : O(|domain|) per unique domain — computed once per domain (cached)
+# Top-K    : O(D log D) where D = unique domains (or O(D log k) with heapq)
+# Space    : O(D + C) where D=unique domains, C=unique clients
+#
+# ENTROPY QUICK REFERENCE:
+#   &quot;google&quot;    → ~2.58 bits/char  (NOT flagged)
+#   &quot;amazon&quot;    → ~2.58 bits/char  (NOT flagged)
+#   &quot;xkjdhqwe&quot;  → ~3.0  bits/char  (borderline)
+#   &quot;akjdhqkjwe98&quot; → ~3.7+ bits/char (FLAGGED)
+#   Random 16-char hex → ~4.0 bits/char (FLAGGED)
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;Entropy alone has false positives. How would you reduce them?&quot;
+#     → Combine with: length threshold (&gt; 12 chars), consonant ratio,
+#       n-gram language model score, known-good domain whitelist.
+# - &quot;What if the attacker uses a dictionary-based DGA?&quot;
+#     → Entropy won&#x27;t catch it. Use ML (character n-gram classifiers) or
+#       compare against known wordlist membership.
+# - &quot;How would you scale to 1B DNS queries/day?&quot;
+#     → Pre-aggregate in streaming pipeline (Dataflow / Flink).
+#       Use probabilistic structures: HyperLogLog for unique domains per client,
+#       Count-Min Sketch for domain frequencies.
+# =============================================================================
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q09_correlate_alerts.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q09_correlate_alerts.py</h1>
+  <p class="file-path">Source: code\practice\hard\q09_correlate_alerts.py</p>
+  <p class="line-count">519 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q09 [Hard] — Correlate Alerts into Incidents
+=============================================================================
+
+PROBLEM
+-------
+Raw alerts from a SIEM fire continuously.  Many alerts are related — they
+share the same user, host, IP, or happen close in time.  Group related alerts
+into *incidents* to reduce analyst noise and surface the full picture.
+
+Correlation dimensions:
+  1. Shared entity: same user, same host, or same source IP.
+  2. Temporal proximity: alerts within a configurable window of each other.
+
+An incident is a cluster of alerts linked by at least one of those dimensions.
+If alert A shares a user with B, and B shares a host with C, then A, B, C
+belong to the same incident (transitive closure).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input: stream of alert dicts or batch list?
+   → Support both; streaming incremental update is the hard case.
+2. What fields define &quot;same entity&quot;?
+   → user, host, src_ip — configurable.
+3. What does &quot;temporal proximity&quot; mean exactly?
+   → Two alerts are proximate if |ts_a - ts_b| ≤ time_window_seconds.
+4. What is the incident severity?
+   → Max severity across member alerts.
+5. Should incidents be updated when new alerts arrive?
+   → Yes (incremental merge).
+6. When should an incident be closed?
+   → After no new alerts for close_after_seconds (configurable, default 3600s).
+7. Memory bound?
+   → Evict closed incidents; keep only open ones in memory.
+
+=============================================================================
+APPROACH 1 — NAIVE (pairwise comparison + Union-Find offline)
+=============================================================================
+For each pair of alerts, check entity overlap and time proximity.
+Build a graph; connected components = incidents.
+  Time : O(N²) per batch — too slow for streaming
+  Space: O(N²) edges
+
+=============================================================================
+APPROACH 2 — ENTITY INDEX + UNION-FIND (RECOMMENDED)
+=============================================================================
+Maintain an inverted index: entity_value → incident_id.
+When a new alert arrives:
+  1. Find all incidents sharing any entity (user, host, src_ip) with the alert.
+  2. Also find incidents within the time window (checked via last-seen timestamp).
+  3. Union all matched incidents + the new alert into one incident.
+
+Data structures:
+  - entity_index: Dict[entity_value → incident_id]  — O(1) lookup
+  - incidents: Dict[incident_id → Incident]
+  - Union-Find (path compression + rank) for O(α(N)) merge ≈ O(1)
+
+  Time : O(E × α(N)) per alert   (E = entity fields per alert, ≈ 3)
+  Space: O(A)  active alerts + O(I) active incidents
+
+=============================================================================
+APPROACH 3 — GRAPH CLUSTERING with NetworkX-style adjacency
+=============================================================================
+Build an adjacency list per entity; at query time run BFS/DFS for components.
+Easier to reason about but O(V+E) per query — suitable for offline analytics.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Severity ordering
+# ---------------------------------------------------------------------------
+SEVERITY_ORDER = {&quot;critical&quot;: 4, &quot;high&quot;: 3, &quot;medium&quot;: 2, &quot;low&quot;: 1, &quot;info&quot;: 0}
+
+def _max_severity(severities: List[str]) -&gt; str:
+    return max(severities, key=lambda s: SEVERITY_ORDER.get(s.lower(), 0))
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Alert:
+    alert_id: str
+    ts: float
+    rule_name: str
+    severity: str
+    user: Optional[str] = None
+    host: Optional[str] = None
+    src_ip: Optional[str] = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class Incident:
+    incident_id: str
+    alert_ids: List[str] = field(default_factory=list)
+    severity: str = &quot;info&quot;
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    users: Set[str] = field(default_factory=set)
+    hosts: Set[str] = field(default_factory=set)
+    src_ips: Set[str] = field(default_factory=set)
+    rule_names: Set[str] = field(default_factory=set)
+    status: str = &quot;open&quot;  # open | closed
+
+    def add_alert(self, alert: Alert) -&gt; None:
+        self.alert_ids.append(alert.alert_id)
+        self.rule_names.add(alert.rule_name)
+        sev = _max_severity([self.severity, alert.severity])
+        self.severity = sev
+        if self.first_seen == 0.0 or alert.ts &lt; self.first_seen:
+            self.first_seen = alert.ts
+        if alert.ts &gt; self.last_seen:
+            self.last_seen = alert.ts
+        if alert.user:
+            self.users.add(alert.user)
+        if alert.host:
+            self.hosts.add(alert.host)
+        if alert.src_ip:
+            self.src_ips.add(alert.src_ip)
+
+    def merge_from(self, other: &quot;Incident&quot;) -&gt; None:
+        &quot;&quot;&quot;Merge another incident&#x27;s data into this one.&quot;&quot;&quot;
+        for aid in other.alert_ids:
+            if aid not in self.alert_ids:
+                self.alert_ids.append(aid)
+        self.rule_names.update(other.rule_names)
+        self.severity = _max_severity([self.severity, other.severity])
+        self.first_seen = min(self.first_seen, other.first_seen) if self.first_seen else other.first_seen
+        self.last_seen = max(self.last_seen, other.last_seen)
+        self.users.update(other.users)
+        self.hosts.update(other.hosts)
+        self.src_ips.update(other.src_ips)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _alert_from_dict(d: dict) -&gt; Optional[Alert]:
+    ts = _parse_ts(d.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return Alert(
+        alert_id=d.get(&quot;alert_id&quot;) or str(uuid.uuid4()),
+        ts=ts,
+        rule_name=d.get(&quot;rule_name&quot;, &quot;unknown&quot;),
+        severity=d.get(&quot;severity&quot;, &quot;info&quot;),
+        user=d.get(&quot;user&quot;),
+        host=d.get(&quot;host&quot;),
+        src_ip=d.get(&quot;src_ip&quot;) or d.get(&quot;src&quot;),
+        raw=d,
+    )
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive offline batch (pairwise + BFS connected components)
+# ---------------------------------------------------------------------------
+
+class NaiveIncidentCorrelator:
+    &quot;&quot;&quot;
+    Offline batch correlator.  Stores all alerts then builds a graph of
+    related alerts, finds connected components via BFS.
+    O(N²) time — fine for forensic analysis on small datasets.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        time_window_seconds: float = 3600.0,
+        entity_fields: Tuple[str, ...] = (&quot;user&quot;, &quot;host&quot;, &quot;src_ip&quot;),
+    ) -&gt; None:
+        self.window = time_window_seconds
+        self.entity_fields = entity_fields
+        self._alerts: List[Alert] = []
+        self.malformed = 0
+
+    def add(self, raw: dict) -&gt; None:
+        alert = _alert_from_dict(raw)
+        if alert is None:
+            self.malformed += 1
+            return
+        self._alerts.append(alert)
+
+    def _are_related(self, a: Alert, b: Alert) -&gt; bool:
+        if abs(a.ts - b.ts) &gt; self.window:
+            return False
+        for f in self.entity_fields:
+            va, vb = getattr(a, f), getattr(b, f)
+            if va and vb and va == vb:
+                return True
+        return False
+
+    def build_incidents(self) -&gt; List[Incident]:
+        n = len(self._alerts)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if self._are_related(self._alerts[i], self._alerts[j]):
+                    union(i, j)
+
+        groups: Dict[int, List[int]] = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
+
+        incidents = []
+        for indices in groups.values():
+            inc = Incident(incident_id=str(uuid.uuid4()))
+            for idx in indices:
+                inc.add_alert(self._alerts[idx])
+            incidents.append(inc)
+        return incidents
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Streaming Incremental Correlator (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class StreamingIncidentCorrelator:
+    &quot;&quot;&quot;
+    Incremental streaming incident correlator using entity index + Union-Find.
+
+    On each new alert:
+    1. Look up entity index to find existing incidents sharing user/host/src_ip.
+    2. Find time-proximate incidents (those with last_seen within window).
+    3. Union all found incidents + new alert.
+    4. Update entity index.
+    5. Periodically close idle incidents.
+
+    Memory: O(open_incidents × average_alerts_per_incident).
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        time_window_seconds: float = 3600.0,
+        close_after_seconds: float = 3600.0,
+        entity_fields: Tuple[str, ...] = (&quot;user&quot;, &quot;host&quot;, &quot;src_ip&quot;),
+    ) -&gt; None:
+        self.window = time_window_seconds
+        self.close_after = close_after_seconds
+        self.entity_fields = entity_fields
+        # entity_value → incident_id
+        self._entity_index: Dict[str, str] = {}
+        # incident_id → Incident
+        self._incidents: Dict[str, Incident] = {}
+        # alert_id → incident_id (for quick membership lookup)
+        self._alert_incident: Dict[str, str] = {}
+        self._closed: List[Incident] = []
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; Tuple[Optional[Incident], bool]:
+        &quot;&quot;&quot;
+        Process one alert.
+        Returns (incident, is_new) where is_new=True if a new incident was created.
+        &quot;&quot;&quot;
+        alert = _alert_from_dict(raw)
+        if alert is None:
+            self.malformed += 1
+            return None, False
+
+        # 1. Find all existing incident IDs related to this alert
+        matched_iids: Set[str] = set()
+
+        for f in self.entity_fields:
+            val = getattr(alert, f)
+            if val and val in self._entity_index:
+                matched_iids.add(self._entity_index[val])
+
+        # 2. Filter: only keep incidents within the time window
+        valid_iids = {
+            iid for iid in matched_iids
+            if iid in self._incidents
+            and abs(self._incidents[iid].last_seen - alert.ts) &lt;= self.window
+        }
+
+        is_new = len(valid_iids) == 0
+
+        if is_new:
+            # Create new incident
+            inc = Incident(incident_id=str(uuid.uuid4()))
+            inc.add_alert(alert)
+            self._incidents[inc.incident_id] = inc
+            target_iid = inc.incident_id
+        else:
+            # Merge all matching incidents into the first one
+            iids = sorted(valid_iids)
+            primary_iid = iids[0]
+            primary = self._incidents[primary_iid]
+
+            for other_iid in iids[1:]:
+                other = self._incidents.pop(other_iid, None)
+                if other:
+                    primary.merge_from(other)
+                    # Redirect all entity index entries pointing to merged incident
+                    for f in self.entity_fields:
+                        for val in list(self._entity_index):
+                            if self._entity_index[val] == other_iid:
+                                self._entity_index[val] = primary_iid
+                    # Redirect alert ownership
+                    for aid in other.alert_ids:
+                        self._alert_incident[aid] = primary_iid
+
+            primary.add_alert(alert)
+            target_iid = primary_iid
+
+        # 3. Update entity index
+        for f in self.entity_fields:
+            val = getattr(alert, f)
+            if val:
+                self._entity_index[val] = target_iid
+        self._alert_incident[alert.alert_id] = target_iid
+
+        return self._incidents[target_iid], is_new
+
+    def close_idle_incidents(self, now: float) -&gt; List[Incident]:
+        &quot;&quot;&quot;Close incidents with no activity for close_after_seconds.&quot;&quot;&quot;
+        to_close = [
+            iid for iid, inc in self._incidents.items()
+            if now - inc.last_seen &gt; self.close_after
+        ]
+        closed = []
+        for iid in to_close:
+            inc = self._incidents.pop(iid)
+            inc.status = &quot;closed&quot;
+            self._closed.append(inc)
+            closed.append(inc)
+            # Clean up entity index
+            for val, vid in list(self._entity_index.items()):
+                if vid == iid:
+                    del self._entity_index[val]
+        return closed
+
+    def open_incidents(self) -&gt; List[Incident]:
+        return list(self._incidents.values())
+
+    def get_incident_for_alert(self, alert_id: str) -&gt; Optional[Incident]:
+        iid = self._alert_incident.get(alert_id)
+        return self._incidents.get(iid) if iid else None
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _raw(rule: str, sev: str, ts: float, user=None, host=None, src_ip=None) -&gt; dict:
+    d = {&quot;rule_name&quot;: rule, &quot;severity&quot;: sev, &quot;ts&quot;: ts}
+    if user:
+        d[&quot;user&quot;] = user
+    if host:
+        d[&quot;host&quot;] = host
+    if src_ip:
+        d[&quot;src_ip&quot;] = src_ip
+    return d
+
+
+def test_naive_same_user():
+    corr = NaiveIncidentCorrelator(time_window_seconds=3600)
+    corr.add(_raw(&quot;brute_force&quot;, &quot;high&quot;, 1000, user=&quot;alice&quot;))
+    corr.add(_raw(&quot;lateral_movement&quot;, &quot;critical&quot;, 1100, user=&quot;alice&quot;))
+    corr.add(_raw(&quot;unrelated&quot;, &quot;low&quot;, 5000, user=&quot;bob&quot;))
+    incidents = corr.build_incidents()
+    # alice&#x27;s two alerts should merge; bob&#x27;s should be separate
+    assert len(incidents) == 2, f&quot;Expected 2 incidents, got {len(incidents)}&quot;
+    alice_inc = next(i for i in incidents if &quot;alice&quot; in i.users)
+    assert len(alice_inc.alert_ids) == 2
+    assert alice_inc.severity == &quot;critical&quot;
+    print(&quot;Naive same-user: passed&quot;)
+
+
+def test_naive_transitive():
+    &quot;&quot;&quot;A→B via user, B→C via host → A,B,C in one incident.&quot;&quot;&quot;
+    corr = NaiveIncidentCorrelator(time_window_seconds=3600)
+    corr.add(_raw(&quot;a&quot;, &quot;low&quot;,  1000, user=&quot;alice&quot;, host=None))
+    corr.add(_raw(&quot;b&quot;, &quot;high&quot;, 1050, user=&quot;alice&quot;, host=&quot;pc-01&quot;))
+    corr.add(_raw(&quot;c&quot;, &quot;med&quot;,  1100, user=None,    host=&quot;pc-01&quot;))
+    incidents = corr.build_incidents()
+    assert len(incidents) == 1, f&quot;Expected 1 incident, got {len(incidents)}&quot;
+    assert len(incidents[0].alert_ids) == 3
+    print(&quot;Naive transitive: passed&quot;)
+
+
+def test_streaming_same_user():
+    corr = StreamingIncidentCorrelator(time_window_seconds=3600)
+    inc1, is_new1 = corr.process(_raw(&quot;r1&quot;, &quot;high&quot;, 1000, user=&quot;alice&quot;))
+    assert is_new1
+    inc2, is_new2 = corr.process(_raw(&quot;r2&quot;, &quot;critical&quot;, 1100, user=&quot;alice&quot;))
+    assert not is_new2
+    assert inc1.incident_id == inc2.incident_id
+    assert inc2.severity == &quot;critical&quot;
+    assert len(inc2.alert_ids) == 2
+    print(&quot;Streaming same-user: passed&quot;)
+
+
+def test_streaming_merge_incidents():
+    &quot;&quot;&quot;Two separate incidents (different entities) later get merged via a bridging alert.&quot;&quot;&quot;
+    corr = StreamingIncidentCorrelator(time_window_seconds=3600)
+    # Incident A: src_ip=10.0.0.1
+    corr.process(_raw(&quot;r1&quot;, &quot;high&quot;, 1000, src_ip=&quot;10.0.0.1&quot;))
+    # Incident B: host=server-01
+    corr.process(_raw(&quot;r2&quot;, &quot;medium&quot;, 1050, host=&quot;server-01&quot;))
+    assert len(corr.open_incidents()) == 2
+
+    # Bridge alert: same src_ip AND same host → merges both incidents
+    _, is_new = corr.process(_raw(&quot;r3&quot;, &quot;critical&quot;, 1100,
+                                    src_ip=&quot;10.0.0.1&quot;, host=&quot;server-01&quot;))
+    assert not is_new
+    assert len(corr.open_incidents()) == 1
+    merged = corr.open_incidents()[0]
+    assert merged.severity == &quot;critical&quot;
+    assert len(merged.alert_ids) == 3
+    print(&quot;Streaming merge: passed&quot;)
+
+
+def test_time_window_separation():
+    &quot;&quot;&quot;Alerts outside the window should NOT be correlated.&quot;&quot;&quot;
+    corr = StreamingIncidentCorrelator(time_window_seconds=60)
+    corr.process(_raw(&quot;r1&quot;, &quot;high&quot;, 0.0, user=&quot;bob&quot;))
+    _, is_new = corr.process(_raw(&quot;r2&quot;, &quot;high&quot;, 5000.0, user=&quot;bob&quot;))  # 5000s later
+    assert is_new, &quot;Alert outside window should start a new incident&quot;
+    assert len(corr.open_incidents()) == 2
+    print(&quot;Time window separation: passed&quot;)
+
+
+def test_close_idle():
+    corr = StreamingIncidentCorrelator(close_after_seconds=100)
+    corr.process(_raw(&quot;r1&quot;, &quot;low&quot;, 0.0, user=&quot;carol&quot;))
+    closed = corr.close_idle_incidents(now=200.0)
+    assert len(closed) == 1
+    assert closed[0].status == &quot;closed&quot;
+    assert len(corr.open_incidents()) == 0
+    print(&quot;Close idle: passed&quot;)
+
+
+def test_malformed():
+    corr = StreamingIncidentCorrelator()
+    inc, _ = corr.process({&quot;rule_name&quot;: &quot;x&quot;})  # missing ts
+    assert inc is None
+    assert corr.malformed == 1
+    print(&quot;Malformed: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Without incident correlation, a SIEM analyst faces hundreds of raw alerts
+  per hour.  An attacker executing a multi-stage campaign generates many
+  individual alerts that individually look unremarkable (medium/low severity)
+  but together reveal the full attack chain.
+
+  Incident grouping reduces alert fatigue and enables:
+  - Severity escalation: two medium alerts = one high incident.
+  - Unified timeline: all evidence in one place.
+  - Faster containment: responder sees all entities at once (user+host+IP).
+
+EXAMPLE INCIDENT
+  Alert 1: &quot;brute_force_ssh&quot; — src_ip=1.2.3.4 → medium
+  Alert 2: &quot;new_ssh_login&quot;   — src_ip=1.2.3.4, host=db-01 → medium
+  Alert 3: &quot;db_dump_command&quot; — host=db-01 → high
+  → Same incident (1.2.3.4 then db-01); severity = high; analysts alerted once.
+
+FAILURE MODES
+  - Entity aliasing: attacker uses different usernames but same real identity
+    (john@corp vs john.doe@corp).  Normalise identities before indexing.
+  - Time zone errors: incorrect timestamp parsing makes proximity check fail.
+  - Incident explosion: if entity_index is too broad (e.g. correlate by ASN
+    instead of src_ip), unrelated alerts merge.  Calibrate entity granularity.
+  - Cascading merges: one bridge alert merges thousands of small incidents into
+    a mega-incident.  Limit max_alerts_per_incident (e.g. 1000).
+
+PRODUCTION HARDENING
+  - Store incidents in a DB (Elasticsearch, Postgres) for durability.
+  - Expose REST API: GET /incidents, POST /alerts.
+  - Feed incident enrichment (threat intel, user risk score) at merge time.
+  - Implement incident lifecycle: open → triaging → in_response → closed.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_same_user()
+    test_naive_transitive()
+    test_streaming_same_user()
+    test_streaming_merge_incidents()
+    test_time_window_separation()
+    test_close_idle()
+    test_malformed()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,1481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 47 - Kubernetes Cluster Security Hardening - Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario47-kubernetes-hardening-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-47-kubernetes-cluster-security-hardening-threat-exploitation-and-blue-team-control-review">Scenario 47 - Kubernetes Cluster Security Hardening - Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario47-kubernetes-hardening.md</code><br />
+<strong>Prompt source:</strong> <code>../threat-modeling-prompt.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario47-kubernetes-hardening-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead - 15+ years of purple-team experience<br />
+<strong>Scenario:</strong> A production Kubernetes cluster runs 200 microservices across dev, staging, and prod namespaces on the same cluster. Pod-to-pod communication is unrestricted. The platform must prevent a compromised workload from becoming cluster-wide compromise, enforce workload identity and mTLS, stop container-to-host privilege escalation, detect lateral movement, and manage residual risk from third-party Helm charts.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This review turns the Kubernetes hardening scenario into attacker-centric exploitation chains and blue-team controls. It is designed for study: each threat includes attacker path, defensive breakpoints, concrete telemetry, safe validation checks, and the sort of residual-risk reasoning expected in a senior security engineering onsite.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>The highest-risk design decision is running dev, staging, and prod workloads in one shared cluster with unrestricted pod-to-pod networking.</p>
+<p>Namespaces are not a hard security boundary by default. If a dev pod is compromised and the cluster has no default-deny NetworkPolicy, no strict workload identity, and overbroad service account RBAC, the attacker can pivot inside the pod network, steal service account tokens, query the Kubernetes API, read secrets, and reach production services without crossing the external perimeter. The safer architecture is separate clusters or at least separate node pools and strict policy boundaries for prod, backed by default-deny network policy, Pod Security Admission restricted profile, workload identity, signed images, and admission policy-as-code.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker action or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision point.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business, privacy, availability, or platform impact.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Compromised pod lateral movement across namespaces</td>
+<td>High likelihood, Critical impact</td>
+<td><code>NetworkFlowLog</code>, <code>K8sAuditLog</code></td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Service account token theft and overbroad RBAC</td>
+<td>High likelihood, Critical impact</td>
+<td><code>K8sAuditLog</code>, <code>RBACInventory</code></td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Privileged container or hostPath escape to node</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>FalcoRuntimeEvent</code>, <code>AdmissionAudit</code></td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Kubernetes API server exposure or control-plane abuse</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>APIServerAudit</code>, <code>ControlPlaneAccessLog</code></td>
+</tr>
+<tr>
+<td>T5</td>
+<td>etcd or Kubernetes secret exfiltration</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>EtcdAccessLog</code>, <code>SecretAccessAudit</code></td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Cloud metadata service credential theft from pod</td>
+<td>Medium likelihood, High impact</td>
+<td><code>IMDSAccessLog</code>, <code>CloudIAMLog</code></td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Malicious third-party Helm chart deployment</td>
+<td>Medium likelihood, High impact</td>
+<td><code>HelmReleaseAudit</code>, <code>AdmissionAudit</code></td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Unsigned or poisoned container image deployment</td>
+<td>Medium likelihood, High impact</td>
+<td><code>ImageAdmissionLog</code>, <code>RegistryAudit</code></td>
+</tr>
+<tr>
+<td>T9</td>
+<td>mTLS or workload identity bypass</td>
+<td>Medium likelihood, High impact</td>
+<td><code>ServiceMeshTelemetry</code>, <code>SPIFFEIssuerLog</code></td>
+</tr>
+<tr>
+<td>T10</td>
+<td>kubectl exec or port-forward abuse in prod</td>
+<td>Medium likelihood, High impact</td>
+<td><code>K8sAuditLog</code>, <code>JITAccessLog</code></td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Admission policy bypass or failure-open webhook</td>
+<td>Medium likelihood, High impact</td>
+<td><code>AdmissionControllerLog</code>, <code>PolicyChangeLog</code></td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Runtime telemetry gaps and noisy-neighbor evasion</td>
+<td>Medium likelihood, Medium impact</td>
+<td><code>SensorHealthLog</code>, <code>NodeTelemetry</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker gains RCE in dev pod]:::attack --> A1[Reads mounted service account token]:::attack
+    A1 --> C1{Token automount disabled or RBAC minimal?}:::control
+    C1 -->|Yes| B1[API access denied or low value]:::blocked
+    C1 -->|No| A2[Queries Kubernetes API and lists secrets]:::attack
+    A2 --> C2{Secret access and cross-namespace API calls monitored?}:::control
+    C2 -->|Yes| B2[Alert and token revocation]:::blocked
+    C2 -->|No| A3[Gets prod credentials]:::attack
+    A3 --> C3{Default-deny NetworkPolicy and mTLS enforced?}:::control
+    C3 -->|Yes| B3[Cannot reach prod service]:::blocked
+    C3 -->|No| A4[Connects to prod database or service]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-reference-architecture">6. Reference Architecture</h2>
+<pre class="mermaid">
+flowchart LR
+    Dev[Dev namespace] --> DevNP[Default-deny NetworkPolicy]
+    Stage[Staging namespace] --> StageNP[Default-deny NetworkPolicy]
+    Prod[Prod namespace] --> ProdNP[Default-deny NetworkPolicy]
+    DevNP --> Mesh[Service mesh mTLS]
+    StageNP --> Mesh
+    ProdNP --> Mesh
+    Mesh --> API[Kubernetes API server]
+    API --> RBAC[RBAC and admission policy]
+    API --> Etcd[etcd with KMS encryption]
+    Pods[Workloads] --> WI[Workload identity]
+    Pods --> Runtime[Runtime sandbox and Pod Security Admission]
+    Runtime --> Nodes[Node pools]
+    API --> Audit[K8s audit logs]
+    Mesh --> Flows[Service and network telemetry]
+    Runtime --> Falco[Falco or runtime events]
+    Audit --> SIEM[SIEM and SOAR]
+    Flows --> SIEM
+    Falco --> SIEM
+</pre>
+<p>Security properties:</p>
+<ul>
+<li>Prod should be isolated by cluster or, at minimum, by node pool, namespace, policy, and identity.</li>
+<li>NetworkPolicy starts with default-deny ingress and egress.</li>
+<li>Service-to-service calls use workload identity and strict mTLS.</li>
+<li>Admission policy rejects privileged containers, host mounts, unsigned images, and dangerous capabilities.</li>
+<li>RBAC is namespace-scoped and generated from workload needs.</li>
+<li>Kubernetes audit, runtime, and network telemetry are correlated.</li>
+</ul>
+<hr />
+<h2 id="7-threat-by-threat-technical-review">7. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-compromised-pod-lateral-movement-across-namespaces">T1 - Compromised pod lateral movement across namespaces</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege / Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use one compromised workload to discover and reach production workloads over the flat pod network.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: RCE, SSRF, deserialization bug, exposed debug endpoint, or stolen app credential in any dev or staging pod.</li>
+<li>Step 1: Enumerate environment variables, mounted tokens, DNS names, and cluster service discovery.</li>
+<li>Step 2: Scan internal service DNS and pod CIDRs for reachable prod services.</li>
+<li>Step 3: Connect directly to production services or databases that trust cluster-internal traffic.</li>
+<li>Step 4: Exfiltrate data or pivot further using service credentials.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Use separate prod clusters where feasible; otherwise separate prod node pools and strict namespace isolation.</li>
+<li>Preventive: Apply default-deny ingress and egress NetworkPolicy to every namespace.</li>
+<li>Preventive: Allow only declared service dependencies through policy-as-code generated from service ownership metadata.</li>
+<li>Detective: Detect first-seen namespace-to-namespace flows and scans through Cilium Hubble, Calico flow logs, or service mesh telemetry.</li>
+<li>Corrective: Quarantine source namespace, kill affected pods, and rotate credentials reachable by the compromised workload.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>NetworkFlowLog</code>: <code>src_namespace</code>, <code>src_pod</code>, <code>dst_namespace</code>, <code>dst_service</code>, <code>dst_port</code>, <code>bytes</code>.</li>
+<li><code>ServiceMeshTelemetry</code>: <code>source_workload</code>, <code>destination_workload</code>, <code>mtls</code>, <code>response_code</code>.</li>
+<li><code>K8sAuditLog</code>: <code>user.username</code>, <code>sourceIPs</code>, <code>verb</code>, <code>resource</code>, <code>namespace</code>.</li>
+<li><code>SOARActionLog</code>: <code>quarantine_namespace</code>, <code>pod_deleted</code>, <code>network_policy_applied</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify a dev pod cannot reach a prod-only service.
+kubectl -n dev exec deploy/synthetic-client -- curl -sS --connect-timeout 3 http://prod-api.prod.svc.cluster.local/health
+</code></pre>
+<pre><code class="language-kql">NetworkFlowLog
+| where src_namespace != dst_namespace
+| where not(has_declared_dependency)
+| summarize flows=count(), bytes=sum(bytes) by src_namespace, src_pod, dst_namespace, dst_service, bin(TimeGenerated, 5m)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T1_1[RCE in dev pod]:::attack --> T1_2[Attempt connection to prod service]:::attack
+    T1_2 --> C1{Default-deny NetworkPolicy?}:::control
+    C1 -->|Yes| B1[Connection blocked and logged]:::blocked
+    C1 -->|No| T1_3[Direct prod access over pod network]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-service-account-token-theft-and-overbroad-rbac">T2 - Service account token theft and overbroad RBAC</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Steal a mounted service account token and use it to query the Kubernetes API for secrets, workloads, or RBAC changes.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: compromised pod with automounted service account token.</li>
+<li>Step 1: Read <code>/var/run/secrets/kubernetes.io/serviceaccount/token</code>.</li>
+<li>Step 2: Call Kubernetes API server from inside the cluster.</li>
+<li>Step 3: Test verbs like <code>get</code>, <code>list</code>, <code>watch</code>, <code>create</code>, and <code>patch</code> across namespaces.</li>
+<li>Step 4: Read secrets, create pods, bind roles, or deploy a persistence workload.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Disable <code>automountServiceAccountToken</code> unless the workload needs Kubernetes API access.</li>
+<li>Preventive: Use short-lived projected service account tokens with audience restrictions.</li>
+<li>Preventive: Enforce namespace-scoped least privilege; no default service account should have meaningful permissions.</li>
+<li>Detective: Alert on service accounts reading secrets outside their namespace or using unusual verbs.</li>
+<li>Corrective: Revoke token, delete service account, rotate impacted secrets, and redeploy workload with reduced RBAC.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>K8sAuditLog</code>: <code>user.username</code>, <code>verb</code>, <code>resource</code>, <code>namespace</code>, <code>responseStatus.code</code>.</li>
+<li><code>RBACInventory</code>: <code>service_account</code>, <code>role</code>, <code>verbs</code>, <code>resources</code>, <code>scope</code>.</li>
+<li><code>TokenRequestLog</code>: <code>audience</code>, <code>expirationSeconds</code>, <code>boundObjectRef</code>.</li>
+<li><code>SecretAccessAudit</code>: <code>actor</code>, <code>secret_name</code>, <code>secret_namespace</code>, <code>access_reason</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify default service accounts cannot list secrets.
+kubectl auth can-i list secrets --as=system:serviceaccount:dev:default -n prod
+</code></pre>
+<pre><code class="language-kql">K8sAuditLog
+| where user_username startswith &quot;system:serviceaccount:&quot;
+| where resource == &quot;secrets&quot; and verb in (&quot;get&quot;, &quot;list&quot;, &quot;watch&quot;)
+| where actor_namespace != namespace
+| project TimeGenerated, user_username, verb, namespace, response_code
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T2_1[Compromised pod reads service account token]:::attack --> C1{Token automount disabled?}:::control
+    C1 -->|Yes| B1[No token available]:::blocked
+    C1 -->|No| T2_2[Token used against API server]:::attack
+    T2_2 --> C2{RBAC denies secret access?}:::control
+    C2 -->|Yes| B2[API request denied and alerted]:::blocked
+    C2 -->|No| T2_3[Secrets listed or read]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-privileged-container-or-hostpath-escape-to-node">T3 - Privileged container or hostPath escape to node</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Escape the container boundary, gain host-level access, and reach all pods or node credentials.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: workload runs privileged, has hostPath mounts, dangerous Linux capabilities, hostPID, hostNetwork, or vulnerable runtime.</li>
+<li>Step 1: Inspect mounted host filesystems and container runtime sockets.</li>
+<li>Step 2: Abuse hostPath, Docker/containerd socket, or kernel exploit to execute on the node.</li>
+<li>Step 3: Read kubelet credentials, pod volumes, and node-level cloud credentials.</li>
+<li>Step 4: Pivot to other pods on the node or cloud control plane.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce Pod Security Admission <code>restricted</code> profile for prod namespaces.</li>
+<li>Preventive: Add OPA/Gatekeeper or Kyverno policies blocking privileged pods, hostPath, hostNetwork, hostPID, and dangerous capabilities.</li>
+<li>Preventive: Use runtime sandboxing such as gVisor or Kata Containers for untrusted/high-risk workloads.</li>
+<li>Detective: Use Falco or eBPF-based runtime detection for host file access, shell spawn, or container escape indicators.</li>
+<li>Corrective: Cordon and drain node, preserve forensic disk, rotate node and workload credentials.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>AdmissionAudit</code>: <code>policy</code>, <code>resource</code>, <code>namespace</code>, <code>decision</code>, <code>violations</code>.</li>
+<li><code>FalcoRuntimeEvent</code>: <code>rule</code>, <code>pod</code>, <code>namespace</code>, <code>container</code>, <code>proc.name</code>, <code>file.path</code>.</li>
+<li><code>NodeAuditLog</code>: <code>host_pid</code>, <code>process</code>, <code>syscall</code>, <code>parent_process</code>.</li>
+<li><code>CordonDrainLog</code>: <code>node</code>, <code>reason</code>, <code>initiated_by</code>, <code>completed_at</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt to apply a privileged pod manifest and verify admission rejects it.
+kubectl apply -f tests/privileged-pod-deny.yaml --namespace prod
+</code></pre>
+<pre><code class="language-kql">FalcoRuntimeEvent
+| where rule in (&quot;Terminal shell in container&quot;, &quot;Write below root&quot;, &quot;Launch privileged container&quot;, &quot;Contact K8S API Server From Container&quot;)
+| project TimeGenerated, namespace, pod, container, rule, proc_name
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T3_1[Deploy privileged pod or exploit runtime]:::attack --> C1{Admission policy restricted?}:::control
+    C1 -->|Yes| B1[Pod rejected]:::blocked
+    C1 -->|No| T3_2[Host access from container]:::attack
+    T3_2 --> C2{Runtime detection active?}:::control
+    C2 -->|Yes| B2[Node cordoned and investigation starts]:::blocked
+    C2 -->|No| T3_3[Node takeover and credential theft]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-kubernetes-api-server-exposure-or-control-plane-abuse">T4 - Kubernetes API server exposure or control-plane abuse</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege / Tampering<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Abuse exposed or weakly controlled API server access to control workloads and cluster state.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: API server reachable from broad networks, weak auth, stolen kubeconfig, or excessive admin role.</li>
+<li>Step 1: Discover API endpoint and test authentication paths.</li>
+<li>Step 2: Use stolen kubeconfig or service account token to enumerate resources.</li>
+<li>Step 3: Create privileged pods, modify deployments, or create ClusterRoleBindings.</li>
+<li>Step 4: Persist through admission webhooks, daemonsets, or secrets.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Restrict API server access to trusted networks or private endpoints.</li>
+<li>Preventive: Require strong identity, MFA/JIT for human cluster admin, and certificate rotation.</li>
+<li>Preventive: Enforce least-privilege RBAC and deny risky verbs for non-platform roles.</li>
+<li>Detective: Alert on cluster role creation, webhook changes, privileged workload creation, and access from unusual IPs.</li>
+<li>Corrective: Revoke kubeconfigs/certs, remove malicious roles/webhooks, and rebuild control-plane trust if needed.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>ControlPlaneAccessLog</code>: <code>source_ip</code>, <code>principal</code>, <code>auth_method</code>, <code>decision</code>.</li>
+<li><code>K8sAuditLog</code>: <code>verb</code>, <code>resource</code>, <code>objectRef.name</code>, <code>userAgent</code>, <code>sourceIPs</code>.</li>
+<li><code>RBACChangeLog</code>: <code>role</code>, <code>binding</code>, <code>subject</code>, <code>changed_by</code>.</li>
+<li><code>WebhookConfigAudit</code>: <code>webhook_name</code>, <code>failurePolicy</code>, <code>clientConfig</code>, <code>changed_by</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify non-admin identities cannot create ClusterRoleBindings.
+kubectl auth can-i create clusterrolebindings --as=user:developer@example.com
+</code></pre>
+<pre><code class="language-kql">K8sAuditLog
+| where resource in (&quot;clusterrolebindings&quot;, &quot;clusterroles&quot;, &quot;validatingwebhookconfigurations&quot;, &quot;mutatingwebhookconfigurations&quot;)
+| where verb in (&quot;create&quot;, &quot;patch&quot;, &quot;update&quot;, &quot;delete&quot;)
+| project TimeGenerated, user_username, verb, resource, object_name, sourceIPs
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T4_1[Attacker obtains kubeconfig]:::attack --> C1{API endpoint restricted and JIT enforced?}:::control
+    C1 -->|Yes| B1[Access denied]:::blocked
+    C1 -->|No| T4_2[Attacker changes cluster state]:::attack
+    T4_2 --> C2{High-risk API audit alerts?}:::control
+    C2 -->|Yes| B2[Role revoked and change rolled back]:::blocked
+    C2 -->|No| T4_3[Cluster persistence]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-etcd-or-kubernetes-secret-exfiltration">T5 - etcd or Kubernetes secret exfiltration</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Read secrets directly from Kubernetes API or etcd and reuse credentials outside the cluster.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: API permission to read secrets, etcd credential exposure, or compromised control-plane host.</li>
+<li>Step 1: List secrets across namespaces or connect to etcd.</li>
+<li>Step 2: Decode secret values and extract DB credentials, API keys, TLS keys, or OAuth credentials.</li>
+<li>Step 3: Use secrets against production databases, cloud services, or third-party APIs.</li>
+<li>Step 4: Persist outside Kubernetes even after pod cleanup.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Store high-value secrets in external secret manager and inject short-lived credentials at runtime.</li>
+<li>Preventive: Enable etcd encryption at rest with KMS and restrict direct etcd network access.</li>
+<li>Preventive: Deny broad <code>list/watch secrets</code>; prefer narrow <code>get</code> only where absolutely required.</li>
+<li>Detective: Alert on secret reads by service accounts, bulk secret reads, and direct etcd clients.</li>
+<li>Corrective: Rotate all secrets accessible to compromised identity and invalidate external sessions.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>SecretAccessAudit</code>: <code>actor</code>, <code>namespace</code>, <code>secret_name</code>, <code>verb</code>, <code>result</code>.</li>
+<li><code>EtcdAccessLog</code>: <code>client_ip</code>, <code>client_cert_subject</code>, <code>operation</code>, <code>key_prefix</code>.</li>
+<li><code>ExternalSecretLog</code>: <code>workload</code>, <code>secret_id</code>, <code>lease_id</code>, <code>ttl</code>, <code>renewal_count</code>.</li>
+<li><code>RotationLog</code>: <code>secret_id</code>, <code>rotated_at</code>, <code>reason</code>, <code>dependent_services_restarted</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify service account cannot list prod secrets.
+kubectl auth can-i list secrets --as=system:serviceaccount:dev:synthetic-app -n prod
+</code></pre>
+<pre><code class="language-kql">SecretAccessAudit
+| where verb in (&quot;list&quot;, &quot;watch&quot;) or access_count &gt; 10
+| summarize reads=count() by actor, namespace, bin(TimeGenerated, 5m)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T5_1[Actor attempts secret read]:::attack --> C1{RBAC restricts secret verbs?}:::control
+    C1 -->|Yes| B1[Read denied]:::blocked
+    C1 -->|No| T5_2[Secrets exfiltrated]:::attack
+    T5_2 --> C2{Secret read anomaly detected?}:::control
+    C2 -->|Yes| B2[Rotate secrets and revoke identity]:::blocked
+    C2 -->|No| T5_3[External credential abuse]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-cloud-metadata-service-credential-theft-from-pod">T6 - Cloud metadata service credential theft from pod</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Access node metadata service from a pod to steal cloud IAM credentials and pivot from Kubernetes into cloud infrastructure.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: pods can reach cloud metadata endpoint and node service account has broad cloud permissions.</li>
+<li>Step 1: From compromised pod, call metadata endpoint such as <code>169.254.169.254</code>.</li>
+<li>Step 2: Retrieve node identity token or temporary credentials.</li>
+<li>Step 3: Use credentials against cloud APIs to access storage, container registry, KMS, or cluster control plane.</li>
+<li>Step 4: Persist or exfiltrate outside Kubernetes.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Use workload identity so pods receive scoped identities independent of node credentials.</li>
+<li>Preventive: Block pod access to node metadata service except through controlled metadata proxy.</li>
+<li>Preventive: Minimize node IAM permissions and separate node pools by sensitivity.</li>
+<li>Detective: Alert on pod-origin requests to metadata endpoint and unusual cloud API calls from node identities.</li>
+<li>Corrective: Rotate node credentials, cordon affected node, and review cloud IAM grants.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>IMDSAccessLog</code>: <code>pod_ip</code>, <code>namespace</code>, <code>pod</code>, <code>requested_path</code>, <code>decision</code>.</li>
+<li><code>CloudIAMLog</code>: <code>principal</code>, <code>api</code>, <code>resource</code>, <code>source_ip</code>, <code>user_agent</code>.</li>
+<li><code>WorkloadIdentityLog</code>: <code>pod</code>, <code>service_account</code>, <code>cloud_principal</code>, <code>token_audience</code>.</li>
+<li><code>NodeIAMInventory</code>: <code>node_pool</code>, <code>role</code>, <code>permissions</code>, <code>last_used</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify pod cannot access metadata endpoint directly.
+kubectl -n dev exec deploy/synthetic-client -- curl -sS --connect-timeout 2 http://169.254.169.254/
+</code></pre>
+<pre><code class="language-kql">IMDSAccessLog
+| where decision == &quot;allow&quot; and namespace notin (&quot;kube-system&quot;, &quot;metadata-proxy&quot;)
+| project TimeGenerated, namespace, pod, requested_path
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T6_1[Compromised pod calls metadata endpoint]:::attack --> C1{IMDS blocked or proxied?}:::control
+    C1 -->|Yes| B1[Request denied]:::blocked
+    C1 -->|No| T6_2[Node cloud credential obtained]:::attack
+    T6_2 --> C2{Node IAM least privilege?}:::control
+    C2 -->|Yes| B2[Limited cloud blast radius]:::blocked
+    C2 -->|No| T6_3[Cloud control-plane pivot]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-malicious-third-party-helm-chart-deployment">T7 - Malicious third-party Helm chart deployment</h3>
+<p><strong>STRIDE category:</strong> Tampering / Supply Chain<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use a third-party chart to deploy privileged resources, backdoored images, broad RBAC, or exfiltration hooks.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: team installs charts directly from public repositories or allows dynamic chart dependencies.</li>
+<li>Step 1: Publish or compromise a Helm chart dependency.</li>
+<li>Step 2: Add templates creating ClusterRoleBindings, privileged pods, hostPath mounts, or external callbacks.</li>
+<li>Step 3: Chart passes through deployment pipeline without manifest review.</li>
+<li>Step 4: Backdoor runs with tenant or cluster privileges.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Mirror approved charts internally, pin versions and digests, and require provenance verification.</li>
+<li>Preventive: Render charts in CI and scan the final Kubernetes manifests before deployment.</li>
+<li>Preventive: Admission policies reject dangerous resources regardless of chart source.</li>
+<li>Detective: Alert on new chart repositories, chart version drift, and high-risk manifests.</li>
+<li>Corrective: Roll back Helm release, block chart digest, rotate credentials exposed to release.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>HelmReleaseAudit</code>: <code>release</code>, <code>chart</code>, <code>version</code>, <code>digest</code>, <code>values_hash</code>, <code>deployer</code>.</li>
+<li><code>ChartProvenanceLog</code>: <code>repo</code>, <code>signature_valid</code>, <code>approved</code>, <code>mirrored_at</code>.</li>
+<li><code>ManifestScanLog</code>: <code>release</code>, <code>risk_findings</code>, <code>blocked</code>, <code>policy_id</code>.</li>
+<li><code>AdmissionAudit</code>: <code>resource_kind</code>, <code>namespace</code>, <code>decision</code>, <code>violating_fields</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, render and scan a chart before deployment.
+helm template synthetic ./charts/third-party-example | kube-score score -
+</code></pre>
+<pre><code class="language-kql">HelmReleaseAudit
+| where repo notin (ApprovedHelmRepos) or signature_valid == false
+| project TimeGenerated, release, chart, version, repo, deployer
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T7_1[Team installs third-party chart]:::attack --> C1{Internal mirror and provenance required?}:::control
+    C1 -->|Yes| B1[Unapproved chart blocked]:::blocked
+    C1 -->|No| T7_2[Dangerous manifest rendered]:::attack
+    T7_2 --> C2{Admission policy blocks risk?}:::control
+    C2 -->|Yes| B2[Privileged resources rejected]:::blocked
+    C2 -->|No| T7_3[Backdoor workload deployed]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-unsigned-or-poisoned-container-image-deployment">T8 - Unsigned or poisoned container image deployment</h3>
+<p><strong>STRIDE category:</strong> Tampering / Supply Chain<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Deploy a malicious image through compromised CI/CD, registry, base image, or tag drift.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: images are referenced by mutable tags, no signature verification, or registry credentials are compromised.</li>
+<li>Step 1: Push malicious image to trusted registry or replace mutable tag.</li>
+<li>Step 2: Deployment pulls malicious image during rollout or restart.</li>
+<li>Step 3: Image executes credential theft, data exfiltration, or cryptomining.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Require signed images with Cosign/Sigstore or equivalent, verified by admission policy.</li>
+<li>Preventive: Pin images by digest, not mutable tags, for production workloads.</li>
+<li>Preventive: Generate SBOM and scan vulnerabilities/malware before promotion.</li>
+<li>Detective: Alert on image digest drift, unsigned images, and images from unapproved registries.</li>
+<li>Corrective: Block digest, roll back release, rotate credentials exposed to container.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>ImageAdmissionLog</code>: <code>image</code>, <code>digest</code>, <code>signature_valid</code>, <code>admission_decision</code>.</li>
+<li><code>RegistryAudit</code>: <code>pusher</code>, <code>repo</code>, <code>tag</code>, <code>digest</code>, <code>source_ip</code>.</li>
+<li><code>SBOMScanLog</code>: <code>image_digest</code>, <code>critical_findings</code>, <code>malware_findings</code>, <code>approved</code>.</li>
+<li><code>DeploymentAudit</code>: <code>namespace</code>, <code>deployment</code>, <code>old_digest</code>, <code>new_digest</code>, <code>actor</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt to deploy an unsigned image and verify admission denies it.
+kubectl -n prod set image deploy/synthetic-app app=registry.example.com/test/unsigned:latest
+</code></pre>
+<pre><code class="language-kql">ImageAdmissionLog
+| where namespace == &quot;prod&quot; and signature_valid == false
+| project TimeGenerated, image, digest, workload, admission_decision
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T8_1[Malicious image pushed to registry]:::attack --> T8_2[Deployment references image]:::attack
+    T8_2 --> C1{Signature and digest policy enforced?}:::control
+    C1 -->|Yes| B1[Admission denies image]:::blocked
+    C1 -->|No| T8_3[Malicious workload runs in cluster]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-mtls-or-workload-identity-bypass">T9 - mTLS or workload identity bypass</h3>
+<p><strong>STRIDE category:</strong> Spoofing / Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Reach production services without a valid workload identity or impersonate a trusted service.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: service mesh sidecar injection is optional, permissive mTLS is enabled, or identity issuance trusts weak labels.</li>
+<li>Step 1: Deploy a pod without sidecar or with spoofed labels.</li>
+<li>Step 2: Call a production service over plaintext or permissive mTLS.</li>
+<li>Step 3: Abuse service behavior that trusts source IP, namespace, or headers rather than cryptographic identity.</li>
+<li>Step 4: Perform unauthorized actions as a fake service.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce strict mTLS for prod namespaces with deny-by-default authorization policies.</li>
+<li>Preventive: Bind workload identity to Kubernetes service account and namespace, not mutable labels.</li>
+<li>Preventive: Require sidecar injection or ambient mesh enrollment through admission policy.</li>
+<li>Detective: Alert on plaintext calls, missing identity, unexpected SPIFFE IDs, and authz denials.</li>
+<li>Corrective: Disable insecure endpoint, apply mesh policy, and redeploy noncompliant workloads.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>ServiceMeshTelemetry</code>: <code>src_principal</code>, <code>dst_principal</code>, <code>mtls_mode</code>, <code>authz_decision</code>.</li>
+<li><code>SPIFFEIssuerLog</code>: <code>service_account</code>, <code>namespace</code>, <code>spiffe_id</code>, <code>issued_at</code>.</li>
+<li><code>MeshPolicyAudit</code>: <code>namespace</code>, <code>peer_authentication</code>, <code>authorization_policy</code>, <code>mode</code>.</li>
+<li><code>AdmissionAudit</code>: <code>sidecar_required</code>, <code>sidecar_present</code>, <code>decision</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify non-mesh pod cannot call a strict-mTLS prod service.
+kubectl -n dev exec deploy/no-sidecar-client -- curl -sS --connect-timeout 3 http://prod-api.prod.svc.cluster.local/
+</code></pre>
+<pre><code class="language-kql">ServiceMeshTelemetry
+| where dst_namespace == &quot;prod&quot;
+| where mtls_mode != &quot;STRICT&quot; or isempty(src_principal)
+| project TimeGenerated, src_namespace, src_workload, dst_workload, mtls_mode, authz_decision
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T9_1[Pod calls prod service without valid identity]:::attack --> C1{Strict mTLS enforced?}:::control
+    C1 -->|Yes| B1[Connection rejected]:::blocked
+    C1 -->|No| T9_2[Service accepts unauthenticated traffic]:::attack
+    T9_2 --> T9_3[Caller impersonates trusted workload]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-kubectl-exec-or-port-forward-abuse-in-prod">T10 - kubectl exec or port-forward abuse in prod</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use legitimate human access to enter production pods, bypass normal application controls, inspect memory/files, or connect to internal services.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: developer or operator has broad <code>pods/exec</code>, <code>pods/portforward</code>, or <code>pods/log</code> permissions in prod.</li>
+<li>Step 1: Use <code>kubectl exec</code> to open shell in prod pod.</li>
+<li>Step 2: Read environment variables, mounted secrets, logs, or local files.</li>
+<li>Step 3: Use <code>port-forward</code> to reach internal admin endpoints or databases.</li>
+<li>Step 4: Exfiltrate data while activity looks like operations work.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Remove routine prod exec access; require JIT approval and break-glass workflow.</li>
+<li>Preventive: Prefer audited debug containers or controlled diagnostic endpoints over shell access.</li>
+<li>Preventive: Deny port-forward to sensitive services except through approved access broker.</li>
+<li>Detective: Alert on exec/port-forward/logs in prod, especially outside incident windows.</li>
+<li>Corrective: Terminate sessions, revoke JIT grant, rotate exposed secrets, and review incident ticket.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>K8sAuditLog</code>: <code>resource</code>, <code>subresource</code>, <code>verb</code>, <code>namespace</code>, <code>user.username</code>.</li>
+<li><code>JITAccessLog</code>: <code>requester</code>, <code>approval</code>, <code>scope</code>, <code>ticket_id</code>, <code>expires_at</code>.</li>
+<li><code>SessionRecordLog</code>: <code>session_id</code>, <code>command_hash</code>, <code>pod</code>, <code>user</code>, <code>duration</code>.</li>
+<li><code>TicketingCorrelationLog</code>: <code>ticket_id</code>, <code>incident_severity</code>, <code>approved_resources</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify a normal developer cannot exec into prod pods.
+kubectl auth can-i create pods/exec --as=user:developer@example.com -n prod
+</code></pre>
+<pre><code class="language-kql">K8sAuditLog
+| where namespace == &quot;prod&quot;
+| where subresource in (&quot;exec&quot;, &quot;portforward&quot;, &quot;log&quot;)
+| join kind=leftouter JITAccessLog on user_username
+| where isempty(ticket_id) or TimeGenerated &gt; expires_at
+| project TimeGenerated, user_username, subresource, object_name, sourceIPs
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T10_1[User attempts kubectl exec in prod]:::attack --> C1{JIT approval required?}:::control
+    C1 -->|Yes| B1[Denied without ticket]:::blocked
+    C1 -->|No| T10_2[Shell opens inside prod pod]:::attack
+    T10_2 --> C2{Session recorded and alerted?}:::control
+    C2 -->|Yes| B2[SOC review and session termination]:::blocked
+    C2 -->|No| T10_3[Secrets or data accessed directly]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-admission-policy-bypass-or-failure-open-webhook">T11 - Admission policy bypass or failure-open webhook</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Bypass admission controls that normally block privileged pods, unsigned images, broad RBAC, or unsafe host access.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: admission webhooks use <code>failurePolicy: Ignore</code>, weak namespace exclusions, or modifiable webhook configuration.</li>
+<li>Step 1: Trigger webhook outage, timeout, or configuration drift.</li>
+<li>Step 2: Apply manifests that would normally be rejected.</li>
+<li>Step 3: Deploy privileged resources or unsigned images while policy engine is degraded.</li>
+<li>Step 4: Persist before policy recovers.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Use <code>failurePolicy: Fail</code> for security-critical admission controls in prod.</li>
+<li>Preventive: Protect webhook configuration with narrow RBAC and alert on changes.</li>
+<li>Preventive: Run multiple replicas and health checks for admission controllers.</li>
+<li>Detective: Alert on admission webhook failures, latency, namespace exclusions, and policy changes.</li>
+<li>Corrective: Freeze deployments when admission policy is unhealthy and scan cluster for resources admitted during gap.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>AdmissionControllerLog</code>: <code>webhook</code>, <code>decision</code>, <code>latency_ms</code>, <code>error</code>, <code>failure_policy</code>.</li>
+<li><code>PolicyChangeLog</code>: <code>actor</code>, <code>policy</code>, <code>old_value</code>, <code>new_value</code>, <code>approved</code>.</li>
+<li><code>APIServerMetric</code>: <code>admission_webhook_rejection_count</code>, <code>admission_webhook_fail_open_count</code>.</li>
+<li><code>PostureScanLog</code>: <code>resource</code>, <code>namespace</code>, <code>policy_violation</code>, <code>created_at</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, simulate admission controller outage and verify prod deploys fail closed.
+kubectl -n gatekeeper-system scale deploy/gatekeeper-controller-manager --replicas=0
+</code></pre>
+<pre><code class="language-kql">AdmissionControllerLog
+| where failure_policy == &quot;Ignore&quot; or error != &quot;&quot;
+| summarize events=count() by webhook, namespace, bin(TimeGenerated, 5m)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T11_1[Admission webhook unavailable]:::attack --> C1{Failure policy set to Fail?}:::control
+    C1 -->|Yes| B1[Risky deployment blocked]:::blocked
+    C1 -->|No| T11_2[Unsafe manifest admitted]:::attack
+    T11_2 --> C2{Post-admission scan detects drift?}:::control
+    C2 -->|Yes| B2[Resource deleted and pipeline frozen]:::blocked
+    C2 -->|No| T11_3[Policy bypass persists]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-runtime-telemetry-gaps-and-noisy-neighbor-evasion">T12 - Runtime telemetry gaps and noisy-neighbor evasion</h3>
+<p><strong>STRIDE category:</strong> Repudiation / Denial of Service<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Operate in parts of the cluster where audit, runtime, or network telemetry is missing, delayed, or overwhelmed.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: log collectors are missing from nodes, Falco/eBPF sensors fail open, or network flow logging is partial.</li>
+<li>Step 1: Identify unmonitored node pools or namespaces.</li>
+<li>Step 2: Schedule workloads where sensors are missing or resource pressure causes drops.</li>
+<li>Step 3: Generate noisy benign traffic or high-volume logs to hide signals.</li>
+<li>Step 4: Continue lateral movement without reliable detection.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Enforce sensor daemonsets on every node pool and block scheduling when security agents are unhealthy for sensitive pools.</li>
+<li>Preventive: Apply log rate controls while preserving security events with priority queues.</li>
+<li>Detective: Monitor security sensor heartbeats, log drop counters, and node coverage.</li>
+<li>Detective: Alert when a node has workload activity but no corresponding audit/runtime/network telemetry.</li>
+<li>Corrective: Cordon telemetry-blind nodes and reschedule workloads after sensor health is restored.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>SensorHealthLog</code>: <code>node</code>, <code>agent</code>, <code>heartbeat_at</code>, <code>version</code>, <code>healthy</code>.</li>
+<li><code>LogPipelineMetric</code>: <code>source</code>, <code>drop_count</code>, <code>queue_depth</code>, <code>lag_seconds</code>.</li>
+<li><code>NodeTelemetry</code>: <code>node</code>, <code>pod_count</code>, <code>network_bytes</code>, <code>runtime_events</code>.</li>
+<li><code>CoverageScanLog</code>: <code>node_pool</code>, <code>expected_agents</code>, <code>missing_agents</code>, <code>compliant</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, verify every node has required security daemonsets.
+kubectl get daemonset -A -o wide
+</code></pre>
+<pre><code class="language-kql">SensorHealthLog
+| summarize last_seen=max(TimeGenerated) by node, agent
+| where last_seen &lt; ago(5m)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T12_1[Security sensor stops on node]:::attack --> C1{Heartbeat alert fires?}:::control
+    C1 -->|Yes| B1[Node cordoned until sensor healthy]:::blocked
+    C1 -->|No| T12_2[Attacker runs on telemetry-blind node]:::attack
+    T12_2 --> T12_3[Lateral movement without useful evidence]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="8-purple-team-exercise-runbook-summary">8. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Attempt dev-to-prod service call in staging</td>
+<td>NetworkPolicy blocks flow and logs denial</td>
+<td>Dev pod reaches prod service</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Test default service account secret read</td>
+<td>RBAC denies request</td>
+<td>Default service account lists or reads secrets</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Apply privileged pod manifest</td>
+<td>Admission rejects manifest</td>
+<td>Privileged pod is admitted</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Try non-admin ClusterRoleBinding creation</td>
+<td>API denies request and alerts</td>
+<td>Non-admin creates cluster-wide binding</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Attempt bulk secret list with synthetic service account</td>
+<td>Denied or alerted</td>
+<td>Secrets returned silently</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Call metadata endpoint from pod</td>
+<td>Request blocked or proxied safely</td>
+<td>Node credentials returned</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Deploy unapproved Helm chart</td>
+<td>CI or admission blocks release</td>
+<td>Chart deploys risky resources</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Deploy unsigned image</td>
+<td>Admission denies image</td>
+<td>Unsigned image starts in prod</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Call prod service without mTLS identity</td>
+<td>Service mesh rejects call</td>
+<td>Plaintext or unauthenticated call succeeds</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Attempt prod <code>exec</code> without JIT</td>
+<td>Denied and audited</td>
+<td>Shell opens without ticket</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Simulate admission controller outage</td>
+<td>Prod deploys fail closed</td>
+<td>Unsafe manifest admitted</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Stop telemetry sensor in staging</td>
+<td>Heartbeat alert and node cordon</td>
+<td>Node stays schedulable without telemetry</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-control-coverage-heatmap">9. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Namespace and cluster isolation</td>
+<td>T1, T3, T6</td>
+<td>Separate prod clusters are stronger than namespace-only isolation.</td>
+</tr>
+<tr>
+<td>NetworkPolicy and service mesh</td>
+<td>T1, T9</td>
+<td>NetworkPolicy blocks reachability; mTLS authenticates service identity.</td>
+</tr>
+<tr>
+<td>RBAC and service account hygiene</td>
+<td>T2, T4, T5, T10</td>
+<td>Needs continuous drift detection and no default service account privileges.</td>
+</tr>
+<tr>
+<td>Pod Security Admission and OPA/Kyverno</td>
+<td>T3, T7, T8, T11</td>
+<td>Security-critical webhooks should fail closed in prod.</td>
+</tr>
+<tr>
+<td>Secret management and etcd protection</td>
+<td>T2, T5, T6</td>
+<td>External secret manager reduces value of Kubernetes secret reads.</td>
+</tr>
+<tr>
+<td>Supply-chain controls</td>
+<td>T7, T8</td>
+<td>Helm chart provenance and image signing must both be enforced.</td>
+</tr>
+<tr>
+<td>Telemetry and detection</td>
+<td>T1 through T12</td>
+<td>Kubernetes audit logs alone are not enough; need runtime and network telemetry too.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-minimum-viable-control-set">10. Minimum Viable Control Set</h2>
+<p>If timeline is tight, the minimum viable hardening set is:</p>
+<ol>
+<li>Separate prod from dev/staging by cluster or at least by node pool and namespace with strong policy boundaries.</li>
+<li>Default-deny NetworkPolicy for every namespace, with explicit egress and ingress allowlists.</li>
+<li>Disable service account token automount by default and enforce namespace-scoped least-privilege RBAC.</li>
+<li>Pod Security Admission restricted profile plus OPA/Kyverno policies for privileged pods, hostPath, hostNetwork, hostPID, capabilities, and unsigned images.</li>
+<li>Kubernetes audit logs, runtime detection, and network flow telemetry correlated in SIEM.</li>
+</ol>
+<p>Do not accept a design where dev can directly connect to prod services, default service accounts can read secrets, or prod can run unsigned and privileged workloads.</p>
+<hr />
+<h2 id="11-residual-risk-register">11. Residual Risk Register</h2>
+<table>
+<thead>
+<tr>
+<th>Residual Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Why It Remains</th>
+<th>Owner</th>
+<th>Acceptance Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero-day container runtime escape</td>
+<td>Low</td>
+<td>Critical</td>
+<td>Kernel/runtime flaws cannot be fully eliminated</td>
+<td>Platform Security</td>
+<td>Accepted with gVisor/Kata for high-risk workloads and rapid node patching</td>
+</tr>
+<tr>
+<td>Malicious Helm chart logic not caught by static review</td>
+<td>Medium</td>
+<td>High</td>
+<td>Templates and dependencies can hide behavior</td>
+<td>DevSecOps</td>
+<td>Accepted only with internal mirror, digest pinning, and admission enforcement</td>
+</tr>
+<tr>
+<td>Emergency human prod access abused</td>
+<td>Medium</td>
+<td>High</td>
+<td>Break-glass access is operationally required</td>
+<td>SRE / Platform Security</td>
+<td>Accepted with JIT, session recording, and post-use review</td>
+</tr>
+<tr>
+<td>Service mesh misconfiguration leaves plaintext path</td>
+<td>Low/Medium</td>
+<td>High</td>
+<td>Mesh policy drift can occur during service onboarding</td>
+<td>Service Mesh Team</td>
+<td>Accepted with continuous mTLS compliance scans</td>
+</tr>
+<tr>
+<td>Secret present in memory after external secret migration</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Runtime memory exposure cannot be fully removed</td>
+<td>App Owners</td>
+<td>Accepted with short-lived credentials and restart/rotation procedures</td>
+</tr>
+<tr>
+<td>Telemetry blind spot during node pressure or agent crash</td>
+<td>Medium</td>
+<td>High</td>
+<td>Agents can fail under resource pressure</td>
+<td>Security Operations</td>
+<td>Accepted only with heartbeat alerts and node cordon automation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-google-scale-considerations">12. Google-Scale Considerations</h2>
+<p>At Google scale, Kubernetes hardening must be automated through shared infrastructure and policy-as-code.</p>
+<ul>
+<li><strong>Policy-as-code:</strong> RBAC, NetworkPolicy, Pod Security, image signatures, and chart provenance should be enforced in CI and admission, not reviewed manually.</li>
+<li><strong>Blast-radius reduction:</strong> Production workloads should be isolated by cluster and node pool; sensitive workloads should run in sandboxed runtimes.</li>
+<li><strong>Continuous graph analysis:</strong> Build a live graph of service dependencies, namespace boundaries, service account permissions, and reachable paths.</li>
+<li><strong>Automated remediation:</strong> Compromised pod response should cordon nodes, revoke tokens, rotate secrets, and block image digests with minimal human delay.</li>
+<li><strong>Telemetry completeness:</strong> Every node and namespace should report audit, runtime, and network signals; missing telemetry should be treated as a security incident.</li>
+<li><strong>Developer usability:</strong> Provide secure defaults and paved-road deployment templates so teams do not bypass controls for speed.</li>
+</ul>
+<hr />
+<h2 id="13-model-answer-summary-90-second-version">13. Model Answer Summary - 90-second version</h2>
+<p>For a shared Kubernetes cluster with dev, staging, and prod namespaces and unrestricted pod-to-pod traffic, I would first challenge the architecture. Namespaces are not a hard security boundary. A compromised dev pod can read its service account token, probe the API server, list secrets if RBAC is broad, and connect directly to production services over the flat cluster network.</p>
+<p>My control set would be layered: separate prod into its own cluster or at least isolated node pools, default-deny NetworkPolicy in every namespace, strict service-to-service mTLS with workload identity, service account token automount disabled by default, least-privilege RBAC, Pod Security Admission restricted profile, OPA/Kyverno admission policies, signed images, internal Helm chart mirroring, and external secret management.</p>
+<p>For detection, I would correlate Kubernetes API audit logs, runtime events from Falco or eBPF sensors, and network flow or service mesh telemetry. Critical alerts include cross-namespace secret reads, first-seen dev-to-prod connections, privileged pod admission, direct etcd access, metadata service access from pods, and prod exec/port-forward without JIT approval. Residual risks remain around runtime zero-days, Helm supply chain, and emergency human access, but each should have an explicit owner and acceptance condition.</p>
+<hr />
+<h2 id="14-likely-follow-up-questions-and-strong-answers">14. Likely Follow-Up Questions and Strong Answers</h2>
+<h3 id="follow-up-1-what-is-the-threat-model-for-a-compromised-pod-in-this-shared-namespace-architecture">Follow-up 1: What is the threat model for a compromised pod in this shared-namespace architecture?</h3>
+<p>A compromised pod is already inside the trusted cluster network and usually has a mounted service account token. If NetworkPolicy is default-allow, it can reach other namespaces directly. If RBAC is broad, it can query the API server and read secrets. The main chain is RCE in dev, token theft, API enumeration, secret access, direct prod service connection, and data exfiltration. I would reduce blast radius with separate prod clusters, default-deny network policy, least-privilege RBAC, and workload identity.</p>
+<h3 id="follow-up-2-how-do-you-enforce-workload-identity-and-service-to-service-authentication">Follow-up 2: How do you enforce workload identity and service-to-service authentication?</h3>
+<p>Use a service mesh or equivalent workload identity system issuing cryptographic identities bound to Kubernetes service accounts and namespaces, such as SPIFFE/SVID identities. Enforce strict mTLS in prod and authorization policies that allow only declared caller-to-callee pairs. Applications should not trust source IP or headers alone, because those are weak signals inside the cluster.</p>
+<h3 id="follow-up-3-what-prevents-privilege-escalation-from-a-container-to-the-host">Follow-up 3: What prevents privilege escalation from a container to the host?</h3>
+<p>Admission policy should block privileged containers, hostPath mounts, hostNetwork, hostPID, and dangerous capabilities. Pod Security Admission should enforce the restricted profile, with OPA or Kyverno as a second layer. For sensitive or untrusted workloads, use sandboxed runtimes such as gVisor or Kata. Detection should include runtime rules for shell execution, host file access, and container escape indicators.</p>
+<h3 id="follow-up-4-how-do-you-detect-lateral-movement">Follow-up 4: How do you detect lateral movement?</h3>
+<p>Use three signals together: Kubernetes API audit logs for secret reads and RBAC changes, network flow logs or service mesh telemetry for first-seen cross-namespace connections, and runtime events for suspicious process execution. A high-confidence alert is a service account in dev reading secrets or making API calls outside its namespace followed by a new connection to a prod service.</p>
+<h3 id="follow-up-5-what-residual-risk-remains-for-third-party-helm-charts">Follow-up 5: What residual risk remains for third-party Helm charts?</h3>
+<p>The residual risk is that a chart or dependency can create dangerous manifests or run malicious code even if the chart appears legitimate. I would reduce that through internal chart mirroring, version and digest pinning, provenance verification, rendered-manifest scanning, and admission policies that reject privileged pods, broad ClusterRoleBindings, and unsigned images regardless of chart source.</p>
+<hr />
+<h2 id="15-common-mistakes-to-avoid">15. Common Mistakes to Avoid</h2>
+<ul>
+<li>Treating namespaces as security boundaries without NetworkPolicy, RBAC, and admission controls.</li>
+<li>Leaving pod-to-pod traffic default-allow across dev, staging, and prod.</li>
+<li>Allowing default service accounts to carry useful API permissions.</li>
+<li>Keeping <code>automountServiceAccountToken</code> enabled for workloads that do not need the API server.</li>
+<li>Storing high-value secrets only in Kubernetes Secrets without external secret management or KMS.</li>
+<li>Relying on service mesh mTLS while leaving direct pod or database paths open.</li>
+<li>Allowing <code>kubectl exec</code> and <code>port-forward</code> in prod without JIT, ticket binding, and audit.</li>
+<li>Installing third-party Helm charts directly from public repos without provenance or rendered-manifest scanning.</li>
+<li>Setting security admission webhooks to fail open in production.</li>
+<li>Enabling audit logs but missing runtime and network telemetry.</li>
+</ul>
+<hr />
+<h2 id="16-top-5-immediate-actions">16. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Break the flat network</strong> - separate prod or enforce default-deny NetworkPolicy for every namespace.</li>
+<li><strong>Reduce service account blast radius</strong> - disable automount by default and enforce least-privilege RBAC.</li>
+<li><strong>Block dangerous workloads at admission</strong> - enforce restricted Pod Security, OPA/Kyverno policies, and signed images.</li>
+<li><strong>Enforce workload identity and mTLS</strong> - require authenticated service-to-service calls with explicit authorization.</li>
+<li><strong>Correlate K8s audit, runtime, and network telemetry</strong> - detect cross-namespace movement, secret reads, privileged workloads, and telemetry gaps quickly.</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-06 | Source: scenario47-kubernetes-hardening.md and threat-modeling-prompt.md | Scenario 47 review - Attack-Review-Enhanced</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

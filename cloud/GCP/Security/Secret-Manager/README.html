@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Secret Manager — Secrets, Rotation, and the Secrets-Management Problem</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Security\Secret-Manager\README.md</p>
+<h1 id="gcp-secret-manager-secrets-rotation-and-the-secrets-management-problem">GCP Secret Manager — Secrets, Rotation, and the Secrets-Management Problem</h1>
+<p><strong>Cloud / Domain:</strong> GCP · Data protection · Identity &amp; credential hygiene<br />
+<strong>Service:</strong> <code>secretmanager.googleapis.com</code> (regional endpoints: <code>secretmanager.&lt;region&gt;.rep.googleapis.com</code>)<br />
+<strong>Anchor frameworks/refs:</strong> NIST SP 800-57 (key mgmt), NIST SP 800-63B (secrets), CIS GCP Benchmark, MITRE ATT&amp;CK T1555.006 / T1552 · Cross-refs: <code>../../../../supply_chain/README.md</code>, <code>../../../../supply_chain/Dependency-Confusion/README.md</code>, <code>../../../../supply_chain/Sigstore-And-Signing/README.md</code></p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Secret Manager is GCP's managed store for <strong>small blobs of sensitive data</strong> — database passwords, API keys, OAuth client secrets, TLS private keys, service-account keys you could not avoid minting — with a clean separation between the <em>secret</em> (a named container plus IAM and rotation policy), the <em>version</em> (an immutable, individually-addressable payload up to 64 KiB), and the <em>access</em> (a per-request, audited <code>AccessSecretVersion</code> call). It exists because the alternative — secrets pasted into source, baked into container images, dropped in environment variables committed to a repo, or emailed around — is the single most reliable way large organizations get breached. Real incidents keep proving the point: <strong>Uber (2016)</strong> lost 57M records because AWS keys sat in a private GitHub repo; <strong>Toyota (2022)</strong> left a database access key in a public repo for nearly five years; <strong>CircleCI (2023)</strong> had to force a global rotation of <em>every customer secret</em> after a laptop compromise stole session tokens. At scale, the hard problems are not "where do I put one password" but <strong>secret sprawl</strong> (thousands of secrets, nobody knows who can read what), <strong>secret zero</strong> (how does a workload prove identity to fetch its first secret without a secret), and <strong>detection</strong> (a valid credential read looks exactly like a legitimate one). Secret Manager solves storage, versioning, IAM-gated access, CMEK encryption, and rotation <em>eventing</em>; it does <strong>not</strong> by itself solve secret zero (that's Workload Identity) or rotation <em>logic</em> (you write that).</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- A <strong>secret</strong> is a container (name + IAM + rotation + replication policy); a <strong>version</strong> is the immutable payload; you always resolve <code>secrets/NAME/versions/{N|latest}</code>.<br />
+- Access is gated by <strong><code>roles/secretmanager.secretAccessor</code></strong> and is best granted <strong>per-secret</strong>, not project-wide — project-level accessor = every service can read every secret.<br />
+- Secrets are always encrypted at rest; <strong>CMEK</strong> (user-managed replication + Cloud KMS key) gives you the key-destruction kill-switch and crypto-shredding.<br />
+- Rotation in GCP is <strong>event-only</strong>: Secret Manager publishes to <strong>Pub/Sub</strong> on a schedule; <strong>you</strong> run the Cloud Function that mints the new credential and adds a version. Unlike AWS, there is no managed rotation Lambda.<br />
+- The right way to fetch a secret from GKE/Cloud Run/GCE is a <strong>short-lived Workload Identity token</strong>, never a downloaded SA key — solving <strong>secret zero</strong> with the platform, not another secret.<br />
+- Enclose Secret Manager in a <strong>VPC Service Controls</strong> perimeter so a stolen credential cannot exfiltrate secrets to an attacker-controlled project.</p>
+</blockquote>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>Secret Manager is a <strong>global control plane</strong> over regionally-replicated ciphertext. The API is small and the object model is deliberately three-layered so that IAM, rotation, and audit attach at the right granularity.</p>
+<table>
+<thead>
+<tr>
+<th>Object / concept</th>
+<th>What it is</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Secret</strong></td>
+<td>Named resource <code>projects/P/secrets/NAME</code> holding metadata: replication policy, rotation schedule, Pub/Sub topics, labels, CMEK key, IAM policy</td>
+<td>IAM and rotation bind here; the payload is <em>not</em> stored on the secret itself</td>
+</tr>
+<tr>
+<td><strong>Secret version</strong></td>
+<td>Immutable payload <code>.../secrets/NAME/versions/N</code>; states <code>ENABLED</code>, <code>DISABLED</code>, <code>DESTROYED</code></td>
+<td>Versions are how you rotate without breaking readers; <code>destroy</code> crypto-erases the payload but keeps the number</td>
+</tr>
+<tr>
+<td><strong><code>latest</code> alias</strong></td>
+<td>Resolves to the highest <strong>enabled</strong> version number</td>
+<td>Convenient but risky — pinning <code>latest</code> means a bad rotation instantly breaks all readers</td>
+</tr>
+<tr>
+<td><strong>Replication policy</strong></td>
+<td><code>automatic</code> (Google-managed multi-region) or <code>user-managed</code> (you pick regions)</td>
+<td><strong>CMEK requires <code>user-managed</code></strong> — you supply a KMS key <em>per location</em></td>
+</tr>
+<tr>
+<td><strong><code>AccessSecretVersion</code></strong></td>
+<td>The read RPC that returns the decrypted payload</td>
+<td>This is the only call that exposes plaintext; it is a <strong>Data Access audit log</strong> (off by default)</td>
+</tr>
+<tr>
+<td><strong>Rotation policy</strong></td>
+<td><code>rotation-period</code> + <code>next-rotation-time</code> + <code>topics</code></td>
+<td>Fires a Pub/Sub message; <strong>does not change the secret value</strong> by itself</td>
+</tr>
+<tr>
+<td><strong>Secret Manager service agent</strong></td>
+<td><code>service-&lt;PROJECT_NUMBER&gt;@gcp-sa-secretmanager.iam.gserviceaccount.com</code></td>
+<td>Needs KMS encrypt/decrypt on CMEK keys and <code>pubsub.publisher</code> on rotation topics</td>
+</tr>
+<tr>
+<td><strong>Regional secrets</strong></td>
+<td>Secrets created against a regional endpoint, data pinned to one region</td>
+<td>Data-residency and lower-latency; distinct from global secrets with replication policy</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Decision logic on a read.</strong> When a workload calls <code>AccessSecretVersion</code>, GCP evaluates, in order: (1) is the caller authenticated (valid Google identity / token)? (2) does IAM grant <code>secretmanager.versions.access</code> on that secret (via <code>secretAccessor</code> at the secret, project, folder, or org level, plus any conditions/deny policies)? (3) if a <strong>VPC-SC perimeter</strong> wraps the project, is the request originating from inside the perimeter (or an allowed access level)? (4) is the version <code>ENABLED</code>? (5) decrypt with the Google-managed or CMEK key (if CMEK, the KMS key must be <code>ENABLED</code> and the service agent must hold <code>cryptoKeyDecrypter</code>). Any failure short-circuits and is logged.</p>
+<p><strong>IAM roles you actually use.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Grants</th>
+<th>Use for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>roles/secretmanager.secretAccessor</code></td>
+<td><code>versions.access</code> (read payload)</td>
+<td>The <strong>only</strong> role a workload should get; grant per-secret</td>
+</tr>
+<tr>
+<td><code>roles/secretmanager.viewer</code></td>
+<td>Read metadata, <strong>not</strong> payload</td>
+<td>Dashboards, inventory tooling</td>
+</tr>
+<tr>
+<td><code>roles/secretmanager.secretVersionManager</code></td>
+<td>Add/enable/disable/destroy versions</td>
+<td>Rotation functions</td>
+</tr>
+<tr>
+<td><code>roles/secretmanager.admin</code></td>
+<td>Full incl. <code>setIamPolicy</code></td>
+<td>Break-glass / platform team only</td>
+</tr>
+<tr>
+<td><code>roles/secretmanager.secretVersionAdder</code></td>
+<td>Add versions only</td>
+<td>CI that publishes new secret values</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Create secrets (automatic vs user-managed replication) and add a version.</strong></p>
+<pre><code class="language-bash"># Global secret, Google-managed multi-region replication (simplest default)
+gcloud secrets create db-password \
+  --replication-policy=&quot;automatic&quot; \
+  --labels=&quot;env=prod,team=payments&quot;
+
+# Data-residency: pin replicas to specific regions (required before CMEK)
+gcloud secrets create db-password-eu \
+  --replication-policy=&quot;user-managed&quot; \
+  --locations=&quot;europe-west1,europe-west4&quot;
+
+# Add the payload as a NEW immutable version. Never pass secrets on argv (shell history!)
+printf 's3cr3t-value' | gcloud secrets versions add db-password --data-file=-
+
+# Read it back — this is the audited AccessSecretVersion call
+gcloud secrets versions access latest --secret=&quot;db-password&quot;
+gcloud secrets versions access 3 --secret=&quot;db-password&quot;   # pin a specific version
+</code></pre>
+<p><strong>Grant per-secret access to exactly one workload identity (least privilege).</strong></p>
+<pre><code class="language-bash"># GOOD: bind accessor on the single secret, to the app's dedicated service account
+gcloud secrets add-iam-policy-binding db-password \
+  --member=&quot;serviceAccount:payments-api@my-proj.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/secretmanager.secretAccessor&quot;
+
+# BAD (do not do this): project-level accessor = read EVERY secret in the project
+# gcloud projects add-iam-policy-binding my-proj \
+#   --member=&quot;serviceAccount:payments-api@my-proj.iam.gserviceaccount.com&quot; \
+#   --role=&quot;roles/secretmanager.secretAccessor&quot;
+</code></pre>
+<p><strong>IAM Condition to scope even a project-level grant by resource name</strong> (defense against blast-radius when you must grant broadly):</p>
+<pre><code class="language-bash">gcloud projects add-iam-policy-binding my-proj \
+  --member=&quot;serviceAccount:ci-runner@my-proj.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/secretmanager.secretAccessor&quot; \
+  --condition='expression=resource.name.startsWith(&quot;projects/_/secrets/ci-&quot;),title=ci-secrets-only'
+</code></pre>
+<p><strong>CMEK: user-managed replication + a Cloud KMS key per location.</strong> The Secret Manager <em>service agent</em> must be able to use the key.</p>
+<pre><code class="language-bash"># 1) Grant the Secret Manager service agent decrypt on the KMS key
+gcloud kms keys add-iam-policy-binding payments-key \
+  --location=&quot;us-central1&quot; --keyring=&quot;prod-ring&quot; \
+  --member=&quot;serviceAccount:service-123456789012@gcp-sa-secretmanager.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/cloudkms.cryptoKeyEncrypterDecrypter&quot;
+
+# 2) Create the secret with CMEK (note: needs user-managed replication)
+gcloud secrets create db-password-cmek \
+  --replication-policy=&quot;user-managed&quot; \
+  --locations=&quot;us-central1&quot; \
+  --kms-key-name=&quot;projects/my-proj/locations/us-central1/keyRings/prod-ring/cryptoKeys/payments-key&quot;
+</code></pre>
+<p><strong>Version lifecycle (safe rotation hygiene).</strong> Disable before destroy so you can roll back; destroy performs cryptographic erasure of the payload.</p>
+<pre><code class="language-bash">gcloud secrets versions disable 2 --secret=&quot;db-password&quot;    # readers of v2 now fail
+gcloud secrets versions destroy 2 --secret=&quot;db-password&quot;    # irreversible payload erase
+</code></pre>
+<p><strong>Configure scheduled rotation eventing</strong> (this only <em>notifies</em>; the function does the work):</p>
+<pre><code class="language-bash"># Secret Manager service agent must be able to publish to the topic
+gcloud pubsub topics add-iam-policy-binding secret-rotation \
+  --member=&quot;serviceAccount:service-123456789012@gcp-sa-secretmanager.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/pubsub.publisher&quot;
+
+gcloud secrets update db-password \
+  --add-topics=&quot;projects/my-proj/topics/secret-rotation&quot; \
+  --rotation-period=&quot;2592000s&quot; \
+  --next-rotation-time=&quot;2026-08-01T00:00:00Z&quot;   # rotate every 30 days
+</code></pre>
+<p><strong>Accessing a secret from a workload — Python client (short-lived token via ADC).</strong></p>
+<pre><code class="language-python">from google.cloud import secretmanager
+
+client = secretmanager.SecretManagerServiceClient()
+name = &quot;projects/my-proj/secrets/db-password/versions/latest&quot;
+resp = client.access_secret_version(request={&quot;name&quot;: name})
+db_password = resp.payload.data.decode(&quot;utf-8&quot;)   # never log this
+# Optionally verify integrity: resp.payload.data_crc32c
+</code></pre>
+<p><strong>Cloud Run — inject a secret without any code change</strong> (mounted as env var or file):</p>
+<pre><code class="language-bash"># As an environment variable (pinned version recommended over :latest for prod)
+gcloud run deploy payments-api --image=us-docker.pkg.dev/my-proj/app:v42 \
+  --service-account=&quot;payments-api@my-proj.iam.gserviceaccount.com&quot; \
+  --set-secrets=&quot;DB_PASSWORD=db-password:latest&quot;
+
+# As a mounted file (avoids env-var leakage via /proc/&lt;pid&gt;/environ or crash dumps)
+gcloud run deploy payments-api --image=us-docker.pkg.dev/my-proj/app:v42 \
+  --set-secrets=&quot;/secrets/db/password=db-password:latest&quot;
+</code></pre>
+<p><strong>GKE — Workload Identity + the Secret Store CSI driver</strong> (mount, no key files):</p>
+<pre><code class="language-yaml"># SecretProviderClass mounts db-password at /mnt/secrets-store/db-password
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: gcp-db-secret
+spec:
+  provider: gcp
+  parameters:
+    secrets: |
+      - resourceName: &quot;projects/my-proj/secrets/db-password/versions/latest&quot;
+        path: &quot;db-password&quot;
+</code></pre>
+<pre><code class="language-yaml"># The pod's KSA is bound to the GCP SA via Workload Identity (no downloaded key)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-ksa
+  annotations:
+    iam.gke.io/gcp-service-account: payments-api@my-proj.iam.gserviceaccount.com
+</code></pre>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — Object model and control/data plane.</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Secret container] --> B[IAM policy]
+    A --> C[Rotation policy]
+    A --> D[Replication and CMEK]
+    A --> E[Version 1 enabled]
+    A --> F[Version 2 enabled]
+    A --> G[Version 3 disabled]
+    H[Workload] --> I[AccessSecretVersion latest]
+    I --> F
+    F --> J[Decrypt with KMS key]
+    J --> K[Return payload]
+</pre>
+<p><strong>Diagram B — Read path with IAM and VPC-SC evaluation.</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+    participant W as Workload
+    participant M as Metadata server
+    participant SM as Secret Manager
+    participant KMS as Cloud KMS
+    participant AL as Audit Log
+    W->>M: Request OAuth token for attached SA
+    M-->>W: Short lived access token
+    W->>SM: AccessSecretVersion with token
+    SM->>SM: Check IAM secretAccessor
+    SM->>SM: Check VPC-SC perimeter
+    SM->>KMS: Decrypt payload
+    KMS-->>SM: Plaintext
+    SM->>AL: Write DATA_READ log entry
+    SM-->>W: Secret payload
+</pre>
+<p><strong>Diagram C — Pub/Sub + Cloud Function rotation pattern.</strong></p>
+<pre class="mermaid">
+flowchart LR
+    A[Secret Manager scheduler] --> B[Publish SECRET_ROTATE event]
+    B --> C[Pub Sub topic]
+    C --> D[Cloud Function subscriber]
+    D --> E[Create new credential in upstream system]
+    E --> F[Add new secret version]
+    F --> G[Verify new version works]
+    G --> H[Disable and destroy old version]
+</pre>
+<p><strong>Diagram D — Secret zero: bootstrapping trust without a stored secret.</strong></p>
+<pre class="mermaid">
+flowchart TD
+    A[Workload has no secret] --> B[Platform issues signed identity]
+    B --> C[Metadata token or Workload Identity]
+    C --> D[Exchange for OAuth access token]
+    D --> E[Call Secret Manager]
+    E --> F[Receive app secrets]
+    F --> G[Connect to database and APIs]
+</pre>
+<p><strong>Diagram E — Version state machine.</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Enabled
+    Enabled --> Disabled
+    Disabled --> Enabled
+    Disabled --> Destroyed
+    Enabled --> Destroyed
+    Destroyed --> [*]
+</pre>
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Uber breach</td>
+<td>2016</td>
+<td>AWS keys in a private GitHub repo; attackers pivoted to S3, 57M records</td>
+<td>Long-lived static keys in source = full blast radius; use a vault + short-lived creds</td>
+</tr>
+<tr>
+<td>Toyota T-Connect key leak</td>
+<td>2022</td>
+<td>DB access key in a <em>public</em> GitHub repo for ~5 years, ~296k emails exposed</td>
+<td>Secret scanning must run on push; rotate on any exposure regardless of "was it used"</td>
+</tr>
+<tr>
+<td>CircleCI breach</td>
+<td>2023</td>
+<td>Engineer laptop malware stole SSO session, exfiltrated customer env vars &amp; secrets</td>
+<td>CI is a secret aggregator; store secrets in a vault with short TTL and rotate en masse fast</td>
+</tr>
+<tr>
+<td>Codecov bash-uploader</td>
+<td>2021</td>
+<td>Poisoned CI script exfiltrated env vars (incl. secrets) from thousands of pipelines</td>
+<td>Secrets injected as env vars in CI are readable by any compromised step — cross-ref <code>supply_chain</code></td>
+</tr>
+<tr>
+<td>Log4Shell exploitation</td>
+<td>2021</td>
+<td>CVE-2022-… JNDI RCE used to read env vars / exfil cloud creds</td>
+<td>App RCE reaches env-var secrets instantly; prefer file mounts and least-privilege SAs</td>
+</tr>
+<tr>
+<td>Capital One</td>
+<td>2019</td>
+<td>SSRF to EC2 metadata → temp creds → 100M records</td>
+<td>Metadata/identity is the new secret; protect the metadata path, use scoped SAs</td>
+</tr>
+<tr>
+<td>Solarwinds "solarwinds123"</td>
+<td>2019–20</td>
+<td>Hardcoded weak password in a public repo update-server config</td>
+<td>Hardcoded credentials of any strength are a design defect, not a strength question</td>
+</tr>
+<tr>
+<td>Mercedes-Benz token leak</td>
+<td>2024</td>
+<td>A GitHub token in a public repo exposed internal source, keys, blueprints</td>
+<td>One leaked token can unlock an entire internal registry — treat tokens as secret zero</td>
+</tr>
+<tr>
+<td>GitGuardian Secrets Sprawl</td>
+<td>annual</td>
+<td>Millions of secrets committed to public GitHub every year (10M+ in 2022)</td>
+<td>Sprawl is the baseline reality; assume some of yours are already leaked and design for rotation</td>
+</tr>
+<tr>
+<td>Toyota supplier / Nissan / Samsung leaks</td>
+<td>2022–23</td>
+<td>Assorted keys and source in repos and pasted into third-party tools</td>
+<td>Detection + rotation speed matters more than perfect prevention</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — Toyota (2022): the five-year key.</strong> A subcontractor uploaded portions of the T-Connect source to a public GitHub repository, and embedded in it was an access key to a data server holding ~296,000 customer email addresses and management numbers. The key sat exposed from December 2017 to September 2022. Nothing about Secret Manager's storage would have helped <em>if the key was still copied into source</em> — but the control that closes this gap is <strong>(a) not minting a static key at all</strong> (use Workload Identity so there is no key to leak) and <strong>(b) secret scanning on every push</strong> (gitleaks/trufflehog) so the key never survives the first commit, plus <strong>automatic rotation</strong> so even a leaked value is short-lived. The failure was upstream of any vault: the credential was long-lived and copyable.</p>
+<p><strong>Case study 2 — CircleCI (2023): the secret aggregator.</strong> Malware on an engineer's laptop stole a valid, 2FA-backed SSO session token (T1539/T1078). Because CircleCI stores customers' pipeline secrets to inject into builds, the attacker could potentially read <em>every customer's</em> environment variables, project keys, and tokens. CircleCI's response was to rotate all customer secrets and advise customers to rotate everything they'd stored. The lesson for a Secret Manager design: (1) secrets that live in a third-party CI are only as safe as that CI's crown-jewel session tokens — prefer <strong>OIDC federation</strong> so CI gets a <em>short-lived</em> GCP token rather than a stored long-lived key; (2) design so a mass rotation is a scripted, low-effort event, not a multi-week scramble; (3) <strong>Data Access audit logs</strong> on <code>AccessSecretVersion</code> are what let you answer "which secrets did the attacker actually read?"</p>
+<p><strong>Case study 3 — Codecov (2021): env-var exfiltration in CI.</strong> Attackers altered Codecov's <code>bash-uploader</code> script so that, when run in customers' CI, it exfiltrated the entire environment — which in most pipelines includes injected secrets. This is why <strong>how</strong> you inject matters: a secret set as a build-wide environment variable is readable by any compromised step or dependency, whereas a <strong>file mount with tight file permissions</strong>, fetched <strong>just-in-time</strong> by a scoped identity, narrows the window. It also argues for keeping secrets out of CI entirely where possible — let the <em>deployment target</em> (Cloud Run/GKE) fetch its own secrets at runtime via Workload Identity, so CI never holds them.</p>
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Secret committed to source repo</td>
+<td>T1552.001 Credentials in Files</td>
+<td>Developer hardcodes key; no pre-commit scan</td>
+<td>Full credential exposure, often years</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Secret printed in CI/build logs</td>
+<td>T1552.001 / T1213</td>
+<td><code>echo $SECRET</code>, verbose debug, error dumps</td>
+<td>Anyone with log access reads it</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Project-level <code>secretAccessor</code> grant</td>
+<td>T1078.004 Valid Accounts</td>
+<td>Over-broad IAM ("grant on project, done")</td>
+<td>One SA compromise reads all secrets</td>
+<td>High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Downloaded SA JSON key used to fetch secrets</td>
+<td>T1552.004 Private Keys</td>
+<td>Key file on disk / in image = new secret zero</td>
+<td>Portable, long-lived, forgeable identity</td>
+<td>High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No rotation / static long-lived value</td>
+<td>T1555.006 Cloud Secret Stores</td>
+<td>Rotation "later"; eventing wired to nothing</td>
+<td>Leaked value valid indefinitely</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Secret exfiltrated to attacker project</td>
+<td>TA0010 / T1537</td>
+<td>No VPC-SC perimeter; valid creds copy out</td>
+<td>Bulk theft of every accessible secret</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Metadata SSRF to steal workload token</td>
+<td>T1552.005 Cloud Metadata API</td>
+<td>App SSRF reaches <code>169.254.169.254</code></td>
+<td>Token → <code>AccessSecretVersion</code> as the SA</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>8</td>
+<td>RCE reads env-var-injected secrets</td>
+<td>T1552.007 / T1005</td>
+<td>Secrets as env vars, app RCE (Log4Shell class)</td>
+<td>Instant read of all injected secrets</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Over-privileged rotation function</td>
+<td>T1098 Account Manipulation</td>
+<td>Function has <code>admin</code> not <code>versionManager</code></td>
+<td>Function compromise = IAM changes</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Data Access logs disabled</td>
+<td>Detection gap</td>
+<td><code>AccessSecretVersion</code> DATA_READ off by default</td>
+<td>No record of who read what</td>
+<td>High</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>latest</code> pinned, bad rotation breaks prod</td>
+<td>Availability / mis-op</td>
+<td>Reader follows <code>latest</code>, new version invalid</td>
+<td>Outage across all consumers</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>12</td>
+<td>CMEK key destroyed / disabled</td>
+<td>Availability / DoS</td>
+<td>Key lifecycle mistake or malicious disable</td>
+<td>All CMEK secrets unreadable (also a kill-switch)</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Secret in Terraform state / plan output</td>
+<td>T1552.001</td>
+<td>Plaintext in <code>terraform.tfstate</code>, unencrypted backend</td>
+<td>State file becomes a secret trove</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Secret pasted into chat / ticket / AI tool</td>
+<td>T1552.008 Chat Messages</td>
+<td>Human sharing, LLM prompt paste</td>
+<td>Sprawl into un-audited systems</td>
+<td>High</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Typosquatted/confused dep exfiltrates env</td>
+<td>T1195 Supply Chain</td>
+<td>Malicious package reads process env at install</td>
+<td>CI/runtime secrets exfil — cross-ref Dependency-Confusion</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Stale accessor after team/role change</td>
+<td>T1078 Valid Accounts</td>
+<td>No access review; IAM drift</td>
+<td>Ex-service/ex-team still reads secrets</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Version <code>destroy</code> used maliciously</td>
+<td>Impact / T1485</td>
+<td>Attacker with <code>versionManager</code> erases payloads</td>
+<td>Data-loss / denial to dependent services</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Cross-project impersonation to read secrets</td>
+<td>T1548 / T1078.004</td>
+<td><code>iam.serviceAccountTokenCreator</code> misgranted</td>
+<td>Lateral movement to another project's secrets</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Regional/replication misconfig leaks residency</td>
+<td>Compliance</td>
+<td><code>automatic</code> replication for EU-only data</td>
+<td>Data-residency / GDPR violation</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Weak human break-glass access</td>
+<td>T1078</td>
+<td>Admins hold standing <code>secretmanager.admin</code></td>
+<td>Insider or phished admin drains store</td>
+<td>Medium</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Secrets in source</td>
+<td>gitleaks/trufflehog pre-commit + CI gate; GitHub push protection</td>
+<td>SCM / CI</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Secrets in logs</td>
+<td>Log redaction, no <code>set -x</code> around secrets, deny debug in prod</td>
+<td>CI config / app</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Broad accessor</td>
+<td>Per-secret <code>secretAccessor</code>; IAM Conditions on resource name</td>
+<td>Secret IAM policy</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Downloaded SA keys</td>
+<td>Workload Identity / Workload Identity Federation; org policy <code>disableServiceAccountKeyCreation</code></td>
+<td>Org policy / IAM</td>
+</tr>
+<tr>
+<td>5</td>
+<td>No rotation</td>
+<td>Rotation policy + Pub/Sub + function; alert on <code>next-rotation-time</code> overdue</td>
+<td>Secret + Cloud Function</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Exfiltration</td>
+<td>VPC Service Controls perimeter around <code>secretmanager.googleapis.com</code></td>
+<td>VPC-SC</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Metadata SSRF</td>
+<td>Fix SSRF; GKE metadata concealment; egress controls; scoped SA</td>
+<td>Network / app</td>
+</tr>
+<tr>
+<td>8</td>
+<td>RCE reads env secrets</td>
+<td>Mount secrets as files not env; least-priv SA; patch</td>
+<td>Deploy config</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Over-priv rotation fn</td>
+<td>Grant <code>secretVersionManager</code> only; dedicated SA</td>
+<td>Function IAM</td>
+</tr>
+<tr>
+<td>10</td>
+<td>No audit trail</td>
+<td>Enable Data Access <code>DATA_READ</code> audit logs for Secret Manager</td>
+<td>Audit config</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>latest</code> breaks prod</td>
+<td>Pin explicit versions in prod; canary new version; verify-then-promote</td>
+<td>Deploy / rotation fn</td>
+</tr>
+<tr>
+<td>12</td>
+<td>CMEK key destroy</td>
+<td>KMS key IAM separation; scheduled-destroy delay; key ring backups</td>
+<td>Cloud KMS</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Secret in TF state</td>
+<td>Encrypted remote backend; avoid secret in state; use ephemeral values</td>
+<td>IaC</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Human paste/sprawl</td>
+<td>Policy + DLP; scan tickets/chat; SSO to vault not copy-paste</td>
+<td>Process / DLP</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Malicious dependency</td>
+<td>Private-first resolution, lockfiles, hermetic builds — cross-ref supply_chain</td>
+<td>Build</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Stale accessors</td>
+<td>Quarterly IAM Recommender access reviews; IAM deny policies</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Malicious destroy</td>
+<td>Split <code>versionManager</code> from readers; alert on <code>DestroySecretVersion</code></td>
+<td>IAM / detection</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Cross-proj impersonation</td>
+<td>Restrict <code>serviceAccountTokenCreator</code>; org policy audit</td>
+<td>IAM</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Residency misconfig</td>
+<td><code>user-managed</code> replication to required regions; org policy on locations</td>
+<td>Replication policy</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Standing admin</td>
+<td>Just-in-time access (PAM), break-glass with approval + alerting</td>
+<td>Access management</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1) Per-secret <code>secretAccessor</code>, never project-level.</strong> The single most common misconfiguration is granting <code>roles/secretmanager.secretAccessor</code> on the <em>project</em>, which makes every principal with that binding able to read <em>every secret in the project</em>. IAM evaluates the role on the resource hierarchy (org → folder → project → secret), so a binding higher up is inherited downward. The correct pattern is <code>gcloud secrets add-iam-policy-binding &lt;secret&gt; --member=&lt;one SA&gt; --role=secretAccessor</code> on each secret, ideally one dedicated service account per workload. Where a broad grant is unavoidable (e.g., a CI runner), constrain it with an <strong>IAM Condition</strong> on <code>resource.name.startsWith(...)</code> so the grant only covers a naming prefix. <em>Trade-off:</em> per-secret bindings multiply the number of policies to manage — you offset this with Terraform modules and a naming convention, but it is real operational overhead versus one lazy project grant. The blast-radius reduction is worth it: a compromised workload reads <em>its</em> secrets, not the whole org's.</p>
+<p><strong>2) Workload Identity instead of downloaded SA keys (solving secret zero).</strong> A downloaded service-account JSON key is itself a long-lived, copyable, forgeable secret — the exact thing you're trying to eliminate — and it recreates the "secret zero" bootstrap problem. Instead, let the platform assert identity: GCE/Cloud Run/Cloud Functions get an <strong>attached service account</strong> and fetch short-lived OAuth tokens from the metadata server; <strong>GKE Workload Identity</strong> binds a Kubernetes ServiceAccount to a GCP SA so pods get tokens without any key file; and <strong>Workload Identity Federation</strong> lets external systems (GitHub Actions, on-prem, other clouds) exchange their native OIDC token for a short-lived GCP token — no stored GCP key at all. Enforce it with the org policy <code>constraints/iam.disableServiceAccountKeyCreation</code>. <em>Trade-off:</em> federation setup is fiddly (mapping claims, pool/provider config) and some legacy/off-cloud systems genuinely can't produce a usable OIDC token; for those, a short-TTL key with alerting is the fallback, not the default.</p>
+<p><strong>3) Rotation via Pub/Sub + Cloud Function — and know it's your job.</strong> GCP's rotation is <strong>event-only</strong>: setting <code>--rotation-period</code> and <code>--add-topics</code> makes Secret Manager publish a message with attribute <code>eventType=SECRET_ROTATE</code> on schedule, but it does <strong>not</strong> generate a new value. You subscribe a Cloud Function that (a) mints a new credential in the upstream system (DB user, API), (b) <code>AddSecretVersion</code>, (c) verifies the new version works, then (d) disables/destroys the old one. The classic robust pattern is <strong>two-set/AWS-style "AWSPENDING→AWSCURRENT"</strong> — create-and-test the new credential before cutting over, so a failed rotation never causes an outage. <em>Trade-off:</em> you own the correctness, retries, idempotency, and the "old version still valid during overlap" window; this is more work than AWS's managed rotation Lambdas but gives full control. Always alert if a secret's <code>next-rotation-time</code> is in the past (rotation silently stalled).</p>
+<p><strong>4) VPC Service Controls perimeter around Secret Manager.</strong> IAM answers "<em>who</em> can access"; VPC-SC answers "<em>from where</em>." Placing <code>secretmanager.googleapis.com</code> inside a <strong>service perimeter</strong> means that even a valid, correctly-authorized credential cannot be used to read secrets and copy them to a project <em>outside</em> the perimeter — it neutralizes the exfiltration step (T1537/TA0010) that follows most credential theft. You pair it with <strong>access levels</strong> (e.g., allow only from corporate IP ranges / trusted device posture) for human access. <em>Trade-off:</em> perimeters are notoriously operationally sharp — cross-project and cross-perimeter calls break in non-obvious ways, and you must maintain ingress/egress rules; roll out in <strong>dry-run mode</strong> first and read the <code>vpcServiceControlsUniqueId</code> denials in the audit log before enforcing.</p>
+<p><strong>5) Enable Data Access audit logging and alert on anomalies.</strong> By default GCP logs Secret Manager <strong>Admin Activity</strong> (create, <code>setIamPolicy</code>, destroy) but <strong>not</strong> <code>AccessSecretVersion</code>, because reads are <code>DATA_READ</code> logs that are off by default and can be high-volume. Without them you cannot answer "which secrets did the attacker read" after a breach — the exact question CircleCI had to answer. Turn them on via the project/org <strong>IAM audit config</strong> for <code>secretmanager.googleapis.com</code>, then build detections (§6) for volume spikes, access from new principals/regions, and reads immediately following an IAM change. <em>Trade-off:</em> <code>DATA_READ</code> volume and cost — a busy service reading <code>latest</code> every few seconds generates a lot of log lines; mitigate by caching secrets in-process with a sane TTL (which also reduces API calls) and by exporting logs to BigQuery/Chronicle for cheaper retention and querying.</p>
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<p><strong>What to log / telemetry sources.</strong><br />
+- <strong>Cloud Audit Logs — Admin Activity</strong> (always on): <code>CreateSecret</code>, <code>AddSecretVersion</code>, <code>SetIamPolicy</code>, <code>DestroySecretVersion</code>, <code>UpdateSecret</code> (rotation/topic changes). Field <code>protoPayload.methodName</code>, <code>protoPayload.authenticationInfo.principalEmail</code>.<br />
+- <strong>Cloud Audit Logs — Data Access</strong> (must enable): <code>google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion</code> — the read events. Key fields: <code>resourceName</code> (which secret/version), <code>principalEmail</code>, <code>requestMetadata.callerIp</code>, <code>requestMetadata.callerSuppliedUserAgent</code>.<br />
+- <strong>VPC-SC violation logs</strong>: <code>protoPayload.metadata.violationReason</code>, <code>vpcServiceControlsUniqueId</code> for denied cross-perimeter reads.<br />
+- <strong>Cloud KMS logs</strong>: decrypt calls on the CMEK key (spike = mass read), and any <code>DestroyCryptoKeyVersion</code>.<br />
+- <strong>SCM / CI secret-scan findings</strong>: gitleaks/trufflehog/GitHub push-protection alerts.</p>
+<p><strong>Sample detection 1 — anomalous secret access (BigQuery/Log Analytics SQL on exported audit logs).</strong> Flags principals reading far more distinct secrets than their baseline, or reading from a new IP.</p>
+<pre><code class="language-sql">SELECT
+  protopayload_auditlog.authenticationInfo.principalEmail AS principal,
+  protopayload_auditlog.requestMetadata.callerIp          AS caller_ip,
+  COUNT(DISTINCT protopayload_auditlog.resourceName)       AS distinct_secrets,
+  COUNT(*)                                                 AS access_count
+FROM `my-proj.security_logs.cloudaudit_googleapis_com_data_access`
+WHERE protopayload_auditlog.methodName =
+      'google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion'
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+GROUP BY principal, caller_ip
+HAVING distinct_secrets &gt; 20          -- tune to your baseline
+ORDER BY distinct_secrets DESC;
+</code></pre>
+<p><strong>Sample detection 2 — Sigma rule: destroy or IAM-widen on secrets.</strong></p>
+<pre><code class="language-yaml">title: GCP Secret Manager Destroy or Broad IAM Grant
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  destroy:
+    protoPayload.methodName: 'google.cloud.secretmanager.v1.SecretManagerService.DestroySecretVersion'
+  broad_grant:
+    protoPayload.methodName: 'google.cloud.secretmanager.v1.SecretManagerService.SetIamPolicy'
+    protoPayload.request.policy.bindings|contains: 'roles/secretmanager.secretAccessor'
+    protoPayload.resourceName|contains: 'projects/'   # project-level, not per-secret
+  condition: destroy or broad_grant
+level: high
+</code></pre>
+<p><strong>Sample detection 3 — CI secret-scan gate (gitleaks in a pre-merge job).</strong></p>
+<pre><code class="language-yaml"># .github/workflows/secret-scan.yml
+- name: gitleaks
+  uses: gitleaks/gitleaks-action@v2
+  env:
+    GITLEAKS_ENABLE_UPLOAD_ARTIFACT: &quot;false&quot;
+  # Fails the build (non-zero exit) on any detected secret; block merge on failure
+</code></pre>
+<p><strong>Sample detection 4 — Cloud Logging alert on stalled rotation.</strong> Alert when <code>UpdateSecret</code> events stop for secrets that carry a rotation policy, or query the API for <code>nextRotationTime &lt; now</code> on a schedule (a stalled rotation function is silent otherwise).</p>
+<p><strong>Response playbook (specific to a suspected secret compromise).</strong><br />
+1. <strong>Confirm scope (identify):</strong> query Data Access logs for every <code>AccessSecretVersion</code> by the suspect principal/IP over the exposure window; list the exact <code>resourceName</code>s read. This is your "what did they get" list.<br />
+2. <strong>Contain — cut the identity:</strong> disable/rotate the compromised principal (SA key, session), remove its IAM bindings, and if a perimeter exists, tighten access levels. If exfil is suspected and VPC-SC was off, enable it now (dry-run then enforce).<br />
+3. <strong>Contain — cut the secret value:</strong> for each affected secret, <code>AddSecretVersion</code> with a fresh value in the upstream system, verify consumers pick it up, then <code>disable</code> (not yet destroy) the exposed version so you can roll back. For CMEK secrets under active abuse, disabling the KMS key is an instant blanket kill-switch (accept the outage).<br />
+4. <strong>Eradicate:</strong> rotate <em>every</em> credential the compromised path could reach, not just the confirmed reads (assume the log may be incomplete if Data Access logging was recently enabled). Remove any downloaded SA keys and replace with Workload Identity. Scrub the leaked value from source/CI history.<br />
+5. <strong>Recover:</strong> re-enable normal access, restore consumers on new versions, and only then <code>destroy</code> the exposed versions (crypto-erase). Confirm no consumer still pins the old version number.<br />
+6. <strong>Post-incident:</strong> add/verify per-secret IAM, rotation policy, Data Access logging, and secret scanning where they were missing; write a detection for the exact pattern observed; run a game-day mass-rotation drill.</p>
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>Q1. What are the three layers of the Secret Manager object model and why does the split matter?</strong><br />
+A secret is a named container holding metadata — IAM policy, rotation policy, replication/CMEK, labels. A secret <em>version</em> is the immutable payload (≤64 KiB), addressable by number, with states enabled/disabled/destroyed. Access is a per-request <code>AccessSecretVersion</code> call resolving <code>secrets/NAME/versions/{N|latest}</code>. The split matters because IAM and rotation attach to the <em>container</em> (stable identity) while the <em>value</em> changes over time as immutable versions — so you can rotate without changing who has access, and roll back by re-enabling an older version.<br />
+<em>Signal:</em> Do they know versions are immutable and that IAM binds at the secret, not the value.</p>
+<p><strong>Q2. Which IAM role does a workload need to read a secret, and what's the least-privilege way to grant it?</strong><br />
+<code>roles/secretmanager.secretAccessor</code>, which grants <code>secretmanager.versions.access</code>. Least privilege means binding it <strong>on the individual secret</strong> to a <strong>dedicated service account</strong> for that workload — never <code>roles/owner</code> or accessor at the project level, because higher-level bindings are inherited by all secrets. If a broad grant is unavoidable, constrain with an IAM Condition on <code>resource.name</code>.<br />
+<em>Signal:</em> Per-secret vs project-level instinct; knowing the exact role name.</p>
+<p><strong>Q3. Is data in Secret Manager encrypted, and what does CMEK add?</strong><br />
+Yes — all payloads are encrypted at rest by default with Google-managed keys. CMEK lets you supply your own Cloud KMS key (requires user-managed replication, one key per location), which adds: control over the key's lifecycle, the ability to <strong>crypto-shred</strong> by destroying the key, key-usage audit logs, and satisfying compliance requirements for customer-controlled keys. The Secret Manager service agent must hold <code>cryptoKeyEncrypterDecrypter</code> on the key.<br />
+<em>Signal:</em> Understands default encryption exists; CMEK is about control/kill-switch, not "encryption on vs off."</p>
+<p><strong>Q4. What is "secret zero" and how does GCP address it?</strong><br />
+Secret zero is the bootstrap paradox: to fetch secrets you need a credential, but that credential is itself a secret that must be provisioned and protected. GCP addresses it with platform-issued identity — attached service accounts (metadata tokens), GKE Workload Identity, and Workload Identity Federation for external systems — so the workload proves identity via short-lived tokens without any stored key. The platform, not another secret, is the root of trust.<br />
+<em>Signal:</em> Recognizes the recursion and that Workload Identity is the answer, not "store it more carefully."</p>
+<p><strong>Q5. Why prefer mounting a secret as a file over an environment variable?</strong><br />
+Environment variables are broadly readable — via <code>/proc/&lt;pid&gt;/environ</code>, crash dumps, <code>printenv</code>, child processes, and any compromised build/runtime step (Codecov, Log4Shell classes) — and often leak into logs. A file mount can have restrictive permissions, isn't inherited by child processes, and is less likely to be dumped. Secret Manager on Cloud Run/GKE supports both; files are the safer default for high-value secrets.<br />
+<em>Signal:</em> Knows env vars are a leak vector, not just a convenience.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>Q6. Design secret access for a fleet of Cloud Run services so no service can read another's secrets and there are no key files.</strong><br />
+Give each service its own dedicated service account (<code>--service-account</code>), so identity is per-service. Store each service's secrets with a naming convention and bind <code>secretAccessor</code> <strong>per secret</strong> to only that service's SA. Inject via <code>--set-secrets</code> as file mounts (not env) pinned to explicit versions for prod. No downloaded keys — Cloud Run's attached SA yields short-lived metadata tokens; enforce <code>disableServiceAccountKeyCreation</code> org-wide. Wrap the project in a VPC-SC perimeter so a compromised service can't exfiltrate to an outside project, and enable Data Access logging with a per-SA anomaly detection. The result: one service's compromise reads only its own secrets, and there's no static key to steal.<br />
+<em>Signal:</em> Ties identity-per-workload + per-secret IAM + no keys + perimeter + detection into a coherent design.</p>
+<p><strong>Q7. Walk through a safe automatic rotation for a database password with zero downtime.</strong><br />
+Set <code>--rotation-period</code> and <code>--add-topics</code> so Secret Manager publishes <code>SECRET_ROTATE</code> to Pub/Sub. A Cloud Function (with only <code>secretVersionManager</code>, its own SA) subscribes and runs a create-then-cut-over flow: (1) create a <em>new</em> DB user/password (or alter a second credential) in the database; (2) <code>AddSecretVersion</code> with the new value; (3) actively test the new version connects; (4) only then have consumers move to it (they follow <code>latest</code> or you canary-promote); (5) once no connections use the old credential, <code>disable</code> then <code>destroy</code> the old version and drop the old DB user. The overlap window (both credentials valid) is what gives zero downtime. Alert if <code>next-rotation-time</code> goes stale. The key insight: GCP only <em>notifies</em>; correctness of the two-credential overlap is your code's job.<br />
+<em>Signal:</em> Knows rotation is event-only in GCP and describes create-test-cutover overlap, not a naive replace-in-place.</p>
+<p><strong>Q8. Compare Secret Manager to SSM Parameter Store / Azure Key Vault and when you'd choose each.</strong><br />
+Secret Manager: purpose-built for secrets, per-secret IAM, versions, CMEK, Pub/Sub rotation eventing (you write logic). AWS splits it: <strong>Secrets Manager</strong> (native rotation Lambdas, cross-region replication, higher cost) vs <strong>SSM Parameter Store</strong> (cheaper, SecureString via KMS, good for config + low-churn secrets, no built-in rotation on standard tier). Azure <strong>Key Vault</strong> unifies secrets/keys/certs with Event Grid rotation events and managed-identity access. Choose Secret Manager on GCP; on AWS use Secrets Manager when you need managed rotation and Parameter Store for cheap config-grade secrets; Key Vault on Azure especially when you also need HSM-backed keys and cert management in one place.<br />
+<em>Signal:</em> Knows AWS's two-service split and the rotation-logic difference (managed vs DIY).</p>
+<p><strong>Q9. How would you detect that a compromised service account is bulk-reading secrets, and what limits your visibility?</strong><br />
+You need Data Access audit logs (<code>AccessSecretVersion</code>) enabled — they're off by default. Then baseline each principal's normal access (distinct secrets, IP, user-agent, rate) and alert on deviations: sudden spike in <em>distinct</em> secrets read, access from a new IP/region, or reads right after an IAM <code>SetIamPolicy</code> change. The limits: if logging was only recently enabled you can't see historical reads; <code>latest</code>-polling services generate high volume that hides low-and-slow abuse; and cached secrets mean a stolen value can be <em>used</em> without any further Secret Manager call. So you complement with downstream detections (the credential's use in the DB/API) and VPC-SC to block exfil regardless.<br />
+<em>Signal:</em> Knows Data Access logs are opt-in and articulates the visibility gaps.</p>
+<p><strong>Q10. Terraform stores a secret's value in state. What's the exposure and how do you mitigate?</strong><br />
+Terraform writes resource attributes — including a secret's plaintext payload if you set it via Terraform — into <code>terraform.tfstate</code>, so state becomes a secret trove readable by anyone with backend access. Mitigations: use an <strong>encrypted remote backend</strong> (GCS with CMEK) with tight IAM and locking; avoid putting the secret value in Terraform at all (create the secret container in Terraform but add versions out-of-band via a pipeline or <code>gcloud</code>); use ephemeral/write-only mechanisms where supported; and never output secrets in plan/apply logs. Treat any state file as sensitive and scan it.<br />
+<em>Signal:</em> Knows IaC state is a real secret-sprawl vector and gives concrete backend/ownership mitigations.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>Q11. An attacker has SSRF in a Cloud Run app whose SA has <code>secretAccessor</code> on several secrets. Trace the attack and the layered defenses.</strong><br />
+SSRF lets the attacker make the app request the metadata server (<code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code>) to obtain a short-lived OAuth token for the attached SA (T1552.005), then call <code>AccessSecretVersion</code> for every secret that SA can read (T1555.006), then exfiltrate. Layered defenses: (1) fix the SSRF and validate/deny internal-address egress; (2) scope the SA minimally so the blast radius is only its own secrets (per-secret IAM); (3) VPC-SC so even with the token, reads can't be copied to an outside project; (4) Data Access logging + anomaly detection to catch the bulk read and the unusual caller pattern; (5) mount secrets as files with a cached in-process copy so the token isn't even needed for already-loaded secrets — but that doesn't help new reads, so (2)+(3) carry the weight. The lesson mirrors Capital One: identity/metadata is the new secret.<br />
+<em>Signal:</em> Connects SSRF→metadata→token→secrets and layers IAM + VPC-SC + detection rather than one control.</p>
+<p><strong>Q12. Explain crypto-shredding with CMEK and its failure modes as both a control and a risk.</strong><br />
+With CMEK, destroying (or disabling) the Cloud KMS key renders every secret encrypted under it permanently unreadable — a fast, irreversible "delete everything" without touching each ciphertext, useful for data-subject deletion or emergency containment. Failure modes: (1) it's a <strong>DoS</strong> if triggered accidentally or maliciously by someone with KMS key admin — separate KMS key IAM from secret IAM and use scheduled-destroy delays so destruction is reversible for a window; (2) key <strong>rotation</strong> in KMS re-encrypts new writes but old versions stay decryptable under prior key versions, so shredding requires destroying the right key material; (3) if the KMS key is in a different project/region with its own availability, a KMS outage or misconfigured service-agent permission takes your secrets offline. The control's power (instant blanket invalidation) is exactly its risk.<br />
+<em>Signal:</em> Understands crypto-shredding mechanics and the availability/DoS dual-nature, plus IAM separation.</p>
+<p><strong>Q13. You must let GitHub Actions deploy to GCP and read deploy-time secrets without storing a GCP key in GitHub. How?</strong><br />
+Use <strong>Workload Identity Federation</strong>: create a workload identity pool and an OIDC provider trusting GitHub's token issuer, with an attribute mapping/condition restricting to your specific repo and branch (e.g., <code>assertion.repository == 'org/repo'</code> and ref conditions) to prevent other repos from assuming the identity. GitHub Actions requests its native OIDC token, the <code>google-github-actions/auth</code> action exchanges it for a <strong>short-lived</strong> GCP access token for a designated service account, and that SA has narrowly-scoped <code>secretAccessor</code> on only the deploy secrets. No long-lived GCP key ever touches GitHub — eliminating the CircleCI-class "stored CI secret" risk. Pitfalls: an over-broad attribute condition (missing repo/branch pin) lets any repo impersonate the SA; and the SA still needs least-privilege IAM, since the token it yields is fully privileged for that SA.<br />
+<em>Signal:</em> Knows federation over stored keys, and specifically the attribute-condition pinning that prevents cross-repo abuse.</p>
+<p><strong>Q14. How do you run a mass-rotation drill, and why is CircleCI the motivating example?</strong><br />
+CircleCI's 2023 breach forced customers to rotate <em>every</em> secret stored in it — those who had scripted, low-friction rotation recovered in hours; those who hadn't spent weeks. A drill: inventory every secret (labels/inventory tooling), ensure each has a rotation function or a documented rotation procedure, then execute a controlled rotation of a non-critical slice end-to-end — mint new, add version, verify consumers, disable old — measuring time-to-rotate and finding consumers that pin old versions or cache indefinitely. Track coverage (what % of secrets can be rotated automatically) as a metric. The goal is to make "rotate everything now" a scripted event, because you <em>will</em> eventually have to, and the failure mode is discovering at incident time that half your secrets have no rotation path.<br />
+<em>Signal:</em> Treats rotation as an operational capability to exercise, not a checkbox; cites the real incident.</p>
+<p><strong>Q15. VPC-SC protects Secret Manager but breaks a legitimate cross-project pipeline. How do you diagnose and fix without disabling the perimeter?</strong><br />
+First read the denials: VPC-SC violations appear in audit logs with <code>violationReason</code> and a <code>vpcServiceControlsUniqueId</code>; find the exact resource, service, and calling project. The fix is <em>not</em> to drop the perimeter but to author precise <strong>ingress/egress rules</strong> or a <strong>perimeter bridge</strong>: an egress rule allowing the source project's identity to reach <code>secretmanager.googleapis.com</code> in the target, or an ingress rule permitting the specific SA/source. Roll changes in <strong>dry-run mode</strong> so you can see what <em>would</em> be denied before enforcing, and add <strong>access levels</strong> (device/IP) for human callers. If the two projects legitimately share secrets often, put both in the same perimeter or bridge them. The discipline is: perimeters fail closed and opaquely, so operate them log-first and rule-precise rather than loosening globally.<br />
+<em>Signal:</em> Knows VPC-SC diagnosis (violation logs, unique id), dry-run, and ingress/egress/bridge instead of disabling.</p>
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP Secret Manager</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Primary secrets store</td>
+<td>Secret Manager</td>
+<td>Secrets Manager</td>
+<td>Key Vault (secrets)</td>
+</tr>
+<tr>
+<td>Cheaper config-grade store</td>
+<td>(labels + Secret Manager)</td>
+<td>SSM Parameter Store (SecureString)</td>
+<td>App Configuration + Key Vault refs</td>
+</tr>
+<tr>
+<td>Access control</td>
+<td>IAM <code>secretmanager.secretAccessor</code> per secret</td>
+<td>IAM policy + resource policy on secret</td>
+<td>RBAC / Key Vault access policies</td>
+</tr>
+<tr>
+<td>Encryption at rest</td>
+<td>Google-managed or CMEK (Cloud KMS)</td>
+<td>AWS-managed or CMK (KMS)</td>
+<td>Microsoft-managed or CMK; HSM-backed tier</td>
+</tr>
+<tr>
+<td>Versioning</td>
+<td>Immutable versions + <code>latest</code></td>
+<td>Version stages (<code>AWSCURRENT</code>/<code>AWSPENDING</code>)</td>
+<td>Versioned secret objects</td>
+</tr>
+<tr>
+<td>Rotation</td>
+<td>Pub/Sub event, <strong>you write</strong> the function</td>
+<td><strong>Managed rotation Lambda</strong> (native for RDS etc.)</td>
+<td>Event Grid event + Function; some managed</td>
+</tr>
+<tr>
+<td>Workload identity</td>
+<td>Attached SA / Workload Identity / WIF</td>
+<td>IAM roles for EC2/EKS IRSA / OIDC</td>
+<td>Managed Identities</td>
+</tr>
+<tr>
+<td>Federation for CI</td>
+<td>Workload Identity Federation (GitHub OIDC)</td>
+<td>IAM OIDC provider (GitHub OIDC → role)</td>
+<td>Federated credentials on managed identity</td>
+</tr>
+<tr>
+<td>Network isolation</td>
+<td>VPC Service Controls</td>
+<td>VPC endpoint + resource policy <code>aws:SourceVpce</code></td>
+<td>Private Endpoint + firewall</td>
+</tr>
+<tr>
+<td>K8s integration</td>
+<td>Secret Store CSI (GCP provider) / External Secrets</td>
+<td>Secrets Manager CSI / External Secrets</td>
+<td>Key Vault CSI / External Secrets</td>
+</tr>
+<tr>
+<td>Audit of reads</td>
+<td>Data Access logs (opt-in) <code>AccessSecretVersion</code></td>
+<td>CloudTrail <code>GetSecretValue</code></td>
+<td>Azure Monitor / Key Vault diagnostic logs</td>
+</tr>
+<tr>
+<td>Max secret size</td>
+<td>64 KiB per version</td>
+<td>64 KB</td>
+<td>25 KB per secret</td>
+</tr>
+</tbody>
+</table>
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li><strong>Grant <code>secretAccessor</code> per-secret to a dedicated SA</strong>, never at the project level — inherited broad grants turn one workload compromise into total secret exposure.</li>
+<li><strong>Kill the SA key file.</strong> Downloaded keys are secret zero reincarnated; use Workload Identity / Workload Identity Federation and enforce <code>disableServiceAccountKeyCreation</code>.</li>
+<li><strong>Rotation in GCP is event-only</strong> — Pub/Sub notifies, your Cloud Function mints the new value with a create-test-cutover overlap. AWS gives you managed rotation Lambdas; GCP makes you own the logic.</li>
+<li><strong>CMEK is a control and a kill-switch</strong>, not just "encryption" — it enables crypto-shredding but also a DoS if KMS key IAM isn't separated from secret IAM.</li>
+<li><strong>VPC Service Controls neutralizes exfiltration</strong>: IAM says who, VPC-SC says from where; wrap <code>secretmanager.googleapis.com</code> so a stolen token can't copy secrets out.</li>
+<li><strong>Data Access logs are off by default</strong> — without them you cannot answer "which secrets were read" post-breach; enable, baseline, and alert on anomalies.</li>
+<li><strong>How you inject matters</strong>: file mounts over env vars; pinned versions over <code>latest</code> in prod; cache in-process with a TTL to cut both cost and read exposure.</li>
+<li><strong>Assume some secrets are already leaked</strong> — the real world is secret sprawl (GitGuardian counts millions/year); design for fast, scripted mass rotation and run drills.</li>
+<li><strong>Secret scanning is upstream of the vault</strong> — gitleaks/trufflehog + push protection stop the Toyota-class "key in source" leak before a vault can matter; cross-ref the supply-chain notes.</li>
+<li><strong>Detection assumes valid credentials</strong> — a legitimate read and a stolen-token read look identical, so rely on volume/behavioral anomalies plus downstream credential-use signals, not just auth success.</li>
+</ul>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>GCP — Secret Manager documentation: https://cloud.google.com/secret-manager/docs (concepts, IAM roles, CMEK, rotation, regional endpoints)</li>
+<li>GCP — Secret Manager rotation with Pub/Sub &amp; Cloud Functions: https://cloud.google.com/secret-manager/docs/event-notifications</li>
+<li>GCP — Workload Identity Federation: https://cloud.google.com/iam/docs/workload-identity-federation</li>
+<li>GCP — VPC Service Controls: https://cloud.google.com/vpc-service-controls/docs/overview</li>
+<li>GCP — Secret Manager Data Access audit logs: https://cloud.google.com/secret-manager/docs/audit-logging</li>
+<li>MITRE ATT&amp;CK — T1555.006 Credentials from Password Stores: Cloud Secrets Management Stores; T1552 Unsecured Credentials; T1552.005 Cloud Instance Metadata API</li>
+<li>NIST SP 800-57 Recommendation for Key Management; NIST SP 800-63B Digital Identity Guidelines</li>
+<li>CIS Google Cloud Platform Foundations Benchmark (KMS/IAM/logging controls)</li>
+<li>GitGuardian — State of Secrets Sprawl (annual report on leaked credentials)</li>
+<li>Tools: gitleaks (https://github.com/gitleaks/gitleaks), trufflehog (https://github.com/trufflesecurity/trufflehog), Secret Store CSI Driver GCP provider, External Secrets Operator</li>
+<li>Incident references: Uber 2016 FTC filings; Toyota T-Connect disclosure (2022); CircleCI security incident report (Jan 2023); Codecov bash-uploader post-mortem (2021)</li>
+<li>Cross-references in this repo: <code>../../../../supply_chain/README.md</code>, <code>../../../../supply_chain/Dependency-Confusion/README.md</code>, <code>../../../../supply_chain/Sigstore-And-Signing/README.md</code></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

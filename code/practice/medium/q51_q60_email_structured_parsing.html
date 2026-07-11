@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q51_q60_email_structured_parsing.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q51_q60_email_structured_parsing.py</h1>
+  <p class="file-path">Source: code\practice\medium\q51_q60_email_structured_parsing.py</p>
+  <p class="line-count">685 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q51–Q60
+Topic: Email Header Parsing, SPF/DKIM/DMARC, CSV/JSONL/KV Log Parsing
+&quot;&quot;&quot;
+
+from collections import defaultdict
+from typing import List, Dict, Optional, Tuple
+import re
+import csv
+import json
+import io
+from datetime import datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q51 — Parse Email Headers
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse a raw email header block (multi-line string) into a dict of header
+  name → list of values. Handle folded headers (continuation lines starting
+  with whitespace per RFC 5322).
+
+Clarifying questions:
+  1. Should we keep all values for multi-valued headers (e.g., multiple Received)?
+  2. Should header names be case-normalised?
+  3. Are MIME-encoded words (=?UTF-8?B?...?=) decoded?
+
+Security angle:
+  Email headers are the primary data source for phishing detection.
+  Key headers: From, Reply-To, Return-Path, Received chain, DKIM-Signature,
+  Authentication-Results. Mismatches between these headers reveal spoofing.
+&quot;&quot;&quot;
+
+
+def parse_email_headers(raw_headers: str) -&gt; Dict[str, List[str]]:
+    &quot;&quot;&quot;
+    Optimal: unfold continuation lines first, then split on &#x27;Name: value&#x27; pattern.
+    Header names are lowercased for consistent lookup.
+    O(n) time where n = characters in header block.
+    &quot;&quot;&quot;
+    # Unfold: join continuation lines (lines starting with whitespace)
+    unfolded = re.sub(r&quot;\r?\n[ \t]+&quot;, &quot; &quot;, raw_headers)
+
+    headers: Dict[str, List[str]] = defaultdict(list)
+    for line in unfolded.splitlines():
+        if not line.strip():
+            continue
+        # Split on first colon only
+        colon_pos = line.find(&quot;:&quot;)
+        if colon_pos == -1:
+            continue
+        name = line[:colon_pos].strip().lower()
+        value = line[colon_pos + 1:].strip()
+        if name:
+            headers[name].append(value)
+
+    return dict(headers)
+
+
+def test_q51():
+    raw = (
+        &quot;From: Alice &lt;alice@example.com&gt;\r\n&quot;
+        &quot;To: Bob &lt;bob@example.com&gt;\r\n&quot;
+        &quot;Subject: Hello\r\n&quot;
+        &quot;Received: from smtp1.example.com\r\n&quot;
+        &quot;  by mx.example.com with ESMTP\r\n&quot;
+        &quot;Received: from client.example.com\r\n&quot;
+        &quot;  by smtp1.example.com\r\n&quot;
+        &quot;DKIM-Signature: v=1; a=rsa-sha256; d=example.com\r\n&quot;
+    )
+    headers = parse_email_headers(raw)
+    assert headers[&quot;from&quot;] == [&quot;Alice &lt;alice@example.com&gt;&quot;]
+    assert len(headers[&quot;received&quot;]) == 2
+    assert &quot;dkim-signature&quot; in headers
+    print(&quot;Q51 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q52 — Count Email Received Hops
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given parsed email headers, count the number of mail relay hops (Received
+  headers). Flag emails with an unusually high hop count (possible relay
+  abuse or spam routing).
+
+Clarifying questions:
+  1. What is the normal hop count? (typical: 3-6 for legitimate email)
+  2. Should we also extract the relay IP from each Received header?
+  3. Should the first hop (from MTA to inbox) be excluded?
+
+Security angle:
+  Spammers and phishing campaigns often route email through many intermediate
+  relays to obscure the true origin. A high hop count (&gt;10) is suspicious.
+  Open relay abuse chains can be detected by inspecting each Received line
+  for internal vs external IPs.
+&quot;&quot;&quot;
+
+
+def count_email_hops(headers: Dict[str, List[str]], alert_threshold: int = 8) -&gt; Dict:
+    &quot;&quot;&quot;
+    Optimal: simply count the &#x27;received&#x27; list length.
+    O(h) time where h = number of Received headers.
+    &quot;&quot;&quot;
+    received = headers.get(&quot;received&quot;) or []
+    hop_count = len(received)
+    return {
+        &quot;hop_count&quot;: hop_count,
+        &quot;alert&quot;: hop_count &gt; alert_threshold,
+    }
+
+
+def test_q52():
+    # 10 Received headers
+    headers = {&quot;received&quot;: [f&quot;from relay{i}.example.com&quot; for i in range(10)]}
+    result = count_email_hops(headers, alert_threshold=8)
+    assert result[&quot;hop_count&quot;] == 10
+    assert result[&quot;alert&quot;] is True
+
+    # Normal 4 hops
+    headers2 = {&quot;received&quot;: [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;, &quot;d&quot;]}
+    result2 = count_email_hops(headers2, alert_threshold=8)
+    assert result2[&quot;alert&quot;] is False
+    print(&quot;Q52 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q53 — Detect SPF / DKIM / DMARC Failure
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse the Authentication-Results header and flag emails where SPF, DKIM,
+  or DMARC did not pass.
+
+Clarifying questions:
+  1. Should partial passes (softfail, neutral) be flagged?
+  2. Is DMARC alignment (strict vs relaxed) checked?
+  3. Should we distinguish &quot;fail&quot; from &quot;none&quot; (not configured)?
+
+Security angle:
+  SPF, DKIM, and DMARC are the three layers of email authentication.
+  Failing all three is a strong phishing indicator.
+  Failing DMARC alone (with SPF pass) can indicate a lookalike domain.
+  These checks are the basis for email security gateways and phishing
+  detection systems at Google, Microsoft, and Proofpoint.
+&quot;&quot;&quot;
+
+AUTH_RESULT_RE = re.compile(
+    r&quot;\b(spf|dkim|dmarc)\s*=\s*(\S+)&quot;,
+    re.IGNORECASE,
+)
+
+
+def detect_auth_failure(headers: Dict[str, List[str]]) -&gt; Dict:
+    &quot;&quot;&quot;
+    Optimal: scan Authentication-Results header(s) with one regex.
+    O(v) time where v = total value length of Authentication-Results headers.
+    &quot;&quot;&quot;
+    auth_results_values = headers.get(&quot;authentication-results&quot;) or []
+    combined = &quot; &quot;.join(auth_results_values).lower()
+
+    results = {}
+    for m in AUTH_RESULT_RE.finditer(combined):
+        mechanism = m.group(1).lower()
+        result = m.group(2).lower().rstrip(&quot;;,&quot;)
+        results[mechanism] = result
+
+    failed = {
+        k: v for k, v in results.items()
+        if v not in (&quot;pass&quot;,)
+    }
+    return {
+        &quot;spf&quot;:   results.get(&quot;spf&quot;, &quot;none&quot;),
+        &quot;dkim&quot;:  results.get(&quot;dkim&quot;, &quot;none&quot;),
+        &quot;dmarc&quot;: results.get(&quot;dmarc&quot;, &quot;none&quot;),
+        &quot;failures&quot;: failed,
+        &quot;alert&quot;: len(failed) &gt; 0,
+    }
+
+
+def test_q53():
+    headers = {
+        &quot;authentication-results&quot;: [
+            &quot;mx.example.com; spf=fail smtp.mailfrom=attacker@evil.com; &quot;
+            &quot;dkim=none; dmarc=fail header.from=evil.com&quot;
+        ]
+    }
+    result = detect_auth_failure(headers)
+    assert result[&quot;spf&quot;] == &quot;fail&quot;
+    assert result[&quot;dmarc&quot;] == &quot;fail&quot;
+    assert result[&quot;alert&quot;] is True
+
+    # All pass
+    headers2 = {
+        &quot;authentication-results&quot;: [
+            &quot;mx.example.com; spf=pass; dkim=pass; dmarc=pass&quot;
+        ]
+    }
+    result2 = detect_auth_failure(headers2)
+    assert result2[&quot;alert&quot;] is False
+    print(&quot;Q53 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q54 — Extract Sender Domain from Header
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Extract the domain from the From: header email address.
+  Handle both &quot;Name &lt;user@domain.com&gt;&quot; and &quot;user@domain.com&quot; formats.
+
+Clarifying questions:
+  1. Should we return the domain for multiple From: addresses?
+  2. Should we normalise to lowercase?
+  3. What if the From header is absent or malformed?
+
+Security angle:
+  The From: domain is compared against:
+  - DMARC policy (header alignment).
+  - SPF envelope sender.
+  - Company domain allowlist (to catch lookalike domains like paypa1.com).
+&quot;&quot;&quot;
+
+EMAIL_DOMAIN_RE = re.compile(
+    r&quot;@([\w.-]+\.[a-zA-Z]{2,})&quot;,
+    re.IGNORECASE,
+)
+
+
+def extract_sender_domain(headers: Dict[str, List[str]]) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Optimal: regex on From header value to capture domain after @.
+    O(1) — there is typically one From header.
+    &quot;&quot;&quot;
+    from_values = headers.get(&quot;from&quot;) or []
+    for val in from_values:
+        m = EMAIL_DOMAIN_RE.search(val)
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def test_q54():
+    h1 = {&quot;from&quot;: [&quot;Alice &lt;alice@example.com&gt;&quot;]}
+    assert extract_sender_domain(h1) == &quot;example.com&quot;
+
+    h2 = {&quot;from&quot;: [&quot;bob@mail.corp.io&quot;]}
+    assert extract_sender_domain(h2) == &quot;mail.corp.io&quot;
+
+    h3 = {&quot;from&quot;: []}
+    assert extract_sender_domain(h3) is None
+    print(&quot;Q54 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q55 — Detect Mismatched From and Return-Path Domains
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag emails where the domain in the From: header differs from the domain
+  in the Return-Path: header. This is a strong spoofing / phishing indicator.
+
+Clarifying questions:
+  1. Should subdomains be allowed? (e.g., From: @corp.com, Return-Path: @mail.corp.com)
+  2. Should we compare eTLD+1 (registered domain) rather than full domain?
+  3. What about mailing lists that legitimately rewrite Return-Path?
+
+Security angle:
+  Phishing emails spoof the From: to look legitimate but use a different
+  Return-Path: that is under attacker control (for bounces). This mismatch
+  is a core signal in email security gateways.
+  Also called &quot;envelope sender&quot; vs &quot;header sender&quot; mismatch.
+&quot;&quot;&quot;
+
+
+def _extract_domain_from_header_value(value: str) -&gt; Optional[str]:
+    m = EMAIL_DOMAIN_RE.search(value)
+    return m.group(1).lower() if m else None
+
+
+def _registered_domain(domain: str) -&gt; str:
+    &quot;&quot;&quot;Naive eTLD+1: return last two labels.&quot;&quot;&quot;
+    parts = domain.split(&quot;.&quot;)
+    return &quot;.&quot;.join(parts[-2:]) if len(parts) &gt;= 2 else domain
+
+
+def detect_from_returnpath_mismatch(
+    headers: Dict[str, List[str]],
+    strict: bool = False,
+) -&gt; bool:
+    &quot;&quot;&quot;
+    Optimal: extract domains from both headers, compare.
+    strict=False compares registered domains (eTLD+1) only.
+    strict=True compares full domains.
+    O(1) time.
+    &quot;&quot;&quot;
+    from_vals = headers.get(&quot;from&quot;) or []
+    rp_vals   = headers.get(&quot;return-path&quot;) or []
+
+    if not from_vals or not rp_vals:
+        return False
+
+    from_domain = _extract_domain_from_header_value(from_vals[0])
+    rp_domain   = _extract_domain_from_header_value(rp_vals[0])
+
+    if not from_domain or not rp_domain:
+        return False
+
+    if strict:
+        return from_domain != rp_domain
+    return _registered_domain(from_domain) != _registered_domain(rp_domain)
+
+
+def test_q55():
+    # Mismatch: From corp.com, Return-Path attacker.net
+    h1 = {
+        &quot;from&quot;:         [&quot;CEO &lt;ceo@corp.com&gt;&quot;],
+        &quot;return-path&quot;:  [&quot;&lt;bounce@attacker.net&gt;&quot;],
+    }
+    assert detect_from_returnpath_mismatch(h1) is True
+
+    # Match: both corp.com
+    h2 = {
+        &quot;from&quot;:         [&quot;Alice &lt;alice@corp.com&gt;&quot;],
+        &quot;return-path&quot;:  [&quot;&lt;bounce@mail.corp.com&gt;&quot;],
+    }
+    assert detect_from_returnpath_mismatch(h2) is False  # same eTLD+1
+
+    # Strict mode: subdomain difference triggers alert
+    assert detect_from_returnpath_mismatch(h2, strict=True) is True
+    print(&quot;Q55 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q56 — Parse CSV Security Events
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse a CSV string of security events into a list of dicts.
+  Handle quoted fields, missing values, and optional header row.
+
+Clarifying questions:
+  1. Are column names in the first row?
+  2. Should missing fields default to None or empty string?
+  3. Should numeric fields (status, bytes) be auto-cast?
+
+Security angle:
+  Security operations teams often export SIEM alerts, firewall logs, or EDR
+  events as CSV. A robust parser is the entry point for downstream detection
+  logic. Injection attacks via CSV formulas (=CMD|...) are a real risk when
+  these files are opened in Excel — a sanitiser should remove leading =, +, @.
+&quot;&quot;&quot;
+
+# Fields that should be coerced to int
+INT_FIELDS = frozenset({&quot;status&quot;, &quot;bytes&quot;, &quot;dst_port&quot;, &quot;src_port&quot;, &quot;count&quot;})
+
+FORMULA_INJECTION_RE = re.compile(r&quot;^[=+\-@\t\r]&quot;)
+
+
+def parse_csv_events(
+    csv_text: str,
+    sanitize: bool = True,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: use stdlib csv.DictReader for correct quoting/escaping.
+    Coerce numeric fields, optionally sanitise formula injection.
+    O(n) time.
+    &quot;&quot;&quot;
+    reader = csv.DictReader(io.StringIO(csv_text))
+    records = []
+    for row in reader:
+        record: Dict = {}
+        for k, v in row.items():
+            if v is None:
+                v = &quot;&quot;
+            if sanitize and FORMULA_INJECTION_RE.match(v):
+                v = &quot;&#x27;&quot; + v   # prepend apostrophe to neutralise
+            k_lower = k.lower().strip()
+            if k_lower in INT_FIELDS:
+                try:
+                    v = int(v)
+                except (ValueError, TypeError):
+                    pass
+            record[k_lower] = v
+        records.append(record)
+    return records
+
+
+def test_q56():
+    csv_text = (
+        &quot;src_ip,dst_ip,dst_port,status,bytes\n&quot;
+        &quot;1.1.1.1,10.0.0.1,443,200,1024\n&quot;
+        &quot;2.2.2.2,10.0.0.1,22,401,0\n&quot;
+        &#x27;5.5.5.5,10.0.0.1,80,200,&quot;=CMD|calc&quot;&quot;!A1&quot;\n&#x27;  # formula injection
+    )
+    records = parse_csv_events(csv_text, sanitize=True)
+    assert len(records) == 3
+    assert records[0][&quot;dst_port&quot;] == 443
+    assert records[0][&quot;bytes&quot;] == 1024
+    assert records[2][&quot;status&quot;] == 200             # status col is int-coerced
+    # bytes field is the injected formula — sanitised (not int, starts with &#x27;)
+    assert isinstance(records[2][&quot;bytes&quot;], str)
+    assert records[2][&quot;bytes&quot;].startswith(&quot;&#x27;&quot;)
+    assert not records[2][&quot;src_ip&quot;].startswith(&quot;=&quot;)
+    print(&quot;Q56 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q57 — Parse JSON Lines Logs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse a JSON Lines (JSONL) log file where each line is a separate JSON object.
+  Skip malformed lines without crashing.
+
+Clarifying questions:
+  1. Should malformed lines be returned with an error flag or silently skipped?
+  2. Is there a schema to validate against?
+  3. Should we handle BOM or trailing whitespace?
+
+Security angle:
+  Modern logging pipelines (Elastic, Splunk HEC, Cloud Logging) emit JSONL.
+  A JSONL parser that crashes on one bad line can silently miss detections.
+  Robust parsers skip bad lines, log a warning, and continue.
+&quot;&quot;&quot;
+
+
+def parse_jsonl_logs(
+    jsonl_text: str,
+    skip_errors: bool = True,
+) -&gt; Tuple[List[Dict], int]:
+    &quot;&quot;&quot;
+    Optimal: iterate lines, attempt json.loads, track parse errors.
+    Returns (records, error_count).
+    O(n) time.
+    &quot;&quot;&quot;
+    records = []
+    errors = 0
+    for line in jsonl_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            errors += 1
+            if not skip_errors:
+                raise
+    return records, errors
+
+
+def test_q57():
+    jsonl = (
+        &#x27;{&quot;ts&quot;: &quot;T1&quot;, &quot;event&quot;: &quot;login&quot;, &quot;user&quot;: &quot;alice&quot;}\n&#x27;
+        &#x27;{&quot;ts&quot;: &quot;T2&quot;, &quot;event&quot;: &quot;logout&quot;, &quot;user&quot;: &quot;bob&quot;}\n&#x27;
+        &#x27;this is not json\n&#x27;
+        &#x27;{&quot;ts&quot;: &quot;T3&quot;, &quot;event&quot;: &quot;delete&quot;, &quot;user&quot;: &quot;eve&quot;}\n&#x27;
+    )
+    records, errors = parse_jsonl_logs(jsonl)
+    assert len(records) == 3
+    assert errors == 1
+    assert records[0][&quot;user&quot;] == &quot;alice&quot;
+    print(&quot;Q57 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q58 — Parse Key-Value Firewall Logs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Parse Cisco ASA / Palo Alto style key=value log lines into dicts.
+  Example: &quot;date=2026-05-29 time=08:00:00 src=1.1.1.1 dst=10.0.0.1 action=deny&quot;
+
+Clarifying questions:
+  1. Are values ever quoted (key=&quot;multi word value&quot;)?
+  2. Is the key=value separator always &quot;=&quot; with no spaces?
+  3. Are there any repeated keys to handle?
+
+Security angle:
+  Firewall logs in KV format are the primary source for network-layer
+  detection. Parsing must handle quoted values correctly to avoid splitting
+  on spaces inside values (e.g., reason=&quot;Policy Violation&quot;).
+&quot;&quot;&quot;
+
+# Match key=value OR key=&quot;quoted value&quot;
+KV_RE = re.compile(r&#x27;(\w+)=(?:&quot;([^&quot;]*)&quot;|([\S]*))&#x27;)
+
+
+def parse_kv_log(line: str) -&gt; Dict[str, str]:
+    &quot;&quot;&quot;
+    Optimal: compiled regex findall. Prefers quoted group over bare group.
+    O(n) time where n = line length.
+    &quot;&quot;&quot;
+    result = {}
+    for m in KV_RE.finditer(line):
+        key = m.group(1)
+        value = m.group(2) if m.group(2) is not None else m.group(3)
+        result[key] = value
+    return result
+
+
+def parse_kv_logs(lines: List[str]) -&gt; List[Dict]:
+    &quot;&quot;&quot;Parse multiple KV log lines.&quot;&quot;&quot;
+    return [parse_kv_log(line) for line in lines if line.strip()]
+
+
+def test_q58():
+    lines = [
+        &#x27;date=2026-05-29 time=08:00:01 src=1.1.1.1 dst=10.0.0.5 action=deny reason=&quot;Policy Violation&quot;&#x27;,
+        &#x27;date=2026-05-29 time=08:00:02 src=2.2.2.2 dst=10.0.0.6 action=allow bytes=2048&#x27;,
+    ]
+    records = parse_kv_logs(lines)
+    assert records[0][&quot;action&quot;] == &quot;deny&quot;
+    assert records[0][&quot;reason&quot;] == &quot;Policy Violation&quot;
+    assert records[1][&quot;bytes&quot;] == &quot;2048&quot;
+    assert records[1][&quot;action&quot;] == &quot;allow&quot;
+    print(&quot;Q58 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q59 — Normalise Mixed Timestamp Formats
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of timestamp strings in mixed formats, normalise all of them
+  to ISO 8601 UTC strings. Common formats:
+  - 2026-05-29T08:00:00Z
+  - 29/May/2026:08:00:00 +0000
+  - May 29 2026 08:00:00
+  - 1748505600 (Unix epoch)
+
+Clarifying questions:
+  1. Should timezone be preserved or converted to UTC?
+  2. What should happen with unparseable timestamps?
+  3. Should millisecond precision be kept?
+
+Security angle:
+  Log correlation (Q61–Q62) requires all timestamps to be in a comparable
+  format. A timestamp normaliser is a core utility in any SIEM pipeline.
+  Inconsistent timestamps are also a log tampering signal.
+&quot;&quot;&quot;
+
+from datetime import timezone
+
+TIMESTAMP_FMTS = [
+    &quot;%Y-%m-%dT%H:%M:%SZ&quot;,
+    &quot;%Y-%m-%dT%H:%M:%S&quot;,
+    &quot;%Y-%m-%d %H:%M:%S&quot;,
+    &quot;%d/%b/%Y:%H:%M:%S %z&quot;,   # Apache/NGINX
+    &quot;%b %d %Y %H:%M:%S&quot;,
+]
+
+
+def normalise_timestamp(ts_str: str) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Optimal: try epoch first (fast int check), then iterate format strings.
+    Returns ISO 8601 UTC string or None on failure.
+    O(F) time where F = number of format strings (constant).
+    &quot;&quot;&quot;
+    ts_str = ts_str.strip()
+
+    # Unix epoch (integer or float)
+    try:
+        epoch = float(ts_str)
+        dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        return dt.strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+    except ValueError:
+        pass
+
+    for fmt in TIMESTAMP_FMTS:
+        try:
+            dt = datetime.strptime(ts_str, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+        except ValueError:
+            continue
+
+    return None  # unparseable
+
+
+def test_q59():
+    samples = [
+        (&quot;2026-05-29T08:00:00Z&quot;,       &quot;2026-05-29T08:00:00Z&quot;),
+        (&quot;29/May/2026:08:00:00 +0000&quot;, &quot;2026-05-29T08:00:00Z&quot;),
+        (&quot;May 29 2026 08:00:00&quot;,       &quot;2026-05-29T08:00:00Z&quot;),
+        (&quot;1780041600&quot;,                  &quot;2026-05-29T08:00:00Z&quot;),
+    ]
+    for raw, expected in samples:
+        result = normalise_timestamp(raw)
+        assert result == expected, f&quot;Got {result!r} for {raw!r}&quot;
+    assert normalise_timestamp(&quot;not-a-date&quot;) is None
+    print(&quot;Q59 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q60 — Deduplicate Logs by Event ID
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a list of log event dicts, deduplicate by a unique event_id field,
+  keeping the first occurrence and discarding subsequent duplicates.
+
+Clarifying questions:
+  1. What field is the unique identifier? (event_id, message_id, etc.)
+  2. Should we keep the latest occurrence instead of the first?
+  3. Should duplicates be counted and returned in a summary?
+
+Security angle:
+  Log pipelines often deliver events at-least-once (Kafka, Kinesis), leading
+  to duplicate events. Without deduplication, detection rules may fire multiple
+  times on the same event (alert storms, false positive counts). Deduplication
+  by event ID is the standard approach in SIEM ingestion.
+&quot;&quot;&quot;
+
+
+def deduplicate_logs(
+    events: List[Dict],
+    id_field: str = &quot;event_id&quot;,
+    keep: str = &quot;first&quot;,
+) -&gt; Tuple[List[Dict], int]:
+    &quot;&quot;&quot;
+    Optimal: dict keyed by event_id preserves insertion order (Python 3.7+).
+    For keep=&#x27;last&#x27;, overwrite; for keep=&#x27;first&#x27;, skip if already seen.
+    Returns (deduped_list, duplicate_count).
+    O(n) time.
+    &quot;&quot;&quot;
+    seen: Dict = {}
+    duplicates = 0
+
+    for event in events:
+        eid = event.get(id_field)
+        if eid is None:
+            seen[id(event)] = event   # no ID — keep all
+        elif eid in seen:
+            duplicates += 1
+            if keep == &quot;last&quot;:
+                seen[eid] = event
+        else:
+            seen[eid] = event
+
+    return list(seen.values()), duplicates
+
+
+def test_q60():
+    events = [
+        {&quot;event_id&quot;: &quot;e1&quot;, &quot;ts&quot;: &quot;T1&quot;, &quot;action&quot;: &quot;login&quot;},
+        {&quot;event_id&quot;: &quot;e2&quot;, &quot;ts&quot;: &quot;T2&quot;, &quot;action&quot;: &quot;logout&quot;},
+        {&quot;event_id&quot;: &quot;e1&quot;, &quot;ts&quot;: &quot;T3&quot;, &quot;action&quot;: &quot;login&quot;},   # duplicate
+        {&quot;event_id&quot;: &quot;e3&quot;, &quot;ts&quot;: &quot;T4&quot;, &quot;action&quot;: &quot;delete&quot;},
+        {&quot;event_id&quot;: &quot;e2&quot;, &quot;ts&quot;: &quot;T5&quot;, &quot;action&quot;: &quot;logout&quot;},  # duplicate
+    ]
+    deduped, dups = deduplicate_logs(events, keep=&quot;first&quot;)
+    assert len(deduped) == 3
+    assert dups == 2
+    ids = [e[&quot;event_id&quot;] for e in deduped]
+    assert ids == [&quot;e1&quot;, &quot;e2&quot;, &quot;e3&quot;]
+
+    # keep=&#x27;last&#x27; should update ts
+    deduped2, _ = deduplicate_logs(events, keep=&quot;last&quot;)
+    id_ts = {e[&quot;event_id&quot;]: e[&quot;ts&quot;] for e in deduped2}
+    assert id_ts[&quot;e1&quot;] == &quot;T3&quot;
+    assert id_ts[&quot;e2&quot;] == &quot;T5&quot;
+    print(&quot;Q60 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q51()
+    test_q52()
+    test_q53()
+    test_q54()
+    test_q55()
+    test_q56()
+    test_q57()
+    test_q58()
+    test_q59()
+    test_q60()
+    print(&quot;\nAll Q51–Q60 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

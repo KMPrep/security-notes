@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q16_kubernetes_privilege_abuse.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q16_kubernetes_privilege_abuse.py</h1>
+  <p class="file-path">Source: code\practice\hard\q16_kubernetes_privilege_abuse.py</p>
+  <p class="line-count">507 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q16 [Hard] — Kubernetes Privilege Abuse Detection
+=============================================================================
+
+PROBLEM
+-------
+Kubernetes audit logs record every API call to the API server.
+Detect the following privilege abuse patterns from audit events:
+
+  1. RBAC Escalation:  creating or modifying (Cluster)RoleBindings or
+     (Cluster)Roles that grant highly-sensitive permissions.
+  2. Exec/Attach to Pod: kubectl exec / attach into pods — unusual for prod.
+  3. Privileged Pod Creation: pod with securityContext.privileged=true, or
+     hostPID/hostNetwork/hostIPC=true, or dangerous capabilities.
+  4. Secret Enumeration: listing or getting Secrets across many namespaces.
+  5. Wildcard permissions: rules with &quot;*&quot; in verbs or resources.
+  6. Service Account Token Mounting: pod automountServiceAccountToken=true
+     with a high-privilege SA (detected post-hoc from RBAC bindings).
+  7. Namespace creation surge: many new namespaces in a short window
+     (attacker trying to evade per-namespace NetworkPolicy / LimitRange).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Input: raw Kubernetes audit log lines (JSON)?
+   → Yes; subset of the full K8s audit schema.
+2. How to detect &quot;high-privilege&quot; role/binding?
+   → Check for wildcard verbs/resources or specific dangerous combos:
+     (verbs=[*], resources=[*]), (verbs=[get,list,watch], resources=[secrets]),
+     (verbs=[create,update], resources=[clusterrolebindings]).
+3. Should exec alerts distinguish between interactive shell and one-off commands?
+   → Flag all exec/attach; note if stdin=true (interactive shell).
+4. How to detect privileged pod without the full pod spec?
+   → Look at requestObject.spec.containers[*].securityContext and pod-level
+     spec.hostPID / spec.hostNetwork / spec.hostIPC fields.
+5. Allowlist for known-good principals?
+   → Yes; accept set of trusted usernames/SA names.
+6. Multi-namespace secret enumeration threshold?
+   → Configurable; default &gt; 3 distinct namespaces in 60 seconds.
+
+=============================================================================
+APPROACH 1 — NAIVE (if-elif chain per event)
+=============================================================================
+Simple if/elif checks on verb + resource.
+  No burst detection, no stateful tracking.
+  O(1) per event.
+
+=============================================================================
+APPROACH 2 — DISPATCH TABLE + STATEFUL COUNTERS (RECOMMENDED)
+=============================================================================
+  - Dict of (verb, resource) → handler function for O(1) dispatch
+  - Sliding window counters per principal for burst/enumeration detection
+  - RBAC analyzer: scan role rules for dangerous permission combos
+  O(1) per event (plus O(rules) for RBAC analysis).
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Dangerous permissions definitions
+# ---------------------------------------------------------------------------
+
+# (verb, resource) tuples that are considered high-privilege
+DANGEROUS_PERMS: FrozenSet[Tuple[str, str]] = frozenset({
+    (&quot;*&quot;, &quot;*&quot;),
+    (&quot;*&quot;, &quot;secrets&quot;),
+    (&quot;create&quot;, &quot;clusterrolebindings&quot;),
+    (&quot;update&quot;, &quot;clusterrolebindings&quot;),
+    (&quot;patch&quot;, &quot;clusterrolebindings&quot;),
+    (&quot;create&quot;, &quot;rolebindings&quot;),
+    (&quot;update&quot;, &quot;rolebindings&quot;),
+    (&quot;patch&quot;, &quot;roles&quot;),
+    (&quot;patch&quot;, &quot;clusterroles&quot;),
+    (&quot;create&quot;, &quot;clusterroles&quot;),
+    (&quot;update&quot;, &quot;clusterroles&quot;),
+    (&quot;escalate&quot;, &quot;clusterroles&quot;),
+    (&quot;bind&quot;, &quot;clusterroles&quot;),
+    (&quot;impersonate&quot;, &quot;serviceaccounts&quot;),
+    (&quot;create&quot;, &quot;pods/exec&quot;),
+    (&quot;list&quot;, &quot;secrets&quot;),
+    (&quot;get&quot;, &quot;secrets&quot;),
+})
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class K8sAuditEvent:
+    event_id: str
+    ts: float
+    verb: str             # get | list | create | update | patch | delete | exec | attach
+    resource: str         # pods | secrets | clusterrolebindings | …
+    namespace: str
+    name: str             # resource name (if applicable)
+    username: str
+    user_groups: List[str]
+    source_ip: str
+    stage: str            # RequestReceived | ResponseStarted | ResponseComplete | Panic
+    response_code: int
+    request_object: dict = field(default_factory=dict)
+    subresource: str = &quot;&quot;
+
+@dataclass
+class K8sAlert:
+    alert_type: str
+    severity: str
+    username: str
+    verb: str
+    resource: str
+    namespace: str
+    ts: float
+    detail: str
+    event_id: str
+
+
+def _parse_ts(ts) -&gt; Optional[float]:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace(&quot;Z&quot;, &quot;+00:00&quot;)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_event(raw: dict) -&gt; Optional[K8sAuditEvent]:
+    ts = _parse_ts(raw.get(&quot;requestReceivedTimestamp&quot;) or raw.get(&quot;ts&quot;))
+    if ts is None:
+        return None
+    obj_ref = raw.get(&quot;objectRef&quot;, {})
+    user = raw.get(&quot;user&quot;, {})
+    return K8sAuditEvent(
+        event_id=raw.get(&quot;auditID&quot;, &quot;unknown&quot;),
+        ts=ts,
+        verb=raw.get(&quot;verb&quot;, &quot;&quot;),
+        resource=obj_ref.get(&quot;resource&quot;, &quot;&quot;),
+        namespace=obj_ref.get(&quot;namespace&quot;, &quot;&quot;),
+        name=obj_ref.get(&quot;name&quot;, &quot;&quot;),
+        username=user.get(&quot;username&quot;, &quot;unknown&quot;),
+        user_groups=user.get(&quot;groups&quot;, []),
+        source_ip=raw.get(&quot;sourceIPs&quot;, [&quot;&quot;])[0] if raw.get(&quot;sourceIPs&quot;) else &quot;&quot;,
+        stage=raw.get(&quot;stage&quot;, &quot;&quot;),
+        response_code=raw.get(&quot;responseStatus&quot;, {}).get(&quot;code&quot;, 0),
+        request_object=raw.get(&quot;requestObject&quot;) or {},
+        subresource=obj_ref.get(&quot;subresource&quot;, &quot;&quot;),
+    )
+
+
+# ---------------------------------------------------------------------------
+# RBAC Rule Analyser
+# ---------------------------------------------------------------------------
+
+def _analyse_rbac_rules(rules: List[dict]) -&gt; List[str]:
+    &quot;&quot;&quot;
+    Given a list of RBAC rule dicts (from Role/ClusterRole spec.rules),
+    return list of dangerous permission descriptions found.
+    &quot;&quot;&quot;
+    findings = []
+    for rule in rules:
+        verbs = set(rule.get(&quot;verbs&quot;, []))
+        resources = set(rule.get(&quot;resources&quot;, []))
+        for v in verbs:
+            for r in resources:
+                if (v, r) in DANGEROUS_PERMS or v == &quot;*&quot; or r == &quot;*&quot;:
+                    findings.append(f&quot;verb={v!r} resource={r!r}&quot;)
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive detector
+# ---------------------------------------------------------------------------
+
+class NaiveK8sAbuseDetector:
+    &quot;&quot;&quot;Simple stateless detector.  O(1) per event.&quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowlist: Optional[Set[str]] = None,
+    ) -&gt; None:
+        self.allowlist = allowlist or set()
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[K8sAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        if evt.username in self.allowlist:
+            return []
+        # Only process completed events with success responses
+        if evt.stage not in (&quot;ResponseComplete&quot;, &quot;&quot;) or evt.response_code &gt;= 400:
+            return []
+
+        alerts = []
+
+        # exec/attach
+        if evt.subresource in (&quot;exec&quot;, &quot;attach&quot;):
+            alerts.append(K8sAlert(
+                alert_type=&quot;pod_exec&quot;, severity=&quot;high&quot;,
+                username=evt.username, verb=evt.verb,
+                resource=&quot;pods/&quot; + evt.subresource, namespace=evt.namespace,
+                ts=evt.ts,
+                detail=f&quot;{evt.username} exec/attach into pod {evt.name!r}&quot;,
+                event_id=evt.event_id,
+            ))
+
+        # Privileged pod
+        if evt.verb in (&quot;create&quot;, &quot;update&quot;) and evt.resource == &quot;pods&quot;:
+            findings = _check_privileged_pod(evt.request_object)
+            if findings:
+                alerts.append(K8sAlert(
+                    alert_type=&quot;privileged_pod&quot;, severity=&quot;critical&quot;,
+                    username=evt.username, verb=evt.verb,
+                    resource=&quot;pods&quot;, namespace=evt.namespace,
+                    ts=evt.ts,
+                    detail=f&quot;Privileged pod: {findings}&quot;,
+                    event_id=evt.event_id,
+                ))
+
+        # RBAC escalation
+        if evt.resource in (&quot;roles&quot;, &quot;clusterroles&quot;, &quot;rolebindings&quot;, &quot;clusterrolebindings&quot;):
+            if evt.verb in (&quot;create&quot;, &quot;update&quot;, &quot;patch&quot;):
+                rules = (evt.request_object.get(&quot;rules&quot;) or
+                         evt.request_object.get(&quot;roleRef&quot;, {}) and [])
+                if evt.resource in (&quot;rolebindings&quot;, &quot;clusterrolebindings&quot;):
+                    role_ref = evt.request_object.get(&quot;roleRef&quot;, {})
+                    alerts.append(K8sAlert(
+                        alert_type=&quot;rbac_binding&quot;, severity=&quot;high&quot;,
+                        username=evt.username, verb=evt.verb,
+                        resource=evt.resource, namespace=evt.namespace,
+                        ts=evt.ts,
+                        detail=f&quot;RBAC binding to {role_ref.get(&#x27;name&#x27;, &#x27;?&#x27;)}&quot;,
+                        event_id=evt.event_id,
+                    ))
+                elif isinstance(rules, list):
+                    findings = _analyse_rbac_rules(rules)
+                    if findings:
+                        alerts.append(K8sAlert(
+                            alert_type=&quot;rbac_escalation&quot;, severity=&quot;critical&quot;,
+                            username=evt.username, verb=evt.verb,
+                            resource=evt.resource, namespace=evt.namespace,
+                            ts=evt.ts,
+                            detail=f&quot;Dangerous RBAC rule: {findings}&quot;,
+                            event_id=evt.event_id,
+                        ))
+
+        return alerts
+
+
+def _check_privileged_pod(spec: dict) -&gt; List[str]:
+    &quot;&quot;&quot;Check pod spec for dangerous privilege settings.&quot;&quot;&quot;
+    findings = []
+    if spec.get(&quot;hostPID&quot;):
+        findings.append(&quot;hostPID=true&quot;)
+    if spec.get(&quot;hostNetwork&quot;):
+        findings.append(&quot;hostNetwork=true&quot;)
+    if spec.get(&quot;hostIPC&quot;):
+        findings.append(&quot;hostIPC=true&quot;)
+    for container in spec.get(&quot;containers&quot;, []):
+        sc = container.get(&quot;securityContext&quot;, {})
+        if sc.get(&quot;privileged&quot;):
+            findings.append(f&quot;container {container.get(&#x27;name&#x27;,&#x27;?&#x27;)!r} privileged=true&quot;)
+        caps = sc.get(&quot;capabilities&quot;, {})
+        dangerous_caps = {&quot;SYS_ADMIN&quot;, &quot;SYS_PTRACE&quot;, &quot;NET_ADMIN&quot;, &quot;DAC_OVERRIDE&quot;}
+        added = set(caps.get(&quot;add&quot;, [])) &amp; dangerous_caps
+        if added:
+            findings.append(f&quot;dangerous caps: {added}&quot;)
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Full stateful detector (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class K8sAbuseDetector:
+    &quot;&quot;&quot;
+    Full stateful K8s privilege abuse detector with burst tracking.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        allowlist: Optional[Set[str]] = None,
+        secret_enum_threshold: int = 3,
+        secret_enum_window_s: float = 60.0,
+        ns_burst_threshold: int = 5,
+        ns_burst_window_s: float = 120.0,
+        exec_alert_for_system_accounts: bool = False,
+    ) -&gt; None:
+        self.allowlist = allowlist or set()
+        self.secret_enum_threshold = secret_enum_threshold
+        self.secret_enum_window = secret_enum_window_s
+        self.ns_burst_threshold = ns_burst_threshold
+        self.ns_burst_window = ns_burst_window_s
+        self.exec_sa = exec_alert_for_system_accounts
+        # principal → deque of (ts, namespace) for secret enumeration
+        self._secret_enum: Dict[str, deque] = defaultdict(deque)
+        # principal → deque of ts for namespace creation burst
+        self._ns_create: Dict[str, deque] = defaultdict(deque)
+        # Dedup sets
+        self._burst_alerted_secret: Set[str] = set()
+        self._burst_alerted_ns: Set[str] = set()
+        self._naive = NaiveK8sAbuseDetector(allowlist=allowlist)
+        self.malformed = 0
+
+    def process(self, raw: dict) -&gt; List[K8sAlert]:
+        evt = _parse_event(raw)
+        if evt is None:
+            self.malformed += 1
+            return []
+        if evt.username in self.allowlist:
+            return []
+        if evt.stage not in (&quot;ResponseComplete&quot;, &quot;&quot;) or evt.response_code &gt;= 400:
+            return []
+
+        alerts: List[K8sAlert] = []
+
+        # Run all naive checks first
+        alerts.extend(self._naive.process(raw))
+
+        # --- Secret enumeration across namespaces ---
+        if evt.resource == &quot;secrets&quot; and evt.verb in (&quot;get&quot;, &quot;list&quot;, &quot;watch&quot;):
+            q = self._secret_enum[evt.username]
+            cutoff = evt.ts - self.secret_enum_window
+            while q and q[0][0] &lt; cutoff:
+                q.popleft()
+            q.append((evt.ts, evt.namespace))
+            distinct_ns = len({x[1] for x in q})
+            if distinct_ns &gt; self.secret_enum_threshold:
+                if evt.username not in self._burst_alerted_secret:
+                    self._burst_alerted_secret.add(evt.username)
+                    alerts.append(K8sAlert(
+                        alert_type=&quot;secret_enumeration&quot;, severity=&quot;high&quot;,
+                        username=evt.username, verb=evt.verb,
+                        resource=&quot;secrets&quot;, namespace=&quot;multiple&quot;,
+                        ts=evt.ts,
+                        detail=(f&quot;{evt.username} accessed secrets in {distinct_ns} &quot;
+                                f&quot;namespaces within {self.secret_enum_window}s&quot;),
+                        event_id=evt.event_id,
+                    ))
+            else:
+                self._burst_alerted_secret.discard(evt.username)
+
+        # --- Namespace creation burst ---
+        if evt.resource == &quot;namespaces&quot; and evt.verb == &quot;create&quot;:
+            q = self._ns_create[evt.username]
+            cutoff = evt.ts - self.ns_burst_window
+            while q and q[0] &lt; cutoff:
+                q.popleft()
+            q.append(evt.ts)
+            if len(q) &gt; self.ns_burst_threshold:
+                if evt.username not in self._burst_alerted_ns:
+                    self._burst_alerted_ns.add(evt.username)
+                    alerts.append(K8sAlert(
+                        alert_type=&quot;namespace_burst&quot;, severity=&quot;medium&quot;,
+                        username=evt.username, verb=&quot;create&quot;,
+                        resource=&quot;namespaces&quot;, namespace=&quot;&quot;,
+                        ts=evt.ts,
+                        detail=(f&quot;{evt.username} created {len(q)} namespaces &quot;
+                                f&quot;in {self.ns_burst_window}s&quot;),
+                        event_id=evt.event_id,
+                    ))
+
+        return alerts
+
+
+# ---------------------------------------------------------------------------
+# Test Helpers
+# ---------------------------------------------------------------------------
+
+def _raw(verb, resource, username=&quot;alice&quot;, ns=&quot;default&quot;, ts=1000.0,
+         subresource=&quot;&quot;, code=200, req_obj=None) -&gt; dict:
+    return {
+        &quot;auditID&quot;: f&quot;{verb}-{resource}-{ts}&quot;,
+        &quot;requestReceivedTimestamp&quot;: ts,
+        &quot;verb&quot;: verb,
+        &quot;objectRef&quot;: {&quot;resource&quot;: resource, &quot;namespace&quot;: ns,
+                      &quot;name&quot;: &quot;test-obj&quot;, &quot;subresource&quot;: subresource},
+        &quot;user&quot;: {&quot;username&quot;: username, &quot;groups&quot;: []},
+        &quot;sourceIPs&quot;: [&quot;10.0.0.1&quot;],
+        &quot;stage&quot;: &quot;ResponseComplete&quot;,
+        &quot;responseStatus&quot;: {&quot;code&quot;: code},
+        &quot;requestObject&quot;: req_obj or {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_exec_alert():
+    det = K8sAbuseDetector()
+    alerts = det.process(_raw(&quot;create&quot;, &quot;pods&quot;, subresource=&quot;exec&quot;))
+    assert any(a.alert_type == &quot;pod_exec&quot; for a in alerts)
+    print(&quot;Pod exec: passed&quot;)
+
+
+def test_privileged_pod():
+    req = {
+        &quot;hostPID&quot;: True,
+        &quot;containers&quot;: [{&quot;name&quot;: &quot;c1&quot;, &quot;securityContext&quot;: {&quot;privileged&quot;: True}}],
+    }
+    det = K8sAbuseDetector()
+    alerts = det.process(_raw(&quot;create&quot;, &quot;pods&quot;, req_obj=req))
+    assert any(a.alert_type == &quot;privileged_pod&quot; for a in alerts)
+    print(&quot;Privileged pod: passed&quot;)
+
+
+def test_rbac_binding():
+    req = {&quot;roleRef&quot;: {&quot;name&quot;: &quot;cluster-admin&quot;, &quot;kind&quot;: &quot;ClusterRole&quot;}}
+    det = K8sAbuseDetector()
+    alerts = det.process(_raw(&quot;create&quot;, &quot;clusterrolebindings&quot;, req_obj=req))
+    assert any(a.alert_type == &quot;rbac_binding&quot; for a in alerts)
+    print(&quot;RBAC binding: passed&quot;)
+
+
+def test_rbac_wildcard_role():
+    req = {&quot;rules&quot;: [{&quot;verbs&quot;: [&quot;*&quot;], &quot;resources&quot;: [&quot;*&quot;]}]}
+    det = K8sAbuseDetector()
+    alerts = det.process(_raw(&quot;create&quot;, &quot;clusterroles&quot;, req_obj=req))
+    assert any(a.alert_type == &quot;rbac_escalation&quot; for a in alerts)
+    print(&quot;RBAC wildcard role: passed&quot;)
+
+
+def test_secret_enumeration():
+    det = K8sAbuseDetector(secret_enum_threshold=2, secret_enum_window_s=60)
+    for ns in [&quot;ns1&quot;, &quot;ns2&quot;, &quot;ns3&quot;]:
+        det.process(_raw(&quot;list&quot;, &quot;secrets&quot;, ns=ns, ts=1000.0))
+    # Should trigger after 3rd distinct namespace
+    final = det.process(_raw(&quot;list&quot;, &quot;secrets&quot;, ns=&quot;ns4&quot;, ts=1010.0))
+    assert any(a.alert_type == &quot;secret_enumeration&quot; for a in final), \
+        &quot;Expected secret_enumeration alert&quot;
+    print(&quot;Secret enumeration: passed&quot;)
+
+
+def test_namespace_burst():
+    det = K8sAbuseDetector(ns_burst_threshold=3, ns_burst_window_s=120)
+    all_alerts = []
+    for i in range(5):
+        all_alerts += det.process(_raw(&quot;create&quot;, &quot;namespaces&quot;, ts=float(1000 + i * 5)))
+    assert any(a.alert_type == &quot;namespace_burst&quot; for a in all_alerts)
+    print(&quot;Namespace burst: passed&quot;)
+
+
+def test_failed_events_ignored():
+    det = K8sAbuseDetector()
+    alerts = det.process(_raw(&quot;create&quot;, &quot;pods&quot;, code=403, subresource=&quot;exec&quot;))
+    assert len(alerts) == 0
+    print(&quot;Failed events ignored: passed&quot;)
+
+
+def test_allowlist():
+    det = K8sAbuseDetector(allowlist={&quot;alice&quot;})
+    alerts = det.process(_raw(&quot;create&quot;, &quot;pods&quot;, subresource=&quot;exec&quot;))  # alice allowlisted
+    assert len(alerts) == 0
+    print(&quot;Allowlist: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Kubernetes RBAC is the authorisation layer for the entire cluster.
+  Common attack patterns:
+
+  1. Pod exec → interactive shell inside a running container
+     → escape to host via mount, nsenter, or privileged context
+  2. Create ClusterRoleBinding to cluster-admin for attacker-controlled SA
+     → full cluster takeover with a single API call
+  3. List secrets across all namespaces → harvest DB creds, API keys, TLS certs
+  4. Create privileged pod mounting hostPath=/ → read/write to worker node filesystem
+  5. ServiceAccount token projection → steal JWT and call API server directly
+
+DETECTION STRATEGY
+  - Audit all RBAC changes (create/update/patch on roles, bindings).
+  - Alert on exec/attach — no legitimate workload needs these in prod.
+  - Check pod specs at admission time (OPA/Gatekeeper / Kyverno policies).
+  - Flag wildcard verbs/resources in new role definitions.
+  - Correlate: new SA + new ClusterRoleBinding + new Pod within 5 minutes
+    = automated privilege escalation chain.
+
+HARDENING
+  - Disable anonymous auth on API server.
+  - Enable audit logging with a policy that captures RequestReceived events.
+  - Use Pod Security Admission (PSA) to reject privileged pods.
+  - Restrict RBAC: no cluster-admin for developers; use aggregated ClusterRoles.
+  - Network policy: limit pods&#x27; egress to API server to only necessary SAs.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_exec_alert()
+    test_privileged_pod()
+    test_rbac_binding()
+    test_rbac_wildcard_role()
+    test_secret_enumeration()
+    test_namespace_burst()
+    test_failed_events_ignored()
+    test_allowlist()
+</code></pre>
+</body>
+</html>

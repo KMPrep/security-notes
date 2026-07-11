@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q60_buffer_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q60_buffer_parser.py</h1>
+  <p class="file-path">Source: code\practice\hard\q60_buffer_parser.py</p>
+  <p class="line-count">538 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q60 [Hard] — Memory-Safe Buffer Parser
+=============================================================================
+
+PROBLEM
+-------
+Given a binary packet format, parse fields safely:
+  1. Check bounds before every read.
+  2. Reject malformed input early (wrong magic, truncated, bad length field).
+  3. Prevent integer overflow on length fields.
+  4. Return structured parsed result or detailed error.
+  5. Support variable-length fields (length-prefixed strings, TLV).
+
+Packet format (custom binary protocol):
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ Magic     4 bytes   0xDEADBEEF                                   │
+  │ Version   1 byte    1 or 2                                       │
+  │ Flags     1 byte    bitmask                                      │
+  │ Sequence  4 bytes   big-endian uint32                            │
+  │ Length    4 bytes   big-endian uint32 (total payload length)     │
+  │ Payload   N bytes   TLV records until end                        │
+  │ Checksum  4 bytes   big-endian uint32 (CRC32 of header+payload)  │
+  └──────────────────────────────────────────────────────────────────┘
+
+TLV (Type-Length-Value) inside payload:
+  Type    2 bytes  uint16
+  Length  2 bytes  uint16
+  Value   Length bytes
+
+CLARIFYING QUESTIONS
+--------------------
+1. Endianness? → Big-endian (network byte order).
+2. Max packet size? → Configurable; default 64 KB.
+3. Max TLV value length? → 4 KB per field.
+4. What to do on error? → Return ParseError; do not raise exception.
+5. Checksum algorithm? → CRC32.
+
+=============================================================================
+APPROACH 1 — NAIVE (unguarded struct.unpack, no bounds check)
+=============================================================================
+  Direct struct.unpack without checking buffer length.
+  struct.error on truncated input; no meaningful error messages.
+
+=============================================================================
+APPROACH 2 — SAFE _Buf WRAPPER + INCREMENTAL PARSER (OPTIMAL)
+=============================================================================
+  _Buf class with cursor:
+    - read(n): checks remaining &gt;= n before slicing; raises BufUnderflow.
+    - peek(n): same but doesn&#x27;t advance cursor.
+    - remaining: bytes left.
+  Parser uses _Buf; catches BufUnderflow; returns ParseError.
+  Validates: magic, version, length &lt;= max, payload fits, checksum.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import struct
+import zlib
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Union
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+MAGIC              = 0xDEADBEEF
+SUPPORTED_VERSIONS = {1, 2}
+HEADER_SIZE        = 14       # magic(4) + version(1) + flags(1) + seq(4) + length(4)
+CHECKSUM_SIZE      = 4
+MIN_PACKET_SIZE    = HEADER_SIZE + CHECKSUM_SIZE
+MAX_PACKET_SIZE    = 64 * 1024          # 64 KB
+MAX_TLV_VALUE_LEN  = 4 * 1024          # 4 KB per TLV field
+MAX_TLV_COUNT      = 256
+
+# TLV type constants (illustrative)
+TLV_SOURCE_IP  = 0x0001
+TLV_DEST_IP    = 0x0002
+TLV_PAYLOAD    = 0x0003
+TLV_TIMESTAMP  = 0x0004
+TLV_USERNAME   = 0x0005
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TlvField:
+    type_id: int
+    value: bytes
+
+    @property
+    def as_str(self) -&gt; str:
+        return self.value.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
+
+    @property
+    def as_uint32(self) -&gt; Optional[int]:
+        if len(self.value) == 4:
+            return struct.unpack_from(&quot;&gt;I&quot;, self.value)[0]
+        return None
+
+
+@dataclass
+class ParsedPacket:
+    magic: int
+    version: int
+    flags: int
+    sequence: int
+    payload_length: int
+    tlv_fields: List[TlvField]
+    checksum: int
+    checksum_valid: bool
+
+    @property
+    def flag_encrypted(self) -&gt; bool:
+        return bool(self.flags &amp; 0x01)
+
+    @property
+    def flag_compressed(self) -&gt; bool:
+        return bool(self.flags &amp; 0x02)
+
+
+@dataclass
+class ParseError:
+    reason: str
+    offset: int = 0
+
+    def __str__(self) -&gt; str:
+        return f&quot;ParseError at offset {self.offset}: {self.reason}&quot;
+
+
+ParseResult = Union[ParsedPacket, ParseError]
+
+
+# ---------------------------------------------------------------------------
+# _Buf — safe buffer reader
+# ---------------------------------------------------------------------------
+
+class BufUnderflow(Exception):
+    def __init__(self, offset: int, needed: int, remaining: int):
+        self.offset    = offset
+        self.needed    = needed
+        self.remaining = remaining
+        super().__init__(
+            f&quot;underflow at offset {offset}: need {needed}, have {remaining}&quot;
+        )
+
+
+class _Buf:
+    &quot;&quot;&quot;
+    Cursor-based safe buffer reader.
+    All read operations check bounds before accessing memory.
+    &quot;&quot;&quot;
+
+    __slots__ = (&quot;_data&quot;, &quot;_pos&quot;, &quot;_end&quot;)
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos  = 0
+        self._end  = len(data)
+
+    @property
+    def pos(self) -&gt; int:
+        return self._pos
+
+    @property
+    def remaining(self) -&gt; int:
+        return self._end - self._pos
+
+    def read(self, n: int) -&gt; bytes:
+        if n &lt; 0:
+            raise ValueError(f&quot;read size must be non-negative, got {n}&quot;)
+        if self.remaining &lt; n:
+            raise BufUnderflow(self._pos, n, self.remaining)
+        chunk      = self._data[self._pos: self._pos + n]
+        self._pos += n
+        return chunk
+
+    def read_u8(self) -&gt; int:
+        return struct.unpack_from(&quot;&gt;B&quot;, self.read(1))[0]
+
+    def read_u16(self) -&gt; int:
+        return struct.unpack_from(&quot;&gt;H&quot;, self.read(2))[0]
+
+    def read_u32(self) -&gt; int:
+        return struct.unpack_from(&quot;&gt;I&quot;, self.read(4))[0]
+
+    def peek(self, n: int) -&gt; bytes:
+        if self.remaining &lt; n:
+            raise BufUnderflow(self._pos, n, self.remaining)
+        return self._data[self._pos: self._pos + n]
+
+    def slice(self, start: int, end: int) -&gt; bytes:
+        &quot;&quot;&quot;Return bytes[start:end] without moving cursor.&quot;&quot;&quot;
+        if end &gt; self._end or start &lt; 0 or start &gt; end:
+            raise BufUnderflow(start, end - start, self._end - start)
+        return self._data[start:end]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (no bounds checking)
+# ---------------------------------------------------------------------------
+
+def parse_naive(data: bytes) -&gt; Optional[Dict]:
+    &quot;&quot;&quot;Vulnerable to truncated input (struct.error crash).&quot;&quot;&quot;
+    try:
+        magic, version, flags, seq, length = struct.unpack_from(&quot;&gt;IBBII&quot;, data, 0)
+        payload = data[14: 14 + length]
+        checksum = struct.unpack_from(&quot;&gt;I&quot;, data, 14 + length)[0]
+        return {&quot;magic&quot;: magic, &quot;version&quot;: version, &quot;payload&quot;: payload}
+    except struct.error:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Safe incremental parser
+# ---------------------------------------------------------------------------
+
+def parse_packet(data: bytes) -&gt; ParseResult:
+    &quot;&quot;&quot;
+    Parse a binary packet safely with bounds checking at every step.
+    Returns ParsedPacket on success or ParseError on any validation failure.
+    &quot;&quot;&quot;
+    # --- 0. Input size guards ---
+    if not isinstance(data, (bytes, bytearray)):
+        return ParseError(&quot;input must be bytes&quot;, 0)
+    if len(data) &gt; MAX_PACKET_SIZE:
+        return ParseError(f&quot;packet too large: {len(data)} &gt; {MAX_PACKET_SIZE}&quot;, 0)
+    if len(data) &lt; MIN_PACKET_SIZE:
+        return ParseError(f&quot;packet too short: {len(data)} &lt; {MIN_PACKET_SIZE}&quot;, 0)
+
+    buf = _Buf(data)
+
+    # --- 1. Header ---
+    try:
+        magic    = buf.read_u32()
+        version  = buf.read_u8()
+        flags    = buf.read_u8()
+        sequence = buf.read_u32()
+        payload_length = buf.read_u32()
+    except BufUnderflow as e:
+        return ParseError(f&quot;truncated header: {e}&quot;, e.offset)
+
+    # --- 2. Validate magic ---
+    if magic != MAGIC:
+        return ParseError(f&quot;invalid magic: 0x{magic:08X} (expected 0x{MAGIC:08X})&quot;, 0)
+
+    # --- 3. Validate version ---
+    if version not in SUPPORTED_VERSIONS:
+        return ParseError(f&quot;unsupported version: {version}&quot;, 5)
+
+    # --- 4. Validate length field (overflow guard) ---
+    if payload_length &gt; MAX_PACKET_SIZE:
+        return ParseError(f&quot;payload_length too large: {payload_length}&quot;, 10)
+
+    expected_total = HEADER_SIZE + payload_length + CHECKSUM_SIZE
+    if len(data) &lt; expected_total:
+        return ParseError(
+            f&quot;buffer too short: have {len(data)}, need {expected_total}&quot;, 14
+        )
+    if len(data) &gt; expected_total:
+        return ParseError(
+            f&quot;trailing bytes: have {len(data)}, expected {expected_total}&quot;, 14
+        )
+
+    # --- 5. Read payload ---
+    try:
+        payload_bytes = buf.read(payload_length)
+    except BufUnderflow as e:
+        return ParseError(f&quot;truncated payload: {e}&quot;, e.offset)
+
+    # --- 6. Read and verify checksum ---
+    try:
+        checksum = buf.read_u32()
+    except BufUnderflow as e:
+        return ParseError(f&quot;truncated checksum: {e}&quot;, e.offset)
+
+    # Checksum covers header + payload (not the checksum field itself)
+    crc_data  = data[:HEADER_SIZE + payload_length]
+    computed  = zlib.crc32(crc_data) &amp; 0xFFFFFFFF
+    checksum_valid = (computed == checksum)
+
+    # --- 7. Parse TLV fields ---
+    tlv_fields: List[TlvField] = []
+    tlv_buf = _Buf(payload_bytes)
+
+    while tlv_buf.remaining &gt; 0:
+        if tlv_buf.remaining &lt; 4:
+            return ParseError(
+                f&quot;truncated TLV header: {tlv_buf.remaining} bytes left&quot;,
+                HEADER_SIZE + tlv_buf.pos,
+            )
+
+        try:
+            tlv_type   = tlv_buf.read_u16()
+            tlv_length = tlv_buf.read_u16()
+        except BufUnderflow as e:
+            return ParseError(f&quot;truncated TLV type/length: {e}&quot;, e.offset)
+
+        # Validate TLV length
+        if tlv_length &gt; MAX_TLV_VALUE_LEN:
+            return ParseError(
+                f&quot;TLV[type={tlv_type}] length too large: {tlv_length} &gt; {MAX_TLV_VALUE_LEN}&quot;,
+                HEADER_SIZE + tlv_buf.pos,
+            )
+
+        if tlv_buf.remaining &lt; tlv_length:
+            return ParseError(
+                f&quot;TLV[type={tlv_type}] value truncated: need {tlv_length}, &quot;
+                f&quot;have {tlv_buf.remaining}&quot;,
+                HEADER_SIZE + tlv_buf.pos,
+            )
+
+        try:
+            value = tlv_buf.read(tlv_length)
+        except BufUnderflow as e:
+            return ParseError(f&quot;TLV value underflow: {e}&quot;, e.offset)
+
+        tlv_fields.append(TlvField(type_id=tlv_type, value=value))
+
+        if len(tlv_fields) &gt; MAX_TLV_COUNT:
+            return ParseError(f&quot;too many TLV fields: &gt; {MAX_TLV_COUNT}&quot;, HEADER_SIZE)
+
+    return ParsedPacket(
+        magic=magic,
+        version=version,
+        flags=flags,
+        sequence=sequence,
+        payload_length=payload_length,
+        tlv_fields=tlv_fields,
+        checksum=checksum,
+        checksum_valid=checksum_valid,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Packet builder (for testing)
+# ---------------------------------------------------------------------------
+
+def build_packet(
+    version: int         = 1,
+    flags: int           = 0,
+    sequence: int        = 1,
+    tlv_fields: Optional[List[TlvField]] = None,
+) -&gt; bytes:
+    &quot;&quot;&quot;Build a valid packet for testing.&quot;&quot;&quot;
+    payload = b&quot;&quot;
+    for tlv in (tlv_fields or []):
+        payload += struct.pack(&quot;&gt;HH&quot;, tlv.type_id, len(tlv.value)) + tlv.value
+
+    header = struct.pack(&quot;&gt;IBBII&quot;, MAGIC, version, flags, sequence, len(payload))
+    crc    = zlib.crc32(header + payload) &amp; 0xFFFFFFFF
+    checksum_bytes = struct.pack(&quot;&gt;I&quot;, crc)
+    return header + payload + checksum_bytes
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_valid_packet():
+    tlvs = [
+        TlvField(TLV_SOURCE_IP, b&quot;\xc0\xa8\x01\x01&quot;),
+        TlvField(TLV_USERNAME,  b&quot;alice&quot;),
+    ]
+    pkt = build_packet(version=1, sequence=42, tlv_fields=tlvs)
+    r   = parse_packet(pkt)
+    assert isinstance(r, ParsedPacket), str(r)
+    assert r.magic    == MAGIC
+    assert r.version  == 1
+    assert r.sequence == 42
+    assert r.checksum_valid
+    assert len(r.tlv_fields) == 2
+    assert r.tlv_fields[1].as_str == &quot;alice&quot;
+    print(&quot;Valid packet parsed: passed&quot;)
+
+
+def test_bad_magic():
+    pkt = build_packet()
+    bad = b&quot;\x00\x00\x00\x00&quot; + pkt[4:]
+    r   = parse_packet(bad)
+    assert isinstance(r, ParseError)
+    assert &quot;magic&quot; in r.reason
+    print(f&quot;Bad magic rejected: passed ({r})&quot;)
+
+
+def test_unsupported_version():
+    pkt = build_packet(version=99)
+    # Build manually to bypass builder&#x27;s version check
+    pkt = bytes([pkt[0], pkt[1], pkt[2], pkt[3], 99]) + pkt[5:]
+    r   = parse_packet(pkt)
+    assert isinstance(r, ParseError)
+    assert &quot;version&quot; in r.reason
+    print(f&quot;Unsupported version: passed ({r})&quot;)
+
+
+def test_truncated_header():
+    pkt = build_packet()
+    r   = parse_packet(pkt[:6])   # cut off mid-header
+    assert isinstance(r, ParseError)
+    print(f&quot;Truncated header: passed ({r})&quot;)
+
+
+def test_length_field_too_large():
+    pkt = bytearray(build_packet())
+    # Override length field (bytes 10–13) with huge value
+    struct.pack_into(&quot;&gt;I&quot;, pkt, 10, MAX_PACKET_SIZE + 1)
+    r = parse_packet(bytes(pkt))
+    assert isinstance(r, ParseError)
+    assert &quot;too large&quot; in r.reason
+    print(f&quot;Length too large: passed ({r})&quot;)
+
+
+def test_corrupted_checksum():
+    pkt      = bytearray(build_packet())
+    pkt[-1] ^= 0xFF    # flip last byte of checksum
+    r = parse_packet(bytes(pkt))
+    assert isinstance(r, ParsedPacket)
+    assert not r.checksum_valid
+    print(&quot;Corrupted checksum detected: passed&quot;)
+
+
+def test_truncated_tlv():
+    tlvs = [TlvField(TLV_PAYLOAD, b&quot;hello&quot;)]
+    pkt  = bytearray(build_packet(tlv_fields=tlvs))
+    # Remove last 3 bytes of the TLV value
+    trimmed = pkt[:-3 - CHECKSUM_SIZE]  # remove checksum + part of TLV value
+    r = parse_packet(bytes(trimmed))
+    assert isinstance(r, ParseError)
+    print(f&quot;Truncated TLV: passed ({r})&quot;)
+
+
+def test_tlv_length_too_large():
+    # Build a packet where TLV length field exceeds MAX_TLV_VALUE_LEN
+    payload = struct.pack(&quot;&gt;HH&quot;, TLV_PAYLOAD, MAX_TLV_VALUE_LEN + 1)
+    payload += b&quot;\x00&quot; * (MAX_TLV_VALUE_LEN + 1)
+    header   = struct.pack(&quot;&gt;IBBII&quot;, MAGIC, 1, 0, 1, len(payload))
+    crc      = zlib.crc32(header + payload) &amp; 0xFFFFFFFF
+    pkt      = header + payload + struct.pack(&quot;&gt;I&quot;, crc)
+    r        = parse_packet(pkt)
+    assert isinstance(r, ParseError)
+    assert &quot;too large&quot; in r.reason
+    print(f&quot;TLV length too large: passed ({r})&quot;)
+
+
+def test_empty_payload():
+    pkt = build_packet(version=2, flags=0x01, tlv_fields=[])
+    r   = parse_packet(pkt)
+    assert isinstance(r, ParsedPacket)
+    assert r.version == 2
+    assert r.flag_encrypted
+    assert r.tlv_fields == []
+    print(&quot;Empty payload (v2 encrypted flag): passed&quot;)
+
+
+def test_packet_too_short():
+    r = parse_packet(b&quot;\xDE\xAD&quot;)
+    assert isinstance(r, ParseError)
+    assert &quot;too short&quot; in r.reason
+    print(f&quot;Packet too short: passed ({r})&quot;)
+
+
+def test_packet_too_large():
+    r = parse_packet(bytes(MAX_PACKET_SIZE + 1))
+    assert isinstance(r, ParseError)
+    assert &quot;too large&quot; in r.reason
+    print(f&quot;Packet too large: passed ({r})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+BINARY PARSER SECURITY
+-----------------------
+Binary parsers are a common source of CVEs in:
+  - Network protocol stacks (Heartbleed in TLS; EternalBlue in SMB)
+  - File format parsers (PDF, PNG, ZIP, ELF, PE)
+  - IPC deserialization (D-Bus, protobuf, gRPC framing)
+
+COMMON VULNERABILITIES
+-----------------------
+1. BUFFER OVERFLOW (CWE-120)
+   Read N bytes based on untrusted length field; N &gt; buffer size.
+   Fix: always validate length &lt;= remaining bytes before read.
+
+2. INTEGER OVERFLOW IN LENGTH CALCULATION (CWE-190)
+   length_field * element_size overflows to small number.
+   if (n * sizeof(T) &lt; BUFSIZE)  → n = 2^29, sizeof(T) = 8 → overflows to 0.
+   Fix: use checked arithmetic; validate each field independently.
+
+3. OFF-BY-ONE (CWE-193)
+   Parse until pos &lt; length instead of pos + record_size &lt;= length.
+   Fix: check remaining &gt;= record_size before each read.
+
+4. MISSING MAGIC / VERSION CHECK
+   Parser proceeds on garbage input; undefined behavior.
+   Fix: validate magic and version as the very first step.
+
+5. CHECKSUM NOT VERIFIED (or verified after use)
+   Parser uses data before verifying integrity.
+   Fix: verify checksum before processing any field values.
+
+HEARTBLEED (CVE-2014-0160) — CLASSIC EXAMPLE
+----------------------------------------------
+  OpenSSL TLS heartbeat extension:
+    Client: type=1, length=64, &quot;hello&quot;
+    Server: echo back length bytes from client message.
+  Attacker: type=1, length=65535, &quot;A&quot;
+  Server: read 65535 bytes starting from &quot;A&quot; → leaks heap contents.
+  Fix: check payload_length &lt;= actual received bytes before echo.
+
+_Buf PATTERN ADVANTAGES
+------------------------
+  - All reads go through a single bounds-checking method.
+  - Cursor tracks position; no manual offset arithmetic (common bug source).
+  - BufUnderflow exception carries offset for debugging.
+  - Easy to fuzz: any bytes input → either ParsedPacket or ParseError; no crash.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_valid_packet()
+    test_bad_magic()
+    test_unsupported_version()
+    test_truncated_header()
+    test_length_field_too_large()
+    test_corrupted_checksum()
+    test_truncated_tlv()
+    test_tlv_length_too_large()
+    test_empty_payload()
+    test_packet_too_short()
+    test_packet_too_large()
+</code></pre>
+</body>
+</html>

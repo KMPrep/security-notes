@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q8_oauth2_log_analyzer.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q8_oauth2_log_analyzer.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q8_oauth2_log_analyzer.py</p>
+  <p class="line-count">287 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q8. OAuth2 Authorization Server Log Analyzer
+==============================================
+Detect token theft, scope escalation, token grinding, and expired token replay
+from OAuth2 authorization server logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Flag users with many refresh events.
+  Problem: Service accounts legitimately refresh tokens frequently.
+  No multi-IP detection (stolen token), no scope comparison, no replay detection.
+
+BETTER: Group by token_id; detect IP changes per token.
+  Problem: Need to reconstruct the original grant scope to compare with
+  refresh scope (scope escalation). Replay detection requires tracking token
+  state across EXPIRED → OK transitions.
+
+GOOGLE-LEVEL (this file):
+  - Token state machine: track first_ip, scope per token_id.
+  - Multi-IP: token used from &gt; 1 distinct IP in 10-minute window = STOLEN.
+  - Scope escalation: refresh results in broader scope than original grant.
+  - Token grinding: &gt; 20 refreshes in 5 minutes for same token.
+  - Expired replay: token first seen as EXPIRED but later succeeds (clock skew
+    exploits or server-side bypass).
+  - Risk level assigned: CRITICAL/HIGH/MEDIUM.
+
+Complexity: O(N) parse, O(T) space where T = unique tokens.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z client_id=app1 user=alice grant=authorization_code token=tok_abc scope=read:profile ip=10.0.0.1 result=OK
+2024-03-12T08:01:00Z client_id=app1 user=alice grant=refresh_token token=tok_abc scope=read:profile ip=203.0.113.5 result=OK
+2024-03-12T08:02:00Z client_id=app1 user=alice grant=refresh_token token=tok_abc scope=read:profile ip=185.220.101.5 result=OK
+2024-03-12T08:03:00Z client_id=app1 user=alice grant=refresh_token token=tok_abc scope=read:profile ip=198.51.100.7 result=OK
+2024-03-12T08:10:00Z client_id=app2 user=bob grant=authorization_code token=tok_def scope=read:email ip=10.0.0.2 result=OK
+2024-03-12T08:10:30Z client_id=app2 user=bob grant=refresh_token token=tok_def scope=read:email,write:data ip=10.0.0.2 result=OK
+2024-03-12T08:20:00Z client_id=app3 user=carol grant=authorization_code token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:05Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:10Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:15Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:20Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:25Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:30Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:35Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:40Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:45Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:50Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:20:55Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:00Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:05Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:10Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:15Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:20Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:25Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:21:30Z client_id=app3 user=carol grant=refresh_token token=tok_ghi scope=read:data ip=10.0.0.3 result=OK
+2024-03-12T08:30:00Z client_id=app4 user=dave grant=authorization_code token=tok_jkl scope=read:api ip=10.0.0.4 result=OK
+2024-03-12T08:31:00Z client_id=app4 user=dave grant=refresh_token token=tok_jkl scope=read:api ip=10.0.0.4 result=EXPIRED
+2024-03-12T08:32:00Z client_id=app4 user=dave grant=refresh_token token=tok_jkl scope=read:api ip=10.0.0.4 result=OK
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+MULTI_IP_WINDOW_SECS   = 600   # 10 minutes
+GRINDING_THRESHOLD     = 20    # refresh attempts in grinding window
+GRINDING_WINDOW_SECS   = 300   # 5 minutes
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+&#x27;
+    r&#x27;client_id=(?P&lt;client_id&gt;\S+)\s+&#x27;
+    r&#x27;user=(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;grant=(?P&lt;grant&gt;\S+)\s+&#x27;
+    r&#x27;token=(?P&lt;token&gt;\S+)\s+&#x27;
+    r&#x27;scope=(?P&lt;scope&gt;\S+)\s+&#x27;
+    r&#x27;ip=(?P&lt;ip&gt;\S+)\s+&#x27;
+    r&#x27;result=(?P&lt;result&gt;\S+)&#x27;
+)
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    try:
+        return datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    scope_set = frozenset(m.group(&quot;scope&quot;).split(&quot;,&quot;))
+    return {
+        &quot;ts&quot;:        ts,
+        &quot;client_id&quot;: m.group(&quot;client_id&quot;),
+        &quot;user&quot;:      m.group(&quot;user&quot;),
+        &quot;grant&quot;:     m.group(&quot;grant&quot;),
+        &quot;token&quot;:     m.group(&quot;token&quot;),
+        &quot;scope&quot;:     scope_set,
+        &quot;scope_raw&quot;: m.group(&quot;scope&quot;),
+        &quot;ip&quot;:        m.group(&quot;ip&quot;),
+        &quot;result&quot;:    m.group(&quot;result&quot;),
+    }
+
+
+def scope_is_broader(original: frozenset, refreshed: frozenset) -&gt; bool:
+    &quot;&quot;&quot;Return True if refreshed scope contains permissions not in original grant.&quot;&quot;&quot;
+    return not refreshed.issubset(original)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANALYZERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_tokens(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;
+    Build a state machine per token_id; emit findings across all four patterns.
+    Single pass over records (sorted by ts) for efficiency.
+    &quot;&quot;&quot;
+    records_sorted = sorted(records, key=lambda x: x[&quot;ts&quot;])
+
+    # Per-token state
+    token_state: dict[str, dict] = {}
+
+    findings = []
+
+    for r in records_sorted:
+        tok = r[&quot;token&quot;]
+
+        if tok not in token_state:
+            token_state[tok] = {
+                &quot;original_scope&quot;: r[&quot;scope&quot;],
+                &quot;ips&quot;:            [],           # list of (ts, ip)
+                &quot;refresh_ts&quot;:     [],           # timestamps of refresh events
+                &quot;expired_seen&quot;:   False,
+                &quot;user&quot;:           r[&quot;user&quot;],
+                &quot;client_id&quot;:      r[&quot;client_id&quot;],
+            }
+
+        state = token_state[tok]
+
+        # Track IPs used with this token
+        state[&quot;ips&quot;].append((r[&quot;ts&quot;], r[&quot;ip&quot;]))
+
+        # Token grinding: track refresh timestamps
+        if r[&quot;grant&quot;] == &quot;refresh_token&quot;:
+            state[&quot;refresh_ts&quot;].append(r[&quot;ts&quot;])
+
+        # Expired token replay
+        if r[&quot;result&quot;] == &quot;EXPIRED&quot;:
+            state[&quot;expired_seen&quot;] = True
+        elif r[&quot;result&quot;] == &quot;OK&quot; and state[&quot;expired_seen&quot;] and r[&quot;grant&quot;] == &quot;refresh_token&quot;:
+            findings.append({
+                &quot;type&quot;:      &quot;EXPIRED_TOKEN_REPLAY&quot;,
+                &quot;risk&quot;:      &quot;CRITICAL&quot;,
+                &quot;token&quot;:     tok,
+                &quot;user&quot;:      state[&quot;user&quot;],
+                &quot;client_id&quot;: state[&quot;client_id&quot;],
+                &quot;ip&quot;:        r[&quot;ip&quot;],
+                &quot;ts&quot;:        r[&quot;ts&quot;],
+                &quot;detail&quot;:    &quot;Token previously returned EXPIRED but was accepted as OK&quot;,
+            })
+
+        # Scope escalation
+        if r[&quot;grant&quot;] == &quot;refresh_token&quot; and r[&quot;result&quot;] == &quot;OK&quot;:
+            if scope_is_broader(state[&quot;original_scope&quot;], r[&quot;scope&quot;]):
+                findings.append({
+                    &quot;type&quot;:           &quot;SCOPE_ESCALATION&quot;,
+                    &quot;risk&quot;:           &quot;HIGH&quot;,
+                    &quot;token&quot;:          tok,
+                    &quot;user&quot;:           state[&quot;user&quot;],
+                    &quot;client_id&quot;:      state[&quot;client_id&quot;],
+                    &quot;original_scope&quot;: &quot;,&quot;.join(sorted(state[&quot;original_scope&quot;])),
+                    &quot;escalated_scope&quot;: r[&quot;scope_raw&quot;],
+                    &quot;ip&quot;:             r[&quot;ip&quot;],
+                    &quot;ts&quot;:             r[&quot;ts&quot;],
+                })
+
+    # Second pass: multi-IP and grinding (needs all events per token)
+    for tok, state in token_state.items():
+        user      = state[&quot;user&quot;]
+        client_id = state[&quot;client_id&quot;]
+
+        # Multi-IP (stolen token): same token from distinct IPs within window
+        ip_events = sorted(state[&quot;ips&quot;], key=lambda x: x[0])
+        for i in range(len(ip_events)):
+            window_ips = set()
+            for j in range(i, len(ip_events)):
+                if ip_events[j][0] - ip_events[i][0] &gt; MULTI_IP_WINDOW_SECS:
+                    break
+                window_ips.add(ip_events[j][1])
+            if len(window_ips) &gt; 1:
+                findings.append({
+                    &quot;type&quot;:        &quot;MULTI_IP_TOKEN_USE&quot;,
+                    &quot;risk&quot;:        &quot;CRITICAL&quot;,
+                    &quot;token&quot;:       tok,
+                    &quot;user&quot;:        user,
+                    &quot;client_id&quot;:   client_id,
+                    &quot;distinct_ips&quot;: len(window_ips),
+                    &quot;ips&quot;:         sorted(window_ips),
+                    &quot;window_start&quot;: ip_events[i][0],
+                })
+                break  # One alert per token
+
+        # Token grinding
+        refresh_ts = sorted(state[&quot;refresh_ts&quot;])
+        for i in range(len(refresh_ts)):
+            count = sum(1 for t in refresh_ts if refresh_ts[i] &lt;= t &lt;= refresh_ts[i] + GRINDING_WINDOW_SECS)
+            if count &gt; GRINDING_THRESHOLD:
+                findings.append({
+                    &quot;type&quot;:      &quot;TOKEN_GRINDING&quot;,
+                    &quot;risk&quot;:      &quot;HIGH&quot;,
+                    &quot;token&quot;:     tok,
+                    &quot;user&quot;:      user,
+                    &quot;client_id&quot;: client_id,
+                    &quot;refreshes&quot;: count,
+                    &quot;window_s&quot;:  GRINDING_WINDOW_SECS,
+                    &quot;ts&quot;:        refresh_ts[i],
+                })
+                break
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(epoch: float) -&gt; str:
+    return datetime.utcfromtimestamp(epoch).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(findings: list[dict]) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;OAUTH2 LOG ANALYSIS REPORT&quot;)
+    print(&quot;=&quot; * 65)
+    if not findings:
+        print(&quot;  No anomalies detected.&quot;)
+    for f in sorted(findings, key=lambda x: {&quot;CRITICAL&quot;: 0, &quot;HIGH&quot;: 1, &quot;MEDIUM&quot;: 2}.get(x[&quot;risk&quot;], 3)):
+        print(f&quot;\n  [{f[&#x27;risk&#x27;]}] {f[&#x27;type&#x27;]}&quot;)
+        print(f&quot;    token={f[&#x27;token&#x27;]}  user={f[&#x27;user&#x27;]}  client={f[&#x27;client_id&#x27;]}&quot;)
+        for k, v in f.items():
+            if k not in (&quot;type&quot;, &quot;risk&quot;, &quot;token&quot;, &quot;user&quot;, &quot;client_id&quot;):
+                if isinstance(v, float) and v &gt; 1e9:
+                    print(f&quot;    {k}={ts_fmt(v)}&quot;)
+                else:
+                    print(f&quot;    {k}={v}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records  = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    findings = analyze_tokens(records)
+    print(f&quot;Parsed {len(records)} OAuth2 log events.  &quot;
+          f&quot;Found {len(findings)} finding(s).\n&quot;)
+    print_report(findings)
+</code></pre>
+</body>
+</html>

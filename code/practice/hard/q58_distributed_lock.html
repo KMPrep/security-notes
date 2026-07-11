@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q58_distributed_lock.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q58_distributed_lock.py</h1>
+  <p class="file-path">Source: code\practice\hard\q58_distributed_lock.py</p>
+  <p class="line-count">462 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q58 [Hard] — Distributed Lock for Incident Processing
+=============================================================================
+
+PROBLEM
+-------
+Design coding logic so only one worker processes the same incident ID:
+  1. Workers compete to acquire a lock on a specific incident_id.
+  2. Only the lock holder should process the incident.
+  3. Lock must auto-expire (TTL) in case the holder crashes.
+  4. Lock must be released explicitly when processing completes.
+  5. Prevent double-processing (idempotency) when lock expires mid-work.
+  6. In-memory simulation (production: Redis SET NX PX).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Distributed or single-node? → Single-node simulation with threading;
+   production notes cover Redis.
+2. Lock TTL? → Configurable; default 30s.
+3. Reentrant? → No (exclusive lock only).
+4. What happens on lock timeout? → Another worker may acquire it.
+   Work should be idempotent or include a completion marker.
+5. Lock refresh? → Optional heartbeat to extend TTL while working.
+
+=============================================================================
+APPROACH 1 — NAIVE (global set, no TTL)
+=============================================================================
+  Set of &quot;locked&quot; incident IDs; no expiry; crashed worker = permanent lock.
+
+=============================================================================
+APPROACH 2 — IN-MEMORY DISTRIBUTED LOCK SIMULATION (OPTIMAL)
+=============================================================================
+  1. dict[incident_id → LockRecord(holder, expires_at, token)].
+  2. acquire() sets lock atomically only if not held or expired.
+     Returns a unique lock token (prevents release by non-holder).
+  3. release(token) validates token before removing lock.
+  4. extend() refreshes TTL (heartbeat).
+  5. RLock around all state for thread safety.
+  6. Background cleanup of expired locks.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import secrets
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Dict, Iterator, Optional
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_LOCK_TTL_S  = 30.0    # 30 seconds
+CLEANUP_INTERVAL_S  = 10.0
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LockRecord:
+    incident_id: str
+    holder_id: str       # which worker holds it
+    token: str           # opaque token; must match to release
+    acquired_at: float
+    expires_at: float
+
+
+class LockError(Exception):
+    pass
+
+
+class LockNotHeldError(LockError):
+    pass
+
+
+class IncidentAlreadyProcessedError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveIncidentLock:
+    &quot;&quot;&quot;No TTL; crashed worker permanently blocks the incident.&quot;&quot;&quot;
+
+    def __init__(self):
+        self._locked: set = set()
+        self._lock = threading.Lock()
+
+    def acquire(self, incident_id: str) -&gt; bool:
+        with self._lock:
+            if incident_id in self._locked:
+                return False
+            self._locked.add(incident_id)
+            return True
+
+    def release(self, incident_id: str) -&gt; None:
+        with self._lock:
+            self._locked.discard(incident_id)
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — TTL-based distributed lock simulation
+# ---------------------------------------------------------------------------
+
+class DistributedIncidentLock:
+    &quot;&quot;&quot;
+    In-memory simulation of a distributed lock for incident processing.
+
+    Key properties:
+      - acquire() is atomic: check-and-set under RLock.
+      - release() validates token: only the holder can release.
+      - TTL: locks auto-expire after ttl_s (simulates Redis EXPIRE).
+      - extend(): heartbeat to renew TTL while work is ongoing.
+      - Context manager: locks are released automatically.
+
+    Production: replace dict operations with Redis SET NX PX.
+    &quot;&quot;&quot;
+
+    def __init__(self, ttl_s: float = DEFAULT_LOCK_TTL_S):
+        self._ttl         = ttl_s
+        self._lock        = threading.RLock()
+        self._locks:      Dict[str, LockRecord] = {}
+        self._completions: set = set()   # incident_ids marked done
+        self._stop        = threading.Event()
+        self._bg          = threading.Thread(
+            target=self._cleanup_loop, daemon=True, name=&quot;lock-cleanup&quot;
+        )
+        self._bg.start()
+
+    # --- Core lock operations -----------------------------------------------
+
+    def acquire(
+        self,
+        incident_id: str,
+        holder_id: str,
+        ttl_s: Optional[float] = None,
+    ) -&gt; Optional[str]:
+        &quot;&quot;&quot;
+        Try to acquire lock on incident_id.
+        Returns lock token on success, None if already locked.
+        &quot;&quot;&quot;
+        ttl = ttl_s or self._ttl
+        now = time.monotonic()
+
+        with self._lock:
+            existing = self._locks.get(incident_id)
+            if existing is not None and now &lt; existing.expires_at:
+                return None   # locked by another holder
+
+            # Create new lock (either first time or expired)
+            token = secrets.token_urlsafe(16)
+            self._locks[incident_id] = LockRecord(
+                incident_id=incident_id,
+                holder_id=holder_id,
+                token=token,
+                acquired_at=now,
+                expires_at=now + ttl,
+            )
+            return token
+
+    def release(self, incident_id: str, token: str) -&gt; bool:
+        &quot;&quot;&quot;
+        Release lock if the provided token matches.
+        Returns True if released; False if not held or token mismatch.
+        &quot;&quot;&quot;
+        with self._lock:
+            rec = self._locks.get(incident_id)
+            if rec is None:
+                return False
+            if rec.token != token:
+                raise LockNotHeldError(
+                    f&quot;Token mismatch for incident {incident_id}: &quot;
+                    f&quot;expected {rec.token!r}, got {token!r}&quot;
+                )
+            del self._locks[incident_id]
+            return True
+
+    def extend(self, incident_id: str, token: str, extra_s: Optional[float] = None) -&gt; bool:
+        &quot;&quot;&quot;
+        Extend the TTL of an existing lock (heartbeat).
+        Returns True on success.
+        &quot;&quot;&quot;
+        with self._lock:
+            rec = self._locks.get(incident_id)
+            if rec is None or rec.token != token:
+                return False
+            rec.expires_at = time.monotonic() + (extra_s or self._ttl)
+            return True
+
+    def mark_complete(self, incident_id: str) -&gt; None:
+        &quot;&quot;&quot;Mark an incident as fully processed (idempotency guard).&quot;&quot;&quot;
+        with self._lock:
+            self._completions.add(incident_id)
+
+    def is_complete(self, incident_id: str) -&gt; bool:
+        with self._lock:
+            return incident_id in self._completions
+
+    # --- Context manager ----------------------------------------------------
+
+    @contextmanager
+    def locked(
+        self,
+        incident_id: str,
+        holder_id: str,
+        ttl_s: Optional[float] = None,
+    ) -&gt; Iterator[str]:
+        &quot;&quot;&quot;
+        Usage:
+            with lock.locked(&quot;INC-001&quot;, &quot;worker-1&quot;) as token:
+                # process incident
+        Raises LockError if cannot acquire.
+        &quot;&quot;&quot;
+        token = self.acquire(incident_id, holder_id, ttl_s)
+        if token is None:
+            raise LockError(f&quot;Could not acquire lock for {incident_id!r}&quot;)
+        try:
+            yield token
+        finally:
+            try:
+                self.release(incident_id, token)
+            except LockNotHeldError:
+                pass  # Token expired mid-work; another worker may have taken over
+
+    # --- Introspection ------------------------------------------------------
+
+    def is_locked(self, incident_id: str) -&gt; bool:
+        with self._lock:
+            rec = self._locks.get(incident_id)
+            return rec is not None and time.monotonic() &lt; rec.expires_at
+
+    def holder(self, incident_id: str) -&gt; Optional[str]:
+        with self._lock:
+            rec = self._locks.get(incident_id)
+            if rec and time.monotonic() &lt; rec.expires_at:
+                return rec.holder_id
+            return None
+
+    def stop(self) -&gt; None:
+        self._stop.set()
+
+    # --- Background cleanup -------------------------------------------------
+
+    def _cleanup_loop(self) -&gt; None:
+        while not self._stop.wait(CLEANUP_INTERVAL_S):
+            self._purge_expired()
+
+    def _purge_expired(self) -&gt; int:
+        now    = time.monotonic()
+        purged = 0
+        with self._lock:
+            expired = [k for k, r in self._locks.items() if now &gt;= r.expires_at]
+            for k in expired:
+                del self._locks[k]
+                purged += 1
+        return purged
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_single_worker_acquires():
+    lm    = DistributedIncidentLock(ttl_s=30)
+    token = lm.acquire(&quot;INC-001&quot;, &quot;worker-1&quot;)
+    assert token is not None
+    assert lm.is_locked(&quot;INC-001&quot;)
+    assert lm.holder(&quot;INC-001&quot;) == &quot;worker-1&quot;
+    print(&quot;Single worker acquires: passed&quot;)
+    lm.stop()
+
+
+def test_second_worker_blocked():
+    lm     = DistributedIncidentLock(ttl_s=30)
+    token1 = lm.acquire(&quot;INC-002&quot;, &quot;worker-1&quot;)
+    token2 = lm.acquire(&quot;INC-002&quot;, &quot;worker-2&quot;)
+    assert token1 is not None
+    assert token2 is None   # blocked
+    print(&quot;Second worker blocked: passed&quot;)
+    lm.stop()
+
+
+def test_release_frees_lock():
+    lm    = DistributedIncidentLock(ttl_s=30)
+    token = lm.acquire(&quot;INC-003&quot;, &quot;worker-1&quot;)
+    assert lm.release(&quot;INC-003&quot;, token) == True
+    assert not lm.is_locked(&quot;INC-003&quot;)
+    # Worker-2 can now acquire
+    t2 = lm.acquire(&quot;INC-003&quot;, &quot;worker-2&quot;)
+    assert t2 is not None
+    print(&quot;Release frees lock: passed&quot;)
+    lm.stop()
+
+
+def test_ttl_expiry_allows_reacquire():
+    lm    = DistributedIncidentLock(ttl_s=0.05)
+    token = lm.acquire(&quot;INC-004&quot;, &quot;worker-1&quot;)
+    assert token is not None
+    time.sleep(0.1)
+    t2 = lm.acquire(&quot;INC-004&quot;, &quot;worker-2&quot;)
+    assert t2 is not None   # expired; re-acquired
+    print(&quot;TTL expiry allows re-acquire: passed&quot;)
+    lm.stop()
+
+
+def test_wrong_token_release_raises():
+    lm    = DistributedIncidentLock(ttl_s=30)
+    _     = lm.acquire(&quot;INC-005&quot;, &quot;worker-1&quot;)
+    try:
+        lm.release(&quot;INC-005&quot;, &quot;wrong_token&quot;)
+        assert False, &quot;Should have raised&quot;
+    except LockNotHeldError:
+        print(&quot;Wrong token raises LockNotHeldError: passed&quot;)
+    lm.stop()
+
+
+def test_context_manager():
+    lm = DistributedIncidentLock(ttl_s=30)
+    with lm.locked(&quot;INC-006&quot;, &quot;worker-1&quot;) as tok:
+        assert lm.is_locked(&quot;INC-006&quot;)
+    assert not lm.is_locked(&quot;INC-006&quot;)   # released on exit
+    print(&quot;Context manager auto-release: passed&quot;)
+    lm.stop()
+
+
+def test_concurrent_workers():
+    &quot;&quot;&quot;Only one of N concurrent workers should acquire the lock.&quot;&quot;&quot;
+    lm       = DistributedIncidentLock(ttl_s=30)
+    acquired = []
+    lock     = threading.Lock()
+    errors   = []
+
+    def worker(name):
+        try:
+            token = lm.acquire(&quot;INC-007&quot;, name)
+            if token:
+                with lock:
+                    acquired.append(name)
+                time.sleep(0.01)
+                lm.release(&quot;INC-007&quot;, token)
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    threads = [threading.Thread(target=worker, args=(f&quot;w{i}&quot;,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    # Only 1 simultaneous holder; but after release others can acquire sequentially
+    print(f&quot;Concurrent: {len(acquired)} workers acquired in sequence — passed&quot;)
+    lm.stop()
+
+
+def test_idempotency_guard():
+    lm    = DistributedIncidentLock()
+    lm.mark_complete(&quot;INC-008&quot;)
+    assert lm.is_complete(&quot;INC-008&quot;)
+    assert not lm.is_complete(&quot;INC-009&quot;)
+    print(&quot;Idempotency guard: passed&quot;)
+    lm.stop()
+
+
+def test_extend_ttl():
+    lm    = DistributedIncidentLock(ttl_s=0.1)
+    token = lm.acquire(&quot;INC-010&quot;, &quot;worker-1&quot;)
+    time.sleep(0.08)
+    assert lm.extend(&quot;INC-010&quot;, token, extra_s=0.5) == True
+    time.sleep(0.15)   # would have expired without extend
+    assert lm.is_locked(&quot;INC-010&quot;)
+    print(&quot;Extend TTL (heartbeat): passed&quot;)
+    lm.stop()
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+DISTRIBUTED LOCKING IN SECURITY SYSTEMS
+-----------------------------------------
+Why lock incident processing?
+  SIEM workers scale horizontally. Without a lock, multiple workers
+  process the same incident simultaneously:
+    - Duplicate alerts to analysts.
+    - Duplicate automated responses (e.g., block IP twice → inconsistency).
+    - Race conditions in state transitions (INC-123: open → investigating
+      by two workers at once → corrupt state).
+
+REDIS SETNX PATTERN (PRODUCTION)
+----------------------------------
+  import redis, uuid
+
+  def acquire_lock(r, incident_id, ttl_ms):
+      token = str(uuid.uuid4())
+      ok = r.set(f&quot;lock:{incident_id}&quot;, token, nx=True, px=ttl_ms)
+      return token if ok else None
+
+  def release_lock(r, incident_id, token):
+      # Lua script: atomic check-and-delete
+      script = &quot;&quot;&quot;
+      if redis.call(&quot;get&quot;, KEYS[1]) == ARGV[1] then
+          return redis.call(&quot;del&quot;, KEYS[1])
+      else
+          return 0
+      end
+      &quot;&quot;&quot;
+      r.eval(script, 1, f&quot;lock:{incident_id}&quot;, token)
+
+  The Lua script ensures atomicity: check + delete cannot interleave.
+
+LOCK EXPIRY EDGE CASES
+-----------------------
+  Worker hangs (GC pause, network timeout): lock expires; another worker
+  takes over and finishes. Original worker wakes up and tries to release:
+    → Token mismatch (another holder). Worker must detect and abort.
+  Solution: use idempotency key in the processed work record.
+    If work already done (idempotency table hit), skip re-processing.
+
+REDLOCK ALGORITHM
+-----------------
+  For fault-tolerant distributed locks across N Redis nodes:
+    1. Acquire lock on majority (N/2 + 1) of Redis instances.
+    2. If majority acquired before TTL/2 elapsed: lock is valid.
+    3. Release lock on ALL instances (even failed ones).
+  Used when a single Redis is a SPOF.
+  Controversy (Martin Kleppmann): edge cases around clock skew
+  and network partitions; use fencing tokens for extra safety.
+
+FENCING TOKENS
+--------------
+  Lock server increments a monotonic counter on each grant.
+  Token (counter value) sent to storage layer with each write.
+  Storage layer rejects writes with stale token:
+    Worker A: token=33 (expired), Worker B: token=34 (current).
+    A tries to write with 33 → storage rejects it.
+  Guarantees strong mutual exclusion even with network partitions.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_single_worker_acquires()
+    test_second_worker_blocked()
+    test_release_frees_lock()
+    test_ttl_expiry_allows_reacquire()
+    test_wrong_token_release_raises()
+    test_context_manager()
+    test_concurrent_workers()
+    test_idempotency_guard()
+    test_extend_ttl()
+</code></pre>
+</body>
+</html>

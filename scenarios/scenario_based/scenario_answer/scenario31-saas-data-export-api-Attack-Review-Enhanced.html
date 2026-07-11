@@ -1,0 +1,2075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 31 — SaaS Customer Data Export and API Access — Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario31-saas-data-export-api-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-31-saas-customer-data-export-and-api-access-threat-exploitation-and-blue-team-control-review">Scenario 31 — SaaS Customer Data Export and API Access — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario31-saas-data-export-api.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario31-saas-data-export-api-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Enterprise bulk export API that stages large PII exports to S3, issues short-lived signed URLs, and supports tenant-scoped queries and downloads.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This review examines the export API from two lenses:</p>
+<ol>
+<li>Attacker lens — realistic exploitation paths for cross-tenant data exposure, signed-URL leakage, and export abuse.</li>
+<li>Blue-team lens — prescriptive controls (preventive, detective, corrective) with specific log sources, queries, and purple-team validation steps.</li>
+</ol>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>The single most consequential decision is how tenant context is propagated and enforced across layers: API gateway authorizers, export job orchestrator, database queries, and object storage prefixes/ACLs. If any layer fails to enforce the tenant_id binding deterministically, legitimate-auth flows can be abused to access another tenant's data. Preferred safe choice: canonical tenant binding injected at the API gateway and carried as an immutable job claim used by RLS and storage key generation. Dangerous alternative: relying on developer-supplied filters or ad-hoc prefixing logic.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or materially contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business or security impact if the chain succeeds.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>IDOR on export job id lookup</td>
+<td>Critical likelihood, High</td>
+<td>API Gateway access logs (<code>requestContext</code>)</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Missing tenant predicate in export query</td>
+<td>Critical likelihood, Critical</td>
+<td>DB audit / query logs (statement text)</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Shared bucket prefix collision</td>
+<td>High likelihood, High</td>
+<td>S3 access logs / CloudTrail <code>GetObject</code></td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Leaked signed URL in logs or telemetry</td>
+<td>High likelihood, High</td>
+<td>Application logs / web server access logs</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Excessive export request rate (DoS)</td>
+<td>High likelihood, High</td>
+<td>Rate limiter metrics / API gateway metrics</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Compromised customer admin token</td>
+<td>Medium likelihood, Critical</td>
+<td>Auth provider logs (token exchange events)</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Weak role model for export scope</td>
+<td>Medium likelihood, High</td>
+<td>AuthZ policy change logs / RBAC audit</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Support impersonation misuse</td>
+<td>Medium likelihood, High</td>
+<td>Support tool audit logs / admin action events</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Delayed cleanup after TTL</td>
+<td>Medium likelihood, Medium</td>
+<td>Lifecycle job telemetry / object age metrics</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Insecure callback / webhook interception</td>
+<td>Medium likelihood, High</td>
+<td>Webhook delivery logs / network logs</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>API pagination or filter bypass</td>
+<td>High likelihood, High</td>
+<td>API request logs showing odd query params</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Incomplete audit coverage</td>
+<td>Medium likelihood, Critical</td>
+<td>Missing events in SIEM or gaps in log stream</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    E0[Compromised admin or attacker]:::attack --> E1[Submit export request with broad filters]:::attack
+    E1 --> E2{API validates tenant claim?}:::control
+    E2 -->|No| E3[Job created without tenant predicate]:::attack
+    E3 --> E4[Export written to shared staging prefix]:::attack
+    E4 --> E5{Signed URL created and logged}:::control
+    E5 -->|Leaked| E6[Download and exfiltrate PII]:::impact
+    E5 -->|Not leaked| E7[Download by rightful tenant]:::blocked
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-idor-on-export-job-id-lookup">T1 — IDOR on export job id lookup</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Critical likelihood, High impact<br />
+<strong>Attacker objective:</strong> Retrieve metadata or download links for another tenant's export by guessing or enumerating <code>job_id</code> or <code>export_id</code>.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: predictable or enumerable job IDs, no tenant binding on lookup endpoint.</li>
+<li>Initial action: iterative requests to <code>/exports/{job_id}</code> probing for valid IDs and response differences.</li>
+<li>Core exploitation: a successful lookup returns signed URL or storage key for victim tenant.</li>
+<li>Escalation: use URL to download PII or chain to request additional exports.</li>
+<li>Impact realization: bulk disclosure of another tenant's export metadata or files.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>API gateway: validate <code>authorizer.claims.tenant_id</code> and compare to job ownership (<code>requestContext.authorizer.claims.tenant_id == job.owner_tenant</code>) at edge (e.g., AWS API Gateway + Lambda authorizer).</li>
+<li>Job service: store immutable <code>owner_tenant</code> claim inside job record at creation and enforce lookup checks in service code and DB queries.</li>
+<li>Rate limiting: per-IP and per-actor throttles for export status API (WAF + API Gateway throttling rules).</li>
+<li>Detective: alert on high-volume 404-&gt;200 patterns and enumerate-like access (SIEM rule <code>ExportIdEnumeration</code>).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>API Gateway access logs: <code>requestContext.authorizer.claims.tenant_id</code>, <code>path</code>, <code>statusCode</code>.</li>
+<li>Application logs: job record reads including <code>job_id</code> and <code>owner_tenant</code> fields.</li>
+<li>SIEM rule: <code>ExportIdEnumeration</code> detecting many sequential job_id lookups from one actor.</li>
+<li>DB audit: SELECT statements on <code>exports</code> table with <code>job_id</code> and returned <code>owner_tenant</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find job lookups returning 200 for actors not matching owner_tenant
+aws logs start-query --log-group-name /aws/apigateway/prod --start-time &lt;start&gt; --end-time &lt;end&gt; --query-string &quot;fields requestContext.authorizer.claims.tenant_id, path, statusCode | filter path like '/exports/' and statusCode==200 | stats count() by requestContext.authorizer.claims.tenant_id&quot;
+</code></pre>
+<pre><code class="language-kql">// SIEM: detect job id enumeration pattern
+ApiGatewayLogs
+| where request_uri startswith &quot;/exports/&quot;
+| summarize cnt=count() by src_ip, bin(timestamp, 5m)
+| where cnt &gt; 50
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Guess job id]:::attack --> A2[Request /exports/{id}]:::attack
+    A2 --> C1{Edge authorizer checks tenant?}:::control
+    C1 -->|Yes| B1[403/404 returned]:::blocked
+    C1 -->|No| A3[Return signed URL / file meta]:::attack
+    A3 --> C2{SIEM detects enumeration?}:::control
+    C2 -->|Yes| B2[Block actor & rotate URL]:::blocked
+    C2 -->|No| A4[Download & exfiltrate]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-missing-tenant-predicate-in-export-query">T2 — Missing tenant predicate in export query</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Critical likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Cause the export worker to run a query without a tenant filter and write other tenants' rows into the export file.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: code path that accepts query filters from request and builds SQL without mandatory tenant predicate.</li>
+<li>Initial action: craft export request with empty or manipulated filters that bypass filter builders.</li>
+<li>Core exploitation: export job issues a query such as <code>SELECT * FROM table WHERE &lt;user_filters&gt;</code> missing <code>tenant_id = X</code>.</li>
+<li>Escalation: request multiple exports covering different tables or time ranges.</li>
+<li>Impact realization: export contains cross-tenant data including PII.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Data: Enforce database Row-Level Security (RLS) with policies requiring <code>tenant_id = current_setting('app.current_tenant')</code> (PostgreSQL RLS) or column-level filters in other DBs.</li>
+<li>Job framework: canonicalize tenant_id in orchestration layer and inject as immutable binding in SQL parameterization — never concatenate filters.</li>
+<li>CI/build: Static analysis unit tests that include negative tests validating missing predicate is rejected (policy-as-code tests run at PR stage).</li>
+<li>Detective: Query-audit rule <code>ExportQueryWithoutTenantFilter</code> that alerts on queries against export workers without <code>tenant_id</code> predicate (DB audit or eBPF/pgAudit events).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>DB audit logs: statement text showing absence of <code>tenant_id</code> in WHERE clause (pgAudit, Oracle Fine-Grained Auditing) and query hashes.</li>
+<li>Export job logs: recorded <code>effective_query</code> or parameter list showing tenant binding.</li>
+<li>SIEM rule match <code>ExportQueryWithoutTenantFilter</code> with job_id and actor.</li>
+<li>Unit test CI results showing policy-as-code failures for missing tenant predicates.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># DB audit: search for export queries missing tenant predicate (example for Postgres audit table)
+psql -c &quot;SELECT query, userid, logged_at FROM pgaudit.log WHERE query LIKE '%FROM exports%' AND query NOT LIKE '%tenant_id%';&quot;
+</code></pre>
+<pre><code class="language-kql">// SIEM: detect export jobs with missing tenant clause
+DBAudit
+| where statement contains &quot;FROM&quot; and statement contains &quot;exports&quot;
+| where statement !contains &quot;tenant_id&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    B1[Worker executes export query]:::attack --> B2[Query missing tenant predicate]:::attack
+    B2 --> C1{RLS enforced at DB?}:::control
+    C1 -->|Yes| B3[No rows from other tenants]:::blocked
+    C1 -->|No| B4[Cross-tenant rows in export]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-shared-bucket-prefix-collision">T3 — Shared bucket prefix collision</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Read a neighboring tenant's staged export due to poor prefixing or ACL misconfiguration.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: bucket layout uses shallow prefixes or shared buckets with weak object key policies.</li>
+<li>Initial action: enumerate objects in bucket or observe predictable key naming and request access.</li>
+<li>Core exploitation: read object via <code>GetObject</code> due to permissive ACL or incorrect prefix filtering.</li>
+<li>Escalation: combine with leaked signed URLs to find accessible objects.</li>
+<li>Impact realization: unauthorized download of other tenants' exports.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Storage: Use per-tenant bucket or enforce strict key prefix conditions in bucket policy (S3 condition <code>StringLike</code> on <code>s3:prefix</code>).</li>
+<li>Access: Require signed URLs bound to object digest and one-time use options; do not rely solely on prefix isolation.</li>
+<li>Detective: CloudTrail <code>GetObject</code> events with requester != owner or prefix mismatch rule.</li>
+<li>Corrective: Automated object quarantine when ACL drift detected and immediate rotation of signed URLs.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>CloudTrail: <code>eventName</code> = <code>GetObject</code> and <code>requestParameters.bucketName</code> / <code>requestParameters.key</code> fields.</li>
+<li>S3 server access logs: <code>cs-uri-stem</code> and <code>x-amz-request-id</code> with requester identity.</li>
+<li>Storage config drift alerts from config management (e.g., AWS Config rule for S3 bucket public access or ACL drift).</li>
+<li>SIEM correlation for cross-prefix access events.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List objects in staging bucket and verify prefixes belong to tenant
+aws s3api list-objects-v2 --bucket prod-exports --prefix &quot;&lt;tenant_prefix&gt;/&quot; --query 'Contents[].Key'
+</code></pre>
+<pre><code class="language-kql">// CloudTrail-ish query: detect getobject from unexpected principal
+CloudTrail
+| where eventName==&quot;GetObject&quot;
+| where requestParameters.bucketName==&quot;prod-exports&quot; and not startswith(requestParameters.key, &quot;&lt;tenant_prefix&gt;/&quot;)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    C1[Shared bucket configured]:::attack --> C2[Requester attempts GetObject]:::attack
+    C2 --> C3{Bucket policy requires prefix match?}:::control
+    C3 -->|Yes| B1[Access denied]:::blocked
+    C3 -->|No| C4[Object returned]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-leaked-signed-url-in-logs-or-telemetry">T4 — Leaked signed URL in logs or telemetry</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Obtain a time-limited signed URL from logs, error messages, or support channels and use it to download a staged export.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: signed URLs written to application logs, stored in analytics snapshots, or delivered over insecure channels.</li>
+<li>Initial action: search logs, SLO dashboards, chat transcripts, or email notifications for URL patterns (e.g., <code>https://...signed...</code>).</li>
+<li>Core exploitation: reuse the URL before expiry or chain with DNS leaks or referer leaks.</li>
+<li>Escalation: replay URL multiple times or share with third parties.</li>
+<li>Impact realization: unauthorized download of full export file.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Delivery: Do not write signed URLs to logs; redact or token-hash them in telemetry. Use event IDs instead of URLs in logs.</li>
+<li>URL policies: Enforce one-time-use signed URLs or require TLS client cert or referer-binding for downloads.</li>
+<li>Detective: DLP on logs to detect URL patterns and trigger immediate revocation (SOAR playbook to invalidate URL and reissue).</li>
+<li>Corrective: Invalidate leaked URL by rotating object key or toggling access policy immediately when leak detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Application logs: ensure no <code>signed_url</code> or full <code>url</code> field present; check for <code>url_redacted</code> or <code>url_id</code> instead.</li>
+<li>SIEM DLP alerts on log archives containing <code>https://.*signed</code> patterns.</li>
+<li>Signed URL generation logs: creation timestamp, creator_id, TTL, and redemption counts.</li>
+<li>Object storage access logs showing multiple redemptions of same URL-derived token.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Search archived logs for signed URL patterns (lab only — search on backups)
+rg &quot;https?://[^&quot;]+\?(?:X-Amz-|signature=)&quot; /var/log/app/* || true
+</code></pre>
+<pre><code class="language-bash"># Validate that signed URL creation logs contain only url_id and not the full URL
+aws logs filter-log-events --log-group-name /app/export --filter-pattern &quot;CreateSignedUrl&quot; --query 'events[].message' | jq '. | select(.message|contains(&quot;url_id&quot;))'
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    D1[Signed URL generated]:::attack --> D2[URL written to logs]:::attack
+    D2 --> C1{Logging redaction in place?}:::control
+    C1 -->|Yes| B1[No URL in logs]:::blocked
+    C1 -->|No| D3[Attacker finds URL]:::attack
+    D3 --> C2{One-time URL?}:::control
+    C2 -->|Yes| B2[URL expired after one use]:::blocked
+    C2 -->|No| D4[Download & exfiltrate]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-excessive-export-request-rate-dos">T5 — Excessive export request rate (DoS)</h3>
+<p><strong>STRIDE category:</strong> Denial of Service<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Flood the export API with large requests, exhausting CPU, DB, and staging storage capacity, impacting other tenants.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: public export endpoint or weak per-tenant quotas.</li>
+<li>Initial action: submit many concurrent export requests or very-large-export filters to trigger heavy queries.</li>
+<li>Core exploitation: overload database, saturate export job queue, exhaust storage IO or egress.</li>
+<li>Escalation: orchestrate from multiple IPs to defeat simple rate limits.</li>
+<li>Impact realization: platform degradation or denial for legitimate customers.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Throttling: enforce layered quotas — per-tenant concurrent jobs, per-tenant daily export rows, and global request rate via API Gateway throttling and WAF rules.</li>
+<li>Queuing: admission queue that enqueues heavy jobs and schedules based on capacity, with priority bands per tenant tier.</li>
+<li>Circuit breakers: automatic job back-pressure and operator-visible backoff with alerts to SRE.</li>
+<li>Detective: rate-limiter metrics and anomaly alerts (CloudWatch metric <code>ThrottledRequests</code> or APIGW <code>Count</code> alarms).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>API gateway metrics: <code>4XX</code>/<code>5XX</code> rates, <code>ThrottledRequests</code> and <code>Latency</code> percentiles.</li>
+<li>Export job queue depth and worker CPU/memory metrics.</li>
+<li>Storage ingress/ejection metrics for staging buckets and object count deltas.</li>
+<li>SIEM rule: sustained exceedance of per-tenant request thresholds.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Simulate high-rate export requests from test tenant to validate throttling (careful, lab only)
+for i in {1..100}; do curl -s -X POST https://api.example.com/exports -H &quot;Authorization: Bearer &lt;test_admin_token&gt;&quot; -d '{&quot;filters&quot;:{}}' &amp; done
+</code></pre>
+<pre><code class="language-kql">// Detection: find tenants with export rate &gt; baseline
+ApiGatewayMetrics | where name==&quot;ThrottledRequests&quot; | summarize sum(value) by tenant_id, bin(timestamp, 5m) | where sum_value &gt; 100
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    E1[Attacker floods export endpoint]:::attack --> E2[Queue depth rises]:::attack
+    E2 --> C1{Per-tenant throttles configured?}:::control
+    C1 -->|Yes| B1[Excess requests rejected]:::blocked
+    C1 -->|No| E3[Resource exhaustion]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-compromised-customer-admin-token">T6 — Compromised customer admin token</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use stolen admin credentials or tokens to request and download large exports legitimately.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: credential theft (phishing, credential stuffing) or token leakage.</li>
+<li>Initial action: authenticate to API and request exports using victim's identity.</li>
+<li>Core exploitation: because the request is authorized, it bypasses many guards and returns the export file.</li>
+<li>Escalation: use exported secrets or keys to expand access or chain into other services.</li>
+<li>Impact realization: high-fidelity, legitimate-appearing exfiltration of data.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Identity: monitor for abnormal session signals — token reuse from different ASN/geolocation and require step-up MFA for high-volume exports.</li>
+<li>Rotations: implement short-lived tokens (OIDC) and automatic revocation upon suspicious activity.</li>
+<li>Detective: Auth telemetry rule <code>AdminTokenReplayAnomaly</code> using auth logs fields <code>sourceIp</code>, <code>userAgent</code>, <code>tokenId</code>.</li>
+<li>Corrective: Automated session invalidation and forced password/MFA reset for the compromised account.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Auth provider logs: token issue and introspection events with <code>token_id</code>, <code>client_ip</code>, and <code>user_agent</code> fields.</li>
+<li>SIEM correlation: login anomaly + export job creation within short time window.</li>
+<li>Audit trail: job creation <code>actor_id</code> vs usual actor baseline.</li>
+<li>SOAR runbook triggers for forced revocation and notification.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Query auth logs for same token used from different ASNs
+auth-logs-cli query --filter &quot;token_id:&lt;id&gt;&quot; --fields timestamp,client_ip,asn
+</code></pre>
+<pre><code class="language-kql">// SIEM: correlate token mint and export creation
+AuthLogs | where eventName==&quot;TokenIssue&quot; | join (JobLogs | where action==&quot;CreateExport&quot;) on requestId
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    F1[Attacker uses stolen admin token]:::attack --> F2[Request export as legitimate user]:::attack
+    F2 --> C1{Step-up for large exports?}:::control
+    C1 -->|Yes| B1[Challenge & block]:::blocked
+    C1 -->|No| F3[Export created & downloaded]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-weak-role-model-for-export-scope">T7 — Weak role model for export scope</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Abuse coarse-grained roles that allow over-broad exports.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: role <code>export_admin</code> that grants access to export all tenants or many datasets.</li>
+<li>Initial action: use role privileges to run exports beyond intended scope or to create service-level keys.</li>
+<li>Core exploitation: request exports that include sensitive tables or join across tenants.</li>
+<li>Escalation: escalate privileges by requesting scoped service account tokens.</li>
+<li>Impact realization: privileges allow broad data access across tenants.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Governance: implement least-privilege roles with field-level scoping and enforce <code>export_scope</code> constraints in RBAC (e.g., IAM policy specifying <code>resource:arn:exports:&lt;tenant&gt;</code>).</li>
+<li>Preventive: Require justification and time-bound elevation for sensitive export roles (access request workflows).</li>
+<li>Detective: Audit role usage with <code>role_assume</code> events and alert when <code>export_admin</code> runs against unexpected tenants.</li>
+<li>Corrective: Revoke or reduce role scope and require reissuance through privileged access management (PAM).</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>IAM audit logs: <code>AssumeRole</code>/<code>GrantRole</code> events with <code>principal</code> and <code>resource</code> details.</li>
+<li>Job logs: <code>actor_role</code> recorded for each export job.</li>
+<li>SIEM: rule for <code>export_admin</code> performing exports across &gt;1 tenant in 24h.</li>
+<li>PAM logs showing time-bound elevation events.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List recent exports performed by privileged roles
+jobs-cli list --filter &quot;actor_role:export_admin&quot; --since 24h
+</code></pre>
+<pre><code class="language-kql">// Detect role abuse across tenants
+AuditLogs | where eventType==&quot;AssumeRole&quot; and role==&quot;export_admin&quot; | join (JobLogs) on principalId | summarize count() by principalId
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    G1[Privilege: export_admin granted]:::attack --> G2[Run export across tenant(s)]:::attack
+    G2 --> C1{Role scoped per tenant?}:::control
+    C1 -->|Yes| B1[Operation limited]:::blocked
+    C1 -->|No| G3[Mass export across tenants]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-support-impersonation-misuse">T8 — Support impersonation misuse</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Insider or compromised support tooling used to initiate exports under false pretenses to exfiltrate data stealthily.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: support tools that can operate on behalf of customers and lack full audit linking to tickets.</li>
+<li>Initial action: invoke support impersonation flow to request or download an export without robust approval.</li>
+<li>Core exploitation: use impersonation to hide actor identity and bypass tenant-level checks.</li>
+<li>Escalation: chain to privileged support accounts to access multiple tenants.</li>
+<li>Impact realization: stealthy exfiltration with plausible legitimate context.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Process: require ticket linkage and dual-approval for any support-initiated export and log <code>ticket_id</code> in job metadata.</li>
+<li>Preventive: restrict support tooling to read-only by default; require explicit temporary escalate-to-export actions with justification.</li>
+<li>Detective: alert on support exports lacking <code>ticket_id</code> or with <code>ticket_id</code> flagged as automated/empty.</li>
+<li>Corrective: suspend support account and capture forensic snapshot when misuse detected.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Support tool logs: <code>actor</code>, <code>ticket_id</code>, <code>action</code>, and <code>target_tenant</code> fields.</li>
+<li>Job metadata: <code>created_by</code> should contain <code>support:ticket:&lt;id&gt;</code>.</li>
+<li>SIEM: rule <code>SupportExportWithoutTicket</code> for support exports missing correlated ticket.</li>
+<li>HR / access logs for post-incident investigation.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find support-initiated exports with no ticket linkage
+jobs-cli list --filter &quot;created_by:support&quot; --query &quot;[?ticket_id==null]&quot;
+</code></pre>
+<pre><code class="language-kql">// SIEM: detect support exports without ticket
+JobLogs | where created_by startswith &quot;support:&quot; and isnull(ticket_id)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    H1[Support tool used to create export]:::attack --> H2[No ticket_id attached]:::attack
+    H2 --> C1{Dual-approval required?}:::control
+    C1 -->|Yes| B1[Export blocked pending approval]:::blocked
+    C1 -->|No| H3[Export created and downloaded]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-delayed-cleanup-after-ttl">T9 — Delayed cleanup after TTL</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Discover and download export objects that were not deleted due to lifecycle job failures.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: failure of cleanup job or misconfigured TTL causing objects to persist longer than expected.</li>
+<li>Initial action: enumerate staging bucket for objects older than expected or query metadata service for stale objects.</li>
+<li>Core exploitation: retrieve objects via valid credentials or leaked URLs found elsewhere.</li>
+<li>Escalation: build index of stale exports for later targeted downloads.</li>
+<li>Impact realization: temporary window of extended exposure of PII.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Ops: implement robust lifecycle jobs with retries, monitoring, and alerting; require idempotent deletes and tombstones.</li>
+<li>Detective: rule <code>CleanupSLABreach</code> alerting when objects older than TTL exist in staging.</li>
+<li>Storage: encrypt artifacts with per-tenant keys and rotate when TTL breach detected to make retained objects unreadable.</li>
+<li>Corrective: automated forced purge and notification to affected tenants.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Lifecycle job metrics: success rate, error counts, and last run timestamp.</li>
+<li>Object metadata: <code>LastModified</code> and <code>x-amz-meta-tenant</code> tags for each object.</li>
+<li>SIEM: <code>CleanupSLABreach</code> rule matches objects older than TTL.</li>
+<li>Audit logs for delete operations and returned errors.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find objects older than TTL in staging bucket
+aws s3api list-objects-v2 --bucket prod-exports --query 'Contents[?LastModified&lt;`2026-05-01`].[Key,LastModified]'
+</code></pre>
+<pre><code class="language-kql">// SIEM: detect objects older than TTL
+StorageAccess | where Operation==&quot;PutObject&quot; | summarize max(TimeGenerated) by ObjectKey | where max_TimeGenerated &lt; ago(7d)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    I1[Lifecycle job fails]:::attack --> I2[Objects remain in staging]:::attack
+    I2 --> C1{Encryption per-tenant?}:::control
+    C1 -->|Yes| B1[Objects unreadable without key]:::blocked
+    C1 -->|No| I3[Attacker finds and downloads object]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-insecure-callback-webhook-interception">T10 — Insecure callback / webhook interception</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Intercept or spoof export completion callbacks that contain signed URLs or object identifiers.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: webhook endpoints delivered without signature verification or over non-TLS channels.</li>
+<li>Initial action: observe network, use man-in-the-middle on poorly secured callback channel, or replay captured delivery.</li>
+<li>Core exploitation: obtain the signed URL from callback payload and download export.</li>
+<li>Escalation: substitute callback URL to redirect notifications to attacker-controlled endpoint and harvest multiple URLs.</li>
+<li>Impact realization: automated exfiltration via intercepted callbacks.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Delivery: Use HMAC-signed webhook payloads (e.g., include <code>X-Signature</code> header with shared secret) and TLS for all deliveries.</li>
+<li>Verification: Receiver must validate signature before acting on payload.</li>
+<li>Detective: Monitor for callback destinations that are not on allowlist and alert on rapid retries or unusual recipient IPs.</li>
+<li>Corrective: Rotate webhook secrets and revoke tokens associated with compromised endpoints.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Webhook delivery logs: destination URL, <code>X-Signature</code> header presence, delivery status codes.</li>
+<li>Network logs for callback traffic showing unexpected destinations or geographies.</li>
+<li>SIEM rule for <code>WebhookDestinationAnomaly</code> mapping delivered to unknown endpoints.</li>
+<li>Webhook replay detection metrics.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Validate that webhook payloads are HMAC-signed
+curl -I -H &quot;X-Signature: sha256=&lt;expected&gt;&quot; https://webhook.example.com/health
+</code></pre>
+<pre><code class="language-kql">// Detect webhook deliveries to endpoints outside of allowlist
+WebhookLogs | where destination notin (&quot;https://trusted-callback1&quot;,&quot;https://trusted-callback2&quot;)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    J1[Job service sends webhook]:::attack --> J2[Payload contains signed URL]:::attack
+    J2 --> C1{Webhook signature validated?}:::control
+    C1 -->|Yes| B1[Ignore unauthenticated callbacks]:::blocked
+    C1 -->|No| J3[Attacker intercepts URL]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-api-pagination-or-filter-bypass">T11 — API pagination or filter bypass</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Abuse pagination, sorting, or filter edge cases to reconstruct larger datasets than intended.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: API accepts offsets, cursors, or filters with inconsistent enforcement of tenant_id.</li>
+<li>Initial action: iterate paginated calls with overlapping windows or abuse <code>limit</code> parameters to circumvent quotas.</li>
+<li>Core exploitation: stitch results to reconstruct full datasets or use specially crafted filters to include other tenants.</li>
+<li>Escalation: combine with multiple accounts or token reuse to widen blast radius.</li>
+<li>Impact realization: incremental data exfiltration under quota thresholds.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>API: Enforce tenant predicate at query planner level (not only response-side filtering) and limit <code>limit</code>/<code>page_size</code> per tenant.</li>
+<li>Rate-limiting: Granular throttles on pagination endpoints, cursor expiry, and detection of fast cursor churn.</li>
+<li>Detective: Detect patterns of sequential pagination across multiple sessions from same actor (<code>PaginationReconstruction</code> rule).</li>
+<li>Corrective: Invalidate cursors and require re-authentication on suspicious behavior.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>API logs: request parameters (<code>limit</code>, <code>offset</code>, <code>cursor</code>) and <code>actor_id</code> and tenant claim.</li>
+<li>SIEM rule: <code>PaginationReconstruction</code> looking for many cursor advances by same actor.</li>
+<li>Job logs: verify that pagination logic includes tenant binding in SQL executed per page.</li>
+<li>WAF logs for abnormal query patterns.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Simulate paging through export API and ensure tenant predicate present server-side
+curl -H &quot;Authorization: Bearer &lt;token&gt;&quot; &quot;https://api.example.com/exports?limit=100&amp;cursor=&lt;cursor&gt;&quot;
+</code></pre>
+<pre><code class="language-kql">// Detect rapid cursor churn
+ApiRequestLogs | where path startswith &quot;/exports&quot; and query_params contains &quot;cursor&quot; | summarize cnt=count() by src_ip, bin(timestamp, 5m) | where cnt &gt; 100
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    K1[Attacker iterates pagination]:::attack --> K2[Server generates pages]:::attack
+    K2 --> C1{Tenant predicate applied per page?}:::control
+    C1 -->|Yes| B1[Pages limited to tenant rows]:::blocked
+    C1 -->|No| K3[Pages include other tenant rows]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-incomplete-audit-coverage">T12 — Incomplete audit coverage</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Ensure key events (export creation, signed URL generation, object deletion) are not logged or are lost, preventing detection and forensics.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: logging gaps, log retention misconfig, or ingestion pipeline filtering sensitive fields.</li>
+<li>Initial action: run export flows that rely on missing log hooks, or trigger log truncation via flooding.</li>
+<li>Core exploitation: perform exfiltration while key audit events are dropped or obfuscated.</li>
+<li>Escalation: attackers try to cover tracks by deleting logs if privileged access exists.</li>
+<li>Impact realization: detection blind spot and inability to notify or perform timely incident response.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Logging: Mandate immutable, append-only audit logs for export lifecycle events (export_create, signed_url_create, object_delete) with encryption-at-rest and write-only ingestion.</li>
+<li>Observability pipeline: end-to-end log delivery SLA and delivery monitoring; alert on missing expected events for completed jobs (<code>AuditGapForCompletedExport</code>).</li>
+<li>Detective: Periodic audit gap checks that compare job completion events to storage deletion events.</li>
+<li>Corrective: Harden log store permissions and enable log archival to an immutable store (WORM) for forensic preservation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>SIEM parity checks: <code>JobComplete</code> event correlated with <code>SignedUrlCreated</code> and <code>ObjectDeleted</code> events.</li>
+<li>Delivery metrics for log ingestion with <code>drop_rate</code> and <code>latency</code> fields.</li>
+<li>Immutable archive checksum validation for older logs.</li>
+<li>Forensic snapshots capturing environment state at time of suspected exfil.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Check for missing audit events for completed exports in the last 24h
+siem-cli query &quot;JobLogs | where event=='JobComplete' and not exists (SignedUrlCreated | where job_id==JobLogs.job_id)&quot;
+</code></pre>
+<pre><code class="language-kql">// SIEM: detect audit gap for completed exports
+JobLogs | where action==&quot;complete&quot; | join kind=leftanti (AuditEvents | where eventType==&quot;SignedUrlCreated&quot;) on job_id
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    L1[Export completes]:::attack --> L2[Signed URL created]:::attack
+    L2 --> C1{Audit events ingested?}:::control
+    C1 -->|Yes| B1[SIEM correlates & alerts]:::blocked
+    C1 -->|No| L3[Missing audit -> delayed detection]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Attempt authorized and unauthorized job lookups; ensure 403 for cross-tenant</td>
+<td>API returns 403 and SIEM logs 403 event</td>
+<td>200 returned with other tenant metadata</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Inject a test missing tenant predicate in staging; DB RLS should block</td>
+<td>DB audit shows no cross-tenant rows</td>
+<td>Export contains rows from other tenants</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>List staging bucket prefixes and verify ACL/policy enforcement</td>
+<td>List returns only tenant objects</td>
+<td>Neighboring tenant objects visible and downloadable</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Place fake signed URL in staging logs (redacted) and ensure DLP triggers</td>
+<td>DLP alert and URL revoked</td>
+<td>URL present in logs and usable</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Run burst export requests from lab tenant to validate throttles</td>
+<td>Throttling metrics and rejected requests</td>
+<td>System resources exhausted and no throttles</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Simulate token replay from different ASN; verify step-up triggers</td>
+<td>Token revoked &amp; MFA required</td>
+<td>Token reused to export data</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Review role policies for export_admin and test scoped denial</td>
+<td>Role cannot export other tenants</td>
+<td>Role exports across tenants</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Create support export without ticket in staging and ensure block</td>
+<td>Export blocked and alert created</td>
+<td>Export completed without ticket</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Kill lifecycle job and verify alert for stale objects exists</td>
+<td>Alert and forced purge executed</td>
+<td>Stale objects remain</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Replay webhook without signature to validate rejection</td>
+<td>Receiver rejects invalid signature</td>
+<td>Webhook accepted and URL leaked</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Iterate pagination API to test limits and cursor expiry</td>
+<td>Cursor invalidated on abuse</td>
+<td>Pages return incremental data enabling reconstruction</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Remove a subset of audit ingestion and verify audit-gap alert</td>
+<td>Audit gap alert triggered</td>
+<td>No alert and missing logs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Identity and authentication</td>
+<td>T1, T6, T7</td>
+<td>Step-up MFA for large exports not fully automated</td>
+</tr>
+<tr>
+<td>Data and query enforcement</td>
+<td>T2, T11</td>
+<td>RLS coverage for historical analytics queries</td>
+</tr>
+<tr>
+<td>Storage isolation &amp; encryption</td>
+<td>T3, T9, T4</td>
+<td>Per-tenant key rotation needs automation</td>
+</tr>
+<tr>
+<td>Logging, detection, and SIEM</td>
+<td>T1, T2, T4, T12</td>
+<td>End-to-end ingestion SLA monitoring</td>
+</tr>
+<tr>
+<td>Rate-limiting and availability</td>
+<td>T5</td>
+<td>Capacity planning for large customers</td>
+</tr>
+<tr>
+<td>Support tooling governance</td>
+<td>T8</td>
+<td>Dual-approval requirement to be enforced</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Enforce canonical tenant binding at the edge</strong> — require <code>authorizer.claims.tenant_id</code> and inject immutable job ownership into job records. (Closes T1, T2)</li>
+<li><strong>Enable DB Row-Level Security for exports</strong> — implement RLS policies (Postgres example) and fail builds without unit tests covering missing predicate cases. (Closes T2, T11)</li>
+<li><strong>Isolate storage per tenant or enforce prefix policies</strong> — move to per-tenant buckets or strict bucket policies and one-time signed URLs. (Closes T3, T4)</li>
+<li><strong>Implement layered quotas and job admission</strong> — per-tenant concurrency, daily export row limits, and capacity-aware scheduling. (Closes T5)</li>
+<li><strong>Mandate append-only audit events and gap detection</strong> — ensure <code>JobComplete</code>, <code>SignedUrlCreated</code>, and <code>ObjectDeleted</code> are always emitted and correlated in SIEM. (Closes T12)</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario31-saas-data-export-api.md | Scenario 31 review — Attack-Review-Enhanced</em></p>
+<h1 id="scenario-31-saas-customer-data-export-api-threat-exploitation-and-blue-team-control-review">Scenario 31 — SaaS Customer Data Export API — Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario31-saas-data-export-api.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario31-saas-data-export-api-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead — 15+ years purple-team experience<br />
+<strong>Scenario:</strong> Enterprise bulk data export API that stages PII exports to object storage; tenants request large exports via authenticated API. Risks: cross-tenant leakage, signed-URL replay, export DoS.</p>
+<hr />
+<h2 id="1-review-objective_1">1. Review Objective</h2>
+<p>This review translates the scenario into attacker-centric exploit chains and concrete blue-team controls. For each threat it provides: STRIDE classification, attacker objective and steps, precise detective/preventive controls (with log sources &amp; event fields), safe purple-team validation commands, and a small mermaid attack tree highlighting breakpoints.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision_1">2. Highest-Risk Design Decision</h2>
+<p>The single most consequential decision is allowing an export request to transform unaudited tenant context into backend query predicates and storage prefixes (i.e., trusting incoming tenant claims end-to-end). If tenant scoping is enforced only at the API layer and not guaranteed in the job worker, database, and storage access controls, a valid authenticated request can cause cross-tenant data leakage and large-scale exfiltration.</p>
+<p>Preferred safe choice: enforce tenant binding at every layer (API, job orchestrator, DB predicates, object keys, and KMS encryption context) with policy-as-code tests. Dangerous alternative: verification at API only, with workers or storage relying on ad-hoc prefixes.</p>
+<hr />
+<h2 id="3-attack-tree-legend_1">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker actions.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive decision points.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): stopped/contained actions.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): business impact.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary_1">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>IDOR on export job id lookup</td>
+<td>High likelihood, Critical</td>
+<td>API gateway access logs</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Missing tenant predicate in export query</td>
+<td>High likelihood, Critical</td>
+<td>DB query audit logs</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Shared bucket prefix collision</td>
+<td>Medium likelihood, High</td>
+<td>Object storage access logs</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Leaked signed URL in logs</td>
+<td>Medium likelihood, High</td>
+<td>Audit logs / application logs</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Excessive export request rate (DoS)</td>
+<td>High likelihood, High</td>
+<td>Rate-limiter metrics</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Compromised customer admin token</td>
+<td>Medium likelihood, Critical</td>
+<td>Auth provider logs</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Weak role model for export scope</td>
+<td>Medium likelihood, High</td>
+<td>RBAC policy change logs</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Support impersonation misuse</td>
+<td>Low/Medium likelihood, High</td>
+<td>Support tool audit logs</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Delayed cleanup after TTL</td>
+<td>Medium likelihood, Medium</td>
+<td>Lifecycle job telemetry</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Insecure callback/webhook interception</td>
+<td>Medium likelihood, Medium</td>
+<td>Notification service logs</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Pagination or filter bypass</td>
+<td>Medium likelihood, High</td>
+<td>Export job query logs</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Incomplete audit coverage</td>
+<td>Medium likelihood, High</td>
+<td>SIEM / Audit ingestion metrics</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree_1">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    E0[Compromised admin token or malicious tenant]:::attack --> E1[Submit broad export request]:::attack
+    E1 --> E2{API authz & tenant binding enforced?}:::control
+    E2 -->|No| E3[Job worker issues cross-tenant query]:::attack
+    E3 --> E4[Export staged to shared bucket]:::attack
+    E4 --> E5{Signed URL leakage or prefix exposure?}:::control
+    E5 -->|Yes| E6[Unauthorized download & exfiltration]:::impact
+    E5 -->|No| E7[Blocked at storage ACL / KMS mismatch]:::blocked
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-threat-by-threat-technical-review_1">6. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-idor-on-export-job-id-lookup_1">T1 — IDOR on export job id lookup</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Retrieve export metadata or download URLs for another tenant's export by enumerating or guessing job IDs.</p>
+<h4 id="how-the-attacker-would-exploit-it_12">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: ability to call the export status/download endpoint with an auth token.</li>
+<li>Initial action: enumerate job IDs or reuse plausible IDs from prior responses.</li>
+<li>Core exploitation: call <code>/exports/{job_id}</code> for other tenants and receive signed URL or status pointing to object key.</li>
+<li>Escalation: use signed URL to download PII or chain with URL leakage to exfiltrate data.</li>
+<li>Impact realization: mass data access without DB compromise.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_12">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Enforce server-side check: job_id -&gt; tenant_id mapping checked against requester principal before any metadata returned.</li>
+<li>Return minimal metadata for unknown job ids and never embed raw signed URLs in status responses.</li>
+<li>Use unguessable job IDs (cryptographic UUIDs) and rate-limit job-status lookups per actor.</li>
+<li>Add HMAC on job ID that ties it to tenant context and rejects mismatched HMAC.</li>
+<li>Detect enumeration patterns: many failed job_id lookups from same actor.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_12">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>API gateway logs: requests to <code>/exports/{job_id}</code> with <code>actor</code>, <code>tenant_id</code>, <code>response_code</code>.</li>
+<li>SIEM rule: repeated 404/403 for different job ids from same actor within short window.</li>
+<li>Download logs: requests which returned headers exposing signed URL fields.</li>
+</ul>
+<h4 id="purple-team-validation-commands_12">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List recent export status calls with actor and response code
+gh api repos/&lt;org&gt;/&lt;repo&gt;/events --jq '.[] | select(.type==&quot;ExportStatusRequest&quot;) | {actor: .actor, job: .payload.job_id, status: .payload.status}'
+</code></pre>
+<pre><code class="language-kql"># Detect job enumeration patterns
+APIGatewayLogs
+| where endpoint startswith &quot;/exports/&quot;
+| summarize cnt=count() by actor, bin(TimeGenerated, 5m)
+| where cnt &gt; 20
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_12">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    A1[Enumerate job IDs]:::attack --> C1{Server checks tenant mapping?}:::control
+    C1 -->|Yes| B1[403/404 returned]:::blocked
+    C1 -->|No| A2[Metadata reveals signed URL]:::attack
+    A2 --> C2{ACL or URL TTL valid?}:::control
+    C2 -->|No| A3[Unauthorized download]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-missing-tenant-predicate-in-export-query_1">T2 — Missing tenant predicate in export query</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Cause the job worker to execute an export query without tenant scoping, returning cross-tenant data.</p>
+<h4 id="how-the-attacker-would-exploit-it_13">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: ability to submit filters or crafted query parameters to the export API.</li>
+<li>Initial action: submit export request containing empty or malformed <code>tenant_id</code> or unexpected filter that triggers fallback path.</li>
+<li>Core exploitation: worker executes query lacking <code>WHERE tenant_id = &lt;x&gt;</code> due to bug, use of dynamic SQL or ORM bug.</li>
+<li>Escalation: request large exports to harvest other tenants' data.</li>
+<li>Impact realization: direct cross-tenant data leakage at scale.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_13">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Mandatory DB-level RLS (Row-Level Security): DB rejects queries that do not include tenant guard or are executed by a role lacking tenant filter.</li>
+<li>Input validation and schema binding: disallow raw SQL filters from clients; translate filters to parameterized queries.</li>
+<li>Pre-deployment policy-as-code tests validating common query shapes and presence of tenant predicate.</li>
+<li>Runtime assertion in worker: fail job if query plan or AST missing tenant predicate.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_13">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>DB audit logs: statement text and presence of tenant_id predicate; event fields: <code>statement_hash</code>, <code>user</code>, <code>duration</code>.</li>
+<li>Job worker logs: recorded <code>query_scope</code> and <code>tenant_id</code> claimed.</li>
+<li>SIEM rule <code>ExportQueryWithoutTenantFilter</code> firing on queries lacking tenant predicate.</li>
+</ul>
+<h4 id="purple-team-validation-commands_13">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Query DB audit for statements without tenant predicate (example)
+db-audit-cli query --since 24h &quot;WHERE statement NOT LIKE '%tenant_id=%' AND statement LIKE '%FROM exports%'&quot;
+</code></pre>
+<pre><code class="language-kql"># SIEM rule simulation
+DBAudit
+| where object == &quot;exports&quot; and not(tostring(statement) contains &quot;tenant_id&quot;)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_13">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    B1[Job receives request]:::attack --> C1{DB RLS enforced?}:::control
+    C1 -->|Yes| B2[Query rejected]:::blocked
+    C1 -->|No| B3[Query runs cross-tenant]:::attack
+    B3 --> C2{SIEM detects missing tenant predicate?}:::control
+    C2 -->|Yes| B4[Quarantine export & alert]:::blocked
+    C2 -->|No| B5[Export staged -> exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-shared-bucket-prefix-collision_1">T3 — Shared bucket prefix collision</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Access neighboring tenant's export by exploiting prefix or key naming collisions in shared object storage.</p>
+<h4 id="how-the-attacker-would-exploit-it_14">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: storage architecture uses shared buckets with prefix-based isolation.</li>
+<li>Initial action: craft object key that bypasses prefix checks (e.g., path traversal-like mistakes or double-encode keys) or abuse wildcard listing.</li>
+<li>Core exploitation: attacker or misconfigured worker reads object at neighbor prefix or obtains list of objects.</li>
+<li>Escalation: iterate across prefixes to harvest multiple tenants' files.</li>
+<li>Impact realization: access to many tenants' PII in bucket scope.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_14">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Use per-tenant buckets or enforced deny-by-default object ACLs; avoid prefix-only isolation.</li>
+<li>Apply server-side key validation: ensure worker writes to tenant-dedicated prefix and storage service validates prefix matches tenant claim.</li>
+<li>Use object encryption with tenant-scoped keys so even if object is listed, decryption requires tenant key.</li>
+<li>Harden storage listing: require explicit permission to list prefixes and log list operations.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_14">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Storage access logs: object_key, requester, operation (GET/PUT/LIST), source_ip.</li>
+<li>Alerts on list operations against unexpected prefixes or mass listing events.</li>
+<li>KMS access logs: decryption requests for tenant keys from unexpected principals.</li>
+</ul>
+<h4 id="purple-team-validation-commands_14">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Check storage access for unexpected prefix reads
+storage-cli logs --since 24h --filter &quot;operation=GET AND object_key startswith 'tenant/&lt;other&gt;'&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_14">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    C1[Shared bucket write/list]:::attack --> C2{Per-tenant keys & ACL?}:::control
+    C2 -->|Yes| B1[Access denied]:::blocked
+    C2 -->|No| C3[Neighbor tenant object read]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-leaked-signed-url-in-logs">T4 — Leaked signed URL in logs</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Acquire signed download URLs by extracting them from logs, error messages, or debug output and use them to download sensitive exports.</p>
+<h4 id="how-the-attacker-would-exploit-it_15">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: signed URLs are logged or returned in-app; logs are searchable or forwarded to external systems.</li>
+<li>Initial action: search logs, error traces, or monitoring dashboards for <code>https://storage/...</code> patterns.</li>
+<li>Core exploitation: download object using signed URL before expiry.</li>
+<li>Escalation: store and reuse URLs, or share with other actors.</li>
+<li>Impact realization: exfiltrate export files without breaking auth.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_15">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Avoid logging full signed URLs; log only URL IDs or redact token query parameters before storing.</li>
+<li>Use one-time signed URLs or require additional claim binding (e.g., IP-bound or referrer-bound URLs when supported).</li>
+<li>Ensure logging ingestion scrubbing and restrict access to logs; enforce retention &amp; DLP scanning for URL regex.</li>
+<li>Automated SIEM DLP rule to detect and rotate any URL-like string in logs and trigger revocation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_15">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Logging pipelines: record if any log line contains <code>signed_url</code> or <code>x-amz-signature</code>-like patterns.</li>
+<li>SIEM DLP alerts for URL exposure; evidence in log ingestion source.</li>
+<li>Storage access logs showing downloads tied to signed URL redemption (url_id) and source IPs.</li>
+</ul>
+<h4 id="purple-team-validation-commands_15">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Search for signed URL patterns in recent logs (lab only)
+logs-cli query --since 24h &quot;message =~ /https:\/\/.*\/signed-url|x-amz-signature/&quot;
+</code></pre>
+<pre><code class="language-kql"># Alert: signed URL string in logs
+IngestedLogs
+| where message contains &quot;x-amz-signature&quot; or message contains &quot;signed_url&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_15">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    D1[Signed URL appears in logs]:::attack --> C1{Log scrubbing enforced?}:::control
+    C1 -->|Yes| B1[URL redacted]:::blocked
+    C1 -->|No| D2[Attacker finds URL & downloads object]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-excessive-export-request-rate-dos_1">T5 — Excessive export request rate (DoS)</h3>
+<p><strong>STRIDE category:</strong> Denial of Service<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exhaust compute, DB, or storage throughput by submitting many heavy export jobs or repeated large downloads.</p>
+<h4 id="how-the-attacker-would-exploit-it_16">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: ability to submit export requests (valid account or misconfigured public endpoint).</li>
+<li>Initial action: submit many concurrent exports or request extremely large datasets that force heavy queries.</li>
+<li>Core exploitation: saturate DB query capacity, fill staging storage, or cause queue backlog affecting other tenants.</li>
+<li>Escalation: coordinate distributed requests to amplify effect.</li>
+<li>Impact realization: platform-wide availability degradation and customer SLA breaches.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_16">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Rate-limiting: multi-dimensional quotas (per-tenant, per-account, per-IP) with backoff and queueing for heavy jobs.</li>
+<li>Cost-estimation gating: estimate query cost and require approval for jobs above threshold.</li>
+<li>Concurrency limits: restrict number of simultaneous active exports per tenant.</li>
+<li>Circuit breakers and graceful degradation when global resources near saturation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_16">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Rate limiter telemetry: <code>rejected_count</code>, <code>queue_depth</code>, per-tenant tokens used.</li>
+<li>DB slow query logs and worker queue metrics.</li>
+<li>Storage capacity alerts and staged object ingestion rate.</li>
+</ul>
+<h4 id="purple-team-validation-commands_16">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Simulate many export submissions from a single tenant (lab)
+for i in {1..50}; do curl -X POST -H &quot;Authorization: Bearer &lt;token&gt;&quot; https://api.example.com/exports -d '{&quot;filters&quot;:...}' &amp; done
+</code></pre>
+<pre><code class="language-kql"># Detect tenant export burst
+RateLimiterMetrics
+| where tenant_id == &quot;&lt;tenant&gt;&quot;
+| summarize rejected=sum(rejected_count) by bin(TimeGenerated, 1m)
+| where rejected &gt; 5
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_16">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    E1[High-rate export submissions]:::attack --> C1{Per-tenant rate-limits?}:::control
+    C1 -->|Yes| B1[Requests rejected/queued]:::blocked
+    C1 -->|No| E2[DB and storage saturation]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-compromised-customer-admin-token_1">T6 — Compromised customer admin token</h3>
+<p><strong>STRIDE category:</strong> Spoofing<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use stolen/compromised admin tokens to request legitimate-looking exports and download PII.</p>
+<h4 id="how-the-attacker-would-exploit-it_17">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: credential theft via phishing, token leakage, or session replay.</li>
+<li>Initial action: request large exports under the stolen token at plausible times.</li>
+<li>Core exploitation: combine token use with signed URL capture or direct downloads.</li>
+<li>Escalation: request exports across many tenants if token has elevated privileges (multi-tenant admin) or combine with IDOR.</li>
+<li>Impact realization: high-quality exfiltration with low signal due to legitimate actor.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_17">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>MFA and step-up: require fresh MFA for exports above thresholds or for new endpoints.</li>
+<li>Session fingerprinting: detect token reuse across disparate geos or ASNs and trigger token revocation.</li>
+<li>Short-lived tokens and rotation: limit lifetime of admin tokens and monitor <code>session_id</code> reuse.</li>
+<li>Anomaly detection: combine login anomalies with high export volume to auto-hold exports.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_17">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Auth logs: <code>session_id</code>, <code>device_id</code>, <code>mfa_state</code>, <code>source_ip</code>, <code>asn</code>.</li>
+<li>Export job correlation: token actor -&gt; job_id -&gt; downloads.</li>
+<li>SIEM rules detecting login anomaly + large export within X minutes.</li>
+</ul>
+<h4 id="purple-team-validation-commands_17">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Detect same token used from multiple ASNs in short window
+AuthLogs | where token == &quot;&lt;token&gt;&quot; | summarize by distinct(asn)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_17">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    F1[Attacker holds valid admin token]:::attack --> F2[Submit export requests]:::attack
+    F2 --> C1{MFA/step-up enforced for large exports?}:::control
+    C1 -->|Yes| B1[Export held for MFA]:::blocked
+    C1 -->|No| F3[Export proceeds -> downloads]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-weak-role-model-for-export-scope_1">T7 — Weak role model for export scope</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use overly-broad roles or misconfigured RBAC to request exports beyond allowed fields or tenant scope.</p>
+<h4 id="how-the-attacker-would-exploit-it_18">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: roles grant export privileges with little granularity.</li>
+<li>Initial action: create export request including sensitive fields or broader entities.</li>
+<li>Core exploitation: retrieve data beyond intended scope because RBAC does not restrict columns/rows.</li>
+<li>Escalation: chain with other roles (support) to escalate scope.</li>
+<li>Impact realization: access to more PII than necessary for role.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_18">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Principle of least privilege: define export templates per role limiting fields and entities.</li>
+<li>RBAC enforcement at request translation layer: map role -&gt; allowed templates and deny custom queries.</li>
+<li>Periodic RBAC reviews and automated policy-as-code checks for role inflation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_18">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>RBAC change logs, role assignment inventory, and template usage metrics.</li>
+<li>SIEM alerts for role usage requesting fields outside expected template.</li>
+</ul>
+<h4 id="purple-team-validation-commands_18">Purple-team validation commands</h4>
+<pre><code class="language-bash"># List roles with export privileges and their allowed templates
+iam-cli roles list --filter &quot;permissions:exports&quot;
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_18">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    G1[Role requests unlimited export]:::attack --> C1{Role bound to template?}:::control
+    C1 -->|Yes| B1[Request restricted]:::blocked
+    C1 -->|No| G2[Full dataset exported]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-support-impersonation-misuse_1">T8 — Support impersonation misuse</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Low/Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Insider or compromised support account uses impersonation to request exports on behalf of other tenants.</p>
+<h4 id="how-the-attacker-would-exploit-it_19">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: support tools allow impersonation with weak audit or missing ticket linkage.</li>
+<li>Initial action: initiate impersonation session and request export for target tenant.</li>
+<li>Core exploitation: download or stage export using support account privileges.</li>
+<li>Escalation: remove traces by editing logs or using break-glass to avoid approval chains.</li>
+<li>Impact realization: stealthy exfiltration using legitimate support mechanisms.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_19">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Require strict ticket binding and dual-approval for impersonation or break-glass actions.</li>
+<li>Full immutable audit trail for impersonation sessions including who approved and why.</li>
+<li>Reduce scope of support impersonation: read-only or limited-time with no export permission by default.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_19">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Support tool audit logs: actor, impersonated_tenant, ticket_id, approval chain.</li>
+<li>SIEM rule: impersonation without valid ticket_id triggers high-priority alert.</li>
+</ul>
+<h4 id="purple-team-validation-commands_19">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find impersonation events without approval
+SupportLogs | where action == &quot;impersonate&quot; and isnull(ticket_id)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_19">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    H1[Support impersonation]:::attack --> C1{Ticket & dual-approval?}:::control
+    C1 -->|Yes| B1[Action blocked or limited]:::blocked
+    C1 -->|No| H2[Export performed under support context]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-delayed-cleanup-after-ttl_1">T9 — Delayed cleanup after TTL</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Exploit cleanup failure windows so staged exports remain accessible beyond TTL.</p>
+<h4 id="how-the-attacker-would-exploit-it_20">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: worker cleanup job failures or delayed retries.</li>
+<li>Initial action: request exports and attempt downloads after TTL + expected grace period where cleanup didn't run.</li>
+<li>Core exploitation: repeated reads of stale objects from staging.</li>
+<li>Escalation: schedule downloads just after known cleanup windows to maximize exposure.</li>
+<li>Impact realization: sensitive data persisted longer than intended.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_20">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Monitor lifecycle job success rates and implement alerts on consecutive failures.</li>
+<li>Harden cleanup with idempotent forced-delete playbooks and verify deletion via storage inventory.</li>
+<li>Shorten TTL and implement immediate revocation capability for signed URLs when cleanup fails.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_20">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Lifecycle job telemetry: last run time, success, deletion count.</li>
+<li>Storage inventory scans showing objects older than TTL.</li>
+<li>SIEM alerts for TTL breaches.</li>
+</ul>
+<h4 id="purple-team-validation-commands_20">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Find objects older than TTL (lab)
+storage-cli list --prefix tenant/&lt;tenant&gt; --older-than 24h
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_20">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    I1[Cleanup job fails]:::attack --> C1{Auto-remediation & alert?}:::control
+    C1 -->|Yes| B1[Forced-delete executed]:::blocked
+    C1 -->|No| I2[Objects remain accessible]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-insecure-callbackwebhook-interception">T10 — Insecure callback/webhook interception</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Medium impact<br />
+<strong>Attacker objective:</strong> Intercept notification callbacks that carry signed URLs or download links, enabling theft via man-in-the-middle or misconfigured webhook endpoints.</p>
+<h4 id="how-the-attacker-would-exploit-it_21">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: webhooks sent to customer-controlled endpoints or third-party systems with poor transport security.</li>
+<li>Initial action: intercept or access webhook payloads, or trick customers into using insecure endpoints.</li>
+<li>Core exploitation: extract signed URL from callback and download artifact.</li>
+<li>Impact realization: unauthorized external retrieval of export artifacts.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_21">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Require HTTPS endpoints and TLS verification for callbacks; sign payloads and include short TTL tokens.</li>
+<li>Allow customers to supply webhook endpoints only after validation; include HMAC verification on payloads.</li>
+<li>Do not include full signed URLs in webhook payloads; send notification with job_id and require authenticated API call to retrieve URL.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_21">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Notification service logs: webhook target, response code, delivery retries.</li>
+<li>SIEM correlation for webhook endpoints failing TLS verification.</li>
+</ul>
+<h4 id="purple-team-validation-commands_21">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Verify webhook endpoints require TLS and validate HMAC reception
+WebhookLogs | where result != &quot;200&quot; or not(has_field(&quot;hmac_verified&quot;))
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_21">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    J1[Webhook with URL delivered]:::attack --> C1{TLS & HMAC enforced?}:::control
+    C1 -->|Yes| B1[Payload rejected or HMAC fails]:::blocked
+    C1 -->|No| J2[Attacker intercepts URL]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-pagination-or-filter-bypass">T11 — Pagination or filter bypass</h3>
+<p><strong>STRIDE category:</strong> Tampering<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use pagination or filter manipulation to iterate over large datasets and extract more data than intended despite per-request limits.</p>
+<h4 id="how-the-attacker-would-exploit-it_22">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: Export API supports pagination and client-controlled filters.</li>
+<li>Initial action: request small pages sequentially or manipulate filters to pull subsets iteratively.</li>
+<li>Core exploitation: reconstruct a near-complete dataset over many requests while staying under per-request limits.</li>
+<li>Escalation: rotate tokens or actors to avoid per-actor rate-limits.</li>
+<li>Impact realization: exfiltrate near-complete dataset without obvious single large export.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_22">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Rate-limit across combination keys (tenant, actor, IP) and enforce per-tenant total bandwidth or row-count quotas over sliding windows.</li>
+<li>Detect sequential pagination patterns from same actor and treat as high-risk when combined with atypical filter patterns.</li>
+<li>Offer signed on-demand snapshots for large retrievals requiring approval rather than piecemeal pagination.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_22">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>API logs showing repeated <code>page</code> or <code>cursor</code> parameters from actor combined with filter variations.</li>
+<li>Sliding-window usage metrics per tenant and actor.</li>
+</ul>
+<h4 id="purple-team-validation-commands_22">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Detect sequential page requests
+APIGatewayLogs | where endpoint == &quot;/exports&quot; | serialize | where tostring(query_params) contains &quot;page=&quot; | summarize pages=count() by actor, bin(TimeGenerated, 10m) | where pages &gt; 20
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_22">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    K1[Many small page requests]:::attack --> C1{Sliding-window quota enforced?}:::control
+    C1 -->|Yes| B1[Requests throttled]:::blocked
+    C1 -->|No| K2[Reconstructed dataset]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-incomplete-audit-coverage_1">T12 — Incomplete audit coverage</h3>
+<p><strong>STRIDE category:</strong> Repudiation<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Operate within gaps of audit collection so exports and downloads are not captured or correlated, hindering detection and forensics.</p>
+<h4 id="how-the-attacker-would-exploit-it_23">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: audit pipeline omits certain worker logs, or log ingestion is delayed/lost.</li>
+<li>Initial action: perform sequence of actions that span systems with partial logging (e.g., export request, storage download) to avoid correlation.</li>
+<li>Core exploitation: remove evidence path or create noise to hide sequence.</li>
+<li>Impact realization: SOC cannot reconstruct timeline; attackers have large dwell time.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_23">Blue-team control review — what must stop the chain</h4>
+<ul>
+<li>Ensure end-to-end immutable audit collection for API gateway, worker, DB, storage, and signed URL service.</li>
+<li>Implement automated audit completeness checks (expected event pairs such as job_created -&gt; job_completed -&gt; download_event).</li>
+<li>Buffer and high-availability log ingestion with backfill capability for missed events.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_23">Evidence and telemetry to validate controls</h4>
+<ul>
+<li>Audit completeness reports, missed event counters, and paired-event checks in SIEM.</li>
+<li>Forensic snapshots of job state and storage index at job completion.</li>
+</ul>
+<h4 id="purple-team-validation-commands_23">Purple-team validation commands</h4>
+<pre><code class="language-bash"># Check for missing paired events for recent jobs
+SIEM | where job_id in (recent_jobs) | summarize events=count() by job_id | where events &lt; 3
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_23">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    L1[Attacker spans systems with partial logs]:::attack --> C1{End-to-end audit enabled?}:::control
+    C1 -->|Yes| B1[Correlation finds full chain]:::blocked
+    C1 -->|No| L2[Incomplete forensic trail]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="7-purple-team-exercise-runbook-summary_1">7. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Attempt to fetch export status for random job IDs; verify 403/404 and no URL returned</td>
+<td>403/404 for unknown jobs; no URL in payload</td>
+<td>Status endpoint returned signed URL or metadata</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Run DB-audit query for missing tenant predicate (lab)</td>
+<td>Exports with tenant predicate only</td>
+<td>Found export statements without tenant predicate</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Try to list neighbor prefixes without permission (lab)</td>
+<td>Access denied / empty listing</td>
+<td>Able to list or GET neighbor objects</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Run DLP scan on logs for signed URL patterns</td>
+<td>No signed URL strings in logs; DLP alerts</td>
+<td>Signed URLs found in logs</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Flood exports under a test tenant to trigger rate limits</td>
+<td>Requests throttled/queued</td>
+<td>Queue saturated and other tenants impacted</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Simulate token reuse from different ASNs to trigger revocation</td>
+<td>Token flagged and revoked</td>
+<td>Token continues to be used for exports</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Attempt export with elevated template from limited role</td>
+<td>Request rejected</td>
+<td>Request succeeds and exports restricted fields</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Trigger impersonation flow without ticket and check alert</td>
+<td>Alert generated and action blocked</td>
+<td>Impersonation allowed without audit</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Introduce fake cleanup failure and verify auto-remediate</td>
+<td>Forced-delete executed and alert sent</td>
+<td>Objects remain older than TTL</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Post to webhook with invalid TLS/HMAC and verify rejection</td>
+<td>Delivery fails with auth/TLS error</td>
+<td>Webhook accepted and delivered URL payload</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Generate many small paginated requests and check sliding quota</td>
+<td>Sliding quota triggers throttling</td>
+<td>Pagination allowed to reconstruct dataset</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Run audit-pairing completeness check over recent jobs</td>
+<td>All job_ids have expected events</td>
+<td>Missing events for completed jobs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-control-coverage-heatmap_1">8. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authorization &amp; tenant binding</td>
+<td>T1, T2, T7</td>
+<td>Need DB RLS and worker-side AST assertions</td>
+</tr>
+<tr>
+<td>Storage &amp; key management</td>
+<td>T3, T4, T6, T9</td>
+<td>Per-tenant keys recommended</td>
+</tr>
+<tr>
+<td>Logging, detection &amp; SIEM</td>
+<td>T1, T2, T4, T12</td>
+<td>End-to-end pairing checks must be automated</td>
+</tr>
+<tr>
+<td>Rate-limiting &amp; quotas</td>
+<td>T5, T11</td>
+<td>Sliding-window enforcement across actors/IP</td>
+</tr>
+<tr>
+<td>Support &amp; operational controls</td>
+<td>T8, T7</td>
+<td>Ticket binding and dual-approval for impersonation</td>
+</tr>
+<tr>
+<td>Lifecycle &amp; cleanup</td>
+<td>T9</td>
+<td>Stronger alerting on failed deletion jobs</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-top-5-immediate-actions_1">9. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Enforce DB-level tenant isolation (RLS) and worker AST checks</strong> — ensures exporter queries cannot run cross-tenant (closes T2, T1).</li>
+<li><strong>Do not log signed URLs &amp; implement DLP on log ingestion</strong> — redact URL tokens and enforce short TTLs with one-time download when needed (closes T4, T3).</li>
+<li><strong>Per-tenant storage isolation or tenant-scoped encryption keys</strong> — eliminate prefix-collision risk and make accidental listing useless (closes T3, T9).</li>
+<li><strong>Sliding-window quotas and export cost gating</strong> — stop pagination-based reconstruction and export DoS (closes T5, T11).</li>
+<li><strong>Hardening support impersonation and audit completeness checks</strong> — require ticket binding, dual-approval, and automated audit pairing (closes T8, T12).</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-01 | Source: scenario31-saas-data-export-api.md | Scenario 31 review — Attack-Review-Enhanced</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

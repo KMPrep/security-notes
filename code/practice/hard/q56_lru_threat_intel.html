@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q56_lru_threat_intel.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q56_lru_threat_intel.py</h1>
+  <p class="file-path">Source: code\practice\hard\q56_lru_threat_intel.py</p>
+  <p class="line-count">444 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q56 [Hard] — LRU Cache for Threat Intelligence Lookups
+=============================================================================
+
+PROBLEM
+-------
+Implement an LRU (Least Recently Used) cache for IOC (Indicator of
+Compromise) lookups:
+  1. Stores threat intelligence results for IPs, domains, file hashes.
+  2. Fixed maximum capacity; evicts least recently used entry when full.
+  3. Thread-safe: concurrent readers and writers.
+  4. Optional TTL per entry: entries expire even if not evicted.
+  5. Hit/miss statistics for monitoring cache effectiveness.
+  6. Negative caching: cache &quot;clean&quot; results too.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Key type? → String (IP, domain, SHA256 hash).
+2. Value type? → ThreatResult dataclass.
+3. Capacity? → Configurable; default 10,000 entries.
+4. TTL? → Per-entry configurable; default 15 minutes.
+5. Thread model? → Python threading; single RLock (simple) vs read-write lock.
+
+=============================================================================
+APPROACH 1 — NAIVE (unbounded dict, no LRU, not thread-safe)
+=============================================================================
+  Plain dict; grows unbounded; no eviction; no TTL; not thread-safe.
+
+=============================================================================
+APPROACH 2 — LRU CACHE WITH OrderedDict + RLock (OPTIMAL)
+=============================================================================
+  Use collections.OrderedDict for O(1) LRU eviction:
+    - move_to_end(key) on every access.
+    - popitem(last=False) to evict the oldest.
+  Single RLock protects all mutations.
+  TTL stored per entry; expired entries treated as cache miss.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_CAPACITY  = 10_000
+DEFAULT_TTL_S     = 900        # 15 minutes
+NEGATIVE_TTL_S    = 300        # 5-minute TTL for &quot;clean&quot; results
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+class ThreatLevel(Enum):
+    CLEAN     = &quot;clean&quot;
+    LOW       = &quot;low&quot;
+    MEDIUM    = &quot;medium&quot;
+    HIGH      = &quot;high&quot;
+    CRITICAL  = &quot;critical&quot;
+
+
+@dataclass
+class ThreatResult:
+    ioc: str
+    threat_level: ThreatLevel
+    categories: list     # e.g., [&quot;malware&quot;, &quot;c2&quot;]
+    confidence: float    # 0.0–1.0
+    source: str          # e.g., &quot;virustotal&quot;, &quot;internal&quot;
+    last_seen: Optional[str] = None
+
+    @property
+    def is_malicious(self) -&gt; bool:
+        return self.threat_level not in (ThreatLevel.CLEAN,)
+
+
+@dataclass
+class _CacheEntry:
+    result: ThreatResult
+    expires_at: float          # monotonic timestamp
+
+
+@dataclass
+class CacheStats:
+    hits: int   = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+
+    @property
+    def hit_rate(self) -&gt; float:
+        total = self.hits + self.misses
+        return self.hits / total if total else 0.0
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+class NaiveThreatCache:
+    &quot;&quot;&quot;Unbounded dict; no TTL; no LRU; not thread-safe.&quot;&quot;&quot;
+
+    def __init__(self):
+        self._cache: Dict[str, ThreatResult] = {}
+
+    def get(self, ioc: str) -&gt; Optional[ThreatResult]:
+        return self._cache.get(ioc)
+
+    def put(self, result: ThreatResult) -&gt; None:
+        self._cache[result.ioc] = result
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — LRU cache with TTL
+# ---------------------------------------------------------------------------
+
+class ThreatIntelLRUCache:
+    &quot;&quot;&quot;
+    Thread-safe LRU cache for threat intelligence with TTL.
+
+    Data structure:
+      OrderedDict[str, _CacheEntry]
+        Keys ordered by recency (most recently used at the end).
+        move_to_end()  → O(1) access update.
+        popitem(last=False) → O(1) evict LRU.
+
+    Locking:
+      Single RLock covers all mutations and reads.
+      (A read-write lock would improve read concurrency but adds complexity.)
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        capacity: int    = DEFAULT_CAPACITY,
+        default_ttl_s: float = DEFAULT_TTL_S,
+        negative_ttl_s: float = NEGATIVE_TTL_S,
+    ):
+        if capacity &lt;= 0:
+            raise ValueError(f&quot;capacity must be positive, got {capacity}&quot;)
+        self._capacity       = capacity
+        self._default_ttl    = default_ttl_s
+        self._negative_ttl   = negative_ttl_s
+        self._lock           = threading.RLock()
+        self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._stats          = CacheStats()
+
+    # --- Read ---------------------------------------------------------------
+
+    def get(self, ioc: str) -&gt; Optional[ThreatResult]:
+        &quot;&quot;&quot;
+        Returns cached ThreatResult or None on miss/expiry.
+        Moves accessed entry to most-recently-used position.
+        &quot;&quot;&quot;
+        with self._lock:
+            entry = self._cache.get(ioc)
+            if entry is None:
+                self._stats.misses += 1
+                return None
+
+            # Check TTL
+            if time.monotonic() &gt; entry.expires_at:
+                del self._cache[ioc]
+                self._stats.misses     += 1
+                self._stats.expirations += 1
+                return None
+
+            # LRU update: move to end (most recent)
+            self._cache.move_to_end(ioc)
+            self._stats.hits += 1
+            return entry.result
+
+    # --- Write --------------------------------------------------------------
+
+    def put(
+        self,
+        result: ThreatResult,
+        ttl_s: Optional[float] = None,
+    ) -&gt; None:
+        &quot;&quot;&quot;
+        Insert or update a cache entry.
+        Negative results (CLEAN) get a shorter TTL.
+        &quot;&quot;&quot;
+        if ttl_s is None:
+            ttl_s = (
+                self._negative_ttl
+                if result.threat_level == ThreatLevel.CLEAN
+                else self._default_ttl
+            )
+
+        with self._lock:
+            now = time.monotonic()
+            if result.ioc in self._cache:
+                # Update existing; move to most-recent
+                self._cache[result.ioc] = _CacheEntry(result=result, expires_at=now + ttl_s)
+                self._cache.move_to_end(result.ioc)
+            else:
+                # Evict LRU if at capacity
+                if len(self._cache) &gt;= self._capacity:
+                    self._cache.popitem(last=False)
+                    self._stats.evictions += 1
+                self._cache[result.ioc] = _CacheEntry(result=result, expires_at=now + ttl_s)
+
+    # --- Invalidation -------------------------------------------------------
+
+    def invalidate(self, ioc: str) -&gt; bool:
+        &quot;&quot;&quot;Remove a specific entry. Returns True if it was present.&quot;&quot;&quot;
+        with self._lock:
+            if ioc in self._cache:
+                del self._cache[ioc]
+                return True
+            return False
+
+    def clear(self) -&gt; None:
+        with self._lock:
+            self._cache.clear()
+
+    # --- Stats &amp; introspection ----------------------------------------------
+
+    @property
+    def size(self) -&gt; int:
+        with self._lock:
+            return len(self._cache)
+
+    @property
+    def stats(self) -&gt; CacheStats:
+        with self._lock:
+            return CacheStats(
+                hits=self._stats.hits,
+                misses=self._stats.misses,
+                evictions=self._stats.evictions,
+                expirations=self._stats.expirations,
+            )
+
+    def purge_expired(self) -&gt; int:
+        &quot;&quot;&quot;Remove all expired entries. Returns count purged.&quot;&quot;&quot;
+        now    = time.monotonic()
+        purged = 0
+        with self._lock:
+            expired = [k for k, e in self._cache.items() if now &gt; e.expires_at]
+            for k in expired:
+                del self._cache[k]
+                purged += 1
+            self._stats.expirations += purged
+        return purged
+
+
+# ---------------------------------------------------------------------------
+# Helper to build ThreatResult
+# ---------------------------------------------------------------------------
+
+def _make_result(ioc: str, level: ThreatLevel = ThreatLevel.HIGH) -&gt; ThreatResult:
+    return ThreatResult(
+        ioc=ioc,
+        threat_level=level,
+        categories=[&quot;malware&quot;],
+        confidence=0.9,
+        source=&quot;test&quot;,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_basic_put_get():
+    cache = ThreatIntelLRUCache(capacity=100)
+    r = _make_result(&quot;192.168.1.1&quot;)
+    cache.put(r)
+    got = cache.get(&quot;192.168.1.1&quot;)
+    assert got is not None
+    assert got.threat_level == ThreatLevel.HIGH
+    print(&quot;Basic put/get: passed&quot;)
+
+
+def test_miss_on_unknown():
+    cache = ThreatIntelLRUCache(capacity=100)
+    assert cache.get(&quot;10.0.0.1&quot;) is None
+    assert cache.stats.misses == 1
+    print(&quot;Miss on unknown: passed&quot;)
+
+
+def test_lru_eviction():
+    cache = ThreatIntelLRUCache(capacity=3)
+    for i in range(3):
+        cache.put(_make_result(f&quot;10.0.0.{i}&quot;))
+
+    # Access 10.0.0.0 and 10.0.0.1 (making 10.0.0.2 the LRU)
+    cache.get(&quot;10.0.0.0&quot;)
+    cache.get(&quot;10.0.0.1&quot;)
+
+    # Insert 4th → should evict 10.0.0.2 (LRU)
+    cache.put(_make_result(&quot;10.0.0.3&quot;))
+    assert cache.get(&quot;10.0.0.2&quot;) is None     # evicted
+    assert cache.get(&quot;10.0.0.0&quot;) is not None # still present
+    assert cache.stats.evictions == 1
+    print(&quot;LRU eviction: passed&quot;)
+
+
+def test_ttl_expiry():
+    cache = ThreatIntelLRUCache(capacity=100, default_ttl_s=0.05)
+    cache.put(_make_result(&quot;evil.com&quot;))
+    assert cache.get(&quot;evil.com&quot;) is not None
+    time.sleep(0.1)
+    assert cache.get(&quot;evil.com&quot;) is None
+    assert cache.stats.expirations == 1
+    print(&quot;TTL expiry: passed&quot;)
+
+
+def test_negative_caching():
+    cache = ThreatIntelLRUCache(capacity=100, negative_ttl_s=0.05)
+    clean = ThreatResult(
+        ioc=&quot;safe.com&quot;, threat_level=ThreatLevel.CLEAN,
+        categories=[], confidence=1.0, source=&quot;test&quot;,
+    )
+    cache.put(clean)
+    assert cache.get(&quot;safe.com&quot;) is not None
+    time.sleep(0.1)
+    assert cache.get(&quot;safe.com&quot;) is None    # negative TTL expired
+    print(&quot;Negative caching TTL: passed&quot;)
+
+
+def test_invalidate():
+    cache = ThreatIntelLRUCache(capacity=100)
+    cache.put(_make_result(&quot;badhost.com&quot;))
+    assert cache.invalidate(&quot;badhost.com&quot;) == True
+    assert cache.get(&quot;badhost.com&quot;) is None
+    assert cache.invalidate(&quot;badhost.com&quot;) == False
+    print(&quot;Invalidate: passed&quot;)
+
+
+def test_concurrent_reads_writes():
+    cache   = ThreatIntelLRUCache(capacity=200)
+    errors  = []
+    results = []
+    lock    = threading.Lock()
+
+    def writer(n):
+        try:
+            for i in range(10):
+                cache.put(_make_result(f&quot;10.{n}.0.{i}&quot;))
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    def reader(n):
+        try:
+            for i in range(10):
+                val = cache.get(f&quot;10.{n}.0.{i}&quot;)
+                with lock:
+                    results.append(val)
+        except Exception as e:
+            with lock:
+                errors.append(str(e))
+
+    threads = (
+        [threading.Thread(target=writer, args=(n,)) for n in range(5)] +
+        [threading.Thread(target=reader, args=(n,)) for n in range(5)]
+    )
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f&quot;Errors: {errors}&quot;
+    print(f&quot;Concurrent r/w: size={cache.size}, stats={cache.stats} — passed&quot;)
+
+
+def test_hit_rate():
+    cache = ThreatIntelLRUCache(capacity=100)
+    for i in range(5):
+        cache.put(_make_result(f&quot;ip-{i}&quot;))
+    for i in range(5):
+        cache.get(f&quot;ip-{i}&quot;)        # 5 hits
+    for i in range(5):
+        cache.get(f&quot;ip-miss-{i}&quot;)   # 5 misses
+    s = cache.stats
+    assert s.hit_rate == 0.5
+    print(f&quot;Hit rate: {s.hit_rate:.0%} — passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT INTELLIGENCE CACHING
+-----------------------------
+Why cache TI lookups?
+  External TI APIs (VirusTotal, Shodan, AbuseIPDB) have rate limits
+  and latency (100–500ms). Caching reduces:
+    - API cost (fewer calls).
+    - Latency (sub-millisecond cache hit vs 200ms API call).
+    - Single point of failure dependency on external service.
+
+CACHE POISONING RISKS
+----------------------
+  Attacker controls IOC store → injects &quot;clean&quot; verdict for known-malicious IPs.
+  Defenses:
+    - Sign TI data with HMAC before caching; verify on read.
+    - TTL-bound: even poisoned entries expire.
+    - Multiple TI sources; cross-check before caching.
+
+NEGATIVE CACHING TRADEOFFS
+---------------------------
+  Cache &quot;clean&quot; verdicts with shorter TTL.
+  Pro: avoids re-querying safe traffic (reduces noise).
+  Con: newly malicious IOC stays &quot;clean&quot; until TTL expires.
+  Mitigation: shorter TTL for CLEAN; push invalidation on TI feed updates.
+
+LRU VS LFU FOR TI LOOKUPS
+---------------------------
+  LRU: assumes recent = likely to be queried again.
+  LFU: assumes frequent = important to keep.
+  For TI: LRU is better since active threats trend in bursts.
+  LFU risks keeping stale popular IOCs while evicting new threats.
+
+DISTRIBUTED TI CACHE
+---------------------
+  Redis with TTL-aware keys:
+    SET ioc:192.168.1.1 &lt;json_result&gt; EX 900
+  Consistent hashing for multi-node Redis.
+  Read-through cache: on miss, query TI API; write result back.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic_put_get()
+    test_miss_on_unknown()
+    test_lru_eviction()
+    test_ttl_expiry()
+    test_negative_caching()
+    test_invalidate()
+    test_concurrent_reads_writes()
+    test_hit_rate()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q02_heavy_hitters_count_min_sketch.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q02_heavy_hitters_count_min_sketch.py</h1>
+  <p class="file-path">Source: code\practice\hard\q02_heavy_hitters_count_min_sketch.py</p>
+  <p class="line-count">431 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q02 [Hard] — Heavy Hitters in Security Logs (Count-Min Sketch deep-dive)
+=============================================================================
+
+PROBLEM
+-------
+Implement a Count-Min Sketch (CMS) to detect &quot;heavy-hitter&quot; IPs whose traffic
+exceeds a configurable threshold fraction φ of the total event stream.
+Unlike Q01 (which tracks top-K), here the caller specifies a *frequency
+threshold* (e.g. &quot;flag any IP that is responsible for &gt; 1% of all events&quot;).
+
+CLARIFYING QUESTIONS
+--------------------
+1. Is the threshold absolute (event count) or relative (fraction of stream)?
+   → Support both: absolute threshold and fraction φ.
+2. What is an acceptable error?
+   → Allow up to ε fraction false over-count; ε &lt; φ so real heavy hitters
+     always exceed the threshold minus error.
+3. Should we also report *which* IPs exceed the threshold, or just counts?
+   → Report IP + estimated count + whether it exceeds threshold.
+4. Single-field (src IP) or multi-field (src+dst pair)?
+   → Demonstrate both; multi-field uses a composite key.
+5. Do we need to expire old counts (sliding window)?
+   → Yes, show a decay / epoch-reset variant.
+6. Distributed?
+   → CMSes are mergeable — show merge() method.
+7. Malformed records?
+   → Skip silently; expose malformed_count.
+
+=============================================================================
+APPROACH 1 — NAIVE  (dict-based exact count)
+=============================================================================
+Count every distinct IP in a plain dict, iterate to find heavy hitters.
+  Time : O(1) amortised per insert, O(D) per query (D = distinct IPs)
+  Space: O(D) — unbounded for large cardinality streams
+
+=============================================================================
+APPROACH 2 — COUNT-MIN SKETCH  (optimal probabilistic)
+=============================================================================
+CMS parameters:
+  width w = ceil(e / ε)       where e ≈ 2.718  → ε-bounded over-estimate
+  depth d = ceil(ln(1/δ))     → failure prob ≤ δ per query
+
+Guarantee: estimated_count ≤ true_count + ε × N
+  where N = total events seen.
+
+For heavy-hitter detection with threshold φ:
+  Set ε = φ/2 so that an IP with true count &gt; φ×N will have estimate &gt; (φ/2)×N
+  and a non-heavy-hitter with true count &lt; (φ/2)×N will never exceed φ×N.
+
+  Time : O(d) per insert/query  (typically d=7, so O(1) practical)
+  Space: O(w × d) = O(e/ε × ln(1/δ)) — fully bounded
+
+=============================================================================
+APPROACH 3 — LOSSY COUNTING (Manku &amp; Motwani 2002)
+=============================================================================
+Divide the stream into epochs of size 1/ε.  Within each epoch increment
+counts; at epoch boundary decrement all by 1 and evict zeros.
+Guarantee: any IP with frequency ≥ φ×N is reported; false positives have
+frequency ≥ (φ-ε)×N.
+
+  Space: O(1/ε)  entries (larger constant than CMS)
+  Advantage: exact counts for surviving entries (no hash collisions)
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import hashlib
+import math
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive exact dict
+# ---------------------------------------------------------------------------
+
+class NaiveHeavyHitters:
+    &quot;&quot;&quot;Exact heavy-hitter detection using an unbounded dict.&quot;&quot;&quot;
+
+    def __init__(self, phi: float = 0.01) -&gt; None:
+        if not 0 &lt; phi &lt; 1:
+            raise ValueError(&quot;phi must be in (0, 1)&quot;)
+        self.phi = phi
+        self._counts: Dict[str, int] = defaultdict(int)
+        self.total = 0
+        self.malformed_count = 0
+
+    def add(self, event: dict, key: str = &quot;src&quot;) -&gt; None:
+        val = event.get(key)
+        if not val or not isinstance(val, str):
+            self.malformed_count += 1
+            return
+        self._counts[val] += 1
+        self.total += 1
+
+    def heavy_hitters(self) -&gt; List[Tuple[str, int, float]]:
+        &quot;&quot;&quot;Return (ip, count, fraction) for IPs above threshold φ.&quot;&quot;&quot;
+        threshold = self.phi * self.total
+        return sorted(
+            [(ip, cnt, cnt / self.total) for ip, cnt in self._counts.items()
+             if cnt &gt;= threshold],
+            key=lambda x: x[1], reverse=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Count-Min Sketch  (RECOMMENDED)
+# ---------------------------------------------------------------------------
+
+class CountMinSketch:
+    &quot;&quot;&quot;
+    Count-Min Sketch with configurable error bounds.
+
+    Parameters:
+      epsilon : maximum over-count fraction  (e.g. 0.005 → 0.5% of N)
+      delta   : failure probability per query (e.g. 0.001 → 0.1% failure)
+    &quot;&quot;&quot;
+
+    def __init__(self, epsilon: float = 0.005, delta: float = 0.001) -&gt; None:
+        if not 0 &lt; epsilon &lt; 1:
+            raise ValueError(&quot;epsilon must be in (0, 1)&quot;)
+        if not 0 &lt; delta &lt; 1:
+            raise ValueError(&quot;delta must be in (0, 1)&quot;)
+        self.epsilon = epsilon
+        self.delta = delta
+        self.width: int = math.ceil(math.e / epsilon)
+        self.depth: int = math.ceil(math.log(1.0 / delta))
+        # 2-D list: depth rows × width columns
+        self.table: List[List[int]] = [[0] * self.width for _ in range(self.depth)]
+        self.total: int = 0
+        # Pre-compute per-row hash salts for independence
+        self._salts: List[bytes] = [
+            (i * 0x9e3779b97f4a7c15).to_bytes(8, &quot;little&quot;) for i in range(self.depth)
+        ]
+
+    def _hash(self, row: int, key: str) -&gt; int:
+        h = hashlib.sha256(self._salts[row] + key.encode()).digest()
+        return int.from_bytes(h[:4], &quot;little&quot;) % self.width
+
+    def add(self, key: str, count: int = 1) -&gt; None:
+        for row in range(self.depth):
+            self.table[row][self._hash(row, key)] += count
+        self.total += count
+
+    def estimate(self, key: str) -&gt; int:
+        &quot;&quot;&quot;Return estimated count.  True count ≤ estimate ≤ true count + ε×N.&quot;&quot;&quot;
+        return min(self.table[row][self._hash(row, key)] for row in range(self.depth))
+
+    def merge(self, other: &quot;CountMinSketch&quot;) -&gt; &quot;CountMinSketch&quot;:
+        &quot;&quot;&quot;
+        Merge another CMS into this one (both must have identical dimensions).
+        Enables distributed aggregation: each shard builds its own CMS,
+        then all are merged at the coordinator.
+        &quot;&quot;&quot;
+        if self.width != other.width or self.depth != other.depth:
+            raise ValueError(&quot;Sketches must have identical dimensions to merge&quot;)
+        merged = CountMinSketch.__new__(CountMinSketch)
+        merged.epsilon = self.epsilon
+        merged.delta = self.delta
+        merged.width = self.width
+        merged.depth = self.depth
+        merged._salts = self._salts  # same salts = same hash functions
+        merged.table = [
+            [self.table[r][c] + other.table[r][c] for c in range(self.width)]
+            for r in range(self.depth)
+        ]
+        merged.total = self.total + other.total
+        return merged
+
+    def memory_bytes(self) -&gt; int:
+        &quot;&quot;&quot;Approximate memory usage in bytes.&quot;&quot;&quot;
+        return self.depth * self.width * 8  # 64-bit counters
+
+
+class CMSHeavyHitterDetector:
+    &quot;&quot;&quot;
+    Heavy-hitter detection combining Count-Min Sketch with a candidate set.
+
+    Design:
+    - CMS handles frequency estimation with bounded memory.
+    - A secondary set tracks *candidate* heavy hitters seen so far.
+      Candidates are only added when their CMS estimate crosses φ×N.
+    - This avoids scanning the full sketch at query time.
+    &quot;&quot;&quot;
+
+    def __init__(self, phi: float = 0.01, epsilon: float = None,
+                 delta: float = 0.001, key_field: str = &quot;src&quot;) -&gt; None:
+        if not 0 &lt; phi &lt; 1:
+            raise ValueError(&quot;phi must be in (0, 1)&quot;)
+        # Set ε = φ/2 so the error zone sits squarely below the threshold
+        if epsilon is None:
+            epsilon = phi / 2
+        self.phi = phi
+        self.key_field = key_field
+        self.sketch = CountMinSketch(epsilon=epsilon, delta=delta)
+        self._candidates: set = set()
+        self.malformed_count = 0
+
+    def add(self, event: dict) -&gt; None:
+        key = event.get(self.key_field)
+        if not key or not isinstance(key, str):
+            self.malformed_count += 1
+            return
+        self.sketch.add(key)
+        # Lazily promote to candidate if estimate crosses threshold
+        est = self.sketch.estimate(key)
+        if est &gt;= self.phi * self.sketch.total:
+            self._candidates.add(key)
+
+    def add_composite(self, event: dict, fields: List[str]) -&gt; None:
+        &quot;&quot;&quot;Track a composite key such as (src, dst) pairs.&quot;&quot;&quot;
+        parts = [str(event.get(f, &quot;&quot;)) for f in fields]
+        if any(not p for p in parts):
+            self.malformed_count += 1
+            return
+        composite_key = &quot;|&quot;.join(parts)
+        self.sketch.add(composite_key)
+        est = self.sketch.estimate(composite_key)
+        if est &gt;= self.phi * self.sketch.total:
+            self._candidates.add(composite_key)
+
+    def heavy_hitters(self) -&gt; List[Tuple[str, int, float]]:
+        &quot;&quot;&quot;
+        Return confirmed heavy hitters: candidates whose *current* estimate
+        still exceeds φ×N (prunes false promotions from early in the stream).
+        &quot;&quot;&quot;
+        threshold = self.phi * self.sketch.total
+        result = []
+        for candidate in self._candidates:
+            est = self.sketch.estimate(candidate)
+            if est &gt;= threshold:
+                result.append((candidate, est, est / max(self.sketch.total, 1)))
+        return sorted(result, key=lambda x: x[1], reverse=True)
+
+    def is_heavy_hitter(self, key: str) -&gt; bool:
+        &quot;&quot;&quot;O(d) point query — is this key currently a heavy hitter?&quot;&quot;&quot;
+        return self.sketch.estimate(key) &gt;= self.phi * self.sketch.total
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 3 — Lossy Counting
+# ---------------------------------------------------------------------------
+
+class LossyCountingHeavyHitters:
+    &quot;&quot;&quot;
+    Lossy Counting algorithm (Manku &amp; Motwani 2002).
+
+    Exact counts for surviving entries; guarantees no false negatives for
+    IPs with frequency ≥ φ × N, and no false positives above (φ-ε) × N.
+
+    epoch_size = floor(1 / epsilon)
+    &quot;&quot;&quot;
+
+    def __init__(self, phi: float = 0.01, epsilon: float = 0.005,
+                 key_field: str = &quot;src&quot;) -&gt; None:
+        if epsilon &gt;= phi:
+            raise ValueError(&quot;epsilon must be &lt; phi&quot;)
+        self.phi = phi
+        self.epsilon = epsilon
+        self.key_field = key_field
+        self.epoch_size: int = max(1, math.floor(1.0 / epsilon))
+        # (key) → (count, max_error_delta)
+        self._buckets: Dict[str, Tuple[int, int]] = {}
+        self.total = 0
+        self.malformed_count = 0
+        self._current_epoch = 1
+
+    def add(self, event: dict) -&gt; None:
+        key = event.get(self.key_field)
+        if not key or not isinstance(key, str):
+            self.malformed_count += 1
+            return
+        self.total += 1
+        if key in self._buckets:
+            cnt, delta = self._buckets[key]
+            self._buckets[key] = (cnt + 1, delta)
+        else:
+            # delta = current_epoch - 1 (the max over-count from previous epochs)
+           self._buckets[key] = (1, self._current_epoch - 1)
+
+        # At epoch boundary, decrement all counts and prune zeros
+        if self.total % self.epoch_size == 0:
+            self._prune()
+            self._current_epoch += 1
+
+    def _prune(self) -&gt; None:
+        to_delete = [k for k, (cnt, delta) in self._buckets.items()
+                     if cnt + delta &lt;= self._current_epoch]
+        for k in to_delete:
+            del self._buckets[k]
+
+    def heavy_hitters(self) -&gt; List[Tuple[str, int, float]]:
+        &quot;&quot;&quot;Return IPs with frequency estimate ≥ (φ - ε) × N.&quot;&quot;&quot;
+        threshold = (self.phi - self.epsilon) * self.total
+        result = []
+        for key, (cnt, _) in self._buckets.items():
+            if cnt &gt;= threshold:
+                result.append((key, cnt, cnt / max(self.total, 1)))
+   /     return sorted(result, key=lambda x: x[1], reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _stream(ip_map: Dict[str, int]) -&gt; List[dict]:
+    events = []
+    for ip, cnt in ip_map.items():
+        events.extend({&quot;src&quot;: ip} for _ in range(cnt))
+    return events
+
+
+def test_naive_hh():
+    detector = NaiveHeavyHitters(phi=0.1)
+    assert detector.heavy_hitters() == []
+
+    for e in _stream({&quot;10.0.0.1&quot;: 500, &quot;10.0.0.2&quot;: 300, &quot;10.0.0.3&quot;: 50,
+                      &quot;10.0.0.4&quot;: 50, &quot;10.0.0.5&quot;: 100}):
+        detector.add(e)
+    hh = [ip for ip, _, _ in detector.heavy_hitters()]
+    assert &quot;10.0.0.1&quot; in hh
+    assert &quot;10.0.0.2&quot; in hh
+
+    detector.add({})
+    assert detector.malformed_count == 1
+    print(&quot;NaiveHeavyHitters: passed&quot;)
+
+
+def test_cms_hh():
+    detector = CMSHeavyHitterDetector(phi=0.1, delta=0.001)
+    assert detector.heavy_hitters() == []
+
+    events = _stream({&quot;10.0.0.1&quot;: 600, &quot;10.0.0.2&quot;: 300,
+                      **{f&quot;10.1.{i}.1&quot;: 5 for i in range(20)}})
+    for e in events:
+        detector.add(e)
+
+    hh = [ip for ip, _, _ in detector.heavy_hitters()]
+    # 10.0.0.1 ~50% and 10.0.0.2 ~25% of traffic; both &gt; 10% threshold
+    assert &quot;10.0.0.1&quot; in hh, f&quot;Expected 10.0.0.1 in {hh}&quot;
+    assert &quot;10.0.0.2&quot; in hh, f&quot;Expected 10.0.0.2 in {hh}&quot;
+
+    # Composite key test
+    det2 = CMSHeavyHitterDetector(phi=0.5, key_field=&quot;src&quot;)
+    for _ in range(100):
+        det2.add_composite({&quot;src&quot;: &quot;1.1.1.1&quot;, &quot;dst&quot;: &quot;2.2.2.2&quot;}, [&quot;src&quot;, &quot;dst&quot;])
+    for _ in range(10):
+        det2.add_composite({&quot;src&quot;: &quot;3.3.3.3&quot;, &quot;dst&quot;: &quot;4.4.4.4&quot;}, [&quot;src&quot;, &quot;dst&quot;])
+    hh2 = [k for k, _, _ in det2.heavy_hitters()]
+    assert &quot;1.1.1.1|2.2.2.2&quot; in hh2
+
+    print(&quot;CMSHeavyHitterDetector: passed&quot;)
+
+
+def test_cms_merge():
+    &quot;&quot;&quot;Verify two independent sketches merge correctly.&quot;&quot;&quot;
+    s1 = CountMinSketch(epsilon=0.01, delta=0.001)
+    s2 = CountMinSketch(epsilon=0.01, delta=0.001)
+    for _ in range(100):
+        s1.add(&quot;hot_ip&quot;)
+    for _ in range(200):
+        s2.add(&quot;hot_ip&quot;)
+    merged = s1.merge(s2)
+    assert merged.estimate(&quot;hot_ip&quot;) &gt;= 300
+    assert merged.total == 300
+    print(&quot;CMS merge: passed&quot;)
+
+
+def test_lossy_counting():
+    detector = LossyCountingHeavyHitters(phi=0.1, epsilon=0.05)
+    assert detector.heavy_hitters() == []
+
+    events = _stream({&quot;192.168.1.1&quot;: 500, &quot;192.168.1.2&quot;: 400,
+                      **{f&quot;10.0.{i}.1&quot;: 2 for i in range(50)}})
+    for e in events:
+        detector.add(e)
+    hh = [ip for ip, _, _ in detector.heavy_hitters()]
+    assert &quot;192.168.1.1&quot; in hh, f&quot;Expected 192.168.1.1 in {hh}&quot;
+    print(&quot;LossyCountingHeavyHitters: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+THREAT MODEL
+  Heavy-hitter detection identifies IPs responsible for a disproportionate
+  share of traffic or failed auth events — direct indicators of:
+  - DDoS amplification sources
+  - Brute-force / credential stuffing attackers
+  - Exfiltration egress sources (large byte volumes)
+  - C2 beaconing originators
+
+WHY CMS OVER NAIVE DICT
+  At 100 Gbps with 64-byte packets, a line-rate event stream exceeds 100M
+  events/second.  A naive dict storing all distinct /32 IPv4 or /128 IPv6
+  sources can easily require gigabytes of RAM.  A CMS with ε=0.001 and δ=0.001
+  uses only 2718 × 7 × 8 bytes ≈ 150 KB regardless of stream size.
+
+DISTRIBUTED USE CASE
+  Deploy one CMS per Kafka partition (one per network tap).  Every minute,
+  serialize and ship to a coordinator which calls merge().  The coordinator
+  runs heavy_hitters() and emits alerts.  Sketch serialisation is O(w×d) and
+  fits in a single UDP packet for small ε.
+
+ERROR ANALYSIS EXAMPLE
+  φ=0.01, ε=0.005, N=10,000,000 events
+  - Any IP with true count &gt; 100,000 will have estimate &gt; 50,000 → reported ✓
+  - Any IP with true count &lt; 50,000 will have estimate &lt; 100,000 → not reported ✓
+  - IPs in the grey zone (50k–100k) may or may not appear → acceptable trade-off.
+
+RESIDUAL RISK
+  - Hash collisions in CMS can inflate estimates for innocent IPs.
+    Mitigate: use d≥7 independent hash functions; accept false-positive rate δ.
+  - Epoch-based decay (Lossy Counting) introduces latency before stale counts
+    are cleared.  Use small epoch size for low-latency detection.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_naive_hh()
+    test_cms_hh()
+    test_cms_merge()
+    test_lossy_counting()
+    print(&quot;\nMemory for CMS(ε=0.005, δ=0.001):&quot;,
+          CountMinSketch(epsilon=0.005, delta=0.001).memory_bytes(), &quot;bytes&quot;)
+</code></pre>
+</body>
+</html>

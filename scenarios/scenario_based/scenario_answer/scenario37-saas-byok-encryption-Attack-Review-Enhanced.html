@@ -1,0 +1,1490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scenario 37 - SaaS Encryption Key Management (Bring Your Own Key) - Threat Exploitation and Blue-Team Control Review</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: scenarios\scenario_based\scenario_answer\scenario37-saas-byok-encryption-Attack-Review-Enhanced.md</p>
+<h1 id="scenario-37-saas-encryption-key-management-bring-your-own-key-threat-exploitation-and-blue-team-control-review">Scenario 37 - SaaS Encryption Key Management (Bring Your Own Key) - Threat Exploitation and Blue-Team Control Review</h1>
+<p><strong>Source file reviewed:</strong> <code>scenario37-saas-byok-encryption.md</code><br />
+<strong>Prompt source:</strong> <code>../threat-modeling-prompt.md</code><br />
+<strong>Generated artifact:</strong> <code>scenario37-saas-byok-encryption-Attack-Review-Enhanced.md</code><br />
+<strong>Reviewer role:</strong> Cybersecurity Architect / Engineer Lead - 15+ years of purple-team experience<br />
+<strong>Scenario:</strong> A SaaS platform adds BYOK support so enterprise customers can use AWS KMS, Azure Key Vault, or similar customer-managed keys to protect tenant data at rest. The platform must handle KMS grants, envelope encryption, revocation semantics, plaintext caching, decrypt monitoring, legacy backups, cross-region behavior, and customer self-lockout risk.</p>
+<hr />
+<h2 id="1-review-objective">1. Review Objective</h2>
+<p>This review turns the BYOK scenario into attacker-centric exploitation chains and blue-team controls. It focuses on what a strong senior security answer should cover: cryptographic trust boundaries, operational failure modes, revocation behavior, telemetry, incident response, customer shared responsibility, and residual risk.</p>
+<hr />
+<h2 id="2-highest-risk-design-decision">2. Highest-Risk Design Decision</h2>
+<p>The highest-risk design decision is treating BYOK as a pure encryption feature instead of a distributed authorization and lifecycle-control system.</p>
+<p>BYOK only provides customer control if the SaaS data plane fails closed when the key is disabled, uses the correct tenant-scoped key every time, does not retain plaintext beyond a tightly bounded processing window, and provides auditable proof of KMS use. If the platform caches plaintext too long, keeps platform-key backups, has broad KMS grants, or lets internal support tooling bypass the BYOK path, the customer's key ownership becomes mostly cosmetic.</p>
+<hr />
+<h2 id="3-attack-tree-legend">3. Attack-Tree Legend</h2>
+<ul>
+<li><strong>Red nodes</strong> (<code>:::attack</code>): attacker action or attacker-controlled state.</li>
+<li><strong>Blue nodes</strong> (<code>:::control</code>): defensive control decision point.</li>
+<li><strong>Green nodes</strong> (<code>:::blocked</code>): attack stopped or contained.</li>
+<li><strong>Yellow nodes</strong> (<code>:::impact</code>): confidentiality, availability, compliance, or customer trust impact.</li>
+</ul>
+<hr />
+<h2 id="4-executive-threat-summary">4. Executive Threat Summary</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Risk</th>
+<th>Primary Evidence Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Over-broad customer KMS grants to SaaS principals</td>
+<td>High likelihood, Critical impact</td>
+<td><code>KMSGrantAudit</code>, <code>KMSDecryptLog</code></td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Tenant-to-key mapping tampering or key confusion</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>KeyMappingAudit</code>, <code>ConfigChangeLog</code></td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Key revocation race or fail-open decrypt behavior</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>KeyStateLog</code>, <code>DecryptServiceLog</code></td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Plaintext cache persists after key revocation</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>CacheEvictionLog</code>, <code>MemoryTTLMetric</code></td>
+</tr>
+<tr>
+<td>T5</td>
+<td>SaaS workload identity compromise enables decrypt abuse</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>WorkloadIdentityLog</code>, <code>KMSDecryptLog</code></td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Customer self-ransomware through key disable/delete</td>
+<td>High likelihood, High impact</td>
+<td><code>CustomerKMSLog</code>, <code>TenantLockoutLog</code></td>
+</tr>
+<tr>
+<td>T7</td>
+<td>High-volume decrypt exfiltration under valid key</td>
+<td>Medium likelihood, High impact</td>
+<td><code>DecryptAnomalyLog</code>, <code>APIAccessLog</code></td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Legacy backups or replicas remain under platform keys</td>
+<td>Medium likelihood, High impact</td>
+<td><code>BackupKeyInventory</code>, <code>RestoreAudit</code></td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Cross-region or residency key mismatch</td>
+<td>Medium likelihood, High impact</td>
+<td><code>ReplicationLog</code>, <code>ProviderRouteLog</code></td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Internal support tooling bypasses BYOK enforcement</td>
+<td>Medium likelihood, Critical impact</td>
+<td><code>SupportAccessLog</code>, <code>AdminToolAudit</code></td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Key rotation or rewrap failure causes data loss</td>
+<td>Medium likelihood, High impact</td>
+<td><code>RewrapJobLog</code>, <code>KeyVersionInventory</code></td>
+</tr>
+<tr>
+<td>T12</td>
+<td>External KMS outage drives unsafe fallback behavior</td>
+<td>Medium likelihood, High impact</td>
+<td><code>KMSAvailabilityLog</code>, <code>FailClosedMetric</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-overall-end-to-end-attack-tree">5. Overall End-to-End Attack Tree</h2>
+<pre class="mermaid">
+flowchart TD
+    A0[Attacker compromises SaaS workload identity]:::attack --> A1[Calls customer KMS decrypt]:::attack
+    A1 --> C1{KMS grant is tenant-scoped and conditioned?}:::control
+    C1 -->|Yes| B1[Decrypt limited to authorized tenant context]:::blocked
+    C1 -->|No| A2[Unwraps data keys across tenant data]:::attack
+    A2 --> C2{Decrypt anomaly monitoring active?}:::control
+    C2 -->|Yes| B2[Throttle, revoke identity, alert SOC]:::blocked
+    C2 -->|No| A3[Bulk tenant data decrypted]:::impact
+    A3 --> C3{Plaintext lifetime tightly bounded?}:::control
+    C3 -->|Yes| B3[Exposure window reduced]:::blocked
+    C3 -->|No| A4[Plaintext persists in cache after revoke]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="6-reference-architecture">6. Reference Architecture</h2>
+<pre class="mermaid">
+flowchart LR
+    TenantAdmin[Tenant admin] --> KeySetup[BYOK setup and validation]
+    KeySetup --> KeyMap[Signed tenant-key mapping service]
+    KeyMap --> EncryptSvc[Encryption service]
+    EncryptSvc --> KMS[Customer KMS or Key Vault]
+    EncryptSvc --> Store[Encrypted object store]
+    Store --> Backup[Backup and replica stores]
+    EncryptSvc --> Cache[Plaintext/key cache with TTL]
+    KMS --> KMSLogs[KMS audit logs]
+    EncryptSvc --> DecryptLogs[Decrypt telemetry]
+    Cache --> CacheLogs[Cache eviction telemetry]
+    KeyMap --> ChangeLogs[Key mapping audit]
+    KMSLogs --> SIEM[SIEM and SOAR]
+    DecryptLogs --> SIEM
+    CacheLogs --> SIEM
+    ChangeLogs --> SIEM
+</pre>
+<p>Security properties:</p>
+<ul>
+<li>Tenant data uses envelope encryption: per-object or per-record DEKs are wrapped by customer-managed KEKs.</li>
+<li>Tenant-to-key mapping is signed, versioned, and changed only through approved workflow.</li>
+<li>Decrypt paths fail closed if key state is unknown, denied, disabled, or revoked.</li>
+<li>Plaintext and unwrapped DEKs have short TTLs and are flushed on revocation.</li>
+<li>Backup and replication key class is visible and reconciled.</li>
+<li>KMS audit logs are correlated with SaaS decrypt logs.</li>
+</ul>
+<hr />
+<h2 id="7-threat-by-threat-technical-review">7. Threat-by-Threat Technical Review</h2>
+<hr />
+<h3 id="t1-over-broad-customer-kms-grants-to-saas-principals">T1 - Over-broad customer KMS grants to SaaS principals</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege / Information Disclosure<br />
+<strong>Risk:</strong> High likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Abuse KMS grants that allow the SaaS principal to decrypt more data than intended.</p>
+<h4 id="how-the-attacker-would-exploit-it">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: customer KMS policy grants broad decrypt to a SaaS principal without tenant context, encryption context, or key conditions.</li>
+<li>Step 1: Attacker compromises or abuses a SaaS workload identity.</li>
+<li>Step 2: Call KMS decrypt with wrapped DEKs from multiple objects or tenants.</li>
+<li>Step 3: Use returned plaintext DEKs to decrypt data.</li>
+<li>Step 4: Blend KMS calls into normal platform decrypt volume.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Require tenant-scoped KMS grants with encryption context conditions such as <code>tenant_id</code>, region, and key purpose.</li>
+<li>Preventive: Validate key policy templates during BYOK onboarding and continuously after setup.</li>
+<li>Preventive: Use separate workload identities per environment, region, and tenant risk class.</li>
+<li>Detective: Alert on decrypt calls where encryption context does not match expected tenant-key mapping.</li>
+<li>Corrective: Disable SaaS grant, rotate workload identity, and force customer key policy remediation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>KMSGrantAudit</code>: <code>tenant_id</code>, <code>key_id</code>, <code>principal</code>, <code>conditions</code>, <code>validated</code>.</li>
+<li><code>KMSDecryptLog</code>: <code>key_id</code>, <code>principal</code>, <code>encryption_context</code>, <code>source_ip</code>, <code>result</code>.</li>
+<li><code>KeyPolicyValidationLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>finding</code>, <code>severity</code>, <code>remediation</code>.</li>
+<li><code>WorkloadIdentityLog</code>: <code>principal</code>, <code>workload</code>, <code>environment</code>, <code>attestation_result</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt decrypt with mismatched encryption context and verify KMS denies.
+aws kms decrypt \
+  --key-id arn:aws:kms:us-east-1:111122223333:key/test \
+  --ciphertext-blob fileb://wrapped-dek.bin \
+  --encryption-context tenant_id=wrong-tenant
+</code></pre>
+<pre><code class="language-kql">KMSDecryptLog
+| where encryption_context_tenant_id != expected_tenant_id
+| project TimeGenerated, tenant_id, key_id, principal, encryption_context, result
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T1_1[Compromised workload calls KMS decrypt]:::attack --> C1{Encryption context condition enforced?}:::control
+    C1 -->|Yes| B1[Decrypt denied]:::blocked
+    C1 -->|No| T1_2[Plaintext DEK returned]:::attack
+    T1_2 --> C2{Decrypt context anomaly detected?}:::control
+    C2 -->|Yes| B2[Grant revoked and identity rotated]:::blocked
+    C2 -->|No| T1_3[Data decrypted at scale]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t2-tenant-to-key-mapping-tampering-or-key-confusion">T2 - Tenant-to-key mapping tampering or key confusion</h3>
+<p><strong>STRIDE category:</strong> Tampering / Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Change which key is used for a tenant, causing wrong-key decrypt, availability loss, or policy bypass.</p>
+<h4 id="how-the-attacker-would-exploit-it_1">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: control-plane API or config store can update tenant key references.</li>
+<li>Step 1: Modify tenant key ARN, key version, vault URI, or region metadata.</li>
+<li>Step 2: Map tenant data to an attacker-controlled or wrong customer key.</li>
+<li>Step 3: Trigger rewrap, restore, or read operations using the incorrect mapping.</li>
+<li>Step 4: Cause data exposure, lockout, or integrity confusion.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_1">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Store key mappings in signed, append-only, versioned config with two-person approval for changes.</li>
+<li>Preventive: Bind each encrypted object metadata to tenant ID, key ID, key version, and encryption context.</li>
+<li>Preventive: Validate key ownership and customer proof-of-control before accepting a new key.</li>
+<li>Detective: Alert on key mapping changes outside approved workflow or unusual volume of key map reads/updates.</li>
+<li>Corrective: Roll back to previous signed mapping and freeze decrypt for affected tenant until verified.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_1">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>KeyMappingAudit</code>: <code>tenant_id</code>, <code>old_key</code>, <code>new_key</code>, <code>version</code>, <code>signed_by</code>, <code>approved_by</code>.</li>
+<li><code>ConfigChangeLog</code>: <code>actor</code>, <code>change_type</code>, <code>ticket_id</code>, <code>source</code>, <code>result</code>.</li>
+<li><code>ObjectCryptoMetadataLog</code>: <code>object_id</code>, <code>tenant_id</code>, <code>key_id</code>, <code>key_version</code>, <code>dek_id</code>.</li>
+<li><code>ProofOfControlLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>challenge_id</code>, <code>validated_at</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_1">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt key mapping change without approval and verify it is rejected.
+curl -X PATCH https://control.staging.example.com/tenants/&lt;tenant-id&gt;/byok-key \
+  -H &quot;Authorization: Bearer &lt;operator-token&gt;&quot; \
+  -d '{&quot;key_ref&quot;:&quot;arn:aws:kms:us-east-1:111122223333:key/new&quot;}'
+</code></pre>
+<pre><code class="language-kql">KeyMappingAudit
+| where isempty(ticket_id) or approval_status != &quot;approved&quot;
+| project TimeGenerated, tenant_id, old_key, new_key, actor, result
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_1">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T2_1[Actor changes key mapping]:::attack --> C1{Signed change workflow required?}:::control
+    C1 -->|Yes| B1[Unauthorized change rejected]:::blocked
+    C1 -->|No| T2_2[Wrong key mapping stored]:::attack
+    T2_2 --> C2{Object metadata consistency check?}:::control
+    C2 -->|Yes| B2[Decrypt frozen and rollback]:::blocked
+    C2 -->|No| T2_3[Wrong-key decrypt or tenant lockout]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t3-key-revocation-race-or-fail-open-decrypt-behavior">T3 - Key revocation race or fail-open decrypt behavior</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Denial of Service<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Continue decrypting after customer key disable or exploit error handling that serves data when key state is uncertain.</p>
+<h4 id="how-the-attacker-would-exploit-it_2">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: revocation state is polled slowly, cached locally, or KMS errors are treated as transient allow conditions.</li>
+<li>Step 1: Customer disables key or attacker triggers key-state ambiguity.</li>
+<li>Step 2: Platform continues using cached key state or retries from stale workers.</li>
+<li>Step 3: Decrypt succeeds after it should have failed.</li>
+<li>Step 4: Customer loses confidence in BYOK revocation semantics.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_2">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Decrypt service must fail closed on disabled, denied, unknown, or stale key state.</li>
+<li>Preventive: Subscribe to KMS/key lifecycle events where possible and poll as backup.</li>
+<li>Preventive: Mark tenant as key-revoked or key-unknown in a strongly consistent state store.</li>
+<li>Detective: Alert on any decrypt success after key disabled or revocation timestamp.</li>
+<li>Corrective: Force tenant read lockout, flush caches, restart decrypt workers, and open incident.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_2">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>KeyStateLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>state</code>, <code>observed_at</code>, <code>source</code>.</li>
+<li><code>DecryptServiceLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>decrypt_result</code>, <code>key_state_seen</code>, <code>worker_id</code>.</li>
+<li><code>TenantLockoutLog</code>: <code>tenant_id</code>, <code>reason</code>, <code>started_at</code>, <code>ended_at</code>.</li>
+<li><code>KMSAvailabilityLog</code>: <code>provider</code>, <code>region</code>, <code>error_code</code>, <code>retry_policy</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_2">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, disable a test key and verify decrypt fails closed immediately.
+byok-test revoke-key --tenant synthetic-tenant --key test-key --expect-decrypt-deny
+</code></pre>
+<pre><code class="language-kql">DecryptServiceLog
+| join kind=inner KeyStateLog on tenant_id, key_id
+| where state in (&quot;disabled&quot;, &quot;revoked&quot;) and decrypt_result == &quot;success&quot;
+| project TimeGenerated, tenant_id, key_id, worker_id, key_state_seen
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_2">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T3_1[Customer disables key]:::attack --> C1{Strong revocation state propagated?}:::control
+    C1 -->|Yes| B1[Decrypt path locked]:::blocked
+    C1 -->|No| T3_2[Worker uses stale key state]:::attack
+    T3_2 --> C2{Post-revoke decrypt detection?}:::control
+    C2 -->|Yes| B2[Incident and worker recycle]:::blocked
+    C2 -->|No| T3_3[Data served after revocation]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t4-plaintext-cache-persists-after-key-revocation">T4 - Plaintext cache persists after key revocation</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Access cached plaintext data or unwrapped data keys after the customer has revoked the BYOK key.</p>
+<h4 id="how-the-attacker-would-exploit-it_3">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: data plane caches plaintext objects, query results, or unwrapped DEKs with long TTLs.</li>
+<li>Step 1: Trigger high-value reads before key revocation.</li>
+<li>Step 2: Customer disables key.</li>
+<li>Step 3: Attacker or normal user reads data from cache, search index, queue, or worker memory.</li>
+<li>Step 4: BYOK revocation does not actually stop access.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_3">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Keep plaintext and unwrapped DEK TTLs short and bounded.</li>
+<li>Preventive: Tag cache entries by tenant and key version for targeted purge.</li>
+<li>Preventive: Exclude high-sensitivity plaintext from shared caches and search indexes where possible.</li>
+<li>Detective: Require cache purge acknowledgments from every region and worker pool.</li>
+<li>Corrective: Force tenant cache flush, worker restart, and memory/cache invalidation on key revocation.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_3">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>CacheEvictionLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>revocation_id</code>, <code>region</code>, <code>status</code>.</li>
+<li><code>MemoryTTLMetric</code>: <code>service</code>, <code>tenant_id</code>, <code>plaintext_ttl_ms</code>, <code>dek_ttl_ms</code>.</li>
+<li><code>CacheReadLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>cache_hit</code>, <code>key_state_at_read</code>.</li>
+<li><code>WorkerRestartLog</code>: <code>tenant_id</code>, <code>worker_pool</code>, <code>restart_reason</code>, <code>completed_at</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_3">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, warm cache, revoke key, then verify cache reads are denied.
+byok-test cache-revoke --tenant synthetic-tenant --object synthetic-object --expect-cache-miss-deny
+</code></pre>
+<pre><code class="language-kql">CacheReadLog
+| where key_state_at_read in (&quot;disabled&quot;, &quot;revoked&quot;) and cache_hit == true
+| project TimeGenerated, tenant_id, key_id, cache_name, object_id
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_3">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T4_1[Plaintext cached before revoke]:::attack --> T4_2[Key revoked]:::attack
+    T4_2 --> C1{Tenant-scoped cache purge complete?}:::control
+    C1 -->|Yes| B1[Cached plaintext evicted]:::blocked
+    C1 -->|No| T4_3[Cache serves plaintext after revoke]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t5-saas-workload-identity-compromise-enables-decrypt-abuse">T5 - SaaS workload identity compromise enables decrypt abuse</h3>
+<p><strong>STRIDE category:</strong> Spoofing / Elevation of Privilege<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use compromised service credentials to call customer KMS and SaaS data APIs.</p>
+<h4 id="how-the-attacker-would-exploit-it_4">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: workload identity, service account token, mTLS credential, or cloud role is stolen.</li>
+<li>Step 1: Replay service credential from attacker-controlled environment or compromised workload.</li>
+<li>Step 2: Call KMS decrypt and SaaS data APIs.</li>
+<li>Step 3: Exfiltrate decrypted data while appearing as legitimate platform service.</li>
+<li>Step 4: Continue until identity is revoked or anomalous behavior is detected.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_4">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Use workload identity with hardware or platform attestation and short-lived credentials.</li>
+<li>Preventive: Bind KMS access to workload, environment, region, tenant, and encryption context.</li>
+<li>Preventive: Deny KMS access from unapproved networks and principals.</li>
+<li>Detective: Alert on new workload identities, unusual regions, or decrypt from non-attested workloads.</li>
+<li>Corrective: Revoke workload identity, rotate credentials, and trigger tenant secret/data exposure review.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_4">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>WorkloadIdentityLog</code>: <code>principal</code>, <code>workload</code>, <code>attestation</code>, <code>region</code>, <code>token_ttl</code>.</li>
+<li><code>KMSDecryptLog</code>: <code>principal</code>, <code>source_ip</code>, <code>user_agent</code>, <code>key_id</code>, <code>encryption_context</code>.</li>
+<li><code>NetworkEgressLog</code>: <code>service</code>, <code>destination</code>, <code>region</code>, <code>allowed</code>.</li>
+<li><code>IdentityRevocationLog</code>: <code>principal</code>, <code>revoked_at</code>, <code>reason</code>, <code>dependent_services</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_4">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt KMS decrypt from an unapproved workload identity.
+byok-test workload-decrypt --principal synthetic-unapproved-workload --expect-deny
+</code></pre>
+<pre><code class="language-kql">KMSDecryptLog
+| where principal !in (ApprovedKMSPrincipals) or attestation_result != &quot;pass&quot;
+| project TimeGenerated, tenant_id, key_id, principal, source_ip, result
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_4">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T5_1[Service credential stolen]:::attack --> T5_2[Attacker calls KMS]:::attack
+    T5_2 --> C1{Workload attestation and network binding?}:::control
+    C1 -->|Yes| B1[Decrypt denied]:::blocked
+    C1 -->|No| T5_3[Plaintext DEK returned]:::attack
+    T5_3 --> C2{Principal anomaly detection?}:::control
+    C2 -->|Yes| B2[Identity revoked]:::blocked
+    C2 -->|No| T5_4[Silent decrypt abuse]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t6-customer-self-ransomware-through-key-disabledelete">T6 - Customer self-ransomware through key disable/delete</h3>
+<p><strong>STRIDE category:</strong> Denial of Service / Tampering<br />
+<strong>Risk:</strong> High likelihood, High impact<br />
+<strong>Attacker objective:</strong> Abuse customer-controlled key lifecycle to lock the tenant out of their own data.</p>
+<h4 id="how-the-attacker-would-exploit-it_5">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: compromised or malicious customer admin can disable, schedule deletion, or revoke grants on the KMS key.</li>
+<li>Step 1: Disable key or revoke SaaS decrypt grants.</li>
+<li>Step 2: SaaS fail-closed behavior makes tenant data unavailable.</li>
+<li>Step 3: Attacker demands ransom or sabotages business operations.</li>
+<li>Step 4: Customer asks SaaS provider to recover data without the key.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_5">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Provide customer-side guardrails: warning banners, break-glass roles, deletion waiting periods, and multi-admin approval guidance.</li>
+<li>Preventive: Detect destructive KMS changes and notify tenant security contacts immediately.</li>
+<li>Preventive: Document that SaaS cannot decrypt BYOK data after irrevocable key deletion.</li>
+<li>Detective: Alert on unusual disable/delete/grant revoke events, especially outside business hours.</li>
+<li>Corrective: Enter tenant lockout playbook, validate customer identity, and guide key restore or grant repair where possible.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_5">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>CustomerKMSLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>operation</code>, <code>actor</code>, <code>source_ip</code>, <code>result</code>.</li>
+<li><code>TenantLockoutLog</code>: <code>tenant_id</code>, <code>trigger</code>, <code>state</code>, <code>customer_contacts_notified</code>.</li>
+<li><code>CustomerAdminAlertLog</code>: <code>tenant_id</code>, <code>notification_type</code>, <code>delivered</code>, <code>acknowledged</code>.</li>
+<li><code>RecoveryRunbookLog</code>: <code>tenant_id</code>, <code>case_id</code>, <code>step</code>, <code>owner</code>, <code>status</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_5">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, simulate customer key disable and verify tenant lockout plus notification.
+byok-test customer-disable --tenant synthetic-tenant --expect-lockout-notify
+</code></pre>
+<pre><code class="language-kql">CustomerKMSLog
+| where operation in (&quot;DisableKey&quot;, &quot;ScheduleKeyDeletion&quot;, &quot;RevokeGrant&quot;)
+| summarize events=count() by tenant_id, key_id, actor, bin(TimeGenerated, 15m)
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_5">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T6_1[Customer admin disables key]:::attack --> C1{Customer guardrails and alerts?}:::control
+    C1 -->|Yes| B1[Customer security contact notified]:::blocked
+    C1 -->|No| T6_2[Tenant data becomes unavailable]:::impact
+    T6_2 --> C2{Recovery path before deletion?}:::control
+    C2 -->|Yes| B2[Grant or key restored]:::blocked
+    C2 -->|No| T6_3[Permanent data loss if key deleted]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t7-high-volume-decrypt-exfiltration-under-valid-key">T7 - High-volume decrypt exfiltration under valid key</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Use valid decrypt permissions to access unusually high volumes of tenant data.</p>
+<h4 id="how-the-attacker-would-exploit-it_6">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: attacker has valid SaaS API session, service credential, or compromised automation.</li>
+<li>Step 1: Enumerate high-value objects or export endpoints.</li>
+<li>Step 2: Trigger many decrypt operations through normal read APIs.</li>
+<li>Step 3: Keep requests below simple rate limits or spread across regions/workers.</li>
+<li>Step 4: Exfiltrate data while KMS calls appear authorized.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_6">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Apply per-tenant and per-principal decrypt budgets and sensitive export controls.</li>
+<li>Preventive: Require step-up authorization for bulk export or unusually sensitive reads.</li>
+<li>Detective: Baseline decrypt rate by tenant, service, data class, and time of day.</li>
+<li>Detective: Correlate decrypt spikes with API reads, exports, and endpoint DLP.</li>
+<li>Corrective: Throttle decrypt service, suspend session, and rotate exposed credentials.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_6">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>DecryptAnomalyLog</code>: <code>tenant_id</code>, <code>principal</code>, <code>decrypt_count</code>, <code>baseline</code>, <code>severity</code>.</li>
+<li><code>APIAccessLog</code>: <code>tenant_id</code>, <code>user_id</code>, <code>route</code>, <code>record_count</code>, <code>data_class</code>.</li>
+<li><code>DLPExportLog</code>: <code>tenant_id</code>, <code>export_id</code>, <code>data_class</code>, <code>volume</code>, <code>destination</code>.</li>
+<li><code>RateLimitLog</code>: <code>tenant_id</code>, <code>principal</code>, <code>budget_used</code>, <code>action_taken</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_6">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, run a synthetic bulk-read workload and verify decrypt anomaly fires.
+byok-test decrypt-spike --tenant synthetic-tenant --objects 5000 --expect-alert
+</code></pre>
+<pre><code class="language-kql">DecryptAnomalyLog
+| where decrypt_count &gt; 3 * baseline
+| join kind=leftouter APIAccessLog on tenant_id, principal
+| project TimeGenerated, tenant_id, principal, decrypt_count, baseline, route, record_count
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_6">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T7_1[Actor triggers many reads]:::attack --> T7_2[Decrypt volume spikes]:::attack
+    T7_2 --> C1{Decrypt budget and anomaly detection?}:::control
+    C1 -->|Yes| B1[Throttle and alert]:::blocked
+    C1 -->|No| T7_3[Large-scale data exfiltration]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t8-legacy-backups-or-replicas-remain-under-platform-keys">T8 - Legacy backups or replicas remain under platform keys</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Compliance<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Access data copies that were not re-encrypted under the customer's BYOK key.</p>
+<h4 id="how-the-attacker-would-exploit-it_7">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: data created before BYOK remains in backups, analytics stores, search indexes, or replicas encrypted with platform-managed keys.</li>
+<li>Step 1: Target backup restore path, replica store, or legacy snapshot.</li>
+<li>Step 2: Access data without customer KMS interaction.</li>
+<li>Step 3: Bypass customer expectation that disabling BYOK blocks access.</li>
+<li>Step 4: Create compliance and contractual dispute.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_7">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Build a key-class inventory for every storage tier, backup, replica, index, and derived dataset.</li>
+<li>Preventive: Re-encrypt or expire legacy backups according to a documented migration plan.</li>
+<li>Preventive: Prevent restore of BYOK tenants into platform-key-only environments.</li>
+<li>Detective: Alert on backup or restore jobs using platform keys for BYOK tenants.</li>
+<li>Corrective: Re-encrypt affected sets and disclose residual exposure window to customer if required.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_7">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>BackupKeyInventory</code>: <code>backup_id</code>, <code>tenant_id</code>, <code>key_class</code>, <code>created_at</code>, <code>expires_at</code>.</li>
+<li><code>RestoreAudit</code>: <code>restore_id</code>, <code>tenant_id</code>, <code>source_key_class</code>, <code>target_key_class</code>, <code>approved</code>.</li>
+<li><code>DerivedDataInventory</code>: <code>dataset</code>, <code>tenant_id</code>, <code>contains_customer_data</code>, <code>key_class</code>.</li>
+<li><code>MigrationProgressLog</code>: <code>tenant_id</code>, <code>storage_tier</code>, <code>percent_reencrypted</code>, <code>deadline</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_7">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt restore of BYOK tenant backup into platform-key environment and verify block.
+byok-test restore-policy --tenant synthetic-tenant --target-key-class platform --expect-deny
+</code></pre>
+<pre><code class="language-kql">BackupKeyInventory
+| where tenant_byok_enabled == true and key_class == &quot;platform-managed&quot;
+| project tenant_id, backup_id, created_at, expires_at, storage_tier
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_7">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T8_1[Legacy backup exists under platform key]:::attack --> C1{Backup key inventory reconciled?}:::control
+    C1 -->|Yes| B1[Backup re-encrypted or expired]:::blocked
+    C1 -->|No| T8_2[Restore bypasses BYOK key]:::attack
+    T8_2 --> T8_3[Customer control expectation violated]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t9-cross-region-or-residency-key-mismatch">T9 - Cross-region or residency key mismatch</h3>
+<p><strong>STRIDE category:</strong> Information Disclosure / Denial of Service<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Cause data to be encrypted, decrypted, replicated, or restored with a key outside the approved region or tenant policy.</p>
+<h4 id="how-the-attacker-would-exploit-it_8">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: SaaS replication or failover logic falls back to platform keys, wrong region keys, or wrong provider vault.</li>
+<li>Step 1: Trigger region failover, backup restore, or migration.</li>
+<li>Step 2: Data plane attempts decrypt using unavailable customer key.</li>
+<li>Step 3: Fallback path uses wrong key or breaks tenant availability.</li>
+<li>Step 4: Data residency or BYOK commitments fail.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_8">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Encode tenant key region, data residency, and provider constraints in key mapping policy.</li>
+<li>Preventive: Fail closed if the approved regional key is unavailable.</li>
+<li>Preventive: Require customer-provided keys for every approved replica/failover region.</li>
+<li>Detective: Alert on decrypt/encrypt requests where data region and key region differ from policy.</li>
+<li>Corrective: Stop replication, freeze restore, and require explicit customer-approved remap.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_8">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>ReplicationLog</code>: <code>tenant_id</code>, <code>source_region</code>, <code>target_region</code>, <code>key_id</code>, <code>status</code>.</li>
+<li><code>ProviderRouteLog</code>: <code>tenant_id</code>, <code>kms_provider</code>, <code>region</code>, <code>policy_region</code>, <code>decision</code>.</li>
+<li><code>KeyResidencyPolicy</code>: <code>tenant_id</code>, <code>allowed_regions</code>, <code>allowed_key_ids</code>, <code>fallback_allowed</code>.</li>
+<li><code>FailoverAudit</code>: <code>tenant_id</code>, <code>from_region</code>, <code>to_region</code>, <code>key_validation</code>, <code>approved</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_8">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, simulate regional failover without approved target key and verify fail closed.
+byok-test failover --tenant eu-synthetic --target-region us-east-1 --expect-fail-closed
+</code></pre>
+<pre><code class="language-kql">ProviderRouteLog
+| where region != policy_region or decision == &quot;fallback&quot;
+| project TimeGenerated, tenant_id, kms_provider, region, policy_region, decision
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_8">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T9_1[Region failover starts]:::attack --> C1{Approved target-region BYOK key exists?}:::control
+    C1 -->|Yes| B1[Failover uses compliant key]:::blocked
+    C1 -->|No| T9_2[Fallback key considered]:::attack
+    T9_2 --> C2{Fail closed on missing key?}:::control
+    C2 -->|Yes| B2[Restore or replication halted]:::blocked
+    C2 -->|No| T9_3[Residency or BYOK violation]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t10-internal-support-tooling-bypasses-byok-enforcement">T10 - Internal support tooling bypasses BYOK enforcement</h3>
+<p><strong>STRIDE category:</strong> Elevation of Privilege / Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, Critical impact<br />
+<strong>Attacker objective:</strong> Use privileged support, analytics, or debugging tools to access tenant data outside the normal BYOK decrypt path.</p>
+<h4 id="how-the-attacker-would-exploit-it_9">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: internal tools read object stores, search indexes, database replicas, logs, or caches without checking BYOK state.</li>
+<li>Step 1: Support engineer or compromised internal account opens admin tool.</li>
+<li>Step 2: Tool reads tenant data through a privileged backend path.</li>
+<li>Step 3: BYOK revocation, customer KMS audit, and tenant controls are bypassed.</li>
+<li>Step 4: Access is difficult to explain or prove to customer.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_9">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Route all internal data access through the same BYOK policy and decrypt service.</li>
+<li>Preventive: Require JIT access, ticket binding, customer approval where appropriate, and purpose-limited views.</li>
+<li>Preventive: Redact or tokenize sensitive fields in support tools by default.</li>
+<li>Detective: Alert on internal reads for BYOK tenants, especially without active ticket or after key disable.</li>
+<li>Corrective: Revoke internal session, rotate exposed credentials, notify privacy/security review board.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_9">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>SupportAccessLog</code>: <code>actor</code>, <code>tenant_id</code>, <code>tool</code>, <code>ticket_id</code>, <code>fields_accessed</code>.</li>
+<li><code>AdminToolAudit</code>: <code>tool</code>, <code>byok_policy_checked</code>, <code>key_state</code>, <code>result</code>.</li>
+<li><code>JITAccessLog</code>: <code>actor</code>, <code>scope</code>, <code>approved_by</code>, <code>expires_at</code>, <code>reason</code>.</li>
+<li><code>PrivacyReviewLog</code>: <code>case_id</code>, <code>tenant_id</code>, <code>access_type</code>, <code>disposition</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_9">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, attempt support read without ticket for BYOK tenant and verify deny.
+curl -X GET https://support.staging.example.com/tenants/&lt;tenant-id&gt;/records/&lt;record-id&gt; \
+  -H &quot;Authorization: Bearer &lt;support-user-token&gt;&quot;
+</code></pre>
+<pre><code class="language-kql">AdminToolAudit
+| where tenant_byok_enabled == true
+| where byok_policy_checked != true or isempty(ticket_id)
+| project TimeGenerated, actor, tenant_id, tool, byok_policy_checked, ticket_id
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_9">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T10_1[Internal user opens support tool]:::attack --> C1{JIT and ticket binding?}:::control
+    C1 -->|Yes| B1[Access scoped and audited]:::blocked
+    C1 -->|No| T10_2[Tool reads data bypassing BYOK]:::attack
+    T10_2 --> C2{BYOK policy check in tool path?}:::control
+    C2 -->|Yes| B2[Read denied if key unavailable]:::blocked
+    C2 -->|No| T10_3[Unauthorized plaintext access]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t11-key-rotation-or-rewrap-failure-causes-data-loss">T11 - Key rotation or rewrap failure causes data loss</h3>
+<p><strong>STRIDE category:</strong> Tampering / Denial of Service<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Exploit or trigger key rotation/rewrap errors so data cannot be decrypted or is associated with the wrong key version.</p>
+<h4 id="how-the-attacker-would-exploit-it_10">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: key rotation jobs are resumable but not strongly tracked, or key version metadata is inconsistent.</li>
+<li>Step 1: Trigger key rotation or rewrap job.</li>
+<li>Step 2: Interrupt job or race object updates during migration.</li>
+<li>Step 3: Some objects point to old key version, some to new, some to no valid version.</li>
+<li>Step 4: Reads fail or data is incorrectly decrypted.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_10">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Use transactional rewrap manifests and per-object crypto metadata.</li>
+<li>Preventive: Make rewrap jobs idempotent, resumable, and verified by sample decrypt checks.</li>
+<li>Preventive: Keep old key enabled until all objects and backups are verified under new version.</li>
+<li>Detective: Alert on rewrap error rates, missing key version metadata, and decrypt failures after rotation.</li>
+<li>Corrective: Roll back to previous key version or resume rewrap from signed checkpoint.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_10">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>RewrapJobLog</code>: <code>job_id</code>, <code>tenant_id</code>, <code>from_key</code>, <code>to_key</code>, <code>objects_total</code>, <code>objects_done</code>, <code>status</code>.</li>
+<li><code>KeyVersionInventory</code>: <code>tenant_id</code>, <code>object_id</code>, <code>key_version</code>, <code>last_verified</code>.</li>
+<li><code>DecryptFailureLog</code>: <code>tenant_id</code>, <code>object_id</code>, <code>key_version</code>, <code>error</code>.</li>
+<li><code>RewrapManifestLog</code>: <code>manifest_id</code>, <code>signed_hash</code>, <code>checkpoint</code>, <code>verified</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_10">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, interrupt and resume a rewrap job and verify idempotent completion.
+byok-test rewrap-resume --tenant synthetic-tenant --objects 10000 --interrupt-at 50 --expect-success
+</code></pre>
+<pre><code class="language-kql">RewrapJobLog
+| where status in (&quot;failed&quot;, &quot;partial&quot;) or error_count &gt; 0
+| project TimeGenerated, tenant_id, job_id, from_key, to_key, objects_done, objects_total, error_count
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_10">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T11_1[Key rotation starts]:::attack --> T11_2[Rewrap interrupted]:::attack
+    T11_2 --> C1{Signed manifest and checkpoint?}:::control
+    C1 -->|Yes| B1[Job resumes safely]:::blocked
+    C1 -->|No| T11_3[Objects have inconsistent key metadata]:::attack
+    T11_3 --> C2{Post-rotation decrypt verification?}:::control
+    C2 -->|Yes| B2[Rollback or repair]:::blocked
+    C2 -->|No| T11_4[Data unavailable or corrupted]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h3 id="t12-external-kms-outage-drives-unsafe-fallback-behavior">T12 - External KMS outage drives unsafe fallback behavior</h3>
+<p><strong>STRIDE category:</strong> Denial of Service / Information Disclosure<br />
+<strong>Risk:</strong> Medium likelihood, High impact<br />
+<strong>Attacker objective:</strong> Trigger KMS errors or outages that cause the SaaS to fail open, use cached plaintext, or fall back to platform-managed keys.</p>
+<h4 id="how-the-attacker-would-exploit-it_11">How the attacker would exploit it</h4>
+<ul>
+<li>Prerequisite: error handling prioritizes availability over BYOK enforcement.</li>
+<li>Step 1: Customer KMS endpoint becomes unavailable or returns throttling/errors.</li>
+<li>Step 2: Platform retries aggressively or uses stale cached keys.</li>
+<li>Step 3: Service serves data despite inability to validate customer key state.</li>
+<li>Step 4: BYOK guarantee is weakened during outage.</li>
+</ul>
+<h4 id="blue-team-control-review-what-must-stop-the-chain_11">Blue-team control review - what must stop the chain</h4>
+<ul>
+<li>Preventive: Fail closed when KMS is unavailable for decrypts requiring current key authorization.</li>
+<li>Preventive: Define degraded mode: no decrypt, read-only metadata access, clear customer-facing status.</li>
+<li>Preventive: Bound retries and prevent retry storms against customer KMS.</li>
+<li>Detective: Monitor KMS error rates, retry storms, fail-closed counts, and any fallback path invocation.</li>
+<li>Corrective: Notify tenant, pause decrypt workflows, and recover only after KMS health and key state are confirmed.</li>
+</ul>
+<h4 id="evidence-and-telemetry-to-validate-controls_11">Evidence and telemetry to validate controls</h4>
+<ul>
+<li><code>KMSAvailabilityLog</code>: <code>tenant_id</code>, <code>provider</code>, <code>region</code>, <code>error_rate</code>, <code>latency</code>.</li>
+<li><code>FailClosedMetric</code>: <code>tenant_id</code>, <code>operation</code>, <code>denied_count</code>, <code>reason</code>.</li>
+<li><code>RetryStormLog</code>: <code>tenant_id</code>, <code>key_id</code>, <code>retry_count</code>, <code>backoff_applied</code>.</li>
+<li><code>FallbackPathAudit</code>: <code>tenant_id</code>, <code>fallback_type</code>, <code>invoked</code>, <code>approved</code>.</li>
+</ul>
+<h4 id="purple-team-validation-commands_11">Purple-team validation commands</h4>
+<pre><code class="language-bash"># In staging, simulate KMS timeout and verify decrypt fails closed without platform-key fallback.
+byok-test kms-timeout --tenant synthetic-tenant --expect-fail-closed
+</code></pre>
+<pre><code class="language-kql">FallbackPathAudit
+| where invoked == true and tenant_byok_enabled == true
+| project TimeGenerated, tenant_id, fallback_type, approved, reason
+</code></pre>
+<h4 id="attack-tree-with-control-breakpoints_11">Attack tree with control breakpoints</h4>
+<pre class="mermaid">
+flowchart TD
+    T12_1[Customer KMS unavailable]:::attack --> C1{Fail-closed decrypt behavior?}:::control
+    C1 -->|Yes| B1[Data access denied with clear status]:::blocked
+    C1 -->|No| T12_2[Fallback or stale cache used]:::attack
+    T12_2 --> T12_3[BYOK enforcement bypassed during outage]:::impact
+
+    classDef attack fill:#ffe6e6,stroke:#cc0000,color:#111;
+    classDef control fill:#e6f2ff,stroke:#0066cc,color:#111;
+    classDef blocked fill:#e8f5e9,stroke:#1b5e20,color:#111;
+    classDef impact fill:#fff3cd,stroke:#b8860b,color:#111;
+</pre>
+<hr />
+<h2 id="8-purple-team-exercise-runbook-summary">8. Purple-Team Exercise Runbook Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Threat ID</th>
+<th>Safe Validation Test</th>
+<th>Evidence of Pass</th>
+<th>Evidence of Fail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td>Decrypt with mismatched encryption context</td>
+<td>KMS denies request</td>
+<td>Plaintext DEK returned</td>
+</tr>
+<tr>
+<td>T2</td>
+<td>Change key mapping without approval</td>
+<td>Change rejected and logged</td>
+<td>Mapping changed silently</td>
+</tr>
+<tr>
+<td>T3</td>
+<td>Disable test key and attempt decrypt</td>
+<td>Decrypt fails closed</td>
+<td>Decrypt succeeds after revoke</td>
+</tr>
+<tr>
+<td>T4</td>
+<td>Warm cache, revoke key, then read</td>
+<td>Cache flushed and read denied</td>
+<td>Cached plaintext served</td>
+</tr>
+<tr>
+<td>T5</td>
+<td>Use unapproved workload identity for decrypt</td>
+<td>KMS denies request</td>
+<td>Unapproved principal decrypts</td>
+</tr>
+<tr>
+<td>T6</td>
+<td>Simulate customer key disable</td>
+<td>Tenant lockout and alerts fire</td>
+<td>Data served or no notification</td>
+</tr>
+<tr>
+<td>T7</td>
+<td>Run bulk-read decrypt spike</td>
+<td>Anomaly and throttle trigger</td>
+<td>High-volume decrypt succeeds silently</td>
+</tr>
+<tr>
+<td>T8</td>
+<td>Restore BYOK backup into platform-key target</td>
+<td>Restore blocked</td>
+<td>Restore bypasses BYOK policy</td>
+</tr>
+<tr>
+<td>T9</td>
+<td>Failover to region without approved key</td>
+<td>Fail closed</td>
+<td>Fallback key used</td>
+</tr>
+<tr>
+<td>T10</td>
+<td>Support read without ticket</td>
+<td>Access denied</td>
+<td>Internal tool returns data</td>
+</tr>
+<tr>
+<td>T11</td>
+<td>Interrupt and resume rewrap job</td>
+<td>Idempotent resume and verification</td>
+<td>Partial inconsistent metadata</td>
+</tr>
+<tr>
+<td>T12</td>
+<td>Simulate KMS timeout</td>
+<td>No fallback; fail closed</td>
+<td>Stale cache or platform key used</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-control-coverage-heatmap">9. Control Coverage Heatmap</h2>
+<table>
+<thead>
+<tr>
+<th>Control Area</th>
+<th>Threats Covered</th>
+<th>Gaps / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>KMS policy and grants</td>
+<td>T1, T5, T9</td>
+<td>Customer-side misconfiguration remains shared responsibility.</td>
+</tr>
+<tr>
+<td>Key mapping governance</td>
+<td>T2, T9, T11</td>
+<td>Mapping changes need signed versioning and approvals.</td>
+</tr>
+<tr>
+<td>Revocation and fail-closed behavior</td>
+<td>T3, T4, T6, T12</td>
+<td>Must be verified through regular drills, not assumed.</td>
+</tr>
+<tr>
+<td>Plaintext lifecycle controls</td>
+<td>T4, T7, T10, T12</td>
+<td>Memory and caches are unavoidable but must be bounded.</td>
+</tr>
+<tr>
+<td>Backup and derived-data inventory</td>
+<td>T8, T9, T11</td>
+<td>Legacy storage tiers often hide residual exposure.</td>
+</tr>
+<tr>
+<td>Monitoring and anomaly detection</td>
+<td>T1, T3, T5, T7, T10</td>
+<td>KMS logs must be correlated with SaaS data-plane logs.</td>
+</tr>
+<tr>
+<td>Customer operations and recovery</td>
+<td>T6, T8, T12</td>
+<td>Documentation and customer notifications are security controls here.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-minimum-viable-control-set">10. Minimum Viable Control Set</h2>
+<p>If implementation time is constrained, the minimum viable control set is:</p>
+<ol>
+<li>Envelope encryption with tenant-scoped KMS grants and encryption context validation.</li>
+<li>Signed, versioned tenant-to-key mapping with two-person approval for changes.</li>
+<li>Fail-closed decrypt behavior for disabled, denied, unknown, or unavailable key state.</li>
+<li>Plaintext and DEK cache TTLs with revocation-triggered purge and per-region acknowledgments.</li>
+<li>KMS decrypt telemetry correlated with SaaS API, cache, backup, and support-access logs.</li>
+</ol>
+<p>Do not ship BYOK if revocation does not stop access, support tooling can bypass key checks, or backups remain under platform keys without explicit residual-risk disclosure.</p>
+<hr />
+<h2 id="11-residual-risk-register">11. Residual Risk Register</h2>
+<table>
+<thead>
+<tr>
+<th>Residual Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Why It Remains</th>
+<th>Owner</th>
+<th>Acceptance Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plaintext exists briefly in memory during active processing</td>
+<td>High</td>
+<td>High</td>
+<td>Data must be decrypted to be processed</td>
+<td>Security Architecture</td>
+<td>Accepted with short TTL, isolation, and cache purge evidence</td>
+</tr>
+<tr>
+<td>Pre-BYOK backups persist under legacy keys</td>
+<td>Medium</td>
+<td>High</td>
+<td>Re-encryption or expiry takes time</td>
+<td>Storage Platform</td>
+<td>Accepted with inventory, migration timeline, and customer disclosure</td>
+</tr>
+<tr>
+<td>Customer self-lockout through key deletion</td>
+<td>High</td>
+<td>Medium/High</td>
+<td>Customer controls the key lifecycle</td>
+<td>Customer Success</td>
+<td>Accepted with warnings, recovery runbook, and deletion-delay guidance</td>
+</tr>
+<tr>
+<td>Customer KMS outage causes SaaS availability impact</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>BYOK depends on external KMS availability</td>
+<td>SRE</td>
+<td>Accepted with fail-closed design and documented SLA behavior</td>
+</tr>
+<tr>
+<td>Sophisticated decrypt abuse mimics normal traffic</td>
+<td>Low/Medium</td>
+<td>High</td>
+<td>Valid decrypts can resemble normal reads</td>
+<td>Detection Engineering</td>
+<td>Accepted with behavioral baselines and hunt cycles</td>
+</tr>
+<tr>
+<td>Third-party KMS policy drift weakens controls</td>
+<td>Medium</td>
+<td>High</td>
+<td>Customer-owned policy can change outside SaaS</td>
+<td>Product Security</td>
+<td>Accepted with continuous validation and tenant alerts</td>
+</tr>
+<tr>
+<td>Data in transit and in use is outside at-rest BYOK guarantee</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>BYOK covers at-rest key control, not every processing state</td>
+<td>Legal / Privacy</td>
+<td>Accepted with clear contract language and technical compensating controls</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-google-scale-considerations">12. Google-Scale Considerations</h2>
+<p>At Google scale, BYOK must be operated like a critical control plane.</p>
+<ul>
+<li><strong>Policy-as-code onboarding:</strong> Generate and validate KMS/Key Vault policies automatically, including principals, conditions, region, and encryption context.</li>
+<li><strong>Continuous reconciliation:</strong> Reconcile key mapping, KMS grant state, object crypto metadata, backup key class, and revocation behavior continuously.</li>
+<li><strong>Revocation drills:</strong> Regularly test key disable scenarios across regions to prove fail-closed behavior and cache purge completeness.</li>
+<li><strong>Blast-radius modeling:</strong> A mapping bug or workload identity compromise should automatically identify affected tenants, keys, objects, backups, and regions.</li>
+<li><strong>Customer proof:</strong> Provide auditable reports showing key usage, decrypt counts, revocation tests, backup key class, and policy drift.</li>
+<li><strong>Paved-road support tooling:</strong> Internal support access must use the same BYOK enforcement path with JIT and ticket-bound audit.</li>
+</ul>
+<hr />
+<h2 id="13-model-answer-summary-90-second-version">13. Model Answer Summary - 90-second version</h2>
+<p>For BYOK, I would frame the core security question as: does customer key control actually govern access to tenant data, or only the primary storage path? The main risks are over-broad KMS grants, tampered tenant-to-key mapping, fail-open decrypt behavior, plaintext cache persistence after key revocation, and legacy backups outside BYOK coverage.</p>
+<p>My design would use envelope encryption with per-object DEKs wrapped by tenant customer keys, tenant-scoped KMS grants with encryption context, signed and versioned key mapping, fail-closed decrypt behavior, short plaintext and DEK cache TTLs, and mandatory cache purge on revocation. Every decrypt should produce correlated evidence in customer KMS logs and SaaS data-plane logs.</p>
+<p>For monitoring, I would alert on decrypt spikes, unauthorized KMS principals, key mapping changes without approval, decrypt success after revocation, backup jobs using platform keys for BYOK tenants, and support tools accessing data without BYOK checks. Residual risk remains for data in memory, pre-BYOK backups, KMS outages, and customer self-lockout; those need explicit owners, runbooks, and customer-facing documentation.</p>
+<hr />
+<h2 id="14-likely-follow-up-questions-and-strong-answers">14. Likely Follow-Up Questions and Strong Answers</h2>
+<h3 id="follow-up-1-what-happens-to-customer-data-access-if-the-customer-revokes-the-byok-key">Follow-up 1: What happens to customer data access if the customer revokes the BYOK key?</h3>
+<p>Decrypt should fail closed immediately for data protected by that key. The tenant may lose read access, which is expected BYOK behavior. The platform must also flush plaintext caches, stop background jobs, block restores, and verify that no internal or support path can still read the data.</p>
+<h3 id="follow-up-2-how-do-you-model-a-customer-using-byok-revocation-as-ransomware-against-themselves">Follow-up 2: How do you model a customer using BYOK revocation as ransomware against themselves?</h3>
+<p>I model it as malicious or compromised customer admin behavior. The controls are customer-side guardrails, alerts to security contacts, deletion-delay guidance, multi-admin approval recommendations, and a recovery runbook. The SaaS provider should not keep a hidden bypass key, because that would undermine the BYOK promise.</p>
+<h3 id="follow-up-3-what-prevents-plaintext-caching-after-key-revocation">Follow-up 3: What prevents plaintext caching after key revocation?</h3>
+<p>Cache entries must be tagged by tenant and key version, plaintext TTLs must be short, and revocation must trigger targeted purge across every region and worker pool. Completion must be measured with acknowledgments. Any cache hit after revocation is a critical incident.</p>
+<h3 id="follow-up-4-how-do-you-monitor-key-usage-and-anomalous-decryption-volume">Follow-up 4: How do you monitor key usage and anomalous decryption volume?</h3>
+<p>Correlate customer KMS decrypt logs with SaaS decrypt service logs, API route logs, data class, actor, workload identity, region, and baseline volume. Alert on unauthorized principals, encryption context mismatch, decrypt rate spikes, new regions, and decrypts after key disable.</p>
+<h3 id="follow-up-5-what-residual-risk-exists-for-data-in-transit-memory-or-backups-before-byok">Follow-up 5: What residual risk exists for data in transit, memory, or backups before BYOK?</h3>
+<p>BYOK primarily controls encryption at rest through customer key material. Data still exists in plaintext in memory during processing, travels over TLS in transit, and may exist in old backups or derived stores from before BYOK enablement. Those risks need compensating controls: short memory lifetime, TLS, backup inventory, re-encryption or expiry, and clear customer disclosures.</p>
+<hr />
+<h2 id="15-common-mistakes-to-avoid">15. Common Mistakes to Avoid</h2>
+<ul>
+<li>Claiming BYOK means the SaaS provider can never access plaintext.</li>
+<li>Keeping plaintext caches alive after customer key revocation.</li>
+<li>Failing open when KMS is unavailable or key state is unknown.</li>
+<li>Allowing broad KMS grants without tenant encryption context conditions.</li>
+<li>Treating tenant-to-key mapping as ordinary config rather than a critical security control.</li>
+<li>Forgetting backups, search indexes, analytics stores, and replicas.</li>
+<li>Letting support/admin tools bypass BYOK enforcement.</li>
+<li>Not reconciling customer KMS logs with SaaS decrypt logs.</li>
+<li>Ignoring customer self-ransomware and key deletion recovery scenarios.</li>
+<li>Migrating existing data to BYOK without a legacy data residual-risk plan.</li>
+</ul>
+<hr />
+<h2 id="16-top-5-immediate-actions">16. Top 5 Immediate Actions</h2>
+<ol>
+<li><strong>Enforce tenant-scoped KMS grants</strong> - require encryption context and continuous policy validation.</li>
+<li><strong>Make key mapping tamper-resistant</strong> - signed, versioned, approved, and tied to object crypto metadata.</li>
+<li><strong>Prove revocation semantics</strong> - fail closed, flush caches, block internal bypasses, and drill regularly.</li>
+<li><strong>Inventory all data copies</strong> - backups, replicas, search indexes, exports, and derived datasets must show key class.</li>
+<li><strong>Correlate decrypt telemetry</strong> - join KMS logs, SaaS API logs, cache logs, and support-access logs for detection.</li>
+</ol>
+<hr />
+<p><em>Generated: 2026-06-06 | Source: scenario37-saas-byok-encryption.md and threat-modeling-prompt.md | Scenario 37 review - Attack-Review-Enhanced</em></p>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

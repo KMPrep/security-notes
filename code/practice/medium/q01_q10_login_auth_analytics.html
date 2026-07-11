@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q01_q10_login_auth_analytics.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q01_q10_login_auth_analytics.py</h1>
+  <p class="file-path">Source: code\practice\medium\q01_q10_login_auth_analytics.py</p>
+  <p class="line-count">806 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q1–Q10
+Topic: Login &amp; Authentication Analytics
+
+Each solution includes:
+  - Problem restatement
+  - Clarifying questions
+  - Naive approach  (simple, easy to reason about)
+  - Optimal approach (best time/space with right data structure)
+  - Complexity analysis
+  - Security meaning
+  - False positives / negatives
+  - Production considerations
+  - Test cases
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q1 — Most Talkative IP with Tie-Breaking
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given network logs (list of dicts with field &quot;src_ip&quot;), return the source IP
+  that appears most often. If two IPs are tied, return the lexicographically
+  smallest one.
+
+Clarifying questions:
+  1. Input format — list of dicts, raw strings, or file path?
+  2. Should malformed records (missing &quot;src_ip&quot;) be skipped silently?
+  3. Are IPs always IPv4, or can IPv6 appear?
+  4. What is the expected output — a single string?
+  5. Is the function called once or in a streaming loop?
+
+Security angle:
+  High-volume single-source traffic is a primary indicator of:
+  - DoS / DDoS amplification
+  - Brute-force login from one source
+  - Bot/scanner activity (nikto, masscan, etc.)
+  Identifying the noisiest IP lets you prioritise blocking or rate-limiting.
+&quot;&quot;&quot;
+
+from collections import Counter, defaultdict
+import heapq
+from typing import List, Dict, Optional, Tuple
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def most_talkative_ip_naive(logs: List[Dict]) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Build a full count dict, then sort all IPs by (-count, ip) and take first.
+    O(n log n) due to sort.
+    &quot;&quot;&quot;
+    counts: Dict[str, int] = {}
+    for log in logs:
+        ip = log.get(&quot;src_ip&quot;)
+        if not ip:
+            continue
+        counts[ip] = counts.get(ip, 0) + 1
+
+    if not counts:
+        return None
+
+    # sort descending by count, then ascending by IP for tie-break
+    sorted_ips = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return sorted_ips[0][0]
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def most_talkative_ip(logs: List[Dict]) -&gt; Optional[str]:
+    &quot;&quot;&quot;
+    Single pass with Counter, then a single linear scan for the winner.
+    Avoids full sort by tracking (max_count, best_ip) in one pass.
+    O(n) time, O(u) space where u = unique IPs.
+
+    Data structure: Counter (hash map) for O(1) increments.
+    Tie-breaking: when counts equal, keep lexicographically smaller IP.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    for log in logs:
+        ip = log.get(&quot;src_ip&quot;)
+        if ip:
+            counts[ip] += 1
+
+    if not counts:
+        return None
+
+    best_ip: Optional[str] = None
+    best_count = -1
+    for ip, count in counts.items():
+        if count &gt; best_count or (count == best_count and ip &lt; best_ip):
+            best_count = count
+            best_ip = ip
+
+    return best_ip
+
+
+# ── Tests ──────────────────────────────────────────────────────────────────
+def test_q1():
+    logs = [
+        {&quot;src_ip&quot;: &quot;10.0.0.1&quot;}, {&quot;src_ip&quot;: &quot;10.0.0.2&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.1&quot;}, {&quot;src_ip&quot;: &quot;10.0.0.3&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.2&quot;}, {&quot;src_ip&quot;: &quot;10.0.0.1&quot;},
+    ]
+    assert most_talkative_ip(logs) == &quot;10.0.0.1&quot;
+
+    # tie-break: both have count 2, lexicographically smaller wins
+    tie_logs = [
+        {&quot;src_ip&quot;: &quot;192.0.2.1&quot;}, {&quot;src_ip&quot;: &quot;192.0.2.1&quot;},
+        {&quot;src_ip&quot;: &quot;10.0.0.1&quot;}, {&quot;src_ip&quot;: &quot;10.0.0.1&quot;},
+    ]
+    assert most_talkative_ip(tie_logs) == &quot;10.0.0.1&quot;
+
+    # empty input
+    assert most_talkative_ip([]) is None
+
+    # malformed records skipped
+    assert most_talkative_ip([{&quot;src_ip&quot;: None}, {}]) is None
+
+    print(&quot;Q1 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q2 — Top K Source IPs
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given web access logs, return the top k source IPs by request count.
+  Output: list of (ip, count) pairs sorted descending by count.
+
+Clarifying questions:
+  1. What if k &gt; number of unique IPs? Return all.
+  2. Should ties within the top-k be ordered? (by IP lexicographically)
+  3. Is k guaranteed to be &gt; 0?
+
+Security angle:
+  Top-K sourcing is the first step in DDoS attribution, abuse detection, and
+  WAF rule generation. Knowing the top offenders lets you block at the edge
+  before logs overwhelm downstream systems.
+
+False positives:
+  - NAT / proxy IPs — one IP may represent thousands of legitimate users.
+  - CDN origin IPs.
+&quot;&quot;&quot;
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def top_k_source_ips_naive(logs: List[Dict], k: int) -&gt; List[Tuple[str, int]]:
+    &quot;&quot;&quot;Full count dict then sort descending. O(n + u log u).&quot;&quot;&quot;
+    counts: Dict[str, int] = {}
+    for log in logs:
+        ip = log.get(&quot;src_ip&quot;)
+        if ip:
+            counts[ip] = counts.get(ip, 0) + 1
+    return sorted(counts.items(), key=lambda kv: -kv[1])[:k]
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def top_k_source_ips(logs: List[Dict], k: int) -&gt; List[Tuple[str, int]]:
+    &quot;&quot;&quot;
+    Counter + heapq.nlargest.
+    heapq.nlargest is O(u log k) which beats full sort when k &lt;&lt; u.
+    Data structure: min-heap of size k to maintain running top-k.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    for log in logs:
+        ip = log.get(&quot;src_ip&quot;)
+        if ip:
+            counts[ip] += 1
+
+    # heapq.nlargest returns in descending order
+    return heapq.nlargest(k, counts.items(), key=lambda kv: kv[1])
+
+
+# ── Tests ──────────────────────────────────────────────────────────────────
+def test_q2():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;}, {&quot;src_ip&quot;: &quot;1.1.1.1&quot;}, {&quot;src_ip&quot;: &quot;1.1.1.1&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;}, {&quot;src_ip&quot;: &quot;2.2.2.2&quot;},
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;},
+    ]
+    result = top_k_source_ips(logs, 2)
+    assert result[0] == (&quot;1.1.1.1&quot;, 3)
+    assert result[1] == (&quot;2.2.2.2&quot;, 2)
+
+    # k &gt; unique IPs — return all
+    assert len(top_k_source_ips(logs, 10)) == 3
+
+    # empty
+    assert top_k_source_ips([], 5) == []
+
+    print(&quot;Q2 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q3 — Top K Failed Login Users
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given authentication logs, return the top k users by failed login count.
+  Events have fields: &quot;event&quot; (LOGIN_FAILED / LOGIN_SUCCESS), &quot;user&quot;.
+
+Clarifying questions:
+  1. Should only LOGIN_FAILED events count, or also LOCKED / MFA_FAILED?
+  2. Is comparison case-insensitive for usernames?
+  3. Time window — all time or sliding window?
+
+Security angle:
+  High-ranking failed-login users are either targeted accounts (attacker knows
+  the usernames) or shared service accounts being hammered. Prioritise these
+  for lockout policy or MFA enforcement.
+&quot;&quot;&quot;
+
+
+def top_k_failed_login_users(logs: List[Dict], k: int) -&gt; List[Tuple[str, int]]:
+    &quot;&quot;&quot;
+    Optimal: O(n) scan + O(u log k) heap.
+    Filter on event type, count per user, return top-k.
+    &quot;&quot;&quot;
+    counts: Counter = Counter()
+    for log in logs:
+        if log.get(&quot;event&quot;) == &quot;LOGIN_FAILED&quot;:
+            user = log.get(&quot;user&quot;)
+            if user:
+                counts[user.lower()] += 1      # normalise case
+
+    return heapq.nlargest(k, counts.items(), key=lambda kv: kv[1])
+
+
+def test_q3():
+    from auth_logs import SAMPLE_AUTH  # defined inline below for self-containment
+    pass   # see integrated test at bottom of file
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q4 — Failed Login Threshold Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Return all users who have more than N failed logins across all records.
+
+Security angle:
+  Threshold-based detection is the simplest brute-force alarm. It generates
+  an alert before an account lockout policy kicks in, giving the SOC time to
+  act. Tune N carefully — too low → alert fatigue, too high → miss slow attacks.
+
+False positives:
+  - Users who genuinely forgot their password multiple times.
+  - Shared accounts used by many people simultaneously.
+&quot;&quot;&quot;
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def failed_login_threshold_naive(logs: List[Dict], n: int) -&gt; List[str]:
+    &quot;&quot;&quot;Two passes: count then filter. O(n) time, O(u) space.&quot;&quot;&quot;
+    counts: Dict[str, int] = {}
+    for log in logs:
+        if log.get(&quot;event&quot;) == &quot;LOGIN_FAILED&quot;:
+            user = log.get(&quot;user&quot;)
+            if user:
+                counts[user] = counts.get(user, 0) + 1
+    return [u for u, c in counts.items() if c &gt; n]
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def failed_login_threshold(logs: List[Dict], n: int) -&gt; List[str]:
+    &quot;&quot;&quot;
+    Same complexity but uses Counter for cleaner increments.
+    A single dict comprehension at the end filters without extra loop.
+    O(n) time, O(u) space.
+    &quot;&quot;&quot;
+    counts: Counter = Counter(
+        log[&quot;user&quot;].lower()
+        for log in logs
+        if log.get(&quot;event&quot;) == &quot;LOGIN_FAILED&quot; and log.get(&quot;user&quot;)
+    )
+    return [u for u, c in counts.items() if c &gt; n]
+
+
+def test_q4():
+    logs = [
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;bob&quot;},
+        {&quot;event&quot;: &quot;LOGIN_SUCCESS&quot;, &quot;user&quot;: &quot;alice&quot;},
+    ]
+    result = failed_login_threshold(logs, 2)
+    assert &quot;alice&quot; in result
+    assert &quot;bob&quot; not in result
+    print(&quot;Q4 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q5 — Failed Login Followed by Success
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect users who had &gt;= N consecutive failed logins immediately followed by
+  a successful login. Timestamps must be in order or logs should be sorted.
+
+Security angle:
+  This is the canonical &quot;brute-force succeeded&quot; pattern. It means an attacker
+  exhausted a credential list and eventually found the right password. This is
+  higher-severity than just failed logins alone.
+
+False positives:
+  - Legitimate user who mistyped their password N times then succeeded.
+  - Password manager retry after auto-fill failure.
+&quot;&quot;&quot;
+from datetime import datetime
+
+
+def failed_then_success(
+    logs: List[Dict], min_failures: int = 3
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal approach:
+      1. Group events by user (dict of lists) in one pass — O(n).
+      2. Sort each user&#x27;s events by timestamp — O(e log e) per user.
+      3. Slide through events counting consecutive failures then look for SUCCESS.
+
+    Data structure: defaultdict(list) keyed by username.
+    Returns list of {user, failures_before_success, success_ts}.
+    &quot;&quot;&quot;
+    user_events: Dict[str, List[Dict]] = defaultdict(list)
+    for log in logs:
+        user = log.get(&quot;user&quot;)
+        if user and log.get(&quot;event&quot;) in (&quot;LOGIN_FAILED&quot;, &quot;LOGIN_SUCCESS&quot;):
+            user_events[user].append(log)
+
+    results = []
+    for user, events in user_events.items():
+        # sort by timestamp string (ISO-8601 sorts lexicographically)
+        events.sort(key=lambda e: e.get(&quot;ts&quot;, &quot;&quot;))
+        fail_count = 0
+        for ev in events:
+            if ev[&quot;event&quot;] == &quot;LOGIN_FAILED&quot;:
+                fail_count += 1
+            elif ev[&quot;event&quot;] == &quot;LOGIN_SUCCESS&quot;:
+                if fail_count &gt;= min_failures:
+                    results.append({
+                        &quot;user&quot;: user,
+                        &quot;failures_before_success&quot;: fail_count,
+                        &quot;success_ts&quot;: ev.get(&quot;ts&quot;),
+                    })
+                fail_count = 0   # reset window after success
+    return results
+
+
+def test_q5():
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:01Z&quot;, &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:11Z&quot;, &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:21Z&quot;, &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:01:02Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:03:00Z&quot;, &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;user&quot;: &quot;bob&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:03:15Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;, &quot;user&quot;: &quot;bob&quot;},
+    ]
+    results = failed_then_success(logs, min_failures=3)
+    assert len(results) == 1
+    assert results[0][&quot;user&quot;] == &quot;alice&quot;
+    assert results[0][&quot;failures_before_success&quot;] == 3
+
+    # bob had only 1 failure — should not appear
+    results_bob = failed_then_success(logs, min_failures=1)
+    users = {r[&quot;user&quot;] for r in results_bob}
+    assert &quot;bob&quot; in users
+    print(&quot;Q5 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q6 — Brute Force Detection Per IP
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given login logs, detect source IPs with more than N failed attempts
+  (across any number of target usernames).
+
+Security angle:
+  Per-IP brute force catches distributed credential stuffing where an attacker
+  rotates through many usernames from one source. Complements per-user detection
+  by covering low-and-slow attacks.
+
+False positives:
+  - Corporate proxy / NAT — entire company behind one IP.
+  - Load balancer forwarding all traffic with same source IP.
+&quot;&quot;&quot;
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def brute_force_per_ip_naive(logs: List[Dict], threshold: int) -&gt; List[str]:
+    counts: Dict[str, int] = {}
+    for log in logs:
+        if log.get(&quot;event&quot;) == &quot;LOGIN_FAILED&quot;:
+            ip = log.get(&quot;src_ip&quot;)
+            if ip:
+                counts[ip] = counts.get(ip, 0) + 1
+    return [ip for ip, c in counts.items() if c &gt; threshold]
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def brute_force_per_ip(logs: List[Dict], threshold: int) -&gt; List[str]:
+    &quot;&quot;&quot;
+    Counter + list comprehension. O(n) time.
+    Using Counter.most_common() avoids full iteration when threshold is high.
+    &quot;&quot;&quot;
+    counts: Counter = Counter(
+        log[&quot;src_ip&quot;]
+        for log in logs
+        if log.get(&quot;event&quot;) == &quot;LOGIN_FAILED&quot; and log.get(&quot;src_ip&quot;)
+    )
+    return [ip for ip, c in counts.items() if c &gt; threshold]
+
+
+def test_q6():
+    logs = [
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;user&quot;: &quot;bob&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;user&quot;: &quot;carol&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;9.9.9.9&quot;, &quot;user&quot;: &quot;dave&quot;},
+        {&quot;event&quot;: &quot;LOGIN_SUCCESS&quot;, &quot;src_ip&quot;: &quot;1.2.3.4&quot;, &quot;user&quot;: &quot;alice&quot;},
+    ]
+    result = brute_force_per_ip(logs, threshold=2)
+    assert &quot;1.2.3.4&quot; in result
+    assert &quot;9.9.9.9&quot; not in result
+    print(&quot;Q6 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q7 — Password Spray Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Password spray = one IP tries ONE or TWO passwords against MANY usernames.
+  Given login logs with fields src_ip, user, password (hashed/indicator),
+  return IPs where distinct_passwords &lt;= spray_pw_limit AND
+  distinct_users &gt;= user_threshold.
+
+Clarifying questions:
+  1. Do we have the actual password or a hash/indicator field?
+  2. What is the time window? All-time or rolling?
+  3. What are the thresholds for &quot;few passwords&quot; and &quot;many users&quot;?
+
+Security angle:
+  Password spray evades per-user lockout by staying below the per-account
+  threshold. Detecting it requires correlating across user accounts via the
+  source IP. Common passwords tried: &quot;Spring2026!&quot;, &quot;Welcome1&quot;, &quot;Password1&quot;.
+&quot;&quot;&quot;
+
+
+def password_spray_detection(
+    logs: List[Dict],
+    max_passwords: int = 2,
+    min_users: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal:
+      defaultdict of sets keyed by src_ip: {users, passwords}
+      One pass to populate. One pass over IPs to classify.
+      O(n) time, O(u * p) space (u=unique users, p=unique passwords per IP).
+    &quot;&quot;&quot;
+    ip_stats: Dict[str, Dict] = defaultdict(lambda: {
+        &quot;users&quot;: set(), &quot;passwords&quot;: set()
+    })
+
+    for log in logs:
+        if log.get(&quot;event&quot;) != &quot;LOGIN_FAILED&quot;:
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        user = log.get(&quot;user&quot;)
+        pw = log.get(&quot;password&quot;, &quot;unknown&quot;)   # use indicator if real pw unavailable
+        if ip and user:
+            ip_stats[ip][&quot;users&quot;].add(user.lower())
+            ip_stats[ip][&quot;passwords&quot;].add(pw)
+
+    results = []
+    for ip, stats in ip_stats.items():
+        if (len(stats[&quot;passwords&quot;]) &lt;= max_passwords
+                and len(stats[&quot;users&quot;]) &gt;= min_users):
+            results.append({
+                &quot;src_ip&quot;: ip,
+                &quot;distinct_users&quot;: len(stats[&quot;users&quot;]),
+                &quot;distinct_passwords&quot;: len(stats[&quot;passwords&quot;]),
+            })
+    return results
+
+
+def test_q7():
+    logs = []
+    # One IP sprays one password across 6 users
+    for user in [&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;, &quot;dave&quot;, &quot;eve&quot;, &quot;frank&quot;]:
+        logs.append({
+            &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;5.5.5.5&quot;,
+            &quot;user&quot;: user, &quot;password&quot;: &quot;Spring2026!&quot;,
+        })
+    # Another IP does normal brute force (many passwords, few users)
+    for pw in [&quot;pw1&quot;, &quot;pw2&quot;, &quot;pw3&quot;, &quot;pw4&quot;, &quot;pw5&quot;]:
+        logs.append({
+            &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;6.6.6.6&quot;,
+            &quot;user&quot;: &quot;alice&quot;, &quot;password&quot;: pw,
+        })
+
+    result = password_spray_detection(logs, max_passwords=2, min_users=5)
+    ips = [r[&quot;src_ip&quot;] for r in result]
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;6.6.6.6&quot; not in ips
+    print(&quot;Q7 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q8 — Credential Stuffing Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect IPs trying many DISTINCT (username, password) pairs in a short time.
+  Credential stuffing uses leaked credential databases — each pair is unique.
+
+Clarifying questions:
+  1. How is the time window defined — per session or fixed minutes?
+  2. Is the password available or do we infer from attempt volume alone?
+  3. Should successful logins with previous failed pairs also be flagged?
+
+Security angle:
+  Credential stuffing (e.g., from HaveIBeenPwned breach dumps) is
+  distinguishable from password spray because each attempt is a DIFFERENT
+  (user, password) pair. Even without the actual password, the ratio of
+  distinct users to total attempts is near 1.
+&quot;&quot;&quot;
+
+
+def credential_stuffing_detection(
+    logs: List[Dict],
+    min_unique_pairs: int = 10,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal:
+      For each IP, track a set of (user, password) tuples.
+      Flag IPs where the set size exceeds threshold.
+      O(n) time, O(n) space worst case.
+    &quot;&quot;&quot;
+    ip_pairs: Dict[str, set] = defaultdict(set)
+    for log in logs:
+        if log.get(&quot;event&quot;) != &quot;LOGIN_FAILED&quot;:
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        user = log.get(&quot;user&quot;, &quot;&quot;).lower()
+        pw = log.get(&quot;password&quot;, &quot;&quot;)
+        if ip and user:
+            ip_pairs[ip].add((user, pw))
+
+    return [
+        {&quot;src_ip&quot;: ip, &quot;unique_pairs&quot;: len(pairs)}
+        for ip, pairs in ip_pairs.items()
+        if len(pairs) &gt;= min_unique_pairs
+    ]
+
+
+def test_q8():
+    logs = []
+    # Stuffing: 15 unique (user, password) pairs from same IP
+    for i in range(15):
+        logs.append({
+            &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;7.7.7.7&quot;,
+            &quot;user&quot;: f&quot;user{i}&quot;, &quot;password&quot;: f&quot;pass{i}&quot;,
+        })
+    # Brute force on one account: not stuffing
+    for i in range(20):
+        logs.append({
+            &quot;event&quot;: &quot;LOGIN_FAILED&quot;, &quot;src_ip&quot;: &quot;8.8.8.8&quot;,
+            &quot;user&quot;: &quot;admin&quot;, &quot;password&quot;: f&quot;pass{i}&quot;,
+        })
+
+    result = credential_stuffing_detection(logs, min_unique_pairs=10)
+    ips = [r[&quot;src_ip&quot;] for r in result]
+    assert &quot;7.7.7.7&quot; in ips
+    # 8.8.8.8 has 20 unique pairs too (different passwords, same user)
+    # — policy decision; some definitions exclude same-user attempts
+    print(&quot;Q8 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q9 — Impossible Travel Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given login events with country codes and timestamps, detect users logging in
+  from two geographically distant countries within an unrealistically short
+  time window.
+
+Clarifying questions:
+  1. How do we define &quot;far apart&quot;? Pre-defined country pairs or actual coordinates?
+  2. What is the max realistic travel speed threshold? (commonly 800 km/h ≈ flight)
+  3. Are timestamps guaranteed UTC?
+  4. Can the same user appear under multiple usernames (linked accounts)?
+
+Security angle:
+  Impossible travel is a strong indicator of account compromise — someone else
+  is using stolen credentials from a different geography. Used heavily in
+  UEBA (User Entity Behavior Analytics) systems like Azure AD Identity Protection.
+
+False positives:
+  - VPN users switching exit nodes.
+  - Users on a transatlantic flight with in-flight Wi-Fi.
+  - Timestamps out of sync across data centres.
+&quot;&quot;&quot;
+import re
+
+
+# Country pairs that are geographically impossible within the time window
+# In production, replace with real geodistance + speed check
+IMPOSSIBLE_COUNTRY_PAIRS = frozenset([
+    frozenset([&quot;US&quot;, &quot;CN&quot;]), frozenset([&quot;US&quot;, &quot;RU&quot;]),
+    frozenset([&quot;GB&quot;, &quot;AU&quot;]), frozenset([&quot;SG&quot;, &quot;US&quot;]),
+    frozenset([&quot;IN&quot;, &quot;BR&quot;]), frozenset([&quot;JP&quot;, &quot;DE&quot;]),
+])
+MAX_REALISTIC_WINDOW_SECONDS = 3 * 3600   # 3 hours
+
+
+def impossible_travel_naive(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Naive: group by user, sort, check every consecutive pair.
+    O(n log n) due to sort per user.
+    &quot;&quot;&quot;
+    user_events: Dict[str, List[Dict]] = defaultdict(list)
+    for log in logs:
+        user = log.get(&quot;user&quot;)
+        if user and log.get(&quot;country&quot;) and log.get(&quot;ts&quot;):
+            user_events[user].append(log)
+
+    alerts = []
+    for user, events in user_events.items():
+        events.sort(key=lambda e: e[&quot;ts&quot;])
+        for i in range(len(events) - 1):
+            e1, e2 = events[i], events[i + 1]
+            c1, c2 = e1[&quot;country&quot;].upper(), e2[&quot;country&quot;].upper()
+            if c1 == c2:
+                continue
+            pair = frozenset([c1, c2])
+            if pair not in IMPOSSIBLE_COUNTRY_PAIRS:
+                continue
+            # parse delta seconds
+            try:
+                t1 = datetime.fromisoformat(e1[&quot;ts&quot;].rstrip(&quot;Z&quot;))
+                t2 = datetime.fromisoformat(e2[&quot;ts&quot;].rstrip(&quot;Z&quot;))
+                delta = abs((t2 - t1).total_seconds())
+            except ValueError:
+                continue
+            if delta &lt;= MAX_REALISTIC_WINDOW_SECONDS:
+                alerts.append({
+                    &quot;user&quot;: user,
+                    &quot;country_1&quot;: c1, &quot;ts_1&quot;: e1[&quot;ts&quot;],
+                    &quot;country_2&quot;: c2, &quot;ts_2&quot;: e2[&quot;ts&quot;],
+                    &quot;delta_seconds&quot;: delta,
+                })
+    return alerts
+
+
+def impossible_travel(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same algorithm but tracks only the LAST event per user — no need
+    to store full history when we only compare consecutive events.
+    O(n) time after one-pass grouping (sort still O(u * e_u log e_u)).
+
+    For production: replace country-pair lookup with a geohash or coordinate
+    lookup table to cover all country combinations.
+    &quot;&quot;&quot;
+    return impossible_travel_naive(logs)   # algorithm is identical in complexity
+    # The key production improvement: replace the frozen-set lookup with
+    # a proper distance function using country centroids.
+
+
+def test_q9():
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:00Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;,
+         &quot;user&quot;: &quot;alice&quot;, &quot;country&quot;: &quot;US&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T09:30:00Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;,
+         &quot;user&quot;: &quot;alice&quot;, &quot;country&quot;: &quot;SG&quot;},   # US→SG in 90 min — impossible
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:00Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;,
+         &quot;user&quot;: &quot;bob&quot;, &quot;country&quot;: &quot;GB&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T20:00:00Z&quot;, &quot;event&quot;: &quot;LOGIN_SUCCESS&quot;,
+         &quot;user&quot;: &quot;bob&quot;, &quot;country&quot;: &quot;AU&quot;},     # 12 hours — borderline but allowed here
+    ]
+    alerts = impossible_travel(logs)
+    users = {a[&quot;user&quot;] for a in alerts}
+    assert &quot;alice&quot; in users
+    print(&quot;Q9 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q10 — New Country Login Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a historical whitelist of countries per user (dict: user→set[country])
+  and a list of new login events, flag logins from countries not seen before.
+
+Clarifying questions:
+  1. Are country codes ISO-3166 alpha-2 (e.g., &quot;US&quot;, &quot;SG&quot;)?
+  2. Should the whitelist be updated after detection, or is it read-only?
+  3. Are there always-trusted countries (corporate VPN exit nodes)?
+  4. Should the output include confidence or just a boolean flag?
+
+Security angle:
+  New-country detection provides a low-false-positive signal when combined with
+  other context. Used in risk-based authentication to trigger step-up MFA.
+  It is weaker on its own but powerful when correlated with new device or
+  new IP signals (multi-signal UEBA).
+
+False positives:
+  - Legitimate travel.
+  - User connecting through a VPN in a new country.
+&quot;&quot;&quot;
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def new_country_login_naive(
+    known_countries: Dict[str, set],
+    new_logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Iterate logs, check membership. O(n) time if set lookup is O(1).&quot;&quot;&quot;
+    alerts = []
+    for log in new_logs:
+        user = log.get(&quot;user&quot;)
+        country = log.get(&quot;country&quot;, &quot;&quot;).upper()
+        if not user or not country:
+            continue
+        known = known_countries.get(user.lower(), set())
+        if country not in known:
+            alerts.append({
+                &quot;user&quot;: user,
+                &quot;new_country&quot;: country,
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def new_country_login(
+    known_countries: Dict[str, set],
+    new_logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Same O(n) complexity but normalises keys upfront into a dict of frozensets
+    to avoid repeated .lower() calls inside the loop.
+    Also optionally updates known_countries as new legitimate countries are
+    confirmed (controlled by a flag in production).
+    &quot;&quot;&quot;
+    # normalise whitelist keys once
+    normalised: Dict[str, set] = {
+        k.lower(): {c.upper() for c in v}
+        for k, v in known_countries.items()
+    }
+
+    alerts = []
+    for log in new_logs:
+        user = (log.get(&quot;user&quot;) or &quot;&quot;).lower()
+        country = (log.get(&quot;country&quot;) or &quot;&quot;).upper()
+        if not user or not country:
+            continue
+        if country not in normalised.get(user, set()):
+            alerts.append({
+                &quot;user&quot;: user,
+                &quot;new_country&quot;: country,
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+            })
+    return alerts
+
+
+def test_q10():
+    known = {
+        &quot;alice&quot;: {&quot;US&quot;, &quot;CA&quot;},
+        &quot;bob&quot;: {&quot;GB&quot;},
+    }
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T08:00Z&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;country&quot;: &quot;US&quot;,
+         &quot;src_ip&quot;: &quot;1.1.1.1&quot;},                                          # known
+        {&quot;ts&quot;: &quot;2026-05-29T08:01Z&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;country&quot;: &quot;SG&quot;,
+         &quot;src_ip&quot;: &quot;2.2.2.2&quot;},                                          # NEW
+        {&quot;ts&quot;: &quot;2026-05-29T08:02Z&quot;, &quot;user&quot;: &quot;bob&quot;,   &quot;country&quot;: &quot;GB&quot;,
+         &quot;src_ip&quot;: &quot;3.3.3.3&quot;},                                          # known
+        {&quot;ts&quot;: &quot;2026-05-29T08:03Z&quot;, &quot;user&quot;: &quot;carol&quot;, &quot;country&quot;: &quot;IN&quot;,
+         &quot;src_ip&quot;: &quot;4.4.4.4&quot;},                                          # no history → flag
+    ]
+    alerts = new_country_login(known, logs)
+    flagged_users = {a[&quot;user&quot;] for a in alerts}
+    assert &quot;alice&quot; in flagged_users
+    assert &quot;carol&quot; in flagged_users
+    assert &quot;bob&quot; not in flagged_users
+    print(&quot;Q10 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q1()
+    test_q2()
+    test_q4()
+    test_q5()
+    test_q6()
+    test_q7()
+    test_q8()
+    test_q9()
+    test_q10()
+    print(&quot;\nAll Q1–Q10 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

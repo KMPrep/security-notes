@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q2.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q2.py</h1>
+  <p class="file-path">Source: code\day6\answers\q2.py</p>
+  <p class="line-count">289 lines</p>
+  <pre><code class="language-python"># Q2 (Medium) - Sliding Window: Rate Limit Enforcement
+# Given sorted request timestamps and a window W (seconds) and limit K,
+# return the count of rate-limited requests. A request is rate-limited if,
+# at its arrival time, there are already K or more requests within the window.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;I have sorted timestamps of API requests from a single user. A sliding
+#    window of W seconds defines the rate limit: if the current request is the
+#    (K+1)th or more request within the window [t-W, t] (inclusive), it&#x27;s
+#    rate-limited. I need to count how many requests get rate-limited.&quot;
+#
+# STEP 2 — Assumptions
+#   - Timestamps are in ascending order (given)
+#   - Timestamps are integers (or comparable numbers)
+#   - W and K are positive integers
+#   - Same timestamp is valid (multiple requests at the same second)
+#   - Inclusive window: request at time t is in window [t-W, t]
+#   - Rate-limited requests are STILL in the timeline (they arrive; we just count them)
+#
+# STEP 3 — Pseudocode (two-pointer / sliding window)
+#   left = 0
+#   rate_limited_count = 0
+#
+#   for right in range(len(timestamps)):
+#       # Shrink window from left while timestamps[left] &lt; timestamps[right] - W
+#       while timestamps[right] - timestamps[left] &gt; W:
+#           left += 1
+#       # Window size = right - left + 1
+#       # If window already has K requests before this one → rate-limited
+#       if (right - left + 1) &gt; K:
+#           rate_limited_count += 1
+#
+#   return rate_limited_count
+#
+# STEP 4 — Why this works
+#   The window [left..right] always contains all requests within W seconds of
+#   timestamps[right]. If window size &gt; K, this request is the (K+1)th or later
+#   in the window → rate-limited.
+#
+# STEP 5 — Naive approach (state first)
+#   &quot;Brute force: for each request i, count requests j &lt; i where
+#    timestamps[i] - timestamps[j] &lt;= W. O(n²). Too slow.&quot;
+#
+# STEP 6 — Follow-up: multiple users share a global rate limit
+#   &quot;Use a shared data structure keyed by user_id: each user has their own
+#    deque of recent timestamps. For a global limit across users:
+#    - Count total requests in [t-W, t] across ALL users.
+#    - Use a sorted container or a sliding window over a merged stream.
+#    - In distributed systems: Redis with ZRANGEBYSCORE + ZCARD is standard.
+#    - Token bucket or leaky bucket algorithms work well for distributed rate
+#      limiting without requiring the full timestamp history.&quot;
+#
+# STEP 7 — Security framing
+#   &quot;Adversarial concern: an attacker may time requests to just-outside-window
+#    to reset the counter. Token bucket (allows bursts up to K) vs fixed window
+#    (vulnerable to boundary attacks) vs sliding window (more accurate, higher
+#    memory). For security-critical endpoints use sliding window or token bucket.&quot;
+#
+# Complexity:
+#   Naive:          O(n²) time, O(1) space
+#   Sliding window: O(n) time,  O(1) space  ← target
+# ─────────────────────────────────────────────────────────────────────────────
+
+from collections import deque
+
+
+# ── APPROACH 1: Brute force O(n²) ────────────────────────────────────────────
+
+def rate_limit_naive(timestamps: list, W: int, K: int) -&gt; int:
+    &quot;&quot;&quot;
+    For each request, count prior requests within the window.
+
+    Time:  O(n²)
+    Space: O(1)
+    &quot;&quot;&quot;
+    if not isinstance(timestamps, list):
+        raise TypeError(f&quot;Expected list, got {type(timestamps).__name__}&quot;)
+    if W &lt;= 0 or K &lt;= 0:
+        raise ValueError(f&quot;W and K must be positive, got W={W}, K={K}&quot;)
+
+    count = 0
+    n = len(timestamps)
+    for i in range(n):
+        window_size = 0
+        for j in range(i + 1):
+            if timestamps[i] - timestamps[j] &lt;= W:
+                window_size += 1
+        if window_size &gt; K:
+            count += 1
+    return count
+
+
+# ── APPROACH 2: Sliding window O(n) ──────────────────────────────────────────
+
+def rate_limit_sliding_window(timestamps: list, W: int, K: int) -&gt; int:
+    &quot;&quot;&quot;
+    Two-pointer sliding window. left marks the oldest request still in window.
+
+    Invariant: timestamps[left..right] are all within W seconds of timestamps[right].
+    If window size &gt; K → current request (at right) is rate-limited.
+
+    Time:  O(n)
+    Space: O(1)
+    &quot;&quot;&quot;
+    if not isinstance(timestamps, list):
+        raise TypeError(f&quot;Expected list, got {type(timestamps).__name__}&quot;)
+    if W &lt;= 0 or K &lt;= 0:
+        raise ValueError(f&quot;W and K must be positive, got W={W}, K={K}&quot;)
+    if not timestamps:
+        return 0
+
+    left  = 0
+    count = 0
+
+    for right in range(len(timestamps)):
+        # Shrink window: drop requests that are outside the W-second window
+        while timestamps[right] - timestamps[left] &gt; W:
+            left += 1
+        # Window size = right - left + 1
+        if (right - left + 1) &gt; K:
+            count += 1
+
+    return count
+
+
+def rate_limit_with_detail(timestamps: list, W: int, K: int) -&gt; dict:
+    &quot;&quot;&quot;
+    Same sliding window, but also returns WHICH timestamps were rate-limited.
+    Useful for audit logs.
+
+    Time:  O(n)
+    Space: O(n) for the detail list
+    &quot;&quot;&quot;
+    if not isinstance(timestamps, list):
+        raise TypeError(f&quot;Expected list, got {type(timestamps).__name__}&quot;)
+    if W &lt;= 0 or K &lt;= 0:
+        raise ValueError(f&quot;W and K must be positive, got W={W}, K={K}&quot;)
+
+    left           = 0
+    rate_limited   = []
+    allowed        = []
+
+    for right in range(len(timestamps)):
+        while timestamps[right] - timestamps[left] &gt; W:
+            left += 1
+        if (right - left + 1) &gt; K:
+            rate_limited.append(timestamps[right])
+        else:
+            allowed.append(timestamps[right])
+
+    return {
+        &quot;total&quot;:         len(timestamps),
+        &quot;allowed&quot;:       allowed,
+        &quot;rate_limited&quot;:  rate_limited,
+        &quot;limited_count&quot;: len(rate_limited),
+    }
+
+
+# ── APPROACH 3: deque-based (explicit window) ─────────────────────────────────
+
+def rate_limit_deque(timestamps: list, W: int, K: int) -&gt; int:
+    &quot;&quot;&quot;
+    Maintain a deque of timestamps in the current window.
+    More explicit about window contents — useful when window needs to be queried.
+
+    Time:  O(n)
+    Space: O(K) amortized (at most K+1 items in deque before we count)
+    &quot;&quot;&quot;
+    if not isinstance(timestamps, list):
+        raise TypeError(f&quot;Expected list, got {type(timestamps).__name__}&quot;)
+    if W &lt;= 0 or K &lt;= 0:
+        raise ValueError(f&quot;W and K must be positive, got W={W}, K={K}&quot;)
+
+    window = deque()    # stores timestamps currently in the window
+    count  = 0
+
+    for ts in timestamps:
+        # Remove timestamps that have fallen out of the window
+        while window and ts - window[0] &gt; W:
+            window.popleft()
+        # Check before adding the current request
+        if len(window) &gt;= K:
+            count += 1
+        window.append(ts)
+
+    return count
+
+
+# ── MANUAL — no deque, manual circular buffer ─────────────────────────────────
+
+def rate_limit_manual(timestamps: list, W: int, K: int) -&gt; int:
+    &quot;&quot;&quot;
+    Two-pointer approach without any imports.
+
+    Time:  O(n)
+    Space: O(1)
+    &quot;&quot;&quot;
+    if timestamps is None:
+        raise ValueError(&quot;timestamps cannot be None&quot;)
+
+    n     = len(timestamps)
+    left  = 0
+    count = 0
+
+    right = 0
+    while right &lt; n:
+        ts = timestamps[right]
+        while ts - timestamps[left] &gt; W:
+            left += 1
+        window_size = right - left + 1
+        if window_size &gt; K:
+            count += 1
+        right += 1
+
+    return count
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    # Example from question: timestamps=[1,1,2,3,4,5,6,6,6,7], W=3, K=3
+    ts = [1, 1, 2, 3, 4, 5, 6, 6, 6, 7]
+    W, K = 3, 3
+
+    result = rate_limit_with_detail(ts, W, K)
+    print(f&quot;timestamps: {ts},  W={W}, K={K}&quot;)
+    print(f&quot;  allowed:      {result[&#x27;allowed&#x27;]}&quot;)
+    print(f&quot;  rate_limited: {result[&#x27;rate_limited&#x27;]}&quot;)
+    print(f&quot;  limited count: {result[&#x27;limited_count&#x27;]}&quot;)
+    print()
+
+    # Verify approaches agree
+    sw     = rate_limit_sliding_window(ts, W, K)
+    naive  = rate_limit_naive(ts, W, K)
+    dq     = rate_limit_deque(ts, W, K)
+    manual = rate_limit_manual(ts, W, K)
+    assert naive == sw == dq == manual, \
+        f&quot;Mismatch: naive={naive}, sw={sw}, dq={dq}, manual={manual}&quot;
+
+    # Simple case: no rate limiting
+    ts2 = [1, 5, 10, 15]   # each request &gt;3s apart
+    assert rate_limit_sliding_window(ts2, W=3, K=2) == 0
+
+    # All rate-limited after the first K
+    ts3 = [1, 1, 1, 1, 1]  # 5 requests at t=1, W=1, K=2
+    result3 = rate_limit_sliding_window(ts3, W=1, K=2)
+    assert result3 == 3     # 3rd, 4th, 5th are rate-limited
+
+    # Edge cases
+    assert rate_limit_sliding_window([], W=5, K=3)   == 0
+    assert rate_limit_sliding_window([1], W=5, K=3)  == 0  # single request never limited
+
+    # K=1: every 2nd+ request within any 5s window is limited
+    # ts=1: window=[1] size=1 → allowed
+    # ts=2: window=[1,2] size=2 → limited
+    # ts=3: window=[1,2,3] size=3 → limited
+    # ts=10: window=[10] size=1 → allowed (fresh window, 10-1=9 &gt; W=5)
+    # ts=11: window=[10,11] size=2 → limited
+    ts4 = [1, 2, 3, 10, 11]
+    assert rate_limit_sliding_window(ts4, W=5, K=1) == 3
+
+    # Verify all approaches agree on all test cases
+    test_cases = [
+        (ts,  3, 3),
+        (ts2, 3, 2),
+        (ts3, 1, 2),
+        ([],  5, 3),
+        ([1], 5, 3),
+        ([1, 2, 3, 10, 11], 5, 1),
+    ]
+    for tc_ts, tc_W, tc_K in test_cases:
+        n = rate_limit_naive(tc_ts, tc_W, tc_K)
+        s = rate_limit_sliding_window(tc_ts, tc_W, tc_K)
+        d = rate_limit_deque(tc_ts, tc_W, tc_K)
+        m = rate_limit_manual(tc_ts, tc_W, tc_K)
+        assert n == s == d == m, \
+            f&quot;Mismatch {tc_ts} W={tc_W} K={tc_K}: {n},{s},{d},{m}&quot;
+
+    print(&quot;Q2 — All assertions passed.&quot;)
+    print(&quot;Complexity: O(n) time, O(1) space (two-pointer sliding window)&quot;)
+    print()
+    print(&quot;Follow-up (multi-user global limit):&quot;)
+    print(&quot;  Per-user: dict of user_id → deque of timestamps, O(n) total&quot;)
+    print(&quot;  Distributed: Redis ZADD + ZRANGEBYSCORE + ZCARD per window&quot;)
+    print(&quot;  Algorithms: token bucket (allows burst), leaky bucket (smooth),&quot;)
+    print(&quot;              sliding window log (accurate, more memory)&quot;)
+</code></pre>
+</body>
+</html>

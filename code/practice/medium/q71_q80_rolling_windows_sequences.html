@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q71_q80_rolling_windows_sequences.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q71_q80_rolling_windows_sequences.py</h1>
+  <p class="file-path">Source: code\practice\medium\q71_q80_rolling_windows_sequences.py</p>
+  <p class="line-count">817 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q71–Q80
+Topic: Rolling Windows, Rate Limiters, Event Sequences &amp; Lateral Movement
+&quot;&quot;&quot;
+
+import re
+import time
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q71 — Failed Logins in Rolling Window
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a stream of login events (each with src_ip, user, result, ts),
+  return users/IPs that exceeded N failed logins within a rolling T-second window.
+
+Clarifying questions:
+  1. Should we alert per-user, per-IP, or per (user, IP) pair?
+  2. Should the window reset after each alert, or slide continuously?
+  3. What is the expected volume? (determines if we need O(1) per event)
+
+Security angle:
+  Sliding window counting is the standard brute-force detection model used
+  in WAFs, fail2ban, and SIEM correlation rules. A deque is ideal because:
+  - Append is O(1).
+  - Eviction of old events from the left is O(1).
+  Combined complexity: O(n) total over all events.
+&quot;&quot;&quot;
+
+
+def failed_logins_in_window(
+    events: List[Dict],
+    threshold: int = 5,
+    window_seconds: int = 60,
+    group_by: str = &quot;src_ip&quot;,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-key deque sliding window.
+    O(n) total time.
+    &quot;&quot;&quot;
+    windows: Dict[str, deque] = defaultdict(deque)
+    alerts: Dict[str, Dict] = {}
+
+    for e in events:
+        if e.get(&quot;result&quot;) != &quot;failure&quot;:
+            continue
+        key = e.get(group_by) or &quot;unknown&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[key]
+        window.append(ts)
+        # Evict events outside the rolling window
+        while window and ts - window[0] &gt; window_seconds:
+            window.popleft()
+
+        if len(window) &gt; threshold and key not in alerts:
+            alerts[key] = {
+                group_by: key,
+                &quot;failures_in_window&quot;: len(window),
+                &quot;window_seconds&quot;: window_seconds,
+                &quot;ts_first&quot;: datetime.fromtimestamp(window[0]).isoformat(),
+                &quot;ts_last&quot;: datetime.fromtimestamp(window[-1]).isoformat(),
+            }
+    return list(alerts.values())
+
+
+def test_q71():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # IP 5.5.5.5: 6 failures in 30 seconds
+    for i in range(6):
+        events.append({
+            &quot;src_ip&quot;: &quot;5.5.5.5&quot;, &quot;result&quot;: &quot;failure&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 5)).isoformat(),
+        })
+    # IP 1.1.1.1: 3 failures spread over 5 minutes (below threshold)
+    for i in range(3):
+        events.append({
+            &quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;result&quot;: &quot;failure&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 120)).isoformat(),
+        })
+
+    results = failed_logins_in_window(events, threshold=5, window_seconds=60)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q71 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q72 — Requests Per IP in Rolling Window
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Count total requests (any result) per IP in a rolling window. Flag IPs
+  above a request-rate threshold.
+
+Clarifying questions:
+  1. Same as Q71 but for total requests, not failures only.
+  2. Useful for DDoS / scraping / API abuse detection.
+
+Security angle:
+  High request rate to any endpoint may indicate:
+  - Layer 7 DDoS (HTTP flood).
+  - Automated scraping.
+  - API abuse (exceeding quota).
+  Rate limiting is the primary control; detection feeds the block list.
+&quot;&quot;&quot;
+
+
+def requests_per_ip_in_window(
+    events: List[Dict],
+    threshold: int = 100,
+    window_seconds: int = 60,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same deque sliding window as Q71 but counts all events.
+    O(n) total time.
+    &quot;&quot;&quot;
+    windows: Dict[str, deque] = defaultdict(deque)
+    alerts: Dict[str, Dict] = {}
+
+    for e in events:
+        ip = e.get(&quot;src_ip&quot;) or &quot;unknown&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[ip]
+        window.append(ts)
+        while window and ts - window[0] &gt; window_seconds:
+            window.popleft()
+
+        if len(window) &gt; threshold and ip not in alerts:
+            alerts[ip] = {
+                &quot;src_ip&quot;: ip,
+                &quot;requests_in_window&quot;: len(window),
+                &quot;window_seconds&quot;: window_seconds,
+            }
+    return list(alerts.values())
+
+
+def test_q72():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Attacker: 110 requests in 30 seconds
+    for i in range(110):
+        events.append({
+            &quot;src_ip&quot;: &quot;5.5.5.5&quot;,
+            &quot;ts&quot;: (base + timedelta(milliseconds=i * 200)).isoformat(),
+        })
+    # Normal user: 10 requests over 5 minutes
+    for i in range(10):
+        events.append({
+            &quot;src_ip&quot;: &quot;1.1.1.1&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 30)).isoformat(),
+        })
+
+    results = requests_per_ip_in_window(events, threshold=100, window_seconds=60)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;5.5.5.5&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q72 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q73 — API Rate Limit Simulation
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Simulate an API gateway rate limiter: given a list of API requests with
+  (api_key, ts), return which requests are allowed and which are throttled
+  based on a per-key limit of N requests per T seconds.
+
+Clarifying questions:
+  1. Should the window be fixed (tumbling) or sliding?
+  2. Should throttled requests be queued or dropped?
+  3. Should the response include retry-after time?
+
+Security angle:
+  Rate limiting is a primary control against brute force, scraping, and
+  API abuse. Simulating the rate limiter logic allows security testing.
+  Overly permissive rate limits let attackers enumerate users or tokens.
+&quot;&quot;&quot;
+
+
+def simulate_rate_limiter(
+    requests: List[Dict],
+    limit: int = 10,
+    window_seconds: int = 60,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: sliding window per api_key using deque.
+    Returns each request annotated with allowed/throttled.
+    O(n) total time.
+    &quot;&quot;&quot;
+    windows: Dict[str, deque] = defaultdict(deque)
+    results = []
+
+    for req in requests:
+        key = req.get(&quot;api_key&quot;) or &quot;anonymous&quot;
+        ts_raw = req.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[key]
+        # Evict expired timestamps
+        while window and ts - window[0] &gt;= window_seconds:
+            window.popleft()
+
+        if len(window) &lt; limit:
+            window.append(ts)
+            results.append({**req, &quot;status&quot;: &quot;allowed&quot;})
+        else:
+            retry_after = int(window_seconds - (ts - window[0])) + 1
+            results.append({**req, &quot;status&quot;: &quot;throttled&quot;, &quot;retry_after_s&quot;: retry_after})
+
+    return results
+
+
+def test_q73():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    reqs = []
+    for i in range(15):
+        reqs.append({
+            &quot;api_key&quot;: &quot;key-abc&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 3)).isoformat(),
+        })
+
+    results = simulate_rate_limiter(reqs, limit=10, window_seconds=60)
+    allowed = [r for r in results if r[&quot;status&quot;] == &quot;allowed&quot;]
+    throttled = [r for r in results if r[&quot;status&quot;] == &quot;throttled&quot;]
+    assert len(allowed) == 10
+    assert len(throttled) == 5
+    assert all(&quot;retry_after_s&quot; in r for r in throttled)
+    print(&quot;Q73 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q74 — Sliding Window Rate Limiter (Class)
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a SlidingWindowRateLimiter class with an is_allowed(key) method
+  that uses the current wall-clock time.
+
+Clarifying questions:
+  1. Is this for unit-testing or production use?
+  2. Should the state persist across requests (in-memory vs Redis)?
+  3. Is per-key granularity sufficient?
+
+Security angle:
+  A class-based limiter is the pattern used in API gateway middleware,
+  Flask-Limiter, and AWS API Gateway throttle settings. The sliding window
+  algorithm is more accurate than a fixed (tumbling) window because it
+  doesn&#x27;t suffer from the burst-at-window-boundary problem.
+&quot;&quot;&quot;
+
+
+class SlidingWindowRateLimiter:
+    &quot;&quot;&quot;
+    Sliding window rate limiter.
+    Allows at most `limit` requests per `window_seconds` per key.
+    O(1) amortised per is_allowed call (deque eviction is amortised).
+    &quot;&quot;&quot;
+
+    def __init__(self, limit: int, window_seconds: float):
+        self.limit = limit
+        self.window = window_seconds
+        self._windows: Dict[str, deque] = defaultdict(deque)
+
+    def is_allowed(self, key: str, now: Optional[float] = None) -&gt; bool:
+        ts = now if now is not None else time.time()
+        window = self._windows[key]
+        while window and ts - window[0] &gt;= self.window:
+            window.popleft()
+        if len(window) &lt; self.limit:
+            window.append(ts)
+            return True
+        return False
+
+    def reset(self, key: str) -&gt; None:
+        self._windows.pop(key, None)
+
+
+def test_q74():
+    limiter = SlidingWindowRateLimiter(limit=3, window_seconds=10)
+    base_ts = 1000.0  # arbitrary base
+
+    assert limiter.is_allowed(&quot;u1&quot;, now=base_ts + 0) is True
+    assert limiter.is_allowed(&quot;u1&quot;, now=base_ts + 1) is True
+    assert limiter.is_allowed(&quot;u1&quot;, now=base_ts + 2) is True
+    assert limiter.is_allowed(&quot;u1&quot;, now=base_ts + 3) is False   # limit hit
+
+    # After window expires, should be allowed again
+    assert limiter.is_allowed(&quot;u1&quot;, now=base_ts + 11) is True   # first 3 expired
+
+    # Different key is independent
+    assert limiter.is_allowed(&quot;u2&quot;, now=base_ts + 0) is True
+    print(&quot;Q74 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q75 — Token Bucket Rate Limiter
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Implement a TokenBucketRateLimiter that refills at `rate` tokens/second
+  up to a maximum `capacity`. Each request consumes one token.
+
+Clarifying questions:
+  1. Should fractional tokens be allowed (continuous refill)?
+  2. Should the bucket be per-user or global?
+  3. Is this for write-heavy or read-heavy APIs?
+
+Security angle:
+  Token bucket is the algorithm used by AWS API Gateway and many CDNs.
+  Key advantage over sliding window: allows short bursts up to bucket
+  capacity, which accommodates legitimate bursty users while still
+  bounding peak rate over time.
+  Abuse pattern: if an attacker gets &gt;1 request/token through, the bucket
+  leaks security guarantees.
+&quot;&quot;&quot;
+
+
+class TokenBucketRateLimiter:
+    &quot;&quot;&quot;
+    Token bucket rate limiter (per-key).
+    rate: tokens added per second.
+    capacity: maximum token accumulation.
+    O(1) per is_allowed call.
+    &quot;&quot;&quot;
+
+    def __init__(self, rate: float, capacity: float):
+        self.rate = rate
+        self.capacity = capacity
+        self._tokens: Dict[str, float] = defaultdict(lambda: capacity)
+        self._last_refill: Dict[str, float] = {}
+
+    def _refill(self, key: str, now: float) -&gt; None:
+        last = self._last_refill.get(key, now)
+        elapsed = now - last
+        self._tokens[key] = min(self.capacity, self._tokens[key] + elapsed * self.rate)
+        self._last_refill[key] = now
+
+    def is_allowed(self, key: str, now: Optional[float] = None) -&gt; bool:
+        ts = now if now is not None else time.time()
+        self._refill(key, ts)
+        if self._tokens[key] &gt;= 1:
+            self._tokens[key] -= 1
+            return True
+        return False
+
+
+def test_q75():
+    limiter = TokenBucketRateLimiter(rate=2.0, capacity=5.0)
+    base = 1000.0
+
+    # Burst: 5 requests immediately (full bucket)
+    for i in range(5):
+        assert limiter.is_allowed(&quot;u1&quot;, now=base + i * 0.01) is True
+
+    # Bucket empty: next request denied
+    assert limiter.is_allowed(&quot;u1&quot;, now=base + 0.1) is False
+
+    # After 1 second, 2 tokens refilled
+    assert limiter.is_allowed(&quot;u1&quot;, now=base + 1.1) is True
+    assert limiter.is_allowed(&quot;u1&quot;, now=base + 1.2) is True
+    assert limiter.is_allowed(&quot;u1&quot;, now=base + 1.3) is False
+    print(&quot;Q75 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q76 — Detect Alert Storm
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a stream of SIEM alerts, detect &quot;alert storms&quot; — periods where the
+  alert rate exceeds a threshold (e.g., &gt;50 alerts in 60 seconds).
+
+Clarifying questions:
+  1. Should alert storms suppress further alerts, or just be flagged?
+  2. Is the storm detection per-rule, per-host, or global?
+  3. How should the storm window boundaries be defined?
+
+Security angle:
+  Alert storms indicate either:
+  - A real active attack generating mass events.
+  - A misconfigured detection rule causing false positive floods.
+  Both need to be detected and handled. During a real attack, storm
+  suppression can blind the SOC — alert management requires careful tuning.
+&quot;&quot;&quot;
+
+
+def detect_alert_storm(
+    alerts: List[Dict],
+    threshold: int = 50,
+    window_seconds: int = 60,
+    group_by: Optional[str] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: sliding window count per (optional) group key.
+    Returns list of storm events with start/end timestamps.
+    O(n) total time.
+    &quot;&quot;&quot;
+    windows: Dict[str, deque] = defaultdict(deque)
+    storms: Dict[str, bool] = {}
+    storm_alerts = []
+
+    for alert in alerts:
+        key = alert.get(group_by, &quot;global&quot;) if group_by else &quot;global&quot;
+        ts_raw = alert.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        window = windows[key]
+        window.append(ts)
+        while window and ts - window[0] &gt; window_seconds:
+            window.popleft()
+
+        count = len(window)
+        if count &gt; threshold and not storms.get(key):
+            storms[key] = True
+            storm_alerts.append({
+                &quot;key&quot;: key,
+                &quot;alert_count_in_window&quot;: count,
+                &quot;storm_start_ts&quot;: datetime.fromtimestamp(window[0]).isoformat(),
+                &quot;storm_detected_ts&quot;: datetime.fromtimestamp(ts).isoformat(),
+            })
+        elif count &lt;= threshold:
+            storms[key] = False
+
+    return storm_alerts
+
+
+def test_q76():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    alerts = []
+    # Storm: 60 alerts in 30 seconds
+    for i in range(60):
+        alerts.append({
+            &quot;rule&quot;: &quot;brute_force&quot;,
+            &quot;ts&quot;: (base + timedelta(milliseconds=i * 500)).isoformat(),
+        })
+    # Quiet period
+    for i in range(5):
+        alerts.append({
+            &quot;rule&quot;: &quot;brute_force&quot;,
+            &quot;ts&quot;: (base + timedelta(seconds=120 + i * 10)).isoformat(),
+        })
+
+    results = detect_alert_storm(alerts, threshold=50, window_seconds=60)
+    assert len(results) &gt;= 1
+    print(&quot;Q76 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q77 — Detect Repeated Malware Hash
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given EDR file-scan events, flag any file hash seen on MORE THAN N hosts —
+  indicating possible worm/malware spreading across the environment.
+
+Clarifying questions:
+  1. Should we count distinct hosts or total occurrences?
+  2. Should we filter out known-good hashes from a whitelist?
+  3. What is N? (default: 2 hosts = lateral spread indicator)
+
+Security angle:
+  A file hash appearing on 3+ hosts is a strong indicator of lateral movement
+  via malware self-copying, malicious share/drive mapping, or supply-chain
+  compromise. This is how CrowdStrike&#x27;s &quot;prevalence&quot; score works — rare hashes
+  (seen on few hosts) are treated as higher risk.
+&quot;&quot;&quot;
+
+
+def detect_repeated_malware_hash(
+    events: List[Dict],
+    min_hosts: int = 2,
+    whitelist: Optional[Set[str]] = None,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: defaultdict of sets — hash → set of host names.
+    O(n) time, O(h) space where h = unique hashes.
+    &quot;&quot;&quot;
+    hash_hosts: Dict[str, Set[str]] = defaultdict(set)
+    whitelist = whitelist or set()
+
+    for e in events:
+        h = (e.get(&quot;hash&quot;) or e.get(&quot;sha256&quot;) or &quot;&quot;).lower()
+        host = e.get(&quot;host&quot;)
+        if h and host and h not in whitelist:
+            hash_hosts[h].add(host)
+
+    return [
+        {
+            &quot;hash&quot;: h,
+            &quot;host_count&quot;: len(hosts),
+            &quot;hosts&quot;: sorted(hosts),
+        }
+        for h, hosts in hash_hosts.items()
+        if len(hosts) &gt;= min_hosts
+    ]
+
+
+def test_q77():
+    events = [
+        {&quot;host&quot;: &quot;ws-01&quot;, &quot;hash&quot;: &quot;deadbeefdeadbeef01&quot;},
+        {&quot;host&quot;: &quot;ws-02&quot;, &quot;hash&quot;: &quot;deadbeefdeadbeef01&quot;},   # same hash, 2nd host
+        {&quot;host&quot;: &quot;ws-03&quot;, &quot;hash&quot;: &quot;deadbeefdeadbeef01&quot;},   # 3rd host
+        {&quot;host&quot;: &quot;ws-04&quot;, &quot;hash&quot;: &quot;cafecafecafecafe01&quot;},   # unique hash
+    ]
+    results = detect_repeated_malware_hash(events, min_hosts=2)
+    hashes = {r[&quot;hash&quot;] for r in results}
+    assert &quot;deadbeefdeadbeef01&quot; in hashes
+    assert &quot;cafecafecafecafe01&quot; not in hashes
+    assert next(r for r in results if r[&quot;hash&quot;] == &quot;deadbeefdeadbeef01&quot;)[&quot;host_count&quot;] == 3
+    print(&quot;Q77 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q78 — Detect Lateral Movement Candidate
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect hosts that authenticate to multiple other internal hosts within a
+  short time window — a hallmark of lateral movement (e.g., pass-the-hash,
+  WMI exec, PsExec across multiple targets).
+
+Clarifying questions:
+  1. What authentication protocols are included? (SMB, WinRM, RDP, SSH)
+  2. What is the minimum number of distinct targets to flag? (default: 3)
+  3. What time window? (default: 10 minutes)
+
+Security angle:
+  MITRE ATT&amp;CK TA0008 (Lateral Movement). A compromised host suddenly
+  authenticating to 5+ peers is the primary detection signal for worm
+  propagation and attacker pivoting through an internal network.
+&quot;&quot;&quot;
+
+
+def detect_lateral_movement(
+    events: List[Dict],
+    min_targets: int = 3,
+    window_seconds: int = 600,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: (src_host) → list of (ts, dst_host) sorted by ts.
+    Sliding window of distinct dst_hosts.
+    O(n log n) due to sort per host.
+    &quot;&quot;&quot;
+    src_events: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+
+    for e in events:
+        src = e.get(&quot;src_host&quot;) or e.get(&quot;src_ip&quot;)
+        dst = e.get(&quot;dst_host&quot;) or e.get(&quot;dst_ip&quot;)
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        if not (src and dst):
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        src_events[src].append((ts, dst))
+
+    alerts = []
+    for src, ts_dst_list in src_events.items():
+        ts_dst_list.sort()
+        window: deque = deque()   # deque of (ts, dst)
+        distinct_dsts: Dict[str, int] = defaultdict(int)
+        max_distinct = 0
+
+        for ts, dst in ts_dst_list:
+            window.append((ts, dst))
+            distinct_dsts[dst] += 1
+
+            while window and ts - window[0][0] &gt; window_seconds:
+                old_ts, old_dst = window.popleft()
+                distinct_dsts[old_dst] -= 1
+                if distinct_dsts[old_dst] == 0:
+                    del distinct_dsts[old_dst]
+
+            max_distinct = max(max_distinct, len(distinct_dsts))
+
+        if max_distinct &gt;= min_targets:
+            alerts.append({
+                &quot;src_host&quot;: src,
+                &quot;max_distinct_targets&quot;: max_distinct,
+                &quot;window_seconds&quot;: window_seconds,
+            })
+    return alerts
+
+
+def test_q78():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = []
+    # Attacker lateral movement: ws-99 connects to 5 internal hosts
+    for i, dst in enumerate([&quot;host-01&quot;, &quot;host-02&quot;, &quot;host-03&quot;, &quot;host-04&quot;, &quot;host-05&quot;]):
+        events.append({
+            &quot;src_host&quot;: &quot;ws-99&quot;, &quot;dst_host&quot;: dst,
+            &quot;ts&quot;: (base + timedelta(seconds=i * 60)).isoformat(),
+        })
+    # Normal: ws-01 connects to 2 hosts over 2 hours
+    events.append({&quot;src_host&quot;: &quot;ws-01&quot;, &quot;dst_host&quot;: &quot;print-server&quot;,
+                   &quot;ts&quot;: base.isoformat()})
+    events.append({&quot;src_host&quot;: &quot;ws-01&quot;, &quot;dst_host&quot;: &quot;file-server&quot;,
+                   &quot;ts&quot;: (base + timedelta(hours=2)).isoformat()})
+
+    results = detect_lateral_movement(events, min_targets=3, window_seconds=600)
+    hosts = {r[&quot;src_host&quot;] for r in results}
+    assert &quot;ws-99&quot; in hosts
+    assert &quot;ws-01&quot; not in hosts
+    print(&quot;Q78 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q79 — Detect Privilege Escalation Sequence
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a sequence of process/command events per user, flag users who execute
+  a known privilege escalation sequence: e.g., within a session:
+  1. whoami or id
+  2. sudo -l  (list sudo privileges)
+  3. sudo &lt;command&gt; or su - root
+
+Clarifying questions:
+  1. Should the events be ordered by timestamp within a session?
+  2. Should all three steps be required, or any two?
+  3. What is the session boundary? (same host, same user, within 10 min)
+
+Security angle:
+  This sequence is the classic Linux privilege escalation enumeration pattern.
+  Red teams and attackers routinely run whoami → sudo -l → sudo bash.
+  Detecting the ordered sequence reduces false positives compared to
+  alerting on each command individually.
+&quot;&quot;&quot;
+
+ESCALATION_STEPS = [
+    re.compile(r&quot;\b(whoami|id)\b&quot;, re.IGNORECASE),
+    re.compile(r&quot;\bsudo\s+-l\b&quot;, re.IGNORECASE),
+    re.compile(r&quot;\b(sudo\s+\S+|su\s+-\s*root|su\s+-)\b&quot;, re.IGNORECASE),
+]
+
+
+def detect_privilege_escalation(
+    events: List[Dict],
+    require_all_steps: bool = True,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-user ordered scan using state machine (step index).
+    O(n) time.
+    &quot;&quot;&quot;
+    user_step: Dict[str, int] = defaultdict(int)
+    alerts = []
+
+    # Sort by ts to handle out-of-order logs
+    sorted_events = sorted(events, key=lambda e: e.get(&quot;ts&quot;, &quot;&quot;))
+
+    for e in sorted_events:
+        user = e.get(&quot;user&quot;) or e.get(&quot;username&quot;) or &quot;unknown&quot;
+        cmd = e.get(&quot;command&quot;) or e.get(&quot;cmd&quot;) or &quot;&quot;
+        step = user_step[user]
+
+        if step &lt; len(ESCALATION_STEPS) and ESCALATION_STEPS[step].search(cmd):
+            user_step[user] += 1
+            if user_step[user] == len(ESCALATION_STEPS):
+                alerts.append({
+                    &quot;user&quot;: user,
+                    &quot;steps_completed&quot;: len(ESCALATION_STEPS),
+                    &quot;ts&quot;: e.get(&quot;ts&quot;),
+                })
+                user_step[user] = 0   # reset for next sequence
+
+    return alerts
+
+
+def test_q79():
+    events = [
+        {&quot;user&quot;: &quot;mallory&quot;, &quot;cmd&quot;: &quot;whoami&quot;,    &quot;ts&quot;: &quot;T1&quot;},
+        {&quot;user&quot;: &quot;alice&quot;,   &quot;cmd&quot;: &quot;ls -la&quot;,    &quot;ts&quot;: &quot;T2&quot;},
+        {&quot;user&quot;: &quot;mallory&quot;, &quot;cmd&quot;: &quot;sudo -l&quot;,   &quot;ts&quot;: &quot;T3&quot;},
+        {&quot;user&quot;: &quot;mallory&quot;, &quot;cmd&quot;: &quot;sudo bash&quot;, &quot;ts&quot;: &quot;T4&quot;},
+        {&quot;user&quot;: &quot;alice&quot;,   &quot;cmd&quot;: &quot;sudo -l&quot;,   &quot;ts&quot;: &quot;T5&quot;},   # only step 2
+    ]
+    results = detect_privilege_escalation(events)
+    users = {r[&quot;user&quot;] for r in results}
+    assert &quot;mallory&quot; in users
+    assert &quot;alice&quot; not in users
+    print(&quot;Q79 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q80 — Detect Cloud API Abuse Sequence
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect an attacker recon sequence in CloudTrail events for a given
+  principal: ListBuckets → GetBucketPolicy → GetObject (exfiltration).
+  Flag principals that complete this ordered sequence within a time window.
+
+Clarifying questions:
+  1. Must all three steps occur in exact order?
+  2. What is the time window (default: 5 minutes)?
+  3. Should we track per-bucket or global across all buckets?
+
+Security angle:
+  This is the classic AWS S3 recon → exfiltration sequence:
+  1. ListBuckets — enumerate all S3 buckets in the account.
+  2. GetBucketPolicy — check which buckets are accessible.
+  3. GetObject — exfiltrate data.
+  AWS GuardDuty &quot;Exfiltration:S3/MaliciousIPCaller&quot; detects related signals.
+  Tracking multi-step sequences requires maintaining per-principal state,
+  which is the core of SIEM correlation rules.
+&quot;&quot;&quot;
+
+CLOUD_ABUSE_STEPS = [&quot;ListBuckets&quot;, &quot;GetBucketPolicy&quot;, &quot;GetObject&quot;]
+
+
+def detect_cloud_api_abuse_sequence(
+    events: List[Dict],
+    window_seconds: int = 300,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: per-principal state machine (step index + first step timestamp).
+    O(n) time.
+    &quot;&quot;&quot;
+    principal_state: Dict[str, Dict] = defaultdict(lambda: {&quot;step&quot;: 0, &quot;start_ts&quot;: None})
+    alerts = []
+
+    sorted_events = sorted(events, key=lambda e: e.get(&quot;ts&quot;, &quot;&quot;))
+
+    for e in sorted_events:
+        principal = e.get(&quot;principal&quot;) or &quot;unknown&quot;
+        event_name = e.get(&quot;event_name&quot;) or &quot;&quot;
+        ts_raw = e.get(&quot;ts&quot;, &quot;&quot;)
+        try:
+            ts = datetime.fromisoformat(ts_raw.rstrip(&quot;Z&quot;)).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        state = principal_state[principal]
+        expected_step = state[&quot;step&quot;]
+
+        if event_name == CLOUD_ABUSE_STEPS[expected_step]:
+            if expected_step == 0:
+                state[&quot;start_ts&quot;] = ts
+            else:
+                # Check window
+                if ts - state[&quot;start_ts&quot;] &gt; window_seconds:
+                    # Timed out — restart from step 1
+                    state[&quot;step&quot;] = 0
+                    state[&quot;start_ts&quot;] = ts
+
+            state[&quot;step&quot;] += 1
+
+            if state[&quot;step&quot;] == len(CLOUD_ABUSE_STEPS):
+                alerts.append({
+                    &quot;principal&quot;: principal,
+                    &quot;sequence&quot;: CLOUD_ABUSE_STEPS[:],
+                    &quot;sequence_duration_s&quot;: round(ts - state[&quot;start_ts&quot;], 1),
+                    &quot;ts_completed&quot;: ts_raw,
+                })
+                state[&quot;step&quot;] = 0
+                state[&quot;start_ts&quot;] = None
+
+    return alerts
+
+
+def test_q80():
+    base = datetime(2026, 5, 29, 8, 0, 0)
+    events = [
+        {&quot;principal&quot;: &quot;eve&quot;, &quot;event_name&quot;: &quot;ListBuckets&quot;,    &quot;ts&quot;: (base + timedelta(seconds=0)).isoformat()},
+        {&quot;principal&quot;: &quot;eve&quot;, &quot;event_name&quot;: &quot;GetBucketPolicy&quot;,&quot;ts&quot;: (base + timedelta(seconds=30)).isoformat()},
+        {&quot;principal&quot;: &quot;eve&quot;, &quot;event_name&quot;: &quot;GetObject&quot;,      &quot;ts&quot;: (base + timedelta(seconds=60)).isoformat()},
+        # Alice only does 2 steps
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;event_name&quot;: &quot;ListBuckets&quot;,  &quot;ts&quot;: (base + timedelta(seconds=5)).isoformat()},
+        {&quot;principal&quot;: &quot;alice&quot;, &quot;event_name&quot;: &quot;GetBucketPolicy&quot;,&quot;ts&quot;:(base + timedelta(seconds=35)).isoformat()},
+    ]
+    results = detect_cloud_api_abuse_sequence(events, window_seconds=300)
+    principals = {r[&quot;principal&quot;] for r in results}
+    assert &quot;eve&quot; in principals
+    assert &quot;alice&quot; not in principals
+    print(&quot;Q80 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q71()
+    test_q72()
+    test_q73()
+    test_q74()
+    test_q75()
+    test_q76()
+    test_q77()
+    test_q78()
+    test_q79()
+    test_q80()
+    print(&quot;\nAll Q71–Q80 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

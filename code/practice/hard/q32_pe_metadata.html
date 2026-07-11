@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q32_pe_metadata.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q32_pe_metadata.py</h1>
+  <p class="file-path">Source: code\practice\hard\q32_pe_metadata.py</p>
+  <p class="line-count">583 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q32 [Hard] — Parse PE (Portable Executable) Metadata
+=============================================================================
+
+PROBLEM
+-------
+Parse a Windows PE binary from raw bytes and extract:
+  1. MZ / PE signature validation.
+  2. COFF header: machine type, number of sections, timestamp, characteristics.
+  3. Optional header: magic (PE32/PE32+), subsystem, entry point, image base,
+     section alignment, DLL characteristics.
+  4. Section table: name, virtual address, raw data offset, raw data size,
+     characteristics flags.
+  5. Import directory: DLL names and imported function names/ordinals.
+  6. Export directory: exported function names and ordinals.
+  7. Security anomalies: packed/obfuscated indicators, TLS callbacks,
+     high entropy sections, unusual section names.
+
+CLARIFYING QUESTIONS
+--------------------
+1. 32-bit (PE32) and 64-bit (PE32+)?
+   → Both; detect from optional header magic.
+2. Corrupted / truncated files?
+   → Return partial data with error fields; don&#x27;t raise.
+3. Parse actual import strings or just DLL names?
+   → DLL names + function names (by name); handle import-by-ordinal.
+4. Detect packing?
+   → Heuristics: UPX section names, high entropy, section count &lt; 3 with
+     large VirtualSize vs RawSize discrepancy.
+5. Return format?
+   → PEMetadata dataclass with nested dataclasses.
+
+=============================================================================
+APPROACH 1 — NAIVE (sequential struct unpacking with bounds checks)
+=============================================================================
+  Unpack fields using struct.unpack_from.  Validate offsets manually.
+  Verbose but explicit; easy to follow the PE spec.
+
+=============================================================================
+APPROACH 2 — BUFFER WRAPPER FOR SAFE READING (RECOMMENDED)
+=============================================================================
+  Wrap bytes in a SafeBuffer class with bounds-checked read methods.
+  Cleaner code; prevents IndexError on truncated files.
+  Both approaches share the same struct unpacking logic.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import math
+import struct
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MZ_MAGIC = b&quot;MZ&quot;
+PE_MAGIC = b&quot;PE\x00\x00&quot;
+
+# COFF machine types
+MACHINE_TYPES: Dict[int, str] = {
+    0x0000: &quot;UNKNOWN&quot;,
+    0x014C: &quot;I386&quot;,
+    0x8664: &quot;AMD64&quot;,
+    0xAA64: &quot;ARM64&quot;,
+    0x01C4: &quot;ARMNT&quot;,
+    0x0200: &quot;IA64&quot;,
+}
+
+# Optional header magic
+OPT_MAGIC_PE32   = 0x010B
+OPT_MAGIC_PE32P  = 0x020B  # PE32+
+OPT_MAGIC_ROM    = 0x0107
+
+# Subsystems
+SUBSYSTEMS: Dict[int, str] = {
+    1:  &quot;NATIVE&quot;,
+    2:  &quot;WINDOWS_GUI&quot;,
+    3:  &quot;WINDOWS_CUI&quot;,
+    5:  &quot;OS2_CUI&quot;,
+    7:  &quot;POSIX_CUI&quot;,
+    9:  &quot;WINDOWS_CE_GUI&quot;,
+    10: &quot;EFI_APPLICATION&quot;,
+    14: &quot;XBOX&quot;,
+    16: &quot;WINDOWS_BOOT_APPLICATION&quot;,
+}
+
+# Section characteristics flags (selected)
+SECTION_FLAGS: Dict[int, str] = {
+    0x00000020: &quot;CNT_CODE&quot;,
+    0x00000040: &quot;CNT_INITIALIZED_DATA&quot;,
+    0x00000080: &quot;CNT_UNINITIALIZED_DATA&quot;,
+    0x04000000: &quot;MEM_DISCARDABLE&quot;,
+    0x20000000: &quot;MEM_EXECUTE&quot;,
+    0x40000000: &quot;MEM_READ&quot;,
+    0x80000000: &quot;MEM_WRITE&quot;,
+}
+
+# DLL characteristics
+DLL_CHARS: Dict[int, str] = {
+    0x0040: &quot;DYNAMIC_BASE (ASLR)&quot;,
+    0x0080: &quot;FORCE_INTEGRITY&quot;,
+    0x0100: &quot;NX_COMPAT (DEP)&quot;,
+    0x0400: &quot;NO_ISOLATION&quot;,
+    0x0800: &quot;NO_SEH&quot;,
+    0x1000: &quot;NO_BIND&quot;,
+    0x4000: &quot;WDM_DRIVER&quot;,
+    0x8000: &quot;TERMINAL_SERVER_AWARE&quot;,
+}
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SectionInfo:
+    name: str
+    virtual_address: int
+    virtual_size: int
+    raw_offset: int
+    raw_size: int
+    characteristics: int
+    flags: List[str] = field(default_factory=list)
+    entropy: float = 0.0
+
+
+@dataclass
+class ImportDLL:
+    name: str
+    functions: List[str] = field(default_factory=list)   # names or &quot;Ordinal#N&quot;
+
+
+@dataclass
+class ExportInfo:
+    dll_name: str
+    functions: List[Tuple[int, str]] = field(default_factory=list)  # (ordinal, name)
+
+
+@dataclass
+class PEMetadata:
+    path: str = &quot;&quot;
+    is_valid: bool = False
+    error: str = &quot;&quot;
+
+    # COFF
+    machine: str = &quot;&quot;
+    machine_raw: int = 0
+    num_sections: int = 0
+    timestamp: int = 0
+    timestamp_str: str = &quot;&quot;
+    characteristics: int = 0
+
+    # Optional header
+    is_64bit: bool = False
+    subsystem: str = &quot;&quot;
+    entry_point_rva: int = 0
+    image_base: int = 0
+    image_size: int = 0
+    section_alignment: int = 0
+    file_alignment: int = 0
+    dll_characteristics: int = 0
+    dll_chars_list: List[str] = field(default_factory=list)
+
+    # Sections
+    sections: List[SectionInfo] = field(default_factory=list)
+
+    # Imports / Exports
+    imports: List[ImportDLL] = field(default_factory=list)
+    exports: Optional[ExportInfo] = None
+
+    # Anomaly indicators
+    anomalies: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Safe Buffer Reader
+# ---------------------------------------------------------------------------
+
+class _Buf:
+    &quot;&quot;&quot;Bounds-checked buffer reader.&quot;&quot;&quot;
+
+    def __init__(self, data: bytes) -&gt; None:
+        self._data = data
+        self._len = len(data)
+
+    def read(self, offset: int, n: int) -&gt; Optional[bytes]:
+        if offset &lt; 0 or offset + n &gt; self._len:
+            return None
+        return self._data[offset:offset + n]
+
+    def u8(self, offset: int) -&gt; Optional[int]:
+        b = self.read(offset, 1)
+        return b[0] if b else None
+
+    def u16(self, offset: int) -&gt; Optional[int]:
+        b = self.read(offset, 2)
+        return struct.unpack_from(&quot;&lt;H&quot;, b)[0] if b else None
+
+    def u32(self, offset: int) -&gt; Optional[int]:
+        b = self.read(offset, 4)
+        return struct.unpack_from(&quot;&lt;I&quot;, b)[0] if b else None
+
+    def u64(self, offset: int) -&gt; Optional[int]:
+        b = self.read(offset, 8)
+        return struct.unpack_from(&quot;&lt;Q&quot;, b)[0] if b else None
+
+    def cstr(self, offset: int, max_len: int = 256) -&gt; str:
+        &quot;&quot;&quot;Read null-terminated string.&quot;&quot;&quot;
+        end = offset
+        while end &lt; self._len and end &lt; offset + max_len and self._data[end] != 0:
+            end += 1
+        return self._data[offset:end].decode(&quot;latin-1&quot;, errors=&quot;replace&quot;)
+
+    def __len__(self) -&gt; int:
+        return self._len
+
+
+# ---------------------------------------------------------------------------
+# Entropy Calculation
+# ---------------------------------------------------------------------------
+
+def _entropy(data: bytes) -&gt; float:
+    if not data:
+        return 0.0
+    freq: Dict[int, int] = {}
+    for b in data:
+        freq[b] = freq.get(b, 0) + 1
+    total = len(data)
+    ent = 0.0
+    for count in freq.values():
+        p = count / total
+        ent -= p * math.log2(p)
+    return round(ent, 4)
+
+
+# ---------------------------------------------------------------------------
+# RVA → File Offset
+# ---------------------------------------------------------------------------
+
+def _rva_to_offset(rva: int, sections: List[SectionInfo]) -&gt; int:
+    &quot;&quot;&quot;Convert RVA to file offset using section table.&quot;&quot;&quot;
+    for s in sections:
+        if s.virtual_address &lt;= rva &lt; s.virtual_address + max(s.virtual_size, s.raw_size):
+            return rva - s.virtual_address + s.raw_offset
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Core Parser
+# ---------------------------------------------------------------------------
+
+def parse_pe(data: bytes, path: str = &quot;&quot;) -&gt; PEMetadata:
+    buf = _Buf(data)
+    meta = PEMetadata(path=path)
+
+    # --- MZ header ---
+    if buf.read(0, 2) != MZ_MAGIC:
+        meta.error = &quot;Missing MZ magic&quot;
+        return meta
+
+    e_lfanew = buf.u32(0x3C)
+    if e_lfanew is None:
+        meta.error = &quot;Cannot read e_lfanew&quot;
+        return meta
+
+    # --- PE signature ---
+    if buf.read(e_lfanew, 4) != PE_MAGIC:
+        meta.error = &quot;Missing PE signature&quot;
+        return meta
+
+    # --- COFF header (20 bytes after PE signature) ---
+    coff_off = e_lfanew + 4
+    machine_raw = buf.u16(coff_off)
+    if machine_raw is None:
+        meta.error = &quot;Truncated COFF header&quot;
+        return meta
+
+    meta.machine_raw = machine_raw
+    meta.machine = MACHINE_TYPES.get(machine_raw, f&quot;UNKNOWN(0x{machine_raw:04X})&quot;)
+    meta.num_sections = buf.u16(coff_off + 2) or 0
+    meta.timestamp = buf.u32(coff_off + 4) or 0
+    meta.timestamp_str = time.strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;,
+                                       time.gmtime(meta.timestamp))
+    meta.characteristics = buf.u16(coff_off + 18) or 0
+
+    # --- Optional header ---
+    opt_hdr_size = buf.u16(coff_off + 16) or 0
+    opt_off = coff_off + 20
+    opt_magic = buf.u16(opt_off)
+    if opt_magic is None:
+        meta.error = &quot;Missing optional header&quot;
+        return meta
+
+    if opt_magic == OPT_MAGIC_PE32:
+        meta.is_64bit = False
+        meta.entry_point_rva = buf.u32(opt_off + 16) or 0
+        meta.image_base = buf.u32(opt_off + 28) or 0
+        meta.section_alignment = buf.u32(opt_off + 32) or 0
+        meta.file_alignment = buf.u32(opt_off + 36) or 0
+        meta.image_size = buf.u32(opt_off + 56) or 0
+        meta.subsystem = SUBSYSTEMS.get(buf.u16(opt_off + 68) or 0, &quot;UNKNOWN&quot;)
+        meta.dll_characteristics = buf.u16(opt_off + 70) or 0
+    elif opt_magic == OPT_MAGIC_PE32P:
+        meta.is_64bit = True
+        meta.entry_point_rva = buf.u32(opt_off + 16) or 0
+        meta.image_base = buf.u64(opt_off + 24) or 0
+        meta.section_alignment = buf.u32(opt_off + 32) or 0
+        meta.file_alignment = buf.u32(opt_off + 36) or 0
+        meta.image_size = buf.u32(opt_off + 56) or 0
+        meta.subsystem = SUBSYSTEMS.get(buf.u16(opt_off + 68) or 0, &quot;UNKNOWN&quot;)
+        meta.dll_characteristics = buf.u16(opt_off + 70) or 0
+
+    meta.dll_chars_list = [name for mask, name in DLL_CHARS.items()
+                           if meta.dll_characteristics &amp; mask]
+
+    # --- Section table ---
+    section_tbl_off = opt_off + opt_hdr_size
+    sections: List[SectionInfo] = []
+    for i in range(meta.num_sections):
+        sec_off = section_tbl_off + i * 40
+        raw_name = buf.read(sec_off, 8)
+        if raw_name is None:
+            break
+        name = raw_name.rstrip(b&quot;\x00&quot;).decode(&quot;latin-1&quot;, errors=&quot;replace&quot;)
+        vsize = buf.u32(sec_off + 8) or 0
+        vaddr = buf.u32(sec_off + 12) or 0
+        rsize = buf.u32(sec_off + 16) or 0
+        roff  = buf.u32(sec_off + 20) or 0
+        chars = buf.u32(sec_off + 36) or 0
+        flags = [name_ for mask, name_ in SECTION_FLAGS.items() if chars &amp; mask]
+
+        # Entropy
+        sec_data = buf.read(roff, rsize) or b&quot;&quot;
+        ent = _entropy(sec_data)
+
+        sections.append(SectionInfo(
+            name=name, virtual_address=vaddr, virtual_size=vsize,
+            raw_offset=roff, raw_size=rsize, characteristics=chars,
+            flags=flags, entropy=ent,
+        ))
+
+    meta.sections = sections
+
+    # --- Import Directory (directory entry 1) ---
+    # import_dir_rva at opt_off + 104 (PE32) or opt_off + 120 (PE32+)
+    import_dir_rva_off = opt_off + (120 if meta.is_64bit else 104)
+    import_dir_rva = buf.u32(import_dir_rva_off) or 0
+    if import_dir_rva:
+        import_dir_off = _rva_to_offset(import_dir_rva, sections)
+        imports: List[ImportDLL] = []
+        for i in range(256):  # safety limit
+            idt_off = import_dir_off + i * 20
+            ilt_rva = buf.u32(idt_off)  # OriginalFirstThunk
+            name_rva = buf.u32(idt_off + 12)
+            if not ilt_rva and not name_rva:
+                break  # end of import table
+            if name_rva is None:
+                break
+            dll_name_off = _rva_to_offset(name_rva, sections)
+            dll_name = buf.cstr(dll_name_off)
+            functions: List[str] = []
+
+            # Walk ILT
+            ilt_off = _rva_to_offset(ilt_rva or 0, sections)
+            if ilt_off:
+                for j in range(1024):  # safety limit
+                    if meta.is_64bit:
+                        thunk = buf.u64(ilt_off + j * 8)
+                    else:
+                        thunk = buf.u32(ilt_off + j * 4)
+                    if not thunk:
+                        break
+                    ordinal_flag = 0x80000000000000000 if meta.is_64bit else 0x80000000
+                    if thunk &amp; ordinal_flag:
+                        functions.append(f&quot;Ordinal#{thunk &amp; 0xFFFF}&quot;)
+                    else:
+                        hint_off = _rva_to_offset(thunk &amp; 0x7FFFFFFF, sections)
+                        if hint_off:
+                            func_name = buf.cstr(hint_off + 2)  # skip 2-byte hint
+                            functions.append(func_name)
+
+            imports.append(ImportDLL(name=dll_name, functions=functions))
+
+        meta.imports = imports
+
+    # --- Anomaly detection ---
+    anomalies: List[str] = []
+
+    # Check for UPX
+    upx_names = {s.name for s in sections}
+    if &quot;UPX0&quot; in upx_names or &quot;UPX1&quot; in upx_names:
+        anomalies.append(&quot;UPX packer detected (sections: UPX0/UPX1)&quot;)
+
+    # High entropy sections (&gt; 7.2 bits → likely encrypted/packed)
+    for s in sections:
+        if s.entropy &gt; 7.2 and s.raw_size &gt; 512:
+            anomalies.append(f&quot;High entropy section &#x27;{s.name}&#x27;: {s.entropy:.2f} bits&quot;)
+
+    # VirtualSize &gt;&gt; RawSize (typical of packed files)
+    for s in sections:
+        if s.virtual_size &gt; 0 and s.raw_size == 0 and s.virtual_size &gt; 0x1000:
+            anomalies.append(f&quot;Section &#x27;{s.name}&#x27; has VirtualSize={s.virtual_size} but RawSize=0&quot;)
+
+    # No DEP/ASLR
+    if not (meta.dll_characteristics &amp; 0x0040):
+        anomalies.append(&quot;ASLR not enabled (no DYNAMIC_BASE)&quot;)
+    if not (meta.dll_characteristics &amp; 0x0100):
+        anomalies.append(&quot;DEP not enabled (no NX_COMPAT)&quot;)
+
+    # Suspicious timestamp (future or 0)
+    if meta.timestamp == 0:
+        anomalies.append(&quot;Timestamp is zero (timestomped?)&quot;)
+
+    meta.anomalies = anomalies
+    meta.is_valid = True
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def _build_minimal_pe(is_64: bool = False) -&gt; bytes:
+    &quot;&quot;&quot;Construct a minimal valid PE binary in memory for testing.&quot;&quot;&quot;
+    # Offsets
+    e_lfanew = 0x40
+    coff_off = e_lfanew + 4
+    opt_hdr_off = coff_off + 20
+    # Section table offset after optional header
+    opt_hdr_size = 0xF0 if is_64 else 0xE0
+    section_tbl_off = opt_hdr_off + opt_hdr_size
+    raw_section_off = section_tbl_off + 40  # one section
+    # Total size
+    total = raw_section_off + 512
+
+    buf = bytearray(total)
+
+    # MZ
+    buf[0:2] = b&quot;MZ&quot;
+    struct.pack_into(&quot;&lt;I&quot;, buf, 0x3C, e_lfanew)
+
+    # PE signature
+    buf[e_lfanew:e_lfanew+4] = b&quot;PE\x00\x00&quot;
+
+    # COFF header
+    machine = 0x8664 if is_64 else 0x014C
+    struct.pack_into(&quot;&lt;H&quot;, buf, coff_off, machine)      # Machine
+    struct.pack_into(&quot;&lt;H&quot;, buf, coff_off+2, 1)           # NumSections
+    struct.pack_into(&quot;&lt;I&quot;, buf, coff_off+4, 0x5E000000)  # Timestamp
+    struct.pack_into(&quot;&lt;H&quot;, buf, coff_off+16, opt_hdr_size)  # SizeOfOptionalHeader
+    struct.pack_into(&quot;&lt;H&quot;, buf, coff_off+18, 0x0102)     # Characteristics
+
+    # Optional header
+    magic = OPT_MAGIC_PE32P if is_64 else OPT_MAGIC_PE32
+    struct.pack_into(&quot;&lt;H&quot;, buf, opt_hdr_off, magic)
+    struct.pack_into(&quot;&lt;I&quot;, buf, opt_hdr_off+16, 0x1000)   # EntryPoint RVA
+    if is_64:
+        struct.pack_into(&quot;&lt;Q&quot;, buf, opt_hdr_off+24, 0x140000000)  # ImageBase
+    else:
+        struct.pack_into(&quot;&lt;I&quot;, buf, opt_hdr_off+28, 0x400000)     # ImageBase
+    struct.pack_into(&quot;&lt;I&quot;, buf, opt_hdr_off+32, 0x1000)   # SectionAlignment
+    struct.pack_into(&quot;&lt;I&quot;, buf, opt_hdr_off+36, 0x200)    # FileAlignment
+    struct.pack_into(&quot;&lt;I&quot;, buf, opt_hdr_off+56, 0x3000)   # SizeOfImage
+    struct.pack_into(&quot;&lt;H&quot;, buf, opt_hdr_off+68, 3)         # Subsystem=WINDOWS_CUI
+    struct.pack_into(&quot;&lt;H&quot;, buf, opt_hdr_off+70, 0x0140)    # DllCharacteristics=ASLR+DEP
+
+    # Section table (.text)
+    buf[section_tbl_off:section_tbl_off+8] = b&quot;.text\x00\x00\x00&quot;
+    struct.pack_into(&quot;&lt;I&quot;, buf, section_tbl_off+8,  0x200)          # VirtualSize
+    struct.pack_into(&quot;&lt;I&quot;, buf, section_tbl_off+12, 0x1000)         # VirtualAddress
+    struct.pack_into(&quot;&lt;I&quot;, buf, section_tbl_off+16, 0x200)          # RawSize
+    struct.pack_into(&quot;&lt;I&quot;, buf, section_tbl_off+20, raw_section_off) # RawOffset
+    struct.pack_into(&quot;&lt;I&quot;, buf, section_tbl_off+36, 0x60000020)     # Characteristics
+
+    # Fill section with some bytes
+    buf[raw_section_off:raw_section_off+4] = b&quot;\x90\x90\xC3\x00&quot;
+
+    return bytes(buf)
+
+
+def test_parse_pe32():
+    data = _build_minimal_pe(is_64=False)
+    meta = parse_pe(data, path=&quot;test_pe32.exe&quot;)
+    assert meta.is_valid, f&quot;PE32 parse failed: {meta.error}&quot;
+    assert meta.machine == &quot;I386&quot;
+    assert not meta.is_64bit
+    assert meta.subsystem == &quot;WINDOWS_CUI&quot;
+    assert len(meta.sections) == 1
+    assert meta.sections[0].name == &quot;.text&quot;
+    print(f&quot;PE32 parse: passed (machine={meta.machine}, sections={len(meta.sections)})&quot;)
+
+
+def test_parse_pe64():
+    data = _build_minimal_pe(is_64=True)
+    meta = parse_pe(data, path=&quot;test_pe64.exe&quot;)
+    assert meta.is_valid, f&quot;PE64 parse failed: {meta.error}&quot;
+    assert meta.machine == &quot;AMD64&quot;
+    assert meta.is_64bit
+    print(f&quot;PE64 parse: passed (machine={meta.machine})&quot;)
+
+
+def test_invalid_mz():
+    meta = parse_pe(b&quot;NOTMZ\x00&quot; * 100)
+    assert not meta.is_valid
+    assert &quot;MZ&quot; in meta.error
+    print(&quot;Invalid MZ: passed&quot;)
+
+
+def test_high_entropy_detection():
+    import os
+    data = _build_minimal_pe(is_64=False)
+    # Patch raw section with random-looking high-entropy data
+    data_arr = bytearray(data)
+    raw_off = 0x40 + 4 + 20 + 0xE0 + 40  # section_tbl_off + 40
+    for i in range(512):
+        data_arr[raw_off + i] = i % 256  # pseudo-random
+    meta = parse_pe(bytes(data_arr))
+    # Entropy of 0..255 pattern is ~8.0 bits
+    print(f&quot;High entropy section: entropy={meta.sections[0].entropy:.2f}&quot;)
+    assert meta.sections[0].entropy &gt; 5.0
+    print(&quot;Entropy detection: passed&quot;)
+
+
+def test_anomaly_no_aslr():
+    data = bytearray(_build_minimal_pe(is_64=False))
+    # Clear DYNAMIC_BASE bit at opt_hdr_off+70
+    e_lfanew = 0x40
+    opt_hdr_off = e_lfanew + 4 + 20
+    old = struct.unpack_from(&quot;&lt;H&quot;, data, opt_hdr_off + 70)[0]
+    struct.pack_into(&quot;&lt;H&quot;, data, opt_hdr_off + 70, old &amp; ~0x0040)
+    meta = parse_pe(bytes(data))
+    anomaly_text = &quot; &quot;.join(meta.anomalies)
+    assert &quot;ASLR&quot; in anomaly_text, f&quot;Expected ASLR anomaly; got {meta.anomalies}&quot;
+    print(&quot;ASLR anomaly: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+PE FORMAT IN MALWARE ANALYSIS
+
+TIMESTAMP ANALYSIS
+  PE timestamp can reveal compilation time.
+  Malware often timestamps files to 0 (timestomping) to hide creation time.
+  Detect: timestamp=0 or unrealistically future timestamps.
+
+PACKER DETECTION
+  Packed executables have few sections with high entropy.
+  UPX packer: recognisable section names (UPX0, UPX1).
+  Custom packers: look for single writable+executable section with entropy &gt; 7.
+
+ASLR / DEP / CFG
+  DYNAMIC_BASE (0x0040): enables ASLR; missing = fixed base = easier ROP.
+  NX_COMPAT (0x0100): enables DEP; missing = can execute stack/heap.
+  GUARD_CF (0x4000): enables Control Flow Guard (CFG).
+  Check these in hardening reviews.
+
+TLS CALLBACKS
+  TLS (Thread Local Storage) callbacks execute BEFORE main entry point.
+  Malware uses them to evade debuggers that break only at entry point.
+  Detected via the TLS directory entry (directory index 9).
+
+IMPORT TABLE ANALYSIS
+  Suspicious imports: VirtualAlloc, CreateRemoteThread, WriteProcessMemory
+  → classic code injection triad.
+  LoadLibrary + GetProcAddress → dynamic API resolution (hides true imports).
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_parse_pe32()
+    test_parse_pe64()
+    test_invalid_mz()
+    test_high_entropy_detection()
+    test_anomaly_no_aslr()
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q11_q20_account_anomaly.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q11_q20_account_anomaly.py</h1>
+  <p class="file-path">Source: code\practice\medium\q11_q20_account_anomaly.py</p>
+  <p class="line-count">826 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer — Medium Questions: Q11–Q20
+Topic: Account Anomaly Detection &amp; Web Attack Signatures
+&quot;&quot;&quot;
+
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, Tuple
+import re
+import urllib.parse
+import heapq
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q11 — New Device Login Detection
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given a historical whitelist of device fingerprints per user and new login
+  events, flag logins from devices not previously seen.
+
+Clarifying questions:
+  1. What constitutes a &quot;device fingerprint&quot;? (user-agent, device-id, hardware hash?)
+  2. Is the whitelist updated after confirmed legitimate logins?
+  3. Should the result include confidence score or just boolean?
+  4. Should we correlate with IP or country for compound alerts?
+
+Security angle:
+  New-device logins combined with new-country or impossible travel signals
+  produce high-confidence compromise alerts with minimal false positives.
+  Device fingerprinting is a core control in risk-based MFA systems.
+
+False positives:
+  - Browser update changes user-agent string.
+  - Incognito/private browsing mode.
+  - User bought a new device.
+&quot;&quot;&quot;
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def new_device_login_naive(
+    known_devices: Dict[str, set],
+    new_logs: List[Dict],
+) -&gt; List[Dict]:
+    alerts = []
+    for log in new_logs:
+        user = log.get(&quot;user&quot;)
+        device = log.get(&quot;device&quot;)
+        if not user or not device:
+            continue
+        if device not in known_devices.get(user.lower(), set()):
+            alerts.append({&quot;user&quot;: user, &quot;device&quot;: device, &quot;ts&quot;: log.get(&quot;ts&quot;)})
+    return alerts
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def new_device_login(
+    known_devices: Dict[str, set],
+    new_logs: List[Dict],
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Normalise the whitelist to lowercase keys once. O(n) scan.
+    Data structure: dict of sets for O(1) membership test.
+    &quot;&quot;&quot;
+    normalised = {k.lower(): v for k, v in known_devices.items()}
+    alerts = []
+    for log in new_logs:
+        user = (log.get(&quot;user&quot;) or &quot;&quot;).lower()
+        device = log.get(&quot;device&quot;) or &quot;&quot;
+        if not user or not device:
+            continue
+        if device not in normalised.get(user, set()):
+            alerts.append({
+                &quot;user&quot;: user,
+                &quot;new_device&quot;: device,
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+            })
+    return alerts
+
+
+def test_q11():
+    known = {&quot;alice&quot;: {&quot;chrome-win&quot;, &quot;ios&quot;}, &quot;bob&quot;: {&quot;firefox-mac&quot;}}
+    logs = [
+        {&quot;ts&quot;: &quot;T1&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;device&quot;: &quot;chrome-win&quot;, &quot;src_ip&quot;: &quot;1.1.1.1&quot;},
+        {&quot;ts&quot;: &quot;T2&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;device&quot;: &quot;android&quot;,    &quot;src_ip&quot;: &quot;2.2.2.2&quot;},
+        {&quot;ts&quot;: &quot;T3&quot;, &quot;user&quot;: &quot;bob&quot;,   &quot;device&quot;: &quot;firefox-mac&quot;,&quot;src_ip&quot;: &quot;3.3.3.3&quot;},
+    ]
+    alerts = new_device_login(known, logs)
+    assert len(alerts) == 1
+    assert alerts[0][&quot;new_device&quot;] == &quot;android&quot;
+    print(&quot;Q11 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q12 — Dormant Account Activity
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given last-login dates per user and a set of new login events, flag accounts
+  that have been inactive for more than INACTIVITY_DAYS days.
+
+Security angle:
+  Dormant accounts are prime targets for attackers because:
+  - Owners are unlikely to notice unauthorised access.
+  - Accounts may retain elevated permissions from former roles.
+  - Password reset emails go unread.
+  Standard control: disable accounts inactive &gt; 90 days; alert on login.
+&quot;&quot;&quot;  # noqa: W605
+INACTIVITY_DAYS = 90
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def dormant_account_activity_naive(
+    last_logins: Dict[str, str],   # user → ISO timestamp of last login
+    new_logs: List[Dict],
+    inactivity_days: int = INACTIVITY_DAYS,
+) -&gt; List[Dict]:
+    alerts = []
+    for log in new_logs:
+        user = (log.get(&quot;user&quot;) or &quot;&quot;).lower()
+        last_ts = last_logins.get(user)
+        if not last_ts:
+            continue
+        try:
+            last_dt = datetime.fromisoformat(last_ts.rstrip(&quot;Z&quot;))
+            new_dt  = datetime.fromisoformat((log.get(&quot;ts&quot;) or &quot;&quot;).rstrip(&quot;Z&quot;))
+        except ValueError:
+            continue
+        if (new_dt - last_dt).days &gt; inactivity_days:
+            alerts.append({
+                &quot;user&quot;: user,
+                &quot;last_login&quot;: last_ts,
+                &quot;current_login&quot;: log.get(&quot;ts&quot;),
+                &quot;days_inactive&quot;: (new_dt - last_dt).days,
+            })
+    return alerts
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def dormant_account_activity(
+    last_logins: Dict[str, str],
+    new_logs: List[Dict],
+    inactivity_days: int = INACTIVITY_DAYS,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Pre-parse last_login timestamps once into a dict of datetime objects.
+    Avoids re-parsing inside the loop.
+    O(u) pre-process + O(n) scan.
+    &quot;&quot;&quot;
+    parsed_last: Dict[str, datetime] = {}
+    for user, ts in last_logins.items():
+        try:
+            parsed_last[user.lower()] = datetime.fromisoformat(ts.rstrip(&quot;Z&quot;))
+        except ValueError:
+            pass
+
+    alerts = []
+    for log in new_logs:
+        user = (log.get(&quot;user&quot;) or &quot;&quot;).lower()
+        last_dt = parsed_last.get(user)
+        if not last_dt:
+            continue
+        try:
+            new_dt = datetime.fromisoformat((log.get(&quot;ts&quot;) or &quot;&quot;).rstrip(&quot;Z&quot;))
+        except ValueError:
+            continue
+        days_inactive = (new_dt - last_dt).days
+        if days_inactive &gt; inactivity_days:
+            alerts.append({
+                &quot;user&quot;: user,
+                &quot;last_login&quot;: last_logins[user],
+                &quot;current_login&quot;: log.get(&quot;ts&quot;),
+                &quot;days_inactive&quot;: days_inactive,
+            })
+    return alerts
+
+
+def test_q12():
+    last_logins = {
+        &quot;alice&quot;: &quot;2026-01-01T00:00:00&quot;,   # 148 days ago from May-29
+        &quot;bob&quot;:   &quot;2026-05-01T00:00:00&quot;,   # 28 days ago
+    }
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:00&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:00:00&quot;, &quot;user&quot;: &quot;bob&quot;},
+    ]
+    alerts = dormant_account_activity(last_logins, logs, inactivity_days=90)
+    users = {a[&quot;user&quot;] for a in alerts}
+    assert &quot;alice&quot; in users
+    assert &quot;bob&quot; not in users
+    print(&quot;Q12 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q13 — Privileged Account Login Outside Business Hours
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given login events with role field, flag admin/privileged logins outside
+  working hours (default: Mon-Fri 09:00-18:00 local time).
+
+Security angle:
+  Privileged logins at 2 AM are a strong insider-threat or compromise indicator.
+  Most attackers operate in their own timezone, which differs from victim org&#x27;s
+  business hours. SOC analysts prioritise out-of-hours privileged activity.
+
+Clarifying questions:
+  1. Which timezone defines &quot;business hours&quot;?
+  2. Which roles are &quot;privileged&quot;? Admin, root, svc-account?
+  3. Should public holidays be considered?
+&quot;&quot;&quot;
+
+PRIVILEGED_ROLES = frozenset({&quot;admin&quot;, &quot;root&quot;, &quot;superuser&quot;, &quot;sre&quot;, &quot;sysadmin&quot;})
+BUSINESS_HOUR_START = 9   # 09:00
+BUSINESS_HOUR_END   = 18  # 18:00
+
+
+def _is_outside_business_hours(ts: str) -&gt; bool:
+    try:
+        dt = datetime.fromisoformat(ts.rstrip(&quot;Z&quot;))
+    except ValueError:
+        return False
+    return (
+        dt.weekday() &gt;= 5                        # Saturday / Sunday
+        or dt.hour &lt; BUSINESS_HOUR_START
+        or dt.hour &gt;= BUSINESS_HOUR_END
+    )
+
+
+# ── Naive ──────────────────────────────────────────────────────────────────
+def privileged_login_outside_hours_naive(logs: List[Dict]) -&gt; List[Dict]:
+    return [
+        log for log in logs
+        if log.get(&quot;role&quot;, &quot;&quot;).lower() in PRIVILEGED_ROLES
+        and _is_outside_business_hours(log.get(&quot;ts&quot;, &quot;&quot;))
+    ]
+
+
+# ── Optimal ────────────────────────────────────────────────────────────────
+def privileged_login_outside_hours(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Same O(n) complexity. Optimal version uses generator for lazy evaluation
+    and pre-compiled frozenset for O(1) role lookup.
+    In production: apply timezone conversion using pytz before comparison.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        role = (log.get(&quot;role&quot;) or &quot;&quot;).lower()
+        if role not in PRIVILEGED_ROLES:
+            continue
+        if _is_outside_business_hours(log.get(&quot;ts&quot;, &quot;&quot;)):
+            alerts.append({
+                &quot;user&quot;: log.get(&quot;user&quot;),
+                &quot;role&quot;: role,
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+            })
+    return alerts
+
+
+def test_q13():
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T02:30:00&quot;, &quot;user&quot;: &quot;alice&quot;, &quot;role&quot;: &quot;admin&quot;,
+         &quot;src_ip&quot;: &quot;1.1.1.1&quot;},   # 2:30 AM — outside hours
+        {&quot;ts&quot;: &quot;2026-05-29T10:00:00&quot;, &quot;user&quot;: &quot;bob&quot;, &quot;role&quot;: &quot;admin&quot;,
+         &quot;src_ip&quot;: &quot;2.2.2.2&quot;},   # 10 AM Friday — inside hours
+        {&quot;ts&quot;: &quot;2026-05-30T15:00:00&quot;, &quot;user&quot;: &quot;carol&quot;, &quot;role&quot;: &quot;user&quot;,
+         &quot;src_ip&quot;: &quot;3.3.3.3&quot;},   # regular user
+        {&quot;ts&quot;: &quot;2026-05-31T10:00:00&quot;, &quot;user&quot;: &quot;dave&quot;, &quot;role&quot;: &quot;root&quot;,
+         &quot;src_ip&quot;: &quot;4.4.4.4&quot;},   # Sunday — outside hours
+    ]
+    alerts = privileged_login_outside_hours(logs)
+    users = {a[&quot;user&quot;] for a in alerts}
+    assert &quot;alice&quot; in users
+    assert &quot;dave&quot; in users
+    assert &quot;bob&quot; not in users
+    assert &quot;carol&quot; not in users
+    print(&quot;Q13 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q14 — Multiple Failed MFA Attempts
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given MFA event logs (event types: MFA_FAILED, MFA_SUCCESS), detect users
+  with more than N MFA failures.
+
+Security angle:
+  Repeated MFA failures signal either a targeted attack where the attacker
+  has the password but not the second factor, or a misconfigured authenticator
+  app. Locking MFA after N failures prevents brute force of OTP codes.
+&quot;&quot;&quot;
+
+
+def multiple_failed_mfa(logs: List[Dict], threshold: int = 3) -&gt; List[str]:
+    &quot;&quot;&quot;
+    Optimal: Counter filtered in one pass.
+    O(n) time, O(u) space.
+    &quot;&quot;&quot;
+    counts: Counter = Counter(
+        (log.get(&quot;user&quot;) or &quot;&quot;).lower()
+        for log in logs
+        if log.get(&quot;event&quot;) == &quot;MFA_FAILED&quot; and log.get(&quot;user&quot;)
+    )
+    return [u for u, c in counts.items() if c &gt; threshold]
+
+
+def test_q14():
+    logs = [
+        {&quot;event&quot;: &quot;MFA_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;MFA_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;MFA_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;MFA_FAILED&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;MFA_FAILED&quot;, &quot;user&quot;: &quot;bob&quot;},
+        {&quot;event&quot;: &quot;MFA_SUCCESS&quot;, &quot;user&quot;: &quot;alice&quot;},
+    ]
+    result = multiple_failed_mfa(logs, threshold=3)
+    assert &quot;alice&quot; in result
+    assert &quot;bob&quot; not in result
+    print(&quot;Q14 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q15 — MFA Push Fatigue Pattern
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  MFA push fatigue = attacker sends dozens of push notifications hoping the user
+  accidentally approves one. Detect users receiving &gt;= N push requests within
+  T seconds.
+
+Clarifying questions:
+  1. Is the window per-session or global rolling?
+  2. Should the window reset on approval?
+  3. What is T (seconds)?
+
+Security angle:
+  Push bombing / MFA fatigue is how attackers bypassed Okta, Cisco, and
+  Uber&#x27;s MFA in 2022. Mitigation: number matching, additional context in push,
+  hard limit on push frequency.
+&quot;&quot;&quot;
+from collections import deque
+
+
+def mfa_push_fatigue_naive(
+    logs: List[Dict],
+    push_threshold: int = 3,
+    window_seconds: int = 60,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Naive: group by user, sort, then slide through timestamps.
+    O(n log n) due to sort.
+    &quot;&quot;&quot;
+    user_ts: Dict[str, List[str]] = defaultdict(list)
+    for log in logs:
+        if log.get(&quot;event&quot;) == &quot;MFA_PUSH&quot; and log.get(&quot;user&quot;):
+            user_ts[log[&quot;user&quot;]].append(log[&quot;ts&quot;])
+
+    alerts = []
+    for user, timestamps in user_ts.items():
+        timestamps.sort()
+        dq: deque = deque()
+        for ts in timestamps:
+            try:
+                t = datetime.fromisoformat(ts.rstrip(&quot;Z&quot;))
+            except ValueError:
+                continue
+            dq.append(t)
+            # evict events outside the window
+            while dq and (t - dq[0]).total_seconds() &gt; window_seconds:
+                dq.popleft()
+            if len(dq) &gt;= push_threshold:
+                alerts.append({
+                    &quot;user&quot;: user,
+                    &quot;push_count&quot;: len(dq),
+                    &quot;window_start&quot;: dq[0].isoformat(),
+                    &quot;window_end&quot;: t.isoformat(),
+                })
+                break   # report once per burst
+    return alerts
+
+
+def mfa_push_fatigue(
+    logs: List[Dict],
+    push_threshold: int = 3,
+    window_seconds: int = 60,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: same sliding-window deque, but processes events already in time
+    order if logs are pre-sorted (common in streaming pipelines).
+    Data structure: deque for O(1) append and popleft.
+    O(n) amortised when input is sorted; O(n log n) with sort step.
+    &quot;&quot;&quot;
+    return mfa_push_fatigue_naive(logs, push_threshold, window_seconds)
+
+
+def test_q15():
+    logs = [
+        {&quot;ts&quot;: &quot;2026-05-29T08:04:00Z&quot;, &quot;event&quot;: &quot;MFA_PUSH&quot;, &quot;user&quot;: &quot;eve&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:04:10Z&quot;, &quot;event&quot;: &quot;MFA_PUSH&quot;, &quot;user&quot;: &quot;eve&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:04:20Z&quot;, &quot;event&quot;: &quot;MFA_PUSH&quot;, &quot;user&quot;: &quot;eve&quot;},
+        {&quot;ts&quot;: &quot;2026-05-29T08:10:00Z&quot;, &quot;event&quot;: &quot;MFA_PUSH&quot;, &quot;user&quot;: &quot;bob&quot;},
+    ]
+    alerts = mfa_push_fatigue(logs, push_threshold=3, window_seconds=60)
+    users = {a[&quot;user&quot;] for a in alerts}
+    assert &quot;eve&quot; in users
+    assert &quot;bob&quot; not in users
+    print(&quot;Q15 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q16 — Detect Account Lockout Burst
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given account status logs with event ACCOUNT_LOCKED and src_ip, detect IPs
+  (or /24 subnets) that cause more than N lockouts.
+
+Security angle:
+  Lockout bursts from one IP confirm an active brute-force attack. Detecting
+  at the subnet level catches distributed spray across /24 that would evade
+  per-IP rules. Trigger: block the subnet, alert SOC, notify affected users.
+&quot;&quot;&quot;
+
+
+def account_lockout_burst(
+    logs: List[Dict],
+    threshold: int = 3,
+    by_subnet: bool = False,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: Counter keyed by IP or /24 prefix.
+    O(n) time.
+    &quot;&quot;&quot;
+    def key(ip: str) -&gt; str:
+        if by_subnet:
+            parts = ip.split(&quot;.&quot;)
+            if len(parts) == 4:
+                return &quot;.&quot;.join(parts[:3]) + &quot;.0/24&quot;
+        return ip
+
+    counts: Counter = Counter()
+    for log in logs:
+        if log.get(&quot;event&quot;) != &quot;ACCOUNT_LOCKED&quot;:
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        if ip:
+            counts[key(ip)] += 1
+
+    return [
+        {&quot;ip_or_subnet&quot;: k, &quot;lockout_count&quot;: c}
+        for k, c in counts.items() if c &gt; threshold
+    ]
+
+
+def test_q16():
+    logs = [
+        {&quot;event&quot;: &quot;ACCOUNT_LOCKED&quot;, &quot;src_ip&quot;: &quot;10.0.0.1&quot;, &quot;user&quot;: &quot;alice&quot;},
+        {&quot;event&quot;: &quot;ACCOUNT_LOCKED&quot;, &quot;src_ip&quot;: &quot;10.0.0.2&quot;, &quot;user&quot;: &quot;bob&quot;},
+        {&quot;event&quot;: &quot;ACCOUNT_LOCKED&quot;, &quot;src_ip&quot;: &quot;10.0.0.3&quot;, &quot;user&quot;: &quot;carol&quot;},
+        {&quot;event&quot;: &quot;ACCOUNT_LOCKED&quot;, &quot;src_ip&quot;: &quot;10.0.0.4&quot;, &quot;user&quot;: &quot;dave&quot;},
+        {&quot;event&quot;: &quot;LOGIN_FAILED&quot;,   &quot;src_ip&quot;: &quot;9.9.9.9&quot;,  &quot;user&quot;: &quot;eve&quot;},
+    ]
+    # per-IP: none exceed threshold of 1
+    result_ip = account_lockout_burst(logs, threshold=1, by_subnet=False)
+    # per-/24: 10.0.0.0/24 has 4 lockouts
+    result_subnet = account_lockout_burst(logs, threshold=3, by_subnet=True)
+    subnets = [r[&quot;ip_or_subnet&quot;] for r in result_subnet]
+    assert &quot;10.0.0.0/24&quot; in subnets
+    print(&quot;Q16 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q17 — Detect High Error Rate Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Given HTTP access logs, compute error rate per endpoint (path).
+  Return endpoints where error_count / total_count &gt; threshold.
+
+Clarifying questions:
+  1. What counts as an error? 4xx, 5xx, or just 5xx?
+  2. Is the path normalised (strip query string)?
+  3. Minimum total requests to qualify (avoid noise from rarely hit endpoints)?
+
+Security angle:
+  High error rates on login endpoints may indicate brute force.
+  High 5xx rates can indicate a DoS attack or injection causing backend crashes.
+  High 404 rates on API paths indicate scanning or broken client integrations.
+&quot;&quot;&quot;
+
+
+def _is_error(status: int) -&gt; bool:
+    return status &gt;= 400
+
+
+def high_error_rate_endpoints_naive(
+    logs: List[Dict],
+    error_threshold: float = 0.5,
+    min_requests: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Naive: two dicts (total, error) then filter.&quot;&quot;&quot;
+    totals: Dict[str, int] = defaultdict(int)
+    errors: Dict[str, int] = defaultdict(int)
+    for log in logs:
+        path = log.get(&quot;path&quot;, &quot;&quot;).split(&quot;?&quot;)[0]  # strip query string
+        status = log.get(&quot;status&quot;, 0)
+        if not path:
+            continue
+        totals[path] += 1
+        if _is_error(status):
+            errors[path] += 1
+
+    return [
+        {
+            &quot;path&quot;: path,
+            &quot;error_rate&quot;: errors[path] / totals[path],
+            &quot;total&quot;: totals[path],
+            &quot;errors&quot;: errors[path],
+        }
+        for path in totals
+        if totals[path] &gt;= min_requests
+        and errors[path] / totals[path] &gt; error_threshold
+    ]
+
+
+def high_error_rate_endpoints(
+    logs: List[Dict],
+    error_threshold: float = 0.5,
+    min_requests: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: single-pass using one dict of (total, errors) tuples.
+    Reduces dict lookups by storing both counts together.
+    O(n) time, O(p) space where p = unique paths.
+    &quot;&quot;&quot;
+    path_stats: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # [total, errors]
+    for log in logs:
+        path = (log.get(&quot;path&quot;) or &quot;&quot;).split(&quot;?&quot;)[0]
+        status = log.get(&quot;status&quot;, 0)
+        if not path:
+            continue
+        path_stats[path][0] += 1
+        if _is_error(status):
+            path_stats[path][1] += 1
+
+    results = []
+    for path, (total, err_count) in path_stats.items():
+        if total &gt;= min_requests and err_count / total &gt; error_threshold:
+            results.append({
+                &quot;path&quot;: path,
+                &quot;error_rate&quot;: round(err_count / total, 3),
+                &quot;total&quot;: total,
+                &quot;errors&quot;: err_count,
+            })
+    results.sort(key=lambda r: -r[&quot;error_rate&quot;])
+    return results
+
+
+def test_q17():
+    logs = [
+        {&quot;path&quot;: &quot;/login&quot;, &quot;status&quot;: 401},
+        {&quot;path&quot;: &quot;/login&quot;, &quot;status&quot;: 401},
+        {&quot;path&quot;: &quot;/login&quot;, &quot;status&quot;: 401},
+        {&quot;path&quot;: &quot;/login&quot;, &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/login&quot;, &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/home&quot;,  &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/home&quot;,  &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/home&quot;,  &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/home&quot;,  &quot;status&quot;: 200},
+        {&quot;path&quot;: &quot;/home&quot;,  &quot;status&quot;: 200},
+    ]
+    results = high_error_rate_endpoints(logs, error_threshold=0.5, min_requests=5)
+    paths = [r[&quot;path&quot;] for r in results]
+    assert &quot;/login&quot; in paths
+    assert &quot;/home&quot; not in paths
+    print(&quot;Q17 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q18 — Detect 404 Scanning
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Detect IPs generating many 404 responses across DISTINCT paths.
+  A single IP hitting 10+ unique non-existent paths in a short session is
+  almost certainly a scanner (nikto, dirbuster, gobuster, etc.).
+
+Security angle:
+  Directory/file enumeration is reconnaissance phase of web attacks.
+  Tools like nikto, gobuster, and ffuf send thousands of requests to discover
+  hidden admin panels, backup files, and exposed configuration files.
+
+False positives:
+  - Broken links on a popular page causing legitimate 404s.
+  - Search engine crawlers with stale sitemaps.
+&quot;&quot;&quot;
+
+
+def detect_404_scanning_naive(
+    logs: List[Dict],
+    threshold: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;Naive: two dicts — one for distinct paths, one for total 404s.&quot;&quot;&quot;
+    ip_paths: Dict[str, set] = defaultdict(set)
+    for log in logs:
+        if log.get(&quot;status&quot;) == 404:
+            ip = log.get(&quot;src_ip&quot;)
+            path = (log.get(&quot;path&quot;) or &quot;&quot;).split(&quot;?&quot;)[0]
+            if ip and path:
+                ip_paths[ip].add(path)
+
+    return [
+        {&quot;src_ip&quot;: ip, &quot;distinct_404_paths&quot;: len(paths)}
+        for ip, paths in ip_paths.items()
+        if len(paths) &gt; threshold
+    ]
+
+
+def detect_404_scanning(
+    logs: List[Dict],
+    threshold: int = 5,
+) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: dict of sets, single pass.
+    Sets naturally deduplicate paths. O(n) time, O(i*p) space.
+    &quot;&quot;&quot;
+    ip_paths: Dict[str, set] = defaultdict(set)
+    for log in logs:
+        if log.get(&quot;status&quot;) != 404:
+            continue
+        ip = log.get(&quot;src_ip&quot;)
+        path = (log.get(&quot;path&quot;) or &quot;&quot;).split(&quot;?&quot;)[0]
+        if ip and path:
+            ip_paths[ip].add(path)
+
+    return sorted(
+        [
+            {&quot;src_ip&quot;: ip, &quot;distinct_404_paths&quot;: len(p)}
+            for ip, p in ip_paths.items()
+            if len(p) &gt; threshold
+        ],
+        key=lambda r: -r[&quot;distinct_404_paths&quot;],
+    )
+
+
+def test_q18():
+    logs = []
+    # Scanner: 10 distinct paths
+    for i in range(10):
+        logs.append({&quot;src_ip&quot;: &quot;192.0.2.55&quot;, &quot;path&quot;: f&quot;/path{i}&quot;, &quot;status&quot;: 404})
+    # Normal user: 1 broken link, repeated
+    for _ in range(3):
+        logs.append({&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;path&quot;: &quot;/broken&quot;, &quot;status&quot;: 404})
+
+    result = detect_404_scanning(logs, threshold=5)
+    ips = [r[&quot;src_ip&quot;] for r in result]
+    assert &quot;192.0.2.55&quot; in ips
+    assert &quot;1.1.1.1&quot; not in ips
+    print(&quot;Q18 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q19 — Detect Directory Traversal Attempts
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Find HTTP requests where the URL or parameters contain path traversal
+  patterns: ../, ..(backslash), %2e%2e, %2f, and encoded variants.
+
+Security angle:
+  Directory traversal allows attackers to read files outside the web root
+  (e.g., /etc/passwd, /proc/self/environ, Windows/system.ini).
+  CVE-2021-41773 (Apache) and CVE-2021-42013 are famous real-world examples.
+
+False positives:
+  - File sharing applications with legitimate .. in paths.
+  - Content management systems with deep relative path structures.
+&quot;&quot;&quot;
+
+# Traversal signatures covering encoded variants
+TRAVERSAL_PATTERNS = re.compile(
+    r&#x27;(\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|\.%2e/|%2e\./|%252e%252e)&#x27;,
+    re.IGNORECASE,
+)
+
+
+def detect_directory_traversal(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Regex-based detection. Decode URL encoding first to catch double-encoded
+    variants (%252e → %2e → .).
+    O(n * r) time where r = regex cost per string.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        raw_path = log.get(&quot;path&quot;) or log.get(&quot;url&quot;) or &quot;&quot;
+        # Decode once to catch %2e, twice to catch %252e
+        decoded_once  = urllib.parse.unquote(raw_path)
+        decoded_twice = urllib.parse.unquote(decoded_once)
+
+        for candidate in (raw_path, decoded_once, decoded_twice):
+            if TRAVERSAL_PATTERNS.search(candidate):
+                alerts.append({
+                    &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+                    &quot;path&quot;: raw_path,
+                    &quot;decoded&quot;: decoded_twice,
+                    &quot;ts&quot;: log.get(&quot;ts&quot;),
+                })
+                break
+    return alerts
+
+
+def test_q19():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;path&quot;: &quot;/files/../../etc/passwd&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;path&quot;: &quot;/files/%2e%2e%2fetc%2fpasswd&quot;},
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;, &quot;path&quot;: &quot;/files/%252e%252e/etc/passwd&quot;},
+        {&quot;src_ip&quot;: &quot;4.4.4.4&quot;, &quot;path&quot;: &quot;/files/report.pdf&quot;},             # benign
+    ]
+    results = detect_directory_traversal(logs)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;1.1.1.1&quot; in ips
+    assert &quot;2.2.2.2&quot; in ips
+    assert &quot;3.3.3.3&quot; in ips
+    assert &quot;4.4.4.4&quot; not in ips
+    print(&quot;Q19 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q20 — Detect SQL Injection Keywords
+# ─────────────────────────────────────────────────────────────────────────────
+&quot;&quot;&quot;
+Problem:
+  Flag HTTP requests containing common SQL injection patterns in the URL,
+  query parameters, or body. Patterns: &#x27; OR 1=1, UNION SELECT, --, ;DROP, etc.
+
+Security angle:
+  SQLi is OWASP Top 10 #3. Even failed attempts should be logged and the
+  source IP rate-limited or blocked. WAFs use signature lists similar to
+  this approach (ModSecurity CRS, AWS WAF SQLi rules).
+
+False positives:
+  - Security testing / vulnerability scanners.
+  - Legitimate SQL in code review tools or developer portals.
+&quot;&quot;&quot;
+
+SQLI_PATTERNS = re.compile(
+    r&quot;(\bunion\b.{0,20}\bselect\b&quot;
+    r&quot;|\bor\b.{0,10}1\s*=\s*1&quot;
+    r&quot;|--[\s;&#x27;\&quot;]?&quot;
+    r&quot;|\binsert\s+into\b&quot;
+    r&quot;|\bdrop\s+table\b&quot;
+    r&quot;|;\s*select\b&quot;
+    r&quot;|&#x27;\s*or\s*&#x27;1&#x27;\s*=\s*&#x27;1&quot;
+    r&quot;|sleep\s*\(\s*\d&quot;
+    r&quot;|benchmark\s*\(&quot;
+    r&quot;|\bexec\s*\()&quot;,
+    re.IGNORECASE,
+)
+
+
+def detect_sqli_naive(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;Simple regex scan over path + query string.&quot;&quot;&quot;
+    return [
+        log for log in logs
+        if SQLI_PATTERNS.search(
+            urllib.parse.unquote(log.get(&quot;path&quot;) or &quot;&quot;)
+        )
+    ]
+
+
+def detect_sqli(logs: List[Dict]) -&gt; List[Dict]:
+    &quot;&quot;&quot;
+    Optimal: decode URL once, scan with compiled regex.
+    Returns enriched alerts with matched pattern.
+    O(n) time with compiled regex being O(1) per match attempt.
+    &quot;&quot;&quot;
+    alerts = []
+    for log in logs:
+        raw = log.get(&quot;path&quot;) or log.get(&quot;url&quot;) or &quot;&quot;
+        decoded = urllib.parse.unquote(raw)
+        m = SQLI_PATTERNS.search(decoded)
+        if m:
+            alerts.append({
+                &quot;src_ip&quot;: log.get(&quot;src_ip&quot;),
+                &quot;path&quot;: raw,
+                &quot;matched_pattern&quot;: m.group(0)[:50],
+                &quot;ts&quot;: log.get(&quot;ts&quot;),
+            })
+    return alerts
+
+
+def test_q20():
+    logs = [
+        {&quot;src_ip&quot;: &quot;1.1.1.1&quot;, &quot;path&quot;: &quot;/product?id=1 UNION SELECT password FROM users&quot;},
+        {&quot;src_ip&quot;: &quot;2.2.2.2&quot;, &quot;path&quot;: &quot;/login?user=admin&#x27;--&quot;},
+        {&quot;src_ip&quot;: &quot;3.3.3.3&quot;, &quot;path&quot;: &quot;/search?q=hello+world&quot;},           # benign
+        {&quot;src_ip&quot;: &quot;4.4.4.4&quot;, &quot;path&quot;: &quot;/api?q=1%20OR%201%3D1&quot;},            # URL-encoded
+    ]
+    results = detect_sqli(logs)
+    ips = {r[&quot;src_ip&quot;] for r in results}
+    assert &quot;1.1.1.1&quot; in ips
+    assert &quot;2.2.2.2&quot; in ips
+    assert &quot;3.3.3.3&quot; not in ips
+    assert &quot;4.4.4.4&quot; in ips
+    print(&quot;Q20 tests passed&quot;)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run all tests
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == &quot;__main__&quot;:
+    test_q11()
+    test_q12()
+    test_q13()
+    test_q14()
+    test_q15()
+    test_q16()
+    test_q17()
+    test_q18()
+    test_q19()
+    test_q20()
+    print(&quot;\nAll Q11–Q20 tests passed ✓&quot;)
+</code></pre>
+</body>
+</html>

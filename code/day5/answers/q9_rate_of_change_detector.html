@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q9_rate_of_change_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q9_rate_of_change_detector.py</h1>
+  <p class="file-path">Source: code\day5\answers\q9_rate_of_change_detector.py</p>
+  <p class="line-count">290 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q9. Rate-of-Change Anomaly Detector
+=====================================
+Given a time-series list of (minute, event_count) tuples, flag any minute
+where the count increased by more than 3x compared to the previous minute.
+
+Output: list of (minute, prev_count, curr_count, multiplier)
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Detect DDoS spikes: flag any minute where event count jumps
+more than 3x over the previous minute.&quot;
+
+--- CANDIDATE FIRST RESPONSE (simple loop, no edge case handling) ---
+&quot;Loop from index 1 to end. If data[i] &gt; 3 * data[i-1], flag it.&quot;
+
+Follow-up: &quot;What if prev_count is 0?&quot;
+→ Division by zero / infinite multiplier. Need to handle zero baseline.
+  Options: skip if prev == 0, or treat any non-zero following a zero as a flag.
+
+Follow-up: &quot;What if data is not sorted by minute?&quot;
+→ Sort by minute first.
+
+Follow-up: &quot;What if there are gaps in minutes (minute 5 missing, then 6)?&quot;
+→ Should the gap count as &#x27;0 events&#x27; for minute 5? Likely yes for DDoS detection.
+  Fill gaps with 0 before computing rate-of-change.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Sort by minute, fill gaps with 0, handle zero-baseline,
+compute multiplier as float, clear output format.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import sys
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (minute, event_count) tuples
+SAMPLE_DATA = [
+    (1,  10),
+    (2,  12),
+    (3,  11),
+    (4,  13),
+    (5,   0),   # quiet minute — gap filled
+    (6,  45),   # spike after quiet: 0 → 45 (treat 0-baseline specially)
+    (7,  50),
+    (8, 180),   # 180 / 50 = 3.6x — should be FLAGGED
+    (9,  55),
+    (10, 200),  # 200 / 55 = 3.6x — should be FLAGGED
+    (11, 210),
+    (12, 205),
+    (13,  60),
+    # Gap: minute 14 is missing
+    (15, 250),  # comes after a gap — gap filled with 0
+    (16, 255),
+]
+
+SPIKE_THRESHOLD = 3.0  # flag if curr / prev &gt; this multiplier
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GAP FILLER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fill_gaps(time_series):
+    &quot;&quot;&quot;
+    Given a list of (minute, count) sorted by minute,
+    return a new list with missing minutes filled as (minute, 0).
+    &quot;&quot;&quot;
+    if not time_series:
+        return []
+
+    filled = []
+    for i, (minute, count) in enumerate(time_series):
+        if i == 0:
+            filled.append((minute, count))
+        else:
+            prev_minute = time_series[i - 1][0]
+            # Fill any missing minutes in between
+            for gap_minute in range(prev_minute + 1, minute):
+                filled.append((gap_minute, 0))
+            filled.append((minute, count))
+
+    return filled
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual sort, manual gap fill, no enumerate, explicit indexing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_sort_by_minute(data):
+    &quot;&quot;&quot;Sort list of (minute, count) tuples by minute ascending.&quot;&quot;&quot;
+    # Insertion sort
+    for i in range(1, len(data)):
+        cur = data[i]
+        j = i - 1
+        while j &gt;= 0 and data[j][0] &gt; cur[0]:
+            data[j + 1] = data[j]
+            j -= 1
+        data[j + 1] = cur
+    return data
+
+
+def detect_without_builtins(time_series):
+    &quot;&quot;&quot;
+    Returns list of (minute, prev_count, curr_count, multiplier) for spikes.
+    &quot;&quot;&quot;
+    if not time_series:
+        return []
+
+    # Validate input
+    for item in time_series:
+        if not (isinstance(item, (list, tuple)) and len(item) == 2):
+            raise ValueError(f&quot;Expected (minute, count) tuple, got: {item}&quot;)
+        if item[1] &lt; 0:
+            raise ValueError(f&quot;Event count cannot be negative: {item}&quot;)
+
+    # Sort by minute
+    data = _manual_sort_by_minute(list(time_series))
+
+    # Fill gaps manually
+    filled = []
+    for i in range(len(data)):
+        minute, count = data[i]
+        if i == 0:
+            filled.append((minute, count))
+        else:
+            prev_minute = data[i - 1][0]
+            gap = minute - prev_minute - 1
+            gap_idx = 0
+            while gap_idx &lt; gap:
+                filled.append((prev_minute + 1 + gap_idx, 0))
+                gap_idx += 1
+            filled.append((minute, count))
+
+    # Detect spikes
+    flagged = []
+    for i in range(1, len(filled)):
+        curr_minute, curr_count = filled[i]
+        _, prev_count           = filled[i - 1]
+
+        if prev_count == 0:
+            # Can&#x27;t compute a meaningful multiplier.
+            # Flag if curr_count &gt; 0 as a spike from silence.
+            if curr_count &gt; 0:
+                flagged.append((curr_minute, prev_count, curr_count, float(&quot;inf&quot;)))
+            continue
+
+        multiplier = curr_count / prev_count
+        if multiplier &gt; SPIKE_THRESHOLD:
+            # Round to 2 decimal places manually
+            rounded = int(multiplier * 100) / 100
+            flagged.append((curr_minute, prev_count, curr_count, rounded))
+
+    return flagged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (sorted, enumerate, round)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_with_builtins(time_series):
+    if not time_series:
+        return []
+
+    for item in time_series:
+        if not (isinstance(item, (list, tuple)) and len(item) == 2):
+            raise ValueError(f&quot;Expected (minute, count) tuple, got: {item}&quot;)
+        if item[1] &lt; 0:
+            raise ValueError(f&quot;Event count cannot be negative: {item}&quot;)
+
+    data   = sorted(time_series, key=lambda x: x[0])
+    filled = fill_gaps(data)
+
+    flagged = []
+    for i, (curr_minute, curr_count) in enumerate(filled):
+        if i == 0:
+            continue
+        _, prev_count = filled[i - 1]
+
+        if prev_count == 0:
+            if curr_count &gt; 0:
+                flagged.append((curr_minute, prev_count, curr_count, float(&quot;inf&quot;)))
+            continue
+
+        multiplier = curr_count / prev_count
+        if multiplier &gt; SPIKE_THRESHOLD:
+            flagged.append((curr_minute, prev_count, curr_count, round(multiplier, 2)))
+
+    return flagged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(flagged, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*65}&quot;)
+    print(f&quot;  RATE-OF-CHANGE ANOMALY REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*65}&quot;)
+    print(f&quot;Spike threshold: &gt; {SPIKE_THRESHOLD}x increase\n&quot;)
+
+    if not flagged:
+        print(&quot;  No anomalies detected.\n&quot;)
+        return
+
+    print(f&quot;{&#x27;Minute&#x27;:&lt;8} {&#x27;Prev Count&#x27;:&lt;12} {&#x27;Curr Count&#x27;:&lt;12} {&#x27;Multiplier&#x27;}&quot;)
+    print(f&quot;{&#x27;-&#x27;*7}  {&#x27;-&#x27;*11}  {&#x27;-&#x27;*11}  {&#x27;-&#x27;*10}&quot;)
+    for minute, prev, curr, mult in flagged:
+        mult_str = &quot;∞ (zero→nonzero)&quot; if mult == float(&quot;inf&quot;) else f&quot;{mult:.2f}x&quot;
+        print(f&quot;{minute:&lt;8} {prev:&lt;12} {curr:&lt;12} {mult_str}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    &quot;&quot;&quot;
+    Demonstrates with built-in sample data.
+    In production: load (minute, count) data from a metrics store or log aggregator.
+    &quot;&quot;&quot;
+    print(&quot;[INFO] Using built-in sample data.\n&quot;)
+
+    try:
+        flagged_manual  = detect_without_builtins(SAMPLE_DATA)
+        flagged_builtin = detect_with_builtins(SAMPLE_DATA)
+    except ValueError as exc:
+        print(f&quot;[ERROR] Invalid input: {exc}&quot;, file=sys.stderr)
+        sys.exit(1)
+
+    print_report(flagged_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(flagged_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check (inf values can&#x27;t be compared with ==, so compare carefully)
+    assert len(flagged_manual) == len(flagged_builtin), \
+        f&quot;Count mismatch: {len(flagged_manual)} vs {len(flagged_builtin)}&quot;
+    for m, b in zip(flagged_manual, flagged_builtin):
+        assert m[0] == b[0], f&quot;Minute mismatch: {m[0]} vs {b[0]}&quot;
+    print(&quot;[OK] Both approaches agree.\n&quot;)
+
+    # Edge case tests
+    print(&quot;--- Edge Case Tests ---&quot;)
+    print(&quot;Empty input:      &quot;, detect_with_builtins([]))
+    print(&quot;Single point:     &quot;, detect_with_builtins([(1, 100)]))
+    print(&quot;All zeros:        &quot;, detect_with_builtins([(1,0),(2,0),(3,0)]))
+    print(&quot;Zero then spike:  &quot;, detect_with_builtins([(1,0),(2,50)]))
+    print(&quot;No spike:         &quot;, detect_with_builtins([(1,10),(2,11),(3,12)]))
+    print()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Sort    : O(N log N)
+# Gap fill: O(M) where M = total minutes span (can be &gt;&gt; N if sparse)
+# Scan    : O(M)
+# Overall : O(N log N + M)
+#
+# NOTE: If M &gt;&gt; N (e.g., N=1000 events spanning 100000 minutes), gap filling
+# is expensive. Use a sparse approach: only compare consecutive actual data
+# points and compute the effective rate across the gap.
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;What if you need to detect spikes in a STREAMING feed, not a batch?&quot;
+#     → Keep only the last event count in state. No need for the full list.
+#       Emit an alert immediately when threshold is crossed.
+# - &quot;What if the data has noise — one-off spikes that aren&#x27;t real DDoS?&quot;
+#     → Use a rolling average instead of previous minute:
+#       flag if curr &gt; threshold * avg(last_N_minutes).
+#       This makes it more robust to single-minute noise.
+# - &quot;How would you set the threshold dynamically?&quot;
+#     → Use statistical methods: flag if curr &gt; mean + k * stddev of a
+#       rolling window. Adjust k based on desired false-positive rate.
+# - &quot;Can you detect a sustained attack that ramps up gradually (no single spike)?&quot;
+#     → Rate-of-change alone won&#x27;t catch it. Combine with an absolute
+#       threshold and a trend detector (e.g., 10 consecutive increases).
+# =============================================================================
+</code></pre>
+</body>
+</html>

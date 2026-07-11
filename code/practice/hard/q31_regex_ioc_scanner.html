@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q31_regex_ioc_scanner.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q31_regex_ioc_scanner.py</h1>
+  <p class="file-path">Source: code\practice\hard\q31_regex_ioc_scanner.py</p>
+  <p class="line-count">447 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q31 [Hard] — Regex-Based IOC Scanner (ReDoS-Safe)
+=============================================================================
+
+PROBLEM
+-------
+Build an IOC (Indicator of Compromise) scanner that:
+  1. Detects IPs, domains, URLs, file hashes (MD5/SHA1/SHA256),
+     CVE IDs, email addresses, registry keys, and custom patterns.
+  2. Compiles all regex patterns at startup.
+  3. Applies ReDoS (Regular Expression Denial of Service) detection
+     heuristics to reject unsafe patterns before compilation.
+  4. Applies scan timeout to bound worst-case execution time.
+  5. Returns structured IOC objects with type, value, and context.
+
+CLARIFYING QUESTIONS
+--------------------
+1. What types of IOCs?
+   → IPv4, domain, URL, MD5, SHA1, SHA256, CVE, email, file path,
+     registry key, custom user-supplied patterns.
+2. ReDoS prevention?
+   → Static analysis heuristics (nested quantifiers, catastrophic patterns).
+     Optionally: timeout via threading.
+3. Input: file path or raw text?
+   → Raw text or bytes; caller loads file.
+4. Deduplicate results?
+   → Yes; return unique IOC values per type.
+5. Normalise output?
+   → Yes; lowercase domains, normalise IPs, uppercase hashes.
+
+=============================================================================
+APPROACH 1 — NAIVE (compile and apply one regex at a time)
+=============================================================================
+  Sequential: compile each pattern, scan text, collect results.
+  O(P × M) per scan (P = patterns, M = text length).
+  No ReDoS detection.
+
+=============================================================================
+APPROACH 2 — PRE-COMPILED REGISTRY + REDOS FILTER (RECOMMENDED)
+=============================================================================
+  1. Define IOC patterns as a registry with metadata.
+  2. On load: run ReDoS heuristics; reject unsafe patterns.
+  3. Batch patterns into categories; findall per category.
+  4. Apply optional timeout via threading for custom patterns.
+  O(P × M) but with early rejection of dangerous patterns.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# ReDoS Heuristics
+# ---------------------------------------------------------------------------
+# Patterns that indicate potential catastrophic backtracking:
+#   (a+)+  or  (a*)*  or  (a|aa)+  or  (a+b+)+
+
+_REDOS_PATTERNS = [
+    re.compile(r&quot;\([^)]*[+*][^)]*\)[+*]&quot;),              # (x+)+ or (x*)* style
+    re.compile(r&quot;\([^)]*\|[^)]*\)[+*]&quot;),                # (a|b)+ with overlap possible
+    re.compile(r&quot;\([^)]*[+*][^)]*\)\{[0-9,]+\}&quot;),       # (x+){n,m}
+    re.compile(r&quot;\w[+*]\w[+*].*\)&quot;),                    # nested quantifiers general
+]
+
+
+def is_redos_safe(pattern: str) -&gt; Tuple[bool, str]:
+    &quot;&quot;&quot;
+    Return (is_safe, reason).
+    Uses simple heuristics; not a complete analysis.
+    &quot;&quot;&quot;
+    for hp in _REDOS_PATTERNS:
+        if hp.search(pattern):
+            return False, f&quot;Potential ReDoS: nested quantifier near &#x27;{hp.pattern}&#x27;&quot;
+    # Reject extremely long patterns
+    if len(pattern) &gt; 2000:
+        return False, &quot;Pattern too long (&gt; 2000 chars)&quot;
+    return True, &quot;&quot;
+
+
+# ---------------------------------------------------------------------------
+# IOC Regex Registry
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IOCPattern:
+    ioc_type: str
+    pattern: str
+    compiled: Optional[re.Pattern] = field(default=None, repr=False)
+    flags: int = re.IGNORECASE
+    normalise: Optional[Any] = None   # callable: str → str
+
+
+def _normalise_domain(v: str) -&gt; str:
+    return v.strip().lower().rstrip(&quot;.&quot;)
+
+def _normalise_ip(v: str) -&gt; str:
+    return v.strip()
+
+def _normalise_hash(v: str) -&gt; str:
+    return v.strip().upper()
+
+def _normalise_cve(v: str) -&gt; str:
+    return v.strip().upper()
+
+def _normalise_url(v: str) -&gt; str:
+    return v.strip()
+
+def _normalise_email(v: str) -&gt; str:
+    return v.strip().lower()
+
+
+# Built-in IOC pattern definitions (safe, pre-vetted)
+_BUILTIN_PATTERNS: List[IOCPattern] = [
+    IOCPattern(
+        ioc_type=&quot;ipv4&quot;,
+        pattern=r&quot;\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b&quot;,
+        normalise=_normalise_ip,
+    ),
+    IOCPattern(
+        ioc_type=&quot;domain&quot;,
+        pattern=r&quot;\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|gov|edu|co|uk|ru|cn|de|fr|jp|br|in|info|biz|xyz|top|club|online|site|tech)\b&quot;,
+        normalise=_normalise_domain,
+    ),
+    IOCPattern(
+        ioc_type=&quot;url&quot;,
+        pattern=r&quot;https?://[^\s&lt;&gt;\&quot;&#x27;]{8,512}&quot;,
+        normalise=_normalise_url,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;md5&quot;,
+        pattern=r&quot;\b[a-f0-9]{32}\b&quot;,
+        normalise=_normalise_hash,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;sha1&quot;,
+        pattern=r&quot;\b[a-f0-9]{40}\b&quot;,
+        normalise=_normalise_hash,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;sha256&quot;,
+        pattern=r&quot;\b[a-f0-9]{64}\b&quot;,
+        normalise=_normalise_hash,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;cve&quot;,
+        pattern=r&quot;\bCVE-\d{4}-\d{4,7}\b&quot;,
+        normalise=_normalise_cve,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;email&quot;,
+        pattern=r&quot;\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b&quot;,
+        normalise=_normalise_email,
+    ),
+    IOCPattern(
+        ioc_type=&quot;windows_path&quot;,
+        pattern=r&quot;\b[A-Z]:\\(?:[^\\\s&lt;&gt;\&quot;:|?*\x00-\x1f]{1,255}\\)*[^\\\s&lt;&gt;\&quot;:|?*\x00-\x1f]{1,255}\b&quot;,
+        flags=re.IGNORECASE,
+    ),
+    IOCPattern(
+        ioc_type=&quot;registry_key&quot;,
+        pattern=r&quot;\b(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKLM|HKCU)\\[^\s\&quot;]{4,200}\b&quot;,
+        flags=re.IGNORECASE,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IOC:
+    ioc_type: str
+    value: str
+    raw_value: str
+    context: str = &quot;&quot;    # surrounding text snippet
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
+
+class _TimeoutError(Exception):
+    pass
+
+
+def _run_with_timeout(func, args, timeout_s: float):
+    &quot;&quot;&quot;Run func(*args) with a timeout; raise _TimeoutError on expiry.&quot;&quot;&quot;
+    result = [None]
+    exc = [None]
+
+    def target():
+        try:
+            result[0] = func(*args)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise _TimeoutError(f&quot;Pattern scan timed out after {timeout_s}s&quot;)
+    if exc[0]:
+        raise exc[0]
+    return result[0]
+
+
+class IOCScanner:
+    &quot;&quot;&quot;
+    Compiled IOC scanner with ReDoS filtering.
+    &quot;&quot;&quot;
+
+    def __init__(
+        self,
+        include_types: Optional[Set[str]] = None,
+        exclude_types: Optional[Set[str]] = None,
+        deduplicate: bool = True,
+        context_chars: int = 40,
+        scan_timeout_s: float = 5.0,
+    ) -&gt; None:
+        self.deduplicate = deduplicate
+        self.context_chars = context_chars
+        self.scan_timeout_s = scan_timeout_s
+        self._patterns: List[IOCPattern] = []
+
+        for p in _BUILTIN_PATTERNS:
+            if include_types and p.ioc_type not in include_types:
+                continue
+            if exclude_types and p.ioc_type in exclude_types:
+                continue
+            try:
+                p.compiled = re.compile(p.pattern, p.flags)
+                self._patterns.append(p)
+            except re.error:
+                pass  # Skip invalid builtins (shouldn&#x27;t happen)
+
+    def add_custom_pattern(self, ioc_type: str, pattern: str,
+                           flags: int = re.IGNORECASE) -&gt; Tuple[bool, str]:
+        &quot;&quot;&quot;Add a user-supplied pattern; runs ReDoS check first.&quot;&quot;&quot;
+        safe, reason = is_redos_safe(pattern)
+        if not safe:
+            return False, reason
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as e:
+            return False, f&quot;Regex compile error: {e}&quot;
+        self._patterns.append(IOCPattern(
+            ioc_type=ioc_type, pattern=pattern,
+            compiled=compiled, flags=flags,
+        ))
+        return True, &quot;ok&quot;
+
+    def scan(self, text: str) -&gt; List[IOC]:
+        results: List[IOC] = []
+        seen: Set[Tuple[str, str]] = set()
+
+        for ioc_pat in self._patterns:
+            if ioc_pat.compiled is None:
+                continue
+
+            def _search(pattern=ioc_pat.compiled, data=text):
+                return list(pattern.finditer(data))
+
+            try:
+                matches = _run_with_timeout(_search, (), self.scan_timeout_s)
+            except _TimeoutError:
+                # Pattern timed out; skip it
+                continue
+
+            for m in (matches or []):
+                raw = m.group(0)
+                value = ioc_pat.normalise(raw) if ioc_pat.normalise else raw
+                key = (ioc_pat.ioc_type, value)
+                if self.deduplicate and key in seen:
+                    continue
+                seen.add(key)
+                # Extract context
+                start = max(0, m.start() - self.context_chars)
+                end = min(len(text), m.end() + self.context_chars)
+                ctx = text[start:end].replace(&quot;\n&quot;, &quot; &quot;)
+                results.append(IOC(
+                    ioc_type=ioc_pat.ioc_type, value=value,
+                    raw_value=raw, context=ctx,
+                ))
+
+        return results
+
+    def scan_by_type(self, text: str) -&gt; Dict[str, List[str]]:
+        &quot;&quot;&quot;Return dict of ioc_type → list of unique values.&quot;&quot;&quot;
+        iocs = self.scan(text)
+        result: Dict[str, List[str]] = {}
+        for ioc in iocs:
+            result.setdefault(ioc.ioc_type, []).append(ioc.value)
+        return result
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive (sequential, no ReDoS check, no dedup)
+# ---------------------------------------------------------------------------
+
+class NaiveIOCScanner:
+    &quot;&quot;&quot;Simple scanner; no ReDoS checking or deduplication.&quot;&quot;&quot;
+
+    def __init__(self) -&gt; None:
+        self._patterns = [(p.ioc_type, re.compile(p.pattern, p.flags))
+                          for p in _BUILTIN_PATTERNS]
+
+    def scan(self, text: str) -&gt; List[IOC]:
+        results = []
+        for ioc_type, pat in self._patterns:
+            for m in pat.finditer(text):
+                results.append(IOC(ioc_type=ioc_type, value=m.group(0),
+                                   raw_value=m.group(0)))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+SAMPLE_LOG = &quot;&quot;&quot;
+2024-01-15T10:23:45Z src=192.168.1.50 dst=10.200.5.5 url=https://evilc2.net/beacon
+User-Agent: Mozilla/5.0 (malware_sample/3.1)
+File hash md5=d41d8cd98f00b204e9800998ecf8427e found at C:\\Windows\\Temp\\drop.exe
+CVE-2023-44487 (HTTP2 Rapid Reset) exploited by actor@phishing.com
+SHA256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+Contact admin@target-corp.com for details.
+Registry key: HKEY_LOCAL_MACHINE\\SOFTWARE\\evil\\persist
+&quot;&quot;&quot;
+
+
+def test_ipv4():
+    s = IOCScanner(include_types={&quot;ipv4&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert &quot;192.168.1.50&quot; in result.get(&quot;ipv4&quot;, [])
+    print(f&quot;IPv4: passed → {result.get(&#x27;ipv4&#x27;, [])}&quot;)
+
+
+def test_url():
+    s = IOCScanner(include_types={&quot;url&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert any(&quot;evilc2.net&quot; in u for u in result.get(&quot;url&quot;, []))
+    print(f&quot;URL: passed → {result.get(&#x27;url&#x27;, [])}&quot;)
+
+
+def test_hashes():
+    s = IOCScanner(include_types={&quot;md5&quot;, &quot;sha256&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert result.get(&quot;md5&quot;), &quot;Expected MD5 match&quot;
+    assert result.get(&quot;sha256&quot;), &quot;Expected SHA256 match&quot;
+    print(f&quot;Hashes: passed → md5={result.get(&#x27;md5&#x27;)}, sha256={result.get(&#x27;sha256&#x27;)}&quot;)
+
+
+def test_cve():
+    s = IOCScanner(include_types={&quot;cve&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert &quot;CVE-2023-44487&quot; in result.get(&quot;cve&quot;, [])
+    print(f&quot;CVE: passed → {result.get(&#x27;cve&#x27;, [])}&quot;)
+
+
+def test_email():
+    s = IOCScanner(include_types={&quot;email&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert result.get(&quot;email&quot;), f&quot;Expected email; got {result}&quot;
+    print(f&quot;Email: passed → {result.get(&#x27;email&#x27;, [])}&quot;)
+
+
+def test_registry():
+    s = IOCScanner(include_types={&quot;registry_key&quot;})
+    result = s.scan_by_type(SAMPLE_LOG)
+    assert result.get(&quot;registry_key&quot;), f&quot;Expected registry key; got {result}&quot;
+    print(f&quot;Registry: passed → {result.get(&#x27;registry_key&#x27;, [])}&quot;)
+
+
+def test_redos_rejection():
+    s = IOCScanner()
+    ok, reason = s.add_custom_pattern(&quot;test&quot;, r&quot;(a+)+&quot;)
+    assert not ok, &quot;Expected ReDoS pattern to be rejected&quot;
+    print(f&quot;ReDoS rejection: passed → {reason}&quot;)
+
+
+def test_custom_pattern():
+    s = IOCScanner()
+    ok, _ = s.add_custom_pattern(&quot;c2_beacon&quot;, r&quot;\bbeacon_token=[a-f0-9]{32}\b&quot;)
+    assert ok
+    result = s.scan(&quot;beacon_token=deadbeef00112233445566778899aabb&quot;)
+    assert result and result[0].ioc_type == &quot;c2_beacon&quot;
+    print(&quot;Custom pattern: passed&quot;)
+
+
+def test_naive():
+    s = NaiveIOCScanner()
+    results = s.scan(SAMPLE_LOG)
+    types = {r.ioc_type for r in results}
+    assert &quot;ipv4&quot; in types
+    assert &quot;cve&quot; in types
+    print(f&quot;Naive scanner: passed → types={types}&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+REDOS ATTACKS
+  ReDoS exploits catastrophic backtracking in regex engines.
+  Pattern (a+)+ on &quot;aaaaaaaaaaaaaab&quot; causes exponential backtracking.
+  Impact: CPU exhaustion; has caused outages at Cloudflare (2019) and Stack
+  Overflow (2016).
+
+SAFE REGEX PRACTICES
+  1. Avoid nested quantifiers: (x+)+ → linear (anchored) alternatives.
+  2. Use possessive quantifiers or atomic groups where available (not in Python re).
+  3. Use the &#x27;re2&#x27; library (linear-time matching) instead of &#x27;re&#x27; for
+     untrusted patterns.
+  4. Apply timeouts on all user-supplied regex evaluation.
+  5. Validate patterns with heuristics before compilation.
+
+IOC SCANNER CONTEXT
+  Threat-intel feeds produce millions of IOC regexes.
+  Always sanitise and rate-limit pattern loading.
+  Combine with Aho-Corasick (Q30) for exact-string IOCs; reserve regex
+  for complex patterns where exact matching is insufficient.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_ipv4()
+    test_url()
+    test_hashes()
+    test_cve()
+    test_email()
+    test_registry()
+    test_redos_rejection()
+    test_custom_pattern()
+    test_naive()
+</code></pre>
+</body>
+</html>

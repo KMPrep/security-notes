@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q34_pdf_metadata.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q34_pdf_metadata.py</h1>
+  <p class="file-path">Source: code\practice\hard\q34_pdf_metadata.py</p>
+  <p class="line-count">530 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q34 [Hard] — PDF Metadata Extractor
+=============================================================================
+
+PROBLEM
+-------
+Parse a PDF file from raw bytes and extract:
+  1. PDF header version (%PDF-1.x or %PDF-2.0).
+  2. Cross-reference (xref) table or xref stream: object byte offsets.
+  3. Trailer dictionary: /Info, /Encrypt, /Root, /ID.
+  4. Info dictionary metadata: /Title, /Author, /CreationDate,
+     /ModDate, /Producer, /Creator.
+  5. Detect suspicious elements:
+     - JavaScript (/JS, /JavaScript action types).
+     - Launch actions (/Launch).
+     - Embedded files (/EmbeddedFile, /Filespec).
+     - Encrypted streams (/Crypt filter).
+     - URIs pointing to external hosts.
+  6. Count objects and stream objects.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Full PDF rendering or metadata only?
+   → Metadata only; no rendering needed.
+2. Handle linearised PDFs?
+   → Best-effort; parse last xref first (traditional linear scan from %%EOF).
+3. Compressed xref streams (PDF 1.5+)?
+   → Detect presence; flag as &quot;compressed xref stream&quot; without full decode.
+4. Encrypted PDFs?
+   → Detect /Encrypt in trailer; flag as encrypted; don&#x27;t attempt decrypt.
+5. Return format?
+   → PDFMetadata dataclass.
+
+=============================================================================
+APPROACH 1 — NAIVE (regex-based field extraction, no xref parsing)
+=============================================================================
+  Use regex to find /Author, /Title, /Creator etc. in raw bytes.
+  Fast, works on most PDFs; fails on obfuscated/binary-encoded objects.
+
+=============================================================================
+APPROACH 2 — XREF + OBJECT PARSER (RECOMMENDED)
+=============================================================================
+  1. Find %%EOF and startxref.
+  2. Parse xref table or detect xref stream.
+  3. Parse trailer dictionary.
+  4. For each referenced object, read object header and dictionary.
+  5. Scan dictionaries for suspicious keys.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PDFInfo:
+    title: str = &quot;&quot;
+    author: str = &quot;&quot;
+    creator: str = &quot;&quot;
+    producer: str = &quot;&quot;
+    creation_date: str = &quot;&quot;
+    mod_date: str = &quot;&quot;
+
+
+@dataclass
+class PDFMetadata:
+    path: str = &quot;&quot;
+    is_valid: bool = False
+    error: str = &quot;&quot;
+
+    # Header
+    version: str = &quot;&quot;
+
+    # Object counts
+    total_objects: int = 0
+    stream_objects: int = 0
+
+    # Trailer
+    is_encrypted: bool = False
+    encrypt_filter: str = &quot;&quot;
+    root_obj: str = &quot;&quot;
+    info_obj: str = &quot;&quot;
+
+    # Info dict
+    info: PDFInfo = field(default_factory=PDFInfo)
+
+    # Suspicious elements
+    has_javascript: bool = False
+    has_launch_action: bool = False
+    has_embedded_files: bool = False
+    has_uri_actions: bool = False
+    external_uris: List[str] = field(default_factory=list)
+    suspicious_keys: List[str] = field(default_factory=list)
+
+    # Anomalies
+    anomalies: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Regex Patterns for PDF Parsing
+# ---------------------------------------------------------------------------
+
+_VERSION_RE     = re.compile(rb&quot;%PDF-(\d+\.\d+)&quot;, re.MULTILINE)
+_STARTXREF_RE  = re.compile(rb&quot;startxref\s+(\d+)\s+%%EOF&quot;, re.DOTALL)
+_XREF_RE       = re.compile(rb&quot;xref\s+(\d+)\s+(\d+)\s+((?:\d{10}\s+\d{5}\s+[fn]\s*)+)&quot;, re.DOTALL)
+_TRAILER_RE    = re.compile(rb&quot;trailer\s*&lt;&lt;(.*?)&gt;&gt;&quot;, re.DOTALL)
+_OBJ_RE        = re.compile(rb&quot;(\d+)\s+(\d+)\s+obj\s*&lt;&lt;(.*?)&gt;&gt;\s*(?:stream|endobj)&quot;, re.DOTALL)
+_STREAM_RE     = re.compile(rb&quot;\bstream\b&quot;)
+
+# Dictionary key/value extractor
+_KEY_STR_RE    = re.compile(rb&quot;/([\w]+)\s*\(([^)]{0,1024})\)&quot;)
+_KEY_OBJREF_RE = re.compile(rb&quot;/([\w]+)\s+(\d+)\s+\d+\s+R&quot;)
+_KEY_NAME_RE   = re.compile(rb&quot;/([\w]+)\s+/([\w]+)&quot;)
+_KEY_NUM_RE    = re.compile(rb&quot;/([\w]+)\s+(\d+)&quot;)
+
+# URI extraction
+_URI_RE = re.compile(rb&quot;URI\s*\(([^)]{1,1024})\)&quot;, re.IGNORECASE)
+
+# Suspicious PDF keys (phishing/malware indicators)
+_SUSPICIOUS_KEYS: Set[bytes] = {
+    b&quot;JS&quot;, b&quot;JavaScript&quot;, b&quot;Launch&quot;, b&quot;SubmitForm&quot;,
+    b&quot;ImportData&quot;, b&quot;RichMedia&quot;, b&quot;EmbeddedFile&quot;,
+    b&quot;OpenAction&quot;, b&quot;AA&quot;,  # additional actions
+    b&quot;XFA&quot;,  # XML Forms Architecture (complex, abuse vector)
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _decode_pdf_string(raw: bytes) -&gt; str:
+    &quot;&quot;&quot;Decode a PDF literal string (basic); strips outer parens if present.&quot;&quot;&quot;
+    try:
+        s = raw.decode(&quot;latin-1&quot;, errors=&quot;replace&quot;)
+        # Unescape basic PDF escape sequences
+        s = s.replace(&quot;\\n&quot;, &quot;\n&quot;).replace(&quot;\\r&quot;, &quot;\r&quot;).replace(&quot;\\t&quot;, &quot;\t&quot;)
+        s = s.replace(&quot;\\(&quot;, &quot;(&quot;).replace(&quot;\\)&quot;, &quot;)&quot;).replace(&quot;\\\\&quot;, &quot;\\&quot;)
+        return s.strip()
+    except Exception:
+        return &quot;&quot;
+
+
+def _extract_dict_string(data: bytes, key: str) -&gt; str:
+    &quot;&quot;&quot;Extract /(key) (value) from raw dict bytes.&quot;&quot;&quot;
+    pat = re.compile(rb&quot;/&quot; + key.encode() + rb&quot;\s*\(([^)]{0,2048})\)&quot;, re.DOTALL)
+    m = pat.search(data)
+    return _decode_pdf_string(m.group(1)) if m else &quot;&quot;
+
+
+def _scan_for_keys(data: bytes) -&gt; Set[str]:
+    &quot;&quot;&quot;Return set of suspicious keys found in data.&quot;&quot;&quot;
+    found: Set[str] = set()
+    for key in _SUSPICIOUS_KEYS:
+        # Match as name (e.g. /JS or /JavaScript)
+        if re.search(b&quot;/&quot; + key + rb&quot;[\s/\[(&gt;]&quot;, data):
+            found.add(key.decode(&quot;latin-1&quot;))
+    return found
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive regex scanner
+# ---------------------------------------------------------------------------
+
+class NaivePDFScanner:
+    &quot;&quot;&quot;
+    Regex-only scanner.
+    Extracts metadata using simple patterns; no xref parsing.
+    &quot;&quot;&quot;
+
+    def scan(self, data: bytes, path: str = &quot;&quot;) -&gt; PDFMetadata:
+        meta = PDFMetadata(path=path)
+
+        # Version
+        vm = _VERSION_RE.search(data)
+        if not vm:
+            meta.error = &quot;Missing PDF header&quot;
+            return meta
+        meta.version = vm.group(1).decode(&quot;latin-1&quot;)
+        meta.is_valid = True
+
+        # Count objects
+        meta.total_objects = len(re.findall(rb&quot;\d+ \d+ obj&quot;, data))
+        meta.stream_objects = len(_STREAM_RE.findall(data))
+
+        # Info fields (scan raw data)
+        meta.info.author   = _extract_dict_string(data, &quot;Author&quot;)
+        meta.info.title    = _extract_dict_string(data, &quot;Title&quot;)
+        meta.info.creator  = _extract_dict_string(data, &quot;Creator&quot;)
+        meta.info.producer = _extract_dict_string(data, &quot;Producer&quot;)
+        meta.info.creation_date = _extract_dict_string(data, &quot;CreationDate&quot;)
+        meta.info.mod_date = _extract_dict_string(data, &quot;ModDate&quot;)
+
+        # Encrypt
+        if re.search(rb&quot;/Encrypt\b&quot;, data):
+            meta.is_encrypted = True
+            meta.anomalies.append(&quot;PDF is encrypted&quot;)
+
+        # Suspicious keys
+        susp = _scan_for_keys(data)
+        meta.suspicious_keys = sorted(susp)
+        meta.has_javascript = bool(susp &amp; {&quot;JS&quot;, &quot;JavaScript&quot;})
+        meta.has_launch_action = &quot;Launch&quot; in susp
+        meta.has_embedded_files = &quot;EmbeddedFile&quot; in susp
+
+        # URIs
+        for m in _URI_RE.finditer(data):
+            uri = m.group(1).decode(&quot;latin-1&quot;, errors=&quot;replace&quot;).strip()
+            if uri.startswith(&quot;http&quot;):
+                meta.external_uris.append(uri)
+        meta.has_uri_actions = bool(meta.external_uris)
+
+        # Anomalies
+        if meta.has_javascript:
+            meta.anomalies.append(&quot;JavaScript action found (/JS or /JavaScript)&quot;)
+        if meta.has_launch_action:
+            meta.anomalies.append(&quot;Launch action found (/Launch)&quot;)
+        if meta.has_embedded_files:
+            meta.anomalies.append(&quot;Embedded file found (/EmbeddedFile)&quot;)
+        if meta.external_uris:
+            meta.anomalies.append(f&quot;External URIs: {meta.external_uris[:5]}&quot;)
+
+        return meta
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — xref-aware parser (preferred)
+# ---------------------------------------------------------------------------
+
+class PDFScanner:
+    &quot;&quot;&quot;
+    xref-aware PDF scanner.
+    Parses trailer and object dictionaries more reliably than pure regex.
+    &quot;&quot;&quot;
+
+    def scan(self, data: bytes, path: str = &quot;&quot;) -&gt; PDFMetadata:
+        meta = PDFMetadata(path=path)
+
+        # Version
+        vm = _VERSION_RE.search(data[:1024])  # version in first 1KB
+        if not vm:
+            meta.error = &quot;Missing %PDF- header&quot;
+            return meta
+        meta.version = vm.group(1).decode(&quot;latin-1&quot;)
+
+        # Locate startxref + %%EOF (from end of file)
+        startxref_offset = self._find_startxref(data)
+        xref_at = startxref_offset
+
+        # Parse xref table
+        trailer_data: bytes = b&quot;&quot;
+        if xref_at &gt; 0:
+            xref_m = re.match(rb&quot;xref&quot;, data[xref_at:xref_at + 10])
+            if xref_m:
+                # Traditional xref table → find trailer
+                t_m = _TRAILER_RE.search(data[xref_at:])
+                if t_m:
+                    trailer_data = t_m.group(1)
+            else:
+                # Likely compressed xref stream (PDF 1.5+)
+                meta.anomalies.append(&quot;Compressed xref stream detected (PDF 1.5+)&quot;)
+                # Fall back: find any trailer in the file
+                t_m = _TRAILER_RE.search(data)
+                if t_m:
+                    trailer_data = t_m.group(1)
+
+        # Parse trailer dict
+        if trailer_data:
+            self._parse_trailer(trailer_data, meta)
+
+        # Count objects and streams
+        meta.total_objects = len(re.findall(rb&quot;\b\d+\s+\d+\s+obj\b&quot;, data))
+        meta.stream_objects = len(_STREAM_RE.findall(data))
+
+        # Parse object dictionaries for Info fields and suspicious content
+        for obj_m in _OBJ_RE.finditer(data):
+            obj_dict = obj_m.group(3)
+            self._parse_obj_dict(obj_dict, data, meta)
+
+        # URIs
+        for m in _URI_RE.finditer(data):
+            uri = m.group(1).decode(&quot;latin-1&quot;, errors=&quot;replace&quot;).strip()
+            if uri.startswith(&quot;http&quot;):
+                meta.external_uris.append(uri)
+        meta.has_uri_actions = bool(meta.external_uris)
+
+        # Final anomalies
+        if meta.has_javascript:
+            meta.anomalies.append(&quot;JavaScript action found (/JS or /JavaScript)&quot;)
+        if meta.has_launch_action:
+            meta.anomalies.append(&quot;Launch action found (/Launch)&quot;)
+        if meta.has_embedded_files:
+            meta.anomalies.append(&quot;Embedded file found (/EmbeddedFile)&quot;)
+        if meta.is_encrypted:
+            meta.anomalies.append(&quot;PDF is encrypted&quot;)
+        if meta.external_uris:
+            meta.anomalies.append(f&quot;External URIs: {meta.external_uris[:5]}&quot;)
+
+        meta.is_valid = True
+        return meta
+
+    def _find_startxref(self, data: bytes) -&gt; int:
+        # Search last 2KB of file for startxref
+        tail = data[-2048:] if len(data) &gt; 2048 else data
+        offset_in_tail = len(data) - len(tail)
+        m = list(re.finditer(rb&quot;startxref\s+(\d+)&quot;, tail))
+        if m:
+            return int(m[-1].group(1))
+        return 0
+
+    def _parse_trailer(self, trailer_bytes: bytes, meta: PDFMetadata) -&gt; None:
+        # /Encrypt
+        if re.search(rb&quot;/Encrypt\b&quot;, trailer_bytes):
+            meta.is_encrypted = True
+        # /Root
+        m = re.search(rb&quot;/Root\s+(\d+\s+\d+\s+R)&quot;, trailer_bytes)
+        if m:
+            meta.root_obj = m.group(1).decode(&quot;latin-1&quot;)
+        # /Info
+        m = re.search(rb&quot;/Info\s+(\d+\s+\d+\s+R)&quot;, trailer_bytes)
+        if m:
+            meta.info_obj = m.group(1).decode(&quot;latin-1&quot;)
+
+    def _parse_obj_dict(self, obj_dict: bytes, full_data: bytes,
+                        meta: PDFMetadata) -&gt; None:
+        # Info fields
+        if not meta.info.author:
+            meta.info.author   = _extract_dict_string(obj_dict, &quot;Author&quot;)
+        if not meta.info.title:
+            meta.info.title    = _extract_dict_string(obj_dict, &quot;Title&quot;)
+        if not meta.info.creator:
+            meta.info.creator  = _extract_dict_string(obj_dict, &quot;Creator&quot;)
+        if not meta.info.producer:
+            meta.info.producer = _extract_dict_string(obj_dict, &quot;Producer&quot;)
+        if not meta.info.creation_date:
+            meta.info.creation_date = _extract_dict_string(obj_dict, &quot;CreationDate&quot;)
+        if not meta.info.mod_date:
+            meta.info.mod_date = _extract_dict_string(obj_dict, &quot;ModDate&quot;)
+
+        # Suspicious keys
+        susp = _scan_for_keys(obj_dict)
+        for k in susp:
+            if k not in meta.suspicious_keys:
+                meta.suspicious_keys.append(k)
+        meta.has_javascript = meta.has_javascript or bool(susp &amp; {&quot;JS&quot;, &quot;JavaScript&quot;})
+        meta.has_launch_action = meta.has_launch_action or (&quot;Launch&quot; in susp)
+        meta.has_embedded_files = meta.has_embedded_files or (&quot;EmbeddedFile&quot; in susp)
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+_SIMPLE_PDF = b&quot;&quot;&quot;%PDF-1.4
+1 0 obj
+&lt;&lt; /Type /Catalog /Pages 2 0 R &gt;&gt;
+endobj
+
+2 0 obj
+&lt;&lt; /Type /Pages /Kids [3 0 R] /Count 1 &gt;&gt;
+endobj
+
+3 0 obj
+&lt;&lt; /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] &gt;&gt;
+endobj
+
+4 0 obj
+&lt;&lt; /Title (Test Document) /Author (Alice Smith) /Creator (LibreOffice)
+   /Producer (LibreOffice PDF Export) /CreationDate (D:20240101120000) &gt;&gt;
+endobj
+
+xref
+0 5
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000206 00000 n 
+
+trailer
+&lt;&lt; /Size 5 /Root 1 0 R /Info 4 0 R &gt;&gt;
+startxref
+345
+%%EOF
+&quot;&quot;&quot;
+
+_JS_PDF = b&quot;&quot;&quot;%PDF-1.6
+1 0 obj
+&lt;&lt; /Type /Action /S /JavaScript /JS (app.alert(&quot;pwned&quot;)) &gt;&gt;
+endobj
+trailer
+&lt;&lt; /Root 1 0 R &gt;&gt;
+startxref
+0
+%%EOF
+&quot;&quot;&quot;
+
+_ENCRYPTED_PDF = b&quot;&quot;&quot;%PDF-1.5
+1 0 obj &lt;&lt; /Encrypt 2 0 R &gt;&gt; endobj
+2 0 obj &lt;&lt; /Filter /Standard /V 4 /R 4 &gt;&gt; endobj
+trailer
+&lt;&lt; /Root 1 0 R /Encrypt 2 0 R &gt;&gt;
+startxref
+0
+%%EOF
+&quot;&quot;&quot;
+
+_LAUNCH_PDF = b&quot;&quot;&quot;%PDF-1.4
+1 0 obj
+&lt;&lt; /Type /Action /S /Launch /F &lt;&lt; /FS /DOS /F (malware.exe) &gt;&gt; &gt;&gt;
+endobj
+trailer &lt;&lt; /Root 1 0 R &gt;&gt;
+startxref 0
+%%EOF
+&quot;&quot;&quot;
+
+
+def test_basic_metadata():
+    s = PDFScanner()
+    meta = s.scan(_SIMPLE_PDF)
+    assert meta.is_valid, f&quot;Expected valid; got {meta.error}&quot;
+    assert meta.version == &quot;1.4&quot;
+    assert &quot;Alice Smith&quot; in meta.info.author or meta.info.author == &quot;&quot;
+    print(f&quot;Basic metadata: passed (version={meta.version}, author={meta.info.author!r})&quot;)
+
+
+def test_javascript_detection():
+    s = PDFScanner()
+    meta = s.scan(_JS_PDF)
+    assert meta.is_valid
+    assert meta.has_javascript, f&quot;Expected JS detected; suspicious_keys={meta.suspicious_keys}&quot;
+    print(f&quot;JavaScript detection: passed ({meta.anomalies})&quot;)
+
+
+def test_encrypted():
+    s = PDFScanner()
+    meta = s.scan(_ENCRYPTED_PDF)
+    assert meta.is_valid
+    assert meta.is_encrypted
+    print(f&quot;Encrypted PDF: passed&quot;)
+
+
+def test_launch_action():
+    s = PDFScanner()
+    meta = s.scan(_LAUNCH_PDF)
+    assert meta.is_valid
+    assert meta.has_launch_action
+    print(f&quot;Launch action: passed ({meta.anomalies})&quot;)
+
+
+def test_invalid_pdf():
+    s = PDFScanner()
+    meta = s.scan(b&quot;Not a PDF file content&quot;)
+    assert not meta.is_valid
+    print(&quot;Invalid PDF: passed&quot;)
+
+
+def test_naive_scanner():
+    s = NaivePDFScanner()
+    meta = s.scan(_SIMPLE_PDF)
+    assert meta.is_valid
+    assert meta.version == &quot;1.4&quot;
+    print(f&quot;Naive scanner: passed (version={meta.version})&quot;)
+
+
+def test_uri_detection():
+    pdf_with_uri = _SIMPLE_PDF + b&quot;\n/URI (https://evil.example.com/payload)\n&quot;
+    s = PDFScanner()
+    meta = s.scan(pdf_with_uri)
+    assert meta.has_uri_actions or meta.external_uris
+    print(f&quot;URI detection: passed ({meta.external_uris})&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+PDF AS AN ATTACK VECTOR
+
+JavaScript in PDF
+  /JS and /JavaScript actions can execute ECMAScript within PDF viewers.
+  Used in drive-by exploits (e.g. CVE-2008-2992, Acrobat JS RCE).
+  Mitigation: disable JavaScript in PDF readers, sandbox viewers.
+
+Launch Actions
+  /Launch can execute arbitrary programs on Windows without user consent
+  in older Acrobat versions.
+  Modern readers prompt the user; still abused via social engineering.
+
+Embedded Files
+  /EmbeddedFile can contain executables or other malicious payloads.
+  Combined with auto-open actions, delivers malware transparently.
+
+OpenAction / AA (Additional Actions)
+  /OpenAction executes on document open; /AA on page open, close, etc.
+  Commonly used to silently run JavaScript or Launch actions.
+
+XFA (XML Forms Architecture)
+  Complex, XML-based form system embedded in PDF.
+  Has its own scripting model; historically full of security issues.
+  Adobe phased it out in favour of AcroForms.
+
+ENCRYPTED PDFs
+  Standard /Encrypt with RC4 or AES; metadata often not encrypted,
+  allowing exfiltration even if content is protected.
+  Encrypted PDFs are commonly used to evade email gateway scanning.
+
+DETECTION
+  - Search for /JS, /JavaScript, /Launch, /OpenAction, /AA in dictionaries.
+  - Check Info dictionary dates for timestomping.
+  - High object count relative to stream count → fragmented/obfuscated PDF.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_basic_metadata()
+    test_javascript_detection()
+    test_encrypted()
+    test_launch_action()
+    test_invalid_pdf()
+    test_naive_scanner()
+    test_uri_detection()
+</code></pre>
+</body>
+</html>

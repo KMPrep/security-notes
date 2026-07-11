@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q4_dns_tunneling.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q4_dns_tunneling.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q4_dns_tunneling.py</p>
+  <p class="line-count">272 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q4. DNS Tunneling Detector
+============================
+Detect DNS-based data exfiltration and covert channels by analysing
+query entropy, FQDN length, query volume, and suspicious record types.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Flag domains longer than some fixed length.
+  Problem: CDNs and tracking pixels have long subdomains legitimately.
+  No entropy analysis — misses base32/base64 encoded payloads.
+
+BETTER: Entropy check on the subdomain label.
+  Problem: Still needs volume analysis (tunneling tools hammer the same
+  base domain). Missing TXT/NULL record type check. Shannon entropy
+  on the entire FQDN is wrong — need entropy on the leftmost label only.
+
+GOOGLE-LEVEL (this file):
+  - Extract the leftmost subdomain label (not the TLD or SLD) for entropy.
+  - Volume-per-base-domain check per client within a sliding window.
+  - Suspicious record type detection (TXT, NULL, PRIVATE).
+  - Composite risk score per client so analysts can triage.
+  - Streaming parse — handles large log files without loading all into memory.
+
+Complexity: O(N) time, O(C × D) space where C = clients, D = domains.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import math
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z client=10.0.0.5 query=www.google.com type=A
+2024-03-12T08:00:01Z client=10.0.0.5 query=xjq3kp2m4n8r.tunnel.evil.com type=A
+2024-03-12T08:00:02Z client=10.0.0.5 query=a4b8c2d6e1f9.tunnel.evil.com type=A
+2024-03-12T08:00:03Z client=10.0.0.5 query=g7h3i5j2k9l1.tunnel.evil.com type=TXT
+2024-03-12T08:00:04Z client=10.0.0.5 query=m6n4o8p1q3r7.tunnel.evil.com type=A
+2024-03-12T08:00:05Z client=10.0.0.5 query=s2t9u5v3w8x4.tunnel.evil.com type=A
+2024-03-12T08:00:06Z client=10.0.0.5 query=y1z6a3b7c4d8.tunnel.evil.com type=A
+2024-03-12T08:00:07Z client=10.0.0.5 query=e9f2g5h1i6j3.tunnel.evil.com type=NULL
+2024-03-12T08:00:08Z client=10.0.0.5 query=k4l8m2n6o9p1.tunnel.evil.com type=A
+2024-03-12T08:00:09Z client=10.0.0.5 query=q3r7s1t5u8v2.tunnel.evil.com type=A
+2024-03-12T08:00:10Z client=10.0.0.5 query=w6x4y9z2a5b1.tunnel.evil.com type=A
+2024-03-12T08:00:11Z client=10.0.0.5 query=VGhpcyBpcyBhIHRlc3Qgb2YgdGhlIGVtZXJnZW5jeQ.base.evil.com type=TXT
+2024-03-12T08:01:00Z client=10.0.0.6 query=mail.google.com type=A
+2024-03-12T08:01:01Z client=10.0.0.6 query=update.microsoft.com type=A
+2024-03-12T08:02:00Z client=10.0.0.7 query=short.legit.io type=A
+2024-03-12T08:02:01Z client=10.0.0.7 query=cdn.fastly.net type=AAAA
+2024-03-12T08:03:00Z client=10.0.0.8 query=d41d8cd98f00b204e9800998ecf8427e.files.example.com type=A
+2024-03-12T08:03:01Z client=10.0.0.8 query=aabbccddeeff00112233445566778899.files.example.com type=A
+2024-03-12T08:03:02Z client=10.0.0.8 query=1122334455667788990aabbccddeeff.files.example.com type=A
+2024-03-12T08:03:03Z client=10.0.0.8 query=ffeeddccbbaa99887766554433221100.files.example.com type=A
+2024-03-12T08:03:04Z client=10.0.0.8 query=00112233445566778899aabbccddeeff.files.example.com type=NULL
+MALFORMED LINE
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENTROPY_THRESHOLD     = 3.8   # Shannon entropy bits/char on subdomain label
+LONG_FQDN_THRESHOLD   = 52    # chars before the registered domain (SLD + TLD)
+VOLUME_THRESHOLD      = 100   # queries to same SLD from one client in 5 min
+VOLUME_WINDOW_SECS    = 300
+SUSPICIOUS_QTYPES     = {&quot;TXT&quot;, &quot;NULL&quot;, &quot;PRIVATE&quot;, &quot;ANY&quot;}
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+client=(?P&lt;client&gt;\S+)\s+query=(?P&lt;query&gt;\S+)\s+type=(?P&lt;qtype&gt;\S+)&#x27;
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def shannon_entropy(s: str) -&gt; float:
+    &quot;&quot;&quot;Shannon entropy in bits per character.&quot;&quot;&quot;
+    if not s:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values() if c &gt; 0)
+
+
+def extract_sld_tld(fqdn: str) -&gt; tuple[str, str]:
+    &quot;&quot;&quot;
+    Very simple SLD+TLD extractor (not a full PSL — good enough here).
+    Returns (subdomain_portion, sld_tld).
+    E.g. &#x27;abc.xyz.evil.com&#x27; → (&#x27;abc.xyz&#x27;, &#x27;evil.com&#x27;)
+    &quot;&quot;&quot;
+    parts = fqdn.rstrip(&quot;.&quot;).split(&quot;.&quot;)
+    if len(parts) &lt;= 2:
+        return (&quot;&quot;, fqdn)
+    sld_tld    = &quot;.&quot;.join(parts[-2:])
+    subdomain  = &quot;.&quot;.join(parts[:-2])
+    return (subdomain, sld_tld)
+
+
+def leftmost_label(fqdn: str) -&gt; str:
+    return fqdn.split(&quot;.&quot;)[0]
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    for fmt in (&quot;%Y-%m-%dT%H:%M:%SZ&quot;, &quot;%Y-%m-%dT%H:%M:%S&quot;):
+        try:
+            return datetime.strptime(ts_str, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return {
+        &quot;ts&quot;:     ts,
+        &quot;client&quot;: m.group(&quot;client&quot;),
+        &quot;query&quot;:  m.group(&quot;query&quot;).lower(),
+        &quot;qtype&quot;:  m.group(&quot;qtype&quot;).upper(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_dns_tunneling(records: list[dict]) -&gt; dict:
+    &quot;&quot;&quot;
+    Returns per-client findings: high-entropy labels, long FQDNs,
+    suspicious record types, and high-volume base domains.
+    &quot;&quot;&quot;
+    # Per-client: list of records grouped by (client, sld_tld) for volume check
+    client_domain_ts: dict[tuple, list[float]] = defaultdict(list)
+    client_findings:  dict[str, list[dict]]    = defaultdict(list)
+
+    for r in records:
+        query  = r[&quot;query&quot;]
+        client = r[&quot;client&quot;]
+        qtype  = r[&quot;qtype&quot;]
+        ts     = r[&quot;ts&quot;]
+
+        subdomain, sld_tld = extract_sld_tld(query)
+        label   = leftmost_label(query)
+        entropy = shannon_entropy(label)
+
+        # Track for volume analysis
+        client_domain_ts[(client, sld_tld)].append(ts)
+
+        # High-entropy subdomain label
+        if entropy &gt; ENTROPY_THRESHOLD and len(label) &gt;= 8:
+            client_findings[client].append({
+                &quot;type&quot;:    &quot;HIGH_ENTROPY_LABEL&quot;,
+                &quot;query&quot;:   query,
+                &quot;label&quot;:   label,
+                &quot;entropy&quot;: round(entropy, 3),
+                &quot;ts&quot;:      ts,
+            })
+
+        # Long FQDN subdomain portion
+        if len(subdomain) &gt; LONG_FQDN_THRESHOLD:
+            client_findings[client].append({
+                &quot;type&quot;:   &quot;LONG_FQDN&quot;,
+                &quot;query&quot;:  query,
+                &quot;sub_len&quot;: len(subdomain),
+                &quot;ts&quot;:     ts,
+            })
+
+        # Suspicious record type
+        if qtype in SUSPICIOUS_QTYPES:
+            client_findings[client].append({
+                &quot;type&quot;:  &quot;SUSPICIOUS_QTYPE&quot;,
+                &quot;query&quot;: query,
+                &quot;qtype&quot;: qtype,
+                &quot;ts&quot;:    ts,
+            })
+
+    # Volume check: per-client sliding window over 5 minutes
+    for (client, sld_tld), timestamps in client_domain_ts.items():
+        timestamps.sort()
+        left = 0
+        for right in range(len(timestamps)):
+            while timestamps[right] - timestamps[left] &gt; VOLUME_WINDOW_SECS:
+                left += 1
+            if right - left + 1 &gt; VOLUME_THRESHOLD:
+                client_findings[client].append({
+                    &quot;type&quot;:   &quot;HIGH_VOLUME&quot;,
+                    &quot;sld&quot;:    sld_tld,
+                    &quot;count&quot;:  right - left + 1,
+                    &quot;window&quot;: VOLUME_WINDOW_SECS,
+                    &quot;ts&quot;:     timestamps[left],
+                })
+                break  # One alert per (client, domain) is enough
+
+    return dict(client_findings)
+
+
+def risk_score(findings: list[dict]) -&gt; int:
+    &quot;&quot;&quot;Simple additive risk score for triage sorting.&quot;&quot;&quot;
+    weights = {&quot;HIGH_ENTROPY_LABEL&quot;: 3, &quot;LONG_FQDN&quot;: 2, &quot;SUSPICIOUS_QTYPE&quot;: 2, &quot;HIGH_VOLUME&quot;: 4}
+    return sum(weights.get(f[&quot;type&quot;], 1) for f in findings)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(findings_by_client: dict) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;DNS TUNNELING DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+    if not findings_by_client:
+        print(&quot;  No suspicious activity detected.&quot;)
+        return
+
+    sorted_clients = sorted(
+        findings_by_client.items(),
+        key=lambda x: risk_score(x[1]),
+        reverse=True,
+    )
+
+    for client, findings in sorted_clients:
+        score = risk_score(findings)
+        print(f&quot;\n  Client: {client}  risk_score={score}&quot;)
+        for f in findings:
+            ftype = f[&quot;type&quot;]
+            ts    = datetime.utcfromtimestamp(f[&quot;ts&quot;]).isoformat() + &quot;Z&quot;
+            if ftype == &quot;HIGH_ENTROPY_LABEL&quot;:
+                print(f&quot;    [{ftype}] label=&#x27;{f[&#x27;label&#x27;]}&#x27;  entropy={f[&#x27;entropy&#x27;]}  query={f[&#x27;query&#x27;]}&quot;)
+            elif ftype == &quot;LONG_FQDN&quot;:
+                print(f&quot;    [{ftype}] sub_len={f[&#x27;sub_len&#x27;]}  query={f[&#x27;query&#x27;]}&quot;)
+            elif ftype == &quot;SUSPICIOUS_QTYPE&quot;:
+                print(f&quot;    [{ftype}] qtype={f[&#x27;qtype&#x27;]}  query={f[&#x27;query&#x27;]}&quot;)
+            elif ftype == &quot;HIGH_VOLUME&quot;:
+                print(f&quot;    [{ftype}] {f[&#x27;count&#x27;]} queries to &#x27;{f[&#x27;sld&#x27;]}&#x27; within {f[&#x27;window&#x27;]}s&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records  = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    findings = detect_dns_tunneling(records)
+    print(f&quot;Parsed {len(records)} DNS records.\n&quot;)
+    print_report(findings)
+</code></pre>
+</body>
+</html>

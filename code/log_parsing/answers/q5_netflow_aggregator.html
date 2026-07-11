@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q5_netflow_aggregator.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q5_netflow_aggregator.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q5_netflow_aggregator.py</p>
+  <p class="line-count">327 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q5. NetFlow/IPFIX Log Aggregator
+==================================
+Parse NetFlow records to detect port scans, data exfiltration,
+and internal SMB/lateral movement reconnaissance.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Sum all bytes per src IP, flag if total &gt; threshold.
+  Problem: A single large FTP backup download also triggers this.
+  No port-scan detection, no internal movement analysis.
+
+BETTER: Group by (src, dst), check port diversity.
+  Problem: Port scan detection needs a time window — otherwise a slow scan
+  over many hours looks identical to a fast one. No distinction between
+  internal and external destinations.
+
+GOOGLE-LEVEL (this file):
+  - Typed NetFlow record parsing with protocol mapping.
+  - Port scan: sliding 60-second time window per (src, dst_ip) pair;
+    count distinct dst_ports in window.
+  - Exfil: single flow with bytes &gt; threshold to external IP on non-std port.
+  - Internal recon: src touching &gt; N distinct internal dst_ips on port 445
+    within a time window (SMB scanning).
+  - RFC 1918 helper to distinguish internal vs external.
+  - All three detectors are independent so each can be unit-tested.
+
+Complexity: O(N log N) due to time-window sort; O(N) space.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import ipaddress
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z 10.0.0.5 54321 8.8.8.8 53 UDP 512 1 -
+2024-03-12T08:00:01Z 10.0.0.5 54322 1.2.3.4 80 TCP 1024 3 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54323 1.2.3.4 81 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54324 1.2.3.4 82 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54325 1.2.3.4 83 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54326 1.2.3.4 84 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54327 1.2.3.4 85 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54328 1.2.3.4 86 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54329 1.2.3.4 87 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54330 1.2.3.4 88 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54331 1.2.3.4 89 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54332 1.2.3.4 90 TCP 512 2 SYN
+2024-03-12T08:00:01Z 10.0.0.5 54333 1.2.3.4 443 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54334 1.2.3.4 8080 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54335 1.2.3.4 8443 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54336 1.2.3.4 3306 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54337 1.2.3.4 5432 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54338 1.2.3.4 6379 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54339 1.2.3.4 27017 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54340 1.2.3.4 22 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54341 1.2.3.4 23 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54342 1.2.3.4 25 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54343 1.2.3.4 110 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54344 1.2.3.4 143 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54345 1.2.3.4 993 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54346 1.2.3.4 995 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54347 1.2.3.4 3389 TCP 512 2 SYN
+2024-03-12T08:00:02Z 10.0.0.5 54348 1.2.3.4 5900 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54349 1.2.3.4 5901 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54350 1.2.3.4 5902 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54351 1.2.3.4 5903 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54352 1.2.3.4 5904 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54353 1.2.3.4 5905 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54354 1.2.3.4 5906 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54355 1.2.3.4 5907 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54356 1.2.3.4 5908 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54357 1.2.3.4 5909 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54358 1.2.3.4 5910 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54359 1.2.3.4 5911 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54360 1.2.3.4 5912 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54361 1.2.3.4 5913 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54362 1.2.3.4 5914 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54363 1.2.3.4 5915 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54364 1.2.3.4 5916 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54365 1.2.3.4 5917 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54366 1.2.3.4 5918 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54367 1.2.3.4 5919 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54368 1.2.3.4 5920 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54369 1.2.3.4 5921 TCP 512 2 SYN
+2024-03-12T08:00:03Z 10.0.0.5 54370 1.2.3.4 5922 TCP 512 2 SYN
+2024-03-12T08:00:04Z 10.0.0.9 55000 203.0.113.50 4444 TCP 60000000 1200 -
+2024-03-12T08:00:05Z 10.0.0.20 60000 10.0.0.21 445 TCP 2048 4 -
+2024-03-12T08:00:05Z 10.0.0.20 60001 10.0.0.22 445 TCP 1024 2 -
+2024-03-12T08:00:05Z 10.0.0.20 60002 10.0.0.23 445 TCP 1024 2 -
+2024-03-12T08:00:06Z 10.0.0.20 60003 10.0.0.24 445 TCP 1024 2 -
+2024-03-12T08:00:06Z 10.0.0.20 60004 10.0.0.25 445 TCP 1024 2 -
+2024-03-12T08:00:06Z 10.0.0.20 60005 10.0.0.26 445 TCP 1024 2 -
+2024-03-12T08:00:06Z 10.0.0.20 60006 10.0.0.27 445 TCP 1024 2 -
+2024-03-12T08:00:07Z 10.0.0.20 60007 10.0.0.28 445 TCP 1024 2 -
+2024-03-12T08:00:07Z 10.0.0.20 60008 10.0.0.29 445 TCP 1024 2 -
+2024-03-12T08:00:07Z 10.0.0.20 60009 10.0.0.30 445 TCP 1024 2 -
+2024-03-12T08:00:07Z 10.0.0.20 60010 10.0.0.31 445 TCP 1024 2 -
+2024-03-12T08:00:07Z 10.0.0.20 60011 10.0.0.32 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60012 10.0.0.33 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60013 10.0.0.34 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60014 10.0.0.35 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60015 10.0.0.36 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60016 10.0.0.37 445 TCP 1024 2 -
+2024-03-12T08:00:08Z 10.0.0.20 60017 10.0.0.38 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60018 10.0.0.39 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60019 10.0.0.40 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60020 10.0.0.41 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60021 10.0.0.42 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60022 10.0.0.43 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60023 10.0.0.44 445 TCP 1024 2 -
+2024-03-12T08:00:09Z 10.0.0.20 60024 10.0.0.45 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60025 10.0.0.46 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60026 10.0.0.47 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60027 10.0.0.48 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60028 10.0.0.49 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60029 10.0.0.50 445 TCP 1024 2 -
+2024-03-12T08:00:10Z 10.0.0.20 60030 10.0.0.51 445 TCP 1024 2 -
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCAN_WINDOW_SECS        = 60
+SCAN_PORT_THRESHOLD     = 50
+EXFIL_BYTES_THRESHOLD   = 50_000_000  # 50 MB
+SMB_RECON_THRESHOLD     = 30          # distinct internal IPs on port 445
+SMB_RECON_WINDOW_SECS   = 60
+
+PRIVATE_RANGES = [
+    ipaddress.ip_network(&quot;10.0.0.0/8&quot;),
+    ipaddress.ip_network(&quot;172.16.0.0/12&quot;),
+    ipaddress.ip_network(&quot;192.168.0.0/16&quot;),
+]
+
+
+def is_private(ip_str: str) -&gt; bool:
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return any(addr in net for net in PRIVATE_RANGES)
+    except ValueError:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+&#x27;
+    r&#x27;(?P&lt;src_ip&gt;\S+)\s+(?P&lt;src_port&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;dst_ip&gt;\S+)\s+(?P&lt;dst_port&gt;\d+)\s+&#x27;
+    r&#x27;(?P&lt;proto&gt;\S+)\s+(?P&lt;bytes&gt;\d+)\s+(?P&lt;packets&gt;\d+)\s+(?P&lt;flags&gt;\S+)&#x27;
+)
+
+
+def parse_ts(ts_str: str) -&gt; float | None:
+    try:
+        return datetime.strptime(ts_str, &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group(&quot;ts&quot;))
+    if ts is None:
+        return None
+    return {
+        &quot;ts&quot;:       ts,
+        &quot;src_ip&quot;:   m.group(&quot;src_ip&quot;),
+        &quot;src_port&quot;: int(m.group(&quot;src_port&quot;)),
+        &quot;dst_ip&quot;:   m.group(&quot;dst_ip&quot;),
+        &quot;dst_port&quot;: int(m.group(&quot;dst_port&quot;)),
+        &quot;proto&quot;:    m.group(&quot;proto&quot;),
+        &quot;bytes&quot;:    int(m.group(&quot;bytes&quot;)),
+        &quot;packets&quot;:  int(m.group(&quot;packets&quot;)),
+        &quot;flags&quot;:    m.group(&quot;flags&quot;),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_port_scan(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Single src contacting &gt; SCAN_PORT_THRESHOLD distinct dst_ports on same dst_ip within window.&quot;&quot;&quot;
+    # (src_ip, dst_ip) -&gt; sorted list of (ts, dst_port)
+    pair_events: dict[tuple, list[tuple]] = defaultdict(list)
+    for r in records:
+        pair_events[(r[&quot;src_ip&quot;], r[&quot;dst_ip&quot;])].append((r[&quot;ts&quot;], r[&quot;dst_port&quot;]))
+
+    alerts = []
+    for (src, dst), events in pair_events.items():
+        events.sort()
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; SCAN_WINDOW_SECS:
+                left += 1
+            ports_in_window = {events[i][1] for i in range(left, right + 1)}
+            if len(ports_in_window) &gt; SCAN_PORT_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:         &quot;PORT_SCAN&quot;,
+                    &quot;src_ip&quot;:       src,
+                    &quot;dst_ip&quot;:       dst,
+                    &quot;distinct_ports&quot;: len(ports_in_window),
+                    &quot;window_start&quot;: events[left][0],
+                    &quot;window_end&quot;:   events[right][0],
+                    &quot;sample_ports&quot;: sorted(ports_in_window)[:10],
+                })
+                break
+    return alerts
+
+
+def detect_exfiltration(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Single flow exceeding EXFIL_BYTES_THRESHOLD to an external IP on a non-standard port.&quot;&quot;&quot;
+    alerts = []
+    for r in records:
+        if r[&quot;bytes&quot;] &gt; EXFIL_BYTES_THRESHOLD and not is_private(r[&quot;dst_ip&quot;]) and r[&quot;dst_port&quot;] &gt; 1024:
+            alerts.append({
+                &quot;type&quot;:     &quot;EXFILTRATION&quot;,
+                &quot;src_ip&quot;:   r[&quot;src_ip&quot;],
+                &quot;dst_ip&quot;:   r[&quot;dst_ip&quot;],
+                &quot;dst_port&quot;: r[&quot;dst_port&quot;],
+                &quot;bytes&quot;:    r[&quot;bytes&quot;],
+                &quot;proto&quot;:    r[&quot;proto&quot;],
+                &quot;ts&quot;:       r[&quot;ts&quot;],
+            })
+    return alerts
+
+
+def detect_smb_recon(records: list[dict]) -&gt; list[dict]:
+    &quot;&quot;&quot;Internal src touching &gt; threshold distinct internal IPs on port 445 in a time window.&quot;&quot;&quot;
+    smb_records = [r for r in records if r[&quot;dst_port&quot;] == 445 and is_private(r[&quot;src_ip&quot;]) and is_private(r[&quot;dst_ip&quot;])]
+
+    src_events: dict[str, list[tuple]] = defaultdict(list)
+    for r in smb_records:
+        src_events[r[&quot;src_ip&quot;]].append((r[&quot;ts&quot;], r[&quot;dst_ip&quot;]))
+
+    alerts = []
+    for src, events in src_events.items():
+        events.sort()
+        left = 0
+        for right in range(len(events)):
+            while events[right][0] - events[left][0] &gt; SMB_RECON_WINDOW_SECS:
+                left += 1
+            ips_in_window = {events[i][1] for i in range(left, right + 1)}
+            if len(ips_in_window) &gt; SMB_RECON_THRESHOLD:
+                alerts.append({
+                    &quot;type&quot;:          &quot;SMB_RECON&quot;,
+                    &quot;src_ip&quot;:        src,
+                    &quot;distinct_hosts&quot;: len(ips_in_window),
+                    &quot;window_start&quot;:  events[left][0],
+                    &quot;window_end&quot;:    events[right][0],
+                    &quot;sample_hosts&quot;:  sorted(ips_in_window)[:5],
+                })
+                break
+    return alerts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).isoformat() + &quot;Z&quot;
+
+
+def print_report(scan_alerts, exfil_alerts, smb_alerts) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;NETFLOW AGGREGATOR — THREAT DETECTION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    print(f&quot;\n[PORT_SCAN] {len(scan_alerts)} alert(s)&quot;)
+    for a in scan_alerts:
+        print(f&quot;  src={a[&#x27;src_ip&#x27;]} → dst={a[&#x27;dst_ip&#x27;]}  ports={a[&#x27;distinct_ports&#x27;]}&quot;)
+        print(f&quot;  window={ts_fmt(a[&#x27;window_start&#x27;])} → {ts_fmt(a[&#x27;window_end&#x27;])}&quot;)
+        print(f&quot;  sample_ports={a[&#x27;sample_ports&#x27;]}&quot;)
+
+    print(f&quot;\n[EXFILTRATION] {len(exfil_alerts)} alert(s)&quot;)
+    for a in exfil_alerts:
+        mb = a[&quot;bytes&quot;] / 1_000_000
+        print(f&quot;  src={a[&#x27;src_ip&#x27;]} → dst={a[&#x27;dst_ip&#x27;]}:{a[&#x27;dst_port&#x27;]}  &quot;
+              f&quot;bytes={mb:.1f}MB  proto={a[&#x27;proto&#x27;]}  ts={ts_fmt(a[&#x27;ts&#x27;])}&quot;)
+
+    print(f&quot;\n[SMB_RECON] {len(smb_alerts)} alert(s)&quot;)
+    for a in smb_alerts:
+        print(f&quot;  src={a[&#x27;src_ip&#x27;]}  distinct_hosts={a[&#x27;distinct_hosts&#x27;]}&quot;)
+        print(f&quot;  window={ts_fmt(a[&#x27;window_start&#x27;])} → {ts_fmt(a[&#x27;window_end&#x27;])}&quot;)
+        print(f&quot;  sample_hosts={a[&#x27;sample_hosts&#x27;]}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records       = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    scan_alerts   = detect_port_scan(records)
+    exfil_alerts  = detect_exfiltration(records)
+    smb_alerts    = detect_smb_recon(records)
+
+    print(f&quot;Parsed {len(records)} NetFlow records.\n&quot;)
+    print_report(scan_alerts, exfil_alerts, smb_alerts)
+</code></pre>
+</body>
+</html>

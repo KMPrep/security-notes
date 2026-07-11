@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q61_q70_cloud_config_checks.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q61_q70_cloud_config_checks.py</h1>
+  <p class="file-path">Source: code\practice\easy\q61_q70_cloud_config_checks.py</p>
+  <p class="line-count">445 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Google Security Engineer - Easy Questions: Q61-Q70
+Topic: Certificate dates, cloud configuration checks, secret keyword scans, and HTTPS.
+&quot;&quot;&quot;
+
+from datetime import date, datetime, timedelta
+import re
+from typing import Dict, Iterable, List, Optional, Set
+from urllib.parse import urlparse
+
+
+def _parse_date(value: object) -&gt; Optional[date]:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value.strip(), &quot;%Y-%m-%d&quot;).date()
+        except ValueError:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Q61 - Find Expired Certificates
+# ---------------------------------------------------------------------------
+ANSWER_Q61 = &quot;&quot;&quot;
+Problem:
+  Given certificate expiry dates, return those already expired.
+
+Naive approach:
+  Compare date strings directly. This works only if all dates are valid
+  YYYY-MM-DD strings.
+
+Optimal approach:
+  Parse expiry values into date objects and compare with today&#x27;s date. This is
+  O(n) time and skips malformed records safely.
+
+Security meaning:
+  Expired certificates can cause outages and can weaken user trust in secure
+  connections.
+&quot;&quot;&quot;
+
+
+def find_expired_certificates_naive(certificates: Iterable[Dict[str, str]], today: str) -&gt; List[Dict[str, str]]:
+    return [certificate for certificate in certificates if certificate.get(&quot;expires_on&quot;, &quot;&quot;) &lt; today]
+
+
+def find_expired_certificates(certificates: Iterable[Dict[str, object]], today: Optional[date] = None) -&gt; List[Dict[str, object]]:
+    current_day = today or date.today()
+    expired: List[Dict[str, object]] = []
+    for certificate in certificates:
+        expiry = _parse_date(certificate.get(&quot;expires_on&quot;))
+        if expiry is not None and expiry &lt; current_day:
+            expired.append(certificate)
+    return expired
+
+
+def test_q61() -&gt; None:
+    today = date(2026, 5, 30)
+    certs = [{&quot;name&quot;: &quot;old&quot;, &quot;expires_on&quot;: &quot;2026-05-29&quot;}, {&quot;name&quot;: &quot;new&quot;, &quot;expires_on&quot;: &quot;2026-06-01&quot;}]
+    assert find_expired_certificates(certs, today) == [{&quot;name&quot;: &quot;old&quot;, &quot;expires_on&quot;: &quot;2026-05-29&quot;}]
+
+
+# ---------------------------------------------------------------------------
+# Q62 - Find Certificates Expiring Soon
+# ---------------------------------------------------------------------------
+ANSWER_Q62 = &quot;&quot;&quot;
+Problem:
+  Return certificates expiring within the next 30 days.
+
+Naive approach:
+  Convert dates to strings and compare them lexicographically. This is fragile
+  when formats differ.
+
+Optimal approach:
+  Parse dates and compare against the inclusive window [today, today + 30 days].
+  This is O(n) time.
+
+Security meaning:
+  Expiring-soon certificates should be renewed before they become outages or
+  incident noise.
+&quot;&quot;&quot;
+
+
+def find_certificates_expiring_soon_naive(certificates: Iterable[Dict[str, str]], today: str, cutoff: str) -&gt; List[Dict[str, str]]:
+    return [
+        certificate
+        for certificate in certificates
+        if today &lt;= certificate.get(&quot;expires_on&quot;, &quot;&quot;) &lt;= cutoff
+    ]
+
+
+def find_certificates_expiring_soon(
+    certificates: Iterable[Dict[str, object]],
+    today: Optional[date] = None,
+    days: int = 30,
+) -&gt; List[Dict[str, object]]:
+    current_day = today or date.today()
+    cutoff = current_day + timedelta(days=days)
+    expiring: List[Dict[str, object]] = []
+    for certificate in certificates:
+        expiry = _parse_date(certificate.get(&quot;expires_on&quot;))
+        if expiry is not None and current_day &lt;= expiry &lt;= cutoff:
+            expiring.append(certificate)
+    return expiring
+
+
+def test_q62() -&gt; None:
+    today = date(2026, 5, 30)
+    certs = [
+        {&quot;name&quot;: &quot;expired&quot;, &quot;expires_on&quot;: &quot;2026-05-29&quot;},
+        {&quot;name&quot;: &quot;soon&quot;, &quot;expires_on&quot;: &quot;2026-06-15&quot;},
+        {&quot;name&quot;: &quot;later&quot;, &quot;expires_on&quot;: &quot;2026-08-01&quot;},
+    ]
+    assert find_certificates_expiring_soon(certs, today) == [{&quot;name&quot;: &quot;soon&quot;, &quot;expires_on&quot;: &quot;2026-06-15&quot;}]
+
+
+# ---------------------------------------------------------------------------
+# Q63 - Check Open Ports Against Allowlist
+# ---------------------------------------------------------------------------
+ANSWER_Q63 = &quot;&quot;&quot;
+Problem:
+  Given open ports and allowed ports, return ports not in the allowlist.
+
+Naive approach:
+  For each open port, scan the allowed port list. This is O(n * a).
+
+Optimal approach:
+  Convert allowed ports to a set and check membership in O(1) average time.
+  Preserve input order in the output.
+
+Security meaning:
+  Non-allowlisted ports can indicate exposed services, drift, or unauthorized
+  deployments.
+&quot;&quot;&quot;
+
+
+def check_open_ports_against_allowlist_naive(open_ports: Iterable[int], allowed_ports: List[int]) -&gt; List[int]:
+    return [port for port in open_ports if port not in allowed_ports]
+
+
+def check_open_ports_against_allowlist(open_ports: Iterable[int], allowed_ports: Iterable[int]) -&gt; List[int]:
+    allowed: Set[int] = set(allowed_ports)
+    return [port for port in open_ports if port not in allowed]
+
+
+def test_q63() -&gt; None:
+    assert check_open_ports_against_allowlist([22, 80, 443, 3389], [80, 443]) == [22, 3389]
+    assert check_open_ports_against_allowlist([], [80]) == []
+
+
+# ---------------------------------------------------------------------------
+# Q64 - Check User Against Admin List
+# ---------------------------------------------------------------------------
+ANSWER_Q64 = &quot;&quot;&quot;
+Problem:
+  Given a username and admin list, return whether the user is admin.
+
+Naive approach:
+  Scan the admin list linearly and compare each value.
+
+Optimal approach:
+  Convert the admin list to a set for O(1) average membership checks. Normalize
+  casing if usernames are case-insensitive in the environment.
+
+Security meaning:
+  Fast admin checks are useful for authorization decisions and privileged user
+  monitoring.
+&quot;&quot;&quot;
+
+
+def check_user_against_admin_list_naive(username: str, admins: Iterable[str]) -&gt; bool:
+    for admin in admins:
+        if admin == username:
+            return True
+    return False
+
+
+def check_user_against_admin_list(username: str, admins: Iterable[str], case_sensitive: bool = False) -&gt; bool:
+    if case_sensitive:
+        return username in set(admins)
+    normalized_admins = {admin.casefold() for admin in admins}
+    return username.casefold() in normalized_admins
+
+
+def test_q64() -&gt; None:
+    assert check_user_against_admin_list(&quot;Alice&quot;, [&quot;alice&quot;, &quot;root&quot;]) is True
+    assert check_user_against_admin_list(&quot;bob&quot;, [&quot;alice&quot;, &quot;root&quot;]) is False
+
+
+# ---------------------------------------------------------------------------
+# Q65 - Detect Public S3 Bucket Flag
+# ---------------------------------------------------------------------------
+ANSWER_Q65 = &quot;&quot;&quot;
+Problem:
+  Given bucket metadata, return buckets marked public.
+
+Naive approach:
+  Loop through records and check if public == True.
+
+Optimal approach:
+  Single-pass filter over dictionaries. If metadata has multiple public flags,
+  treat any explicit public flag as risky and return the whole bucket record as
+  evidence.
+
+Security meaning:
+  Public buckets are a common cause of accidental data exposure.
+&quot;&quot;&quot;
+
+
+def detect_public_s3_bucket_flag_naive(buckets: Iterable[Dict[str, object]]) -&gt; List[Dict[str, object]]:
+    return [bucket for bucket in buckets if bucket.get(&quot;public&quot;) is True]
+
+
+def detect_public_s3_bucket_flag(buckets: Iterable[Dict[str, object]]) -&gt; List[Dict[str, object]]:
+    public_buckets: List[Dict[str, object]] = []
+    for bucket in buckets:
+        if bucket.get(&quot;public&quot;) is True or bucket.get(&quot;is_public&quot;) is True:
+            public_buckets.append(bucket)
+    return public_buckets
+
+
+def test_q65() -&gt; None:
+    buckets = [{&quot;name&quot;: &quot;private&quot;, &quot;public&quot;: False}, {&quot;name&quot;: &quot;public&quot;, &quot;public&quot;: True}]
+    assert detect_public_s3_bucket_flag(buckets) == [{&quot;name&quot;: &quot;public&quot;, &quot;public&quot;: True}]
+
+
+# ---------------------------------------------------------------------------
+# Q66 - Find IAM Users Without MFA
+# ---------------------------------------------------------------------------
+ANSWER_Q66 = &quot;&quot;&quot;
+Problem:
+  Given IAM user records, return users where mfa_enabled is false.
+
+Naive approach:
+  Loop and append records with mfa_enabled == False.
+
+Optimal approach:
+  Single-pass filter. Treat only explicit False as non-compliant, and decide
+  separately whether missing MFA fields should be flagged.
+
+Security meaning:
+  Privileged or cloud users without MFA are high-risk targets for credential
+  theft and account takeover.
+&quot;&quot;&quot;
+
+
+def find_iam_users_without_mfa_naive(users: Iterable[Dict[str, object]]) -&gt; List[Dict[str, object]]:
+    return [user for user in users if user.get(&quot;mfa_enabled&quot;) is False]
+
+
+def find_iam_users_without_mfa(users: Iterable[Dict[str, object]], flag_missing: bool = False) -&gt; List[Dict[str, object]]:
+    result: List[Dict[str, object]] = []
+    for user in users:
+        mfa_enabled = user.get(&quot;mfa_enabled&quot;)
+        if mfa_enabled is False or (flag_missing and mfa_enabled is None):
+            result.append(user)
+    return result
+
+
+def test_q66() -&gt; None:
+    users = [{&quot;user&quot;: &quot;alice&quot;, &quot;mfa_enabled&quot;: True}, {&quot;user&quot;: &quot;bob&quot;, &quot;mfa_enabled&quot;: False}, {&quot;user&quot;: &quot;carol&quot;}]
+    assert find_iam_users_without_mfa(users) == [{&quot;user&quot;: &quot;bob&quot;, &quot;mfa_enabled&quot;: False}]
+    assert find_iam_users_without_mfa(users, flag_missing=True) == [
+        {&quot;user&quot;: &quot;bob&quot;, &quot;mfa_enabled&quot;: False},
+        {&quot;user&quot;: &quot;carol&quot;},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Q67 - Find Security Groups Open to Internet
+# ---------------------------------------------------------------------------
+ANSWER_Q67 = &quot;&quot;&quot;
+Problem:
+  Given security group rules, return those with CIDR 0.0.0.0/0.
+
+Naive approach:
+  Loop and compare cidr exactly to &#x27;0.0.0.0/0&#x27;.
+
+Optimal approach:
+  Use a set of internet-open CIDR values for O(1) membership. Include ::/0 if
+  IPv6 should also be considered internet-open.
+
+Security meaning:
+  Internet-open security group rules can expose admin ports, databases, and
+  internal services to attackers.
+&quot;&quot;&quot;
+
+
+INTERNET_OPEN_CIDRS = {&quot;0.0.0.0/0&quot;, &quot;::/0&quot;}
+
+
+def find_security_groups_open_to_internet_naive(rules: Iterable[Dict[str, str]]) -&gt; List[Dict[str, str]]:
+    return [rule for rule in rules if rule.get(&quot;cidr&quot;) == &quot;0.0.0.0/0&quot;]
+
+
+def find_security_groups_open_to_internet(rules: Iterable[Dict[str, str]], include_ipv6: bool = True) -&gt; List[Dict[str, str]]:
+    open_cidrs = INTERNET_OPEN_CIDRS if include_ipv6 else {&quot;0.0.0.0/0&quot;}
+    return [rule for rule in rules if rule.get(&quot;cidr&quot;) in open_cidrs]
+
+
+def test_q67() -&gt; None:
+    rules = [{&quot;sg&quot;: &quot;web&quot;, &quot;cidr&quot;: &quot;0.0.0.0/0&quot;}, {&quot;sg&quot;: &quot;db&quot;, &quot;cidr&quot;: &quot;10.0.0.0/8&quot;}]
+    assert find_security_groups_open_to_internet(rules) == [{&quot;sg&quot;: &quot;web&quot;, &quot;cidr&quot;: &quot;0.0.0.0/0&quot;}]
+
+
+# ---------------------------------------------------------------------------
+# Q68 - Detect Hardcoded Password Keyword
+# ---------------------------------------------------------------------------
+ANSWER_Q68 = &quot;&quot;&quot;
+Problem:
+  Return source code lines containing password=, passwd=, or pwd=.
+
+Naive approach:
+  Lowercase each line and check each keyword with substring membership.
+
+Optimal approach:
+  Use one compiled case-insensitive regex with optional whitespace around &#x27;=&#x27;.
+  This catches &#x27;password = value&#x27; as well as &#x27;password=value&#x27;.
+
+Security meaning:
+  Hardcoded passwords are a direct secret leakage risk and should move to a
+  secret manager.
+&quot;&quot;&quot;
+
+
+PASSWORD_KEYWORD_RE = re.compile(r&quot;\b(?:password|passwd|pwd)\s*=&quot;, re.IGNORECASE)
+PASSWORD_KEYWORDS = (&quot;password=&quot;, &quot;passwd=&quot;, &quot;pwd=&quot;)
+
+
+def detect_hardcoded_password_keyword_naive(lines: Iterable[str]) -&gt; List[str]:
+    result: List[str] = []
+    for line in lines:
+        lower_line = line.lower()
+        if any(keyword in lower_line for keyword in PASSWORD_KEYWORDS):
+            result.append(line)
+    return result
+
+
+def detect_hardcoded_password_keyword(lines: Iterable[str]) -&gt; List[str]:
+    return [line for line in lines if PASSWORD_KEYWORD_RE.search(line)]
+
+
+def test_q68() -&gt; None:
+    lines = [&#x27;password = &quot;Welcome123&quot;&#x27;, &quot;normal_config = true&quot;, &quot;pwd=secret&quot;]
+    assert detect_hardcoded_password_keyword(lines) == [&#x27;password = &quot;Welcome123&quot;&#x27;, &quot;pwd=secret&quot;]
+
+
+# ---------------------------------------------------------------------------
+# Q69 - Detect Hardcoded API Key Keyword
+# ---------------------------------------------------------------------------
+ANSWER_Q69 = &quot;&quot;&quot;
+Problem:
+  Return code lines containing api_key, secret_key, access_token, or private_key.
+
+Naive approach:
+  Lowercase each line and check each keyword with substring membership.
+
+Optimal approach:
+  Compile one regex for all keywords. A regex keeps matching logic central and
+  makes it easy to extend with word boundaries or assignment checks.
+
+Security meaning:
+  API keys, private keys, and access tokens in source code can lead to cloud
+  compromise, data access, or supply-chain exposure.
+&quot;&quot;&quot;
+
+
+API_SECRET_KEYWORDS = (&quot;api_key&quot;, &quot;secret_key&quot;, &quot;access_token&quot;, &quot;private_key&quot;)
+API_SECRET_RE = re.compile(r&quot;\b(?:api_key|secret_key|access_token|private_key)\b&quot;, re.IGNORECASE)
+
+
+def detect_hardcoded_api_key_keyword_naive(lines: Iterable[str]) -&gt; List[str]:
+    result: List[str] = []
+    for line in lines:
+        lower_line = line.lower()
+        if any(keyword in lower_line for keyword in API_SECRET_KEYWORDS):
+            result.append(line)
+    return result
+
+
+def detect_hardcoded_api_key_keyword(lines: Iterable[str]) -&gt; List[str]:
+    return [line for line in lines if API_SECRET_RE.search(line)]
+
+
+def test_q69() -&gt; None:
+    lines = [&#x27;api_key = &quot;AKIA...&quot;&#x27;, &quot;normal_config = true&quot;, &quot;private_key = pem&quot;]
+    assert detect_hardcoded_api_key_keyword(lines) == [&#x27;api_key = &quot;AKIA...&quot;&#x27;, &quot;private_key = pem&quot;]
+
+
+# ---------------------------------------------------------------------------
+# Q70 - Check If URL Uses HTTPS
+# ---------------------------------------------------------------------------
+ANSWER_Q70 = &quot;&quot;&quot;
+Problem:
+  Given a URL, return whether it starts with https://.
+
+Naive approach:
+  Call url.startswith(&#x27;https://&#x27;).
+
+Optimal approach:
+  Strip whitespace and parse the URL with urlparse, then check that the scheme
+  is https. This is clearer when URLs may have leading whitespace or mixed
+  case.
+
+Security meaning:
+  HTTPS is required to protect confidentiality and integrity in transit, though
+  it does not prove the destination is safe.
+&quot;&quot;&quot;
+
+
+def check_if_url_uses_https_naive(url: str) -&gt; bool:
+    return url.startswith(&quot;https://&quot;)
+
+
+def check_if_url_uses_https(url: str) -&gt; bool:
+    parsed = urlparse(url.strip())
+    return parsed.scheme.lower() == &quot;https&quot;
+
+
+def test_q70() -&gt; None:
+    assert check_if_url_uses_https(&quot;https://example.com&quot;) is True
+    assert check_if_url_uses_https(&quot; HTTP://example.com&quot;) is False
+    assert check_if_url_uses_https(&quot;  HTTPS://example.com&quot;) is True
+
+
+def run_tests() -&gt; None:
+    test_q61()
+    test_q62()
+    test_q63()
+    test_q64()
+    test_q65()
+    test_q66()
+    test_q67()
+    test_q68()
+    test_q69()
+    test_q70()
+
+
+if __name__ == &quot;__main__&quot;:
+    run_tests()
+    print(&quot;Q61-Q70 tests passed&quot;)
+</code></pre>
+</body>
+</html>

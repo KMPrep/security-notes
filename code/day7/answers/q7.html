@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q7.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q7.py</h1>
+  <p class="file-path">Source: code\day7\answers\q7.py</p>
+  <p class="line-count">312 lines</p>
+  <pre><code class="language-python"># Q7 (Gap Fixer) - Stack: Evaluate Nested DENY/ALLOW Firewall Policies
+# Parse firewall policy rules from a text format.
+# Rules are grouped in PUSH/POP context blocks (nesting allowed).
+# On POP, finalize the context — report rules and whether any traffic is allowed.
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;Parse a sequence of firewall instructions using a stack:
+#    - PUSH context=&lt;name&gt; → push new context onto stack
+#    - ALLOW proto=&lt;P&gt; port=&lt;N&gt; → add ALLOW rule to current context
+#    - DENY proto=&lt;P&gt; port=&lt;N&gt;  → add DENY rule to current context
+#    - POP → finalize current context (evaluate if any traffic passes)
+#   Output: list of finalized contexts with their rules and evaluation.&quot;
+#
+# STEP 2 — Assumptions
+#   - Rules are evaluated first-match-wins (order matters)
+#   - ALLOW takes precedence if it appears before DENY for same proto/port
+#   - A context evaluates to &#x27;ALLOW_SOME&#x27; if at least one ALLOW rule exists
+#     before any matching DENY (conservative estimate without specific traffic)
+#   - Nested contexts inherit no rules; each context is independent
+#   - POP without a matching PUSH → error
+#   - PUSH without a matching POP → warn, finalize remaining on done
+#
+# STEP 3 — Algorithm
+#   Stack of context dicts: {&#x27;name&#x27;: str, &#x27;rules&#x27;: [(action,proto,port), ...], &#x27;depth&#x27;: int}
+#   - PUSH: push new context onto stack
+#   - ALLOW/DENY: append rule to stack[-1]
+#   - POP: pop context, finalize, append to results list
+#   - At end: finalize any unclosed contexts (stack not empty → warn)
+#
+# STEP 4 — Evaluation logic
+#   &#x27;evaluate_context(rules)&#x27;:
+#   - If no rules: IMPLICIT_DENY (default deny)
+#   - Scan rules in order; first ALLOW → at least some traffic passes → ALLOW_SOME
+#   - If only DENY rules → DENY_ALL
+#   - If ALLOW before DENY → ALLOW_SOME
+#   - If DENY before ALLOW → DENY_FIRST_ALLOW_REST
+#
+# STEP 5 — Stack invariant
+#   &quot;The stack guarantees correct nesting. I never need to scan for a matching
+#    open — I just pop the top. A mismatch in name is a warning, not a crash.&quot;
+#
+# Complexity:
+#   O(L) where L = number of lines in the policy text
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── PARSING HELPERS ───────────────────────────────────────────────────────────
+
+def _parse_rule_line(line: str) -&gt; dict | None:
+    &quot;&quot;&quot;
+    Parse a single policy line. Returns a dict or None if unrecognised.
+
+    Supported formats:
+      PUSH context=&lt;name&gt;
+      POP
+      ALLOW proto=&lt;proto&gt; port=&lt;port&gt;
+      DENY  proto=&lt;proto&gt; port=&lt;port&gt;
+    &quot;&quot;&quot;
+    line = line.strip()
+    if not line or line.startswith(&quot;#&quot;):
+        return None
+
+    parts = line.split()
+    if not parts:
+        return None
+
+    keyword = parts[0].upper()
+
+    if keyword == &quot;PUSH&quot;:
+        # PUSH context=&lt;name&gt;
+        for part in parts[1:]:
+            if part.startswith(&quot;context=&quot;):
+                return {&quot;op&quot;: &quot;PUSH&quot;, &quot;context&quot;: part.split(&quot;=&quot;, 1)[1]}
+        return {&quot;op&quot;: &quot;PUSH&quot;, &quot;context&quot;: &quot;unnamed&quot;}
+
+    if keyword == &quot;POP&quot;:
+        return {&quot;op&quot;: &quot;POP&quot;}
+
+    if keyword in (&quot;ALLOW&quot;, &quot;DENY&quot;):
+        kv = {}
+        for part in parts[1:]:
+            if &quot;=&quot; in part:
+                k, v = part.split(&quot;=&quot;, 1)
+                kv[k.lower()] = v
+        return {
+            &quot;op&quot;:    keyword,
+            &quot;proto&quot;: kv.get(&quot;proto&quot;, &quot;ANY&quot;),
+            &quot;port&quot;:  kv.get(&quot;port&quot;, &quot;ANY&quot;),
+        }
+
+    return None
+
+
+# ── CONTEXT EVALUATION ────────────────────────────────────────────────────────
+
+def _evaluate_context(rules: list) -&gt; str:
+    &quot;&quot;&quot;
+    Evaluate ordered rules list → human-readable verdict.
+
+    Rules are first-match-wins.
+    Returns one of: IMPLICIT_DENY | DENY_ALL | ALLOW_SOME | MIXED
+    &quot;&quot;&quot;
+    if not rules:
+        return &quot;IMPLICIT_DENY&quot;
+
+    has_allow = any(r[&quot;op&quot;] == &quot;ALLOW&quot; for r in rules)
+    has_deny  = any(r[&quot;op&quot;] == &quot;DENY&quot;  for r in rules)
+
+    if not has_allow:
+        return &quot;DENY_ALL&quot;
+
+    if not has_deny:
+        return &quot;ALLOW_ALL_LISTED&quot;
+
+    # Both present — check first occurrence
+    for r in rules:
+        if r[&quot;op&quot;] == &quot;ALLOW&quot;:
+            return &quot;ALLOW_SOME&quot;    # first match is ALLOW
+        if r[&quot;op&quot;] == &quot;DENY&quot;:
+            return &quot;DENY_FIRST_ALLOW_REST&quot;   # first match is DENY
+
+    return &quot;MIXED&quot;
+
+
+# ── MAIN PARSER — single stack pass ──────────────────────────────────────────
+
+def parse_policy(policy_text: str) -&gt; list:
+    &quot;&quot;&quot;
+    Parse the full policy text using a stack. Returns finalized contexts.
+
+    Each finalized context:
+    {
+      &#x27;name&#x27;:     str,
+      &#x27;depth&#x27;:    int,         # nesting depth (0 = top level)
+      &#x27;rules&#x27;:    list of {&#x27;op&#x27;,&#x27;proto&#x27;,&#x27;port&#x27;},
+      &#x27;verdict&#x27;:  str,         # result of evaluate_context
+      &#x27;warnings&#x27;: list of str,
+    }
+
+    Time:  O(L)  — single pass over L lines
+    Space: O(D + R) — D=max depth, R=total rules
+    &quot;&quot;&quot;
+    if not isinstance(policy_text, str):
+        raise TypeError(&quot;policy_text must be a str&quot;)
+
+    stack:   list = []   # active contexts (top = stack[-1])
+    results: list = []
+    warnings: list = []
+
+    for lineno, raw_line in enumerate(policy_text.splitlines(), start=1):
+        instr = _parse_rule_line(raw_line)
+        if instr is None:
+            continue
+
+        op = instr[&quot;op&quot;]
+
+        if op == &quot;PUSH&quot;:
+            stack.append({
+                &quot;name&quot;:     instr[&quot;context&quot;],
+                &quot;depth&quot;:    len(stack),
+                &quot;rules&quot;:    [],
+                &quot;warnings&quot;: [],
+            })
+
+        elif op == &quot;POP&quot;:
+            if not stack:
+                warnings.append(f&quot;Line {lineno}: POP with empty stack — ignored&quot;)
+                continue
+            ctx = stack.pop()
+            ctx[&quot;verdict&quot;] = _evaluate_context(ctx[&quot;rules&quot;])
+            results.append(ctx)
+
+        elif op in (&quot;ALLOW&quot;, &quot;DENY&quot;):
+            if not stack:
+                warnings.append(f&quot;Line {lineno}: {op} outside any context — ignored&quot;)
+                continue
+            stack[-1][&quot;rules&quot;].append({
+                &quot;op&quot;:    op,
+                &quot;proto&quot;: instr[&quot;proto&quot;],
+                &quot;port&quot;:  instr[&quot;port&quot;],
+            })
+
+    # Unclosed contexts: finalize with warning
+    while stack:
+        ctx = stack.pop()
+        ctx[&quot;warnings&quot;].append(&quot;Context was never closed with POP&quot;)
+        ctx[&quot;verdict&quot;] = _evaluate_context(ctx[&quot;rules&quot;])
+        results.append(ctx)
+        warnings.append(f&quot;Unclosed context: &#x27;{ctx[&#x27;name&#x27;]}&#x27;&quot;)
+
+    return results, warnings
+
+
+# ── REPORT FORMATTER ──────────────────────────────────────────────────────────
+
+def format_policy_report(results: list, warnings: list) -&gt; str:
+    &quot;&quot;&quot;Format parsed policy into human-readable report.&quot;&quot;&quot;
+    lines = [
+        &quot;=&quot; * 60,
+        &quot;  FIREWALL POLICY EVALUATION REPORT&quot;,
+        &quot;=&quot; * 60,
+        f&quot;  Contexts evaluated: {len(results)}&quot;,
+    ]
+    if warnings:
+        lines.append(f&quot;  Warnings: {len(warnings)}&quot;)
+    lines.append(&quot;&quot;)
+
+    for ctx in results:
+        indent = &quot;  &quot; * ctx[&quot;depth&quot;]
+        lines.append(f&quot;{indent}[Context: {ctx[&#x27;name&#x27;]}] (depth={ctx[&#x27;depth&#x27;]})&quot;)
+        lines.append(f&quot;{indent}  Verdict: {ctx[&#x27;verdict&#x27;]}&quot;)
+        if not ctx[&quot;rules&quot;]:
+            lines.append(f&quot;{indent}  (no rules)&quot;)
+        for r in ctx[&quot;rules&quot;]:
+            action_sym = &quot;+&quot; if r[&quot;op&quot;] == &quot;ALLOW&quot; else &quot;-&quot;
+            lines.append(f&quot;{indent}  [{action_sym}] {r[&#x27;op&#x27;]:5} proto={r[&#x27;proto&#x27;]} port={r[&#x27;port&#x27;]}&quot;)
+        if ctx.get(&quot;warnings&quot;):
+            for w in ctx[&quot;warnings&quot;]:
+                lines.append(f&quot;{indent}  WARN: {w}&quot;)
+        lines.append(&quot;&quot;)
+
+    if warnings:
+        lines.append(&quot;Global warnings:&quot;)
+        for w in warnings:
+            lines.append(f&quot;  ! {w}&quot;)
+        lines.append(&quot;&quot;)
+
+    lines.append(&quot;=&quot; * 60)
+    return &quot;\n&quot;.join(lines)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+SAMPLE_POLICY = &quot;&quot;&quot;
+# Firewall policy for DMZ
+PUSH context=DMZ
+ALLOW proto=TCP port=443
+ALLOW proto=TCP port=80
+DENY  proto=TCP port=22
+DENY  proto=UDP port=53
+
+  PUSH context=DB-tier
+  DENY  proto=TCP port=443
+  DENY  proto=TCP port=80
+  ALLOW proto=TCP port=5432
+  POP
+
+POP
+
+PUSH context=Admin
+ALLOW proto=TCP port=22
+ALLOW proto=TCP port=443
+POP
+
+PUSH context=Monitoring
+POP
+&quot;&quot;&quot;
+
+if __name__ == &quot;__main__&quot;:
+    results, warnings = parse_policy(SAMPLE_POLICY)
+    report = format_policy_report(results, warnings)
+    print(report)
+
+    # Verify structure
+    assert len(results) &gt;= 3, f&quot;Expected &gt;= 3 contexts, got {len(results)}&quot;
+
+    # Find DMZ context
+    dmz = next((r for r in results if r[&quot;name&quot;] == &quot;DMZ&quot;), None)
+    assert dmz is not None, &quot;DMZ context not found&quot;
+    assert dmz[&quot;verdict&quot;] == &quot;ALLOW_SOME&quot;, f&quot;DMZ: expected ALLOW_SOME, got {dmz[&#x27;verdict&#x27;]}&quot;
+    assert len(dmz[&quot;rules&quot;]) == 4, f&quot;DMZ should have 4 rules, got {len(dmz[&#x27;rules&#x27;])}&quot;
+    assert dmz[&quot;rules&quot;][0] == {&quot;op&quot;: &quot;ALLOW&quot;, &quot;proto&quot;: &quot;TCP&quot;, &quot;port&quot;: &quot;443&quot;}
+
+    # Find DB-tier context
+    db = next((r for r in results if r[&quot;name&quot;] == &quot;DB-tier&quot;), None)
+    assert db is not None
+    assert db[&quot;verdict&quot;] == &quot;DENY_FIRST_ALLOW_REST&quot;, f&quot;DB-tier verdict: {db[&#x27;verdict&#x27;]}&quot;
+    assert db[&quot;depth&quot;] == 1, &quot;DB-tier should be at depth 1 (nested)&quot;
+
+    # Find Admin context
+    admin = next((r for r in results if r[&quot;name&quot;] == &quot;Admin&quot;), None)
+    assert admin is not None
+    assert admin[&quot;verdict&quot;] == &quot;ALLOW_ALL_LISTED&quot;
+
+    # Find Monitoring context (empty rules)
+    mon = next((r for r in results if r[&quot;name&quot;] == &quot;Monitoring&quot;), None)
+    assert mon is not None
+    assert mon[&quot;verdict&quot;] == &quot;IMPLICIT_DENY&quot;
+
+    # No global warnings in valid policy
+    assert len(warnings) == 0, f&quot;Unexpected warnings: {warnings}&quot;
+
+    # Test POP without PUSH
+    bad_policy = &quot;POP\nALLOW proto=TCP port=80\n&quot;
+    _, bad_warn = parse_policy(bad_policy)
+    assert any(&quot;POP with empty stack&quot; in w for w in bad_warn)
+    assert any(&quot;outside any context&quot; in w for w in bad_warn)
+
+    # Test unclosed context
+    unclosed = &quot;PUSH context=X\nALLOW proto=TCP port=443\n&quot;
+    uc_results, uc_warn = parse_policy(unclosed)
+    assert any(&quot;Unclosed context&quot; in w for w in uc_warn)
+    assert uc_results[0][&quot;verdict&quot;] == &quot;ALLOW_ALL_LISTED&quot;
+
+    print(&quot;Q7 — All assertions passed.&quot;)
+    print()
+    print(&quot;Stack invariant: PUSH adds to top, POP finalizes top → O(L) per pass&quot;)
+    print(&quot;evaluate_context: first-match-wins scan of ordered rules → O(R)&quot;)
+    print(&quot;Overall complexity: O(L) where L = number of policy lines&quot;)
+</code></pre>
+</body>
+</html>

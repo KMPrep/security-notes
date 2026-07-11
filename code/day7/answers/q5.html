@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q5.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q5.py</h1>
+  <p class="file-path">Source: code\day7\answers\q5.py</p>
+  <p class="line-count">331 lines</p>
+  <pre><code class="language-python"># Q5 (Consolidation from Day 6 Q4) - Threat Event Correlation Engine (Twist)
+# Same as Day 6 Q4, but: (1) sensor events may arrive OUT OF ORDER — sort first.
+# (2) if a sensor_b event matches multiple sensor_a events, report only the
+# CLOSEST match (smallest time delta).
+#
+# ─── SOLUTION WALKTHROUGH ───────────────────────────────────────────────────
+#
+# STEP 1 — Restate
+#   &quot;Two sensors emit (timestamp, event_type, source_ip) events. They may arrive
+#    out of order. A correlated threat is the same IP appearing in both sensors
+#    within T seconds. If one sensor_b event correlates with multiple sensor_a
+#    events, I only want the ONE with the smallest time delta.&quot;
+#
+# STEP 2 — Assumptions
+#   - Sort both sensors by timestamp before processing
+#   - &#x27;Closest match&#x27; means smallest |ts_a - ts_b|
+#   - If two sensor_a events tie for closest delta, take the one with smaller ts_a
+#   - Still return all correlated pairs after deduplication (one per sensor_b event)
+#   - Output sorted by sensor_a timestamp ascending
+#
+# STEP 3 — Algorithm
+#   Step 1: Sort sensor_a and sensor_b by timestamp O((n+m) log(n+m))
+#   Step 2: Group sensor_b by IP; sort each IP&#x27;s events O(m)
+#   Step 3: For each sensor_a event, binary search sensor_b[ip] for window
+#           [ts_a-T, ts_a+T]; collect candidates
+#   Step 4: Track for each sensor_b event key (ts_b, ip): best (min delta) sensor_a
+#   Step 5: Emit one pair per sensor_b event (best match)
+#   Step 6: Sort output by sensor_a timestamp
+#
+# STEP 4 — Data structure for &quot;best sensor_a per sensor_b event&quot;
+#   &quot;Use a dict keyed by (ts_b, type_b, ip) → best (delta, ts_a, type_a, ip)
+#    After processing all sensor_a events, emit the best match for each sensor_b key.&quot;
+#
+# STEP 5 — Edge cases
+#   - Out-of-order input: must sort first
+#   - T=0: only exact timestamp matches
+#   - Same IP in sensor_b, multiple events in window: one per sensor_b event
+#   - No correlation for any IP → return []
+#
+# Complexity:
+#   Sorting: O((n+m) log(n+m))
+#   Processing: O(n log m + c)
+#   Total: O((n+m) log(n+m))
+# ─────────────────────────────────────────────────────────────────────────────
+
+import bisect
+from collections import defaultdict
+
+
+# ── APPROACH 1: Naive — sort + O(n*m) correlation ────────────────────────────
+
+def correlate_closest_naive(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    Sort both sensors, then brute-force all pairs. For each sensor_b event,
+    keep only the closest sensor_a match.
+
+    Time:  O((n+m) log(n+m) + n*m)
+    Space: O(c)
+    &quot;&quot;&quot;
+    if not isinstance(sensor_a, list) or not isinstance(sensor_b, list):
+        raise TypeError(&quot;sensor_a and sensor_b must be lists&quot;)
+    if T &lt; 0:
+        raise ValueError(f&quot;T must be &gt;= 0, got {T}&quot;)
+    if not sensor_a or not sensor_b:
+        return []
+
+    # Step 1: Sort both by timestamp
+    a = sorted(sensor_a, key=lambda e: e[0])
+    b = sorted(sensor_b, key=lambda e: e[0])
+
+    # Step 2: For each sensor_b event, find best (min delta) sensor_a match
+    # Key: (ts_b, type_b, ip_b) → best_pair dict
+    best: dict = {}
+
+    for ts_a, type_a, ip_a in a:
+        for ts_b, type_b, ip_b in b:
+            if ip_a != ip_b:
+                continue
+            delta = abs(ts_a - ts_b)
+            if delta &gt; T:
+                continue
+            key = (ts_b, type_b, ip_b)
+            if key not in best or delta &lt; best[key][&quot;delta_seconds&quot;] or \
+               (delta == best[key][&quot;delta_seconds&quot;] and ts_a &lt; best[key][&quot;sensor_a_event&quot;][0]):
+                best[key] = {
+                    &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                    &quot;sensor_b_event&quot;: (ts_b, type_b, ip_b),
+                    &quot;ip&quot;:             ip_a,
+                    &quot;delta_seconds&quot;:  delta,
+                }
+
+    result = list(best.values())
+    result.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return result
+
+
+# ── APPROACH 2: Group by IP + binary search + best-match tracking ─────────────
+
+def correlate_closest(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    Optimized approach:
+
+    1. Sort both sensors by timestamp.
+    2. Group sensor_b events by IP.
+    3. For each sensor_a event, binary search in sensor_b[ip] for window.
+    4. Track best (minimum delta) sensor_a for each sensor_b event key.
+    5. Emit one pair per sensor_b event.
+
+    Time:  O((n+m) log(n+m) + n log m + c)
+    Space: O(m)
+    &quot;&quot;&quot;
+    if not isinstance(sensor_a, list) or not isinstance(sensor_b, list):
+        raise TypeError(&quot;sensor_a and sensor_b must be lists&quot;)
+    if T &lt; 0:
+        raise ValueError(f&quot;T must be &gt;= 0, got {T}&quot;)
+    if not sensor_a or not sensor_b:
+        return []
+
+    # Step 1: Sort both sensors by timestamp
+    a_sorted = sorted(sensor_a, key=lambda e: e[0])
+    b_sorted = sorted(sensor_b, key=lambda e: e[0])
+
+    # Step 2: Group sensor_b by IP → {ip: [(ts_b, type_b), ...]} sorted by ts
+    b_by_ip: dict = defaultdict(list)
+    for ts_b, type_b, ip_b in b_sorted:
+        b_by_ip[ip_b].append((ts_b, type_b))
+    # Already sorted since b_sorted is sorted globally; but per-IP may need re-sort
+    for ip in b_by_ip:
+        b_by_ip[ip].sort()
+
+    # Step 3+4: Process each sensor_a event
+    # best_match: sensor_b event key → best match dict
+    best_match: dict = {}
+
+    for ts_a, type_a, ip_a in a_sorted:
+        if ip_a not in b_by_ip:
+            continue
+
+        b_events = b_by_ip[ip_a]
+        b_ts     = [e[0] for e in b_events]
+
+        # Find all sensor_b events within [ts_a-T, ts_a+T]
+        lo = bisect.bisect_left(b_ts,  ts_a - T)
+        hi = bisect.bisect_right(b_ts, ts_a + T)
+
+        for idx in range(lo, hi):
+            ts_b, type_b = b_events[idx]
+            delta = abs(ts_a - ts_b)
+            b_key = (ts_b, type_b, ip_a)    # unique key for this sensor_b event
+
+            if b_key not in best_match:
+                best_match[b_key] = {
+                    &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                    &quot;sensor_b_event&quot;: (ts_b, type_b, ip_a),
+                    &quot;ip&quot;:             ip_a,
+                    &quot;delta_seconds&quot;:  delta,
+                }
+            else:
+                # Update if this sensor_a event is closer
+                prev = best_match[b_key]
+                if delta &lt; prev[&quot;delta_seconds&quot;] or \
+                   (delta == prev[&quot;delta_seconds&quot;] and ts_a &lt; prev[&quot;sensor_a_event&quot;][0]):
+                    best_match[b_key][&quot;sensor_a_event&quot;] = (ts_a, type_a, ip_a)
+                    best_match[b_key][&quot;delta_seconds&quot;]  = delta
+
+    # Step 5: Sort output by sensor_a timestamp
+    result = list(best_match.values())
+    result.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return result
+
+
+# ── MANUAL — no defaultdict, no bisect ────────────────────────────────────────
+
+def _sort_events(events: list) -&gt; list:
+    &quot;&quot;&quot;Manual insertion sort by timestamp (for small inputs).&quot;&quot;&quot;
+    arr = list(events)
+    for i in range(1, len(arr)):
+        key = arr[i]
+        j = i - 1
+        while j &gt;= 0 and arr[j][0] &gt; key[0]:
+            arr[j + 1] = arr[j]
+            j -= 1
+        arr[j + 1] = key
+    return arr
+
+def _manual_bisect_left(arr, val):
+    lo, hi = 0, len(arr)
+    while lo &lt; hi:
+        mid = lo + (hi - lo) // 2
+        if arr[mid] &lt; val:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def _manual_bisect_right(arr, val):
+    lo, hi = 0, len(arr)
+    while lo &lt; hi:
+        mid = lo + (hi - lo) // 2
+        if arr[mid] &lt;= val:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+def correlate_closest_manual(sensor_a: list, sensor_b: list, T: int) -&gt; list:
+    &quot;&quot;&quot;
+    Same algorithm without defaultdict or bisect module.
+
+    Time:  O((n+m)² for manual sort) — use proper sort for large input
+    &quot;&quot;&quot;
+    if not sensor_a or not sensor_b:
+        return []
+
+    a_sorted = _sort_events(sensor_a)
+    b_sorted = _sort_events(sensor_b)
+
+    # Manual grouping
+    b_groups = {}
+    for ts_b, type_b, ip_b in b_sorted:
+        if ip_b not in b_groups:
+            b_groups[ip_b] = []
+        b_groups[ip_b].append((ts_b, type_b))
+
+    best_match = {}
+
+    for ts_a, type_a, ip_a in a_sorted:
+        if ip_a not in b_groups:
+            continue
+        b_events = b_groups[ip_a]
+        b_ts = [e[0] for e in b_events]
+        lo = _manual_bisect_left(b_ts, ts_a - T)
+        hi = _manual_bisect_right(b_ts, ts_a + T)
+        for idx in range(lo, hi):
+            ts_b, type_b = b_events[idx]
+            delta = abs(ts_a - ts_b) if ts_a &gt;= ts_b else ts_b - ts_a
+            b_key = (ts_b, type_b, ip_a)
+            if b_key not in best_match:
+                best_match[b_key] = {
+                    &quot;sensor_a_event&quot;: (ts_a, type_a, ip_a),
+                    &quot;sensor_b_event&quot;: (ts_b, type_b, ip_a),
+                    &quot;ip&quot;:             ip_a,
+                    &quot;delta_seconds&quot;:  delta,
+                }
+            else:
+                prev_delta = best_match[b_key][&quot;delta_seconds&quot;]
+                prev_ts_a  = best_match[b_key][&quot;sensor_a_event&quot;][0]
+                if delta &lt; prev_delta or (delta == prev_delta and ts_a &lt; prev_ts_a):
+                    best_match[b_key][&quot;sensor_a_event&quot;] = (ts_a, type_a, ip_a)
+                    best_match[b_key][&quot;delta_seconds&quot;]  = delta
+
+    result = list(best_match.values())
+    result.sort(key=lambda r: r[&quot;sensor_a_event&quot;][0])
+    return result
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+if __name__ == &quot;__main__&quot;:
+    # Out-of-order inputs (the key twist)
+    sensor_a = [
+        (200, &quot;login_fail&quot;, &quot;2.2.2.2&quot;),    # out of order vs (100,...)
+        (100, &quot;port_scan&quot;,  &quot;1.1.1.1&quot;),
+        (400, &quot;login_fail&quot;, &quot;1.1.1.1&quot;),
+        (300, &quot;port_scan&quot;,  &quot;3.3.3.3&quot;),
+    ]
+    sensor_b = [
+        (395, &quot;dns_query&quot;,  &quot;1.1.1.1&quot;),    # out of order
+        (110, &quot;dns_query&quot;,  &quot;1.1.1.1&quot;),
+        (210, &quot;exec_shell&quot;, &quot;2.2.2.2&quot;),
+        (320, &quot;http_req&quot;,   &quot;3.3.3.3&quot;),
+        (500, &quot;exec_shell&quot;, &quot;1.1.1.1&quot;),    # outside T=30 from both 100 and 400
+    ]
+    T = 30
+
+    results = correlate_closest(sensor_a, sensor_b, T)
+
+    print(f&quot;Correlated pairs (T={T}s, out-of-order input, closest-match only):&quot;)
+    for r in results:
+        a, b = r[&quot;sensor_a_event&quot;], r[&quot;sensor_b_event&quot;]
+        print(f&quot;  IP={r[&#x27;ip&#x27;]}  A:[ts={a[0]},{a[1]}] ↔ B:[ts={b[0]},{b[1]}]  Δ={r[&#x27;delta_seconds&#x27;]}s&quot;)
+    print()
+
+    # Verify: sensor_b event (110, dns_query, 1.1.1.1) is closer to sensor_a ts=100 (delta=10)
+    # than to sensor_a ts=400 (delta=290). So it should pair with ts=100.
+    b_dns_110 = next((r for r in results
+                      if r[&quot;sensor_b_event&quot;] == (110, &quot;dns_query&quot;, &quot;1.1.1.1&quot;)), None)
+    assert b_dns_110 is not None, &quot;Correlation for sensor_b ts=110 not found&quot;
+    assert b_dns_110[&quot;sensor_a_event&quot;][0] == 100, \
+        f&quot;sensor_b ts=110 should pair with sensor_a ts=100 (closest), got {b_dns_110[&#x27;sensor_a_event&#x27;][0]}&quot;
+    assert b_dns_110[&quot;delta_seconds&quot;] == 10
+
+    # Verify sensor_b ts=395 pairs with sensor_a ts=400 (delta=5, closest)
+    b_dns_395 = next((r for r in results
+                      if r[&quot;sensor_b_event&quot;] == (395, &quot;dns_query&quot;, &quot;1.1.1.1&quot;)), None)
+    assert b_dns_395 is not None
+    assert b_dns_395[&quot;sensor_a_event&quot;][0] == 400
+    assert b_dns_395[&quot;delta_seconds&quot;] == 5
+
+    # Output must be sorted by sensor_a timestamp
+    a_ts = [r[&quot;sensor_a_event&quot;][0] for r in results]
+    assert a_ts == sorted(a_ts), &quot;Output must be sorted by sensor_a timestamp&quot;
+
+    # All correlations respect T
+    for r in results:
+        assert r[&quot;delta_seconds&quot;] &lt;= T
+
+    # Edge cases
+    assert correlate_closest([], sensor_b, T) == []
+    assert correlate_closest(sensor_a, [], T) == []
+    # T=0: only exact timestamp match
+    exact_a = [(100, &quot;scan&quot;, &quot;1.1.1.1&quot;)]
+    exact_b = [(100, &quot;dns&quot;, &quot;1.1.1.1&quot;), (101, &quot;http&quot;, &quot;1.1.1.1&quot;)]
+    exact_res = correlate_closest(exact_a, exact_b, T=0)
+    assert len(exact_res) == 1
+    assert exact_res[0][&quot;delta_seconds&quot;] == 0
+
+    # Manual agrees
+    m_results = correlate_closest_manual(sensor_a, sensor_b, T)
+    assert len(m_results) == len(results)
+
+    # Naive agrees on count
+    n_results = correlate_closest_naive(sensor_a, sensor_b, T)
+    assert len(n_results) == len(results)
+
+    print(&quot;Q5 — All assertions passed.&quot;)
+    print()
+    print(&quot;Twist 1: Out-of-order input → sort both sensors first O((n+m)log(n+m))&quot;)
+    print(&quot;Twist 2: Closest match only → track best sensor_a per sensor_b event key&quot;)
+    print(f&quot;Total complexity: O((n+m) log(n+m) + n log m)&quot;)
+</code></pre>
+</body>
+</html>

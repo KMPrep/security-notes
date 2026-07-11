@@ -1,0 +1,2543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebAuthn / FIDO2 Threat Modeling Report</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: auth_authz\Authentication\WebAuthn-Passkeys\mobile.md</p>
+<h1 id="webauthn-fido2-threat-modeling-report">WebAuthn / FIDO2 Threat Modeling Report</h1>
+<h2 id="mobile-android-environment">Mobile Android Environment</h2>
+<h2 id="1-executive-summary">1. Executive Summary</h2>
+<p>This report provides a threat model for WebAuthn/FIDO2/passkey authentication in a <strong>mobile Android environment</strong>. The target environment includes:</p>
+<ul>
+<li>Android end-user devices</li>
+<li>Google Chrome on Android</li>
+<li>Native Android mobile apps using Credential Manager</li>
+<li>Android WebView where applicable</li>
+<li>Google Password Manager or third-party credential providers</li>
+<li>Android screen lock, biometrics, PIN, or pattern</li>
+<li>External FIDO2 security keys over supported transports</li>
+<li>Relying Party web application and backend server</li>
+</ul>
+<p>WebAuthn defines a browser/platform API for creating and using scoped public-key credentials. A public-key credential is created for a relying party and can only be accessed by origins belonging to that relying party, which is the foundation of WebAuthn phishing resistance. (<a href="https://www.w3.org/TR/webauthn-3/?utm_source=chatgpt.com" title="An API for accessing Public Key Credentials - Level 3">W3C</a>)</p>
+<p>On Android, passkeys are commonly exposed through <strong>Credential Manager</strong>, which supports passkeys, passwords, and federated sign-in through a unified API. (<a href="https://developer.android.com/identity/credential-manager?utm_source=chatgpt.com" title="About Credential Manager | Identity">Android Developers</a>) For native Android apps, the app must be associated with the relying-party domain using an OS-provided association mechanism such as <strong>Digital Asset Links</strong>. (<a href="https://developers.google.com/identity/passkeys/developer-guides?utm_source=chatgpt.com" title="Passkeys developer guide for relying parties | Authentication">Google for Developers</a>)</p>
+<p>A key Android-specific design point is that passkeys may be stored in a credential provider such as <strong>Google Password Manager</strong> and may sync across devices. Google states that passkeys are securely encrypted on-device before syncing, and Android 14 or later can also use compatible third-party password managers. (<a href="https://developers.google.com/identity/passkeys?utm_source=chatgpt.com" title="Passkeys | Google for Developers">Google for Developers</a>) Therefore, in Android threat modeling, you must distinguish between:</p>
+<ul>
+<li><strong>Credential binding</strong> to the RP and user account</li>
+<li><strong>App-to-domain binding</strong> using Digital Asset Links</li>
+<li><strong>Device compliance binding</strong> through MDM / Android Enterprise / Play Integrity / Conditional Access</li>
+<li><strong>Authenticator assurance</strong> through UV, attestation, and credential metadata</li>
+</ul>
+<hr />
+<h1 id="2-scope">2. Scope</h1>
+<h2 id="21-in-scope">2.1 In Scope</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Included</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Browser</td>
+<td>Google Chrome on Android</td>
+</tr>
+<tr>
+<td>Native app</td>
+<td>Android app using Credential Manager</td>
+</tr>
+<tr>
+<td>WebView</td>
+<td>Android WebView using Credential Manager integration</td>
+</tr>
+<tr>
+<td>Credential provider</td>
+<td>Google Password Manager or approved third-party credential provider</td>
+</tr>
+<tr>
+<td>Authenticator</td>
+<td>Android platform authenticator, device screen lock, biometric, PIN/pattern, external FIDO2 key</td>
+</tr>
+<tr>
+<td>RP server</td>
+<td>WebAuthn registration, authentication, credential lifecycle, session management</td>
+</tr>
+<tr>
+<td>Enterprise controls</td>
+<td>MDM, Android Enterprise, app integrity, device compliance, endpoint protection</td>
+</tr>
+<tr>
+<td>Threats</td>
+<td>Phishing, fake apps, WebView abuse, malicious apps, rooted devices, session theft, weak recovery</td>
+</tr>
+</tbody>
+</table>
+<h2 id="22-out-of-scope">2.2 Out of Scope</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>iOS passkey design</td>
+<td>Separate platform threat model</td>
+</tr>
+<tr>
+<td>Windows platform authenticator</td>
+<td>Covered in previous report</td>
+</tr>
+<tr>
+<td>Deep cryptographic proof analysis</td>
+<td>This is an architecture/security design review report</td>
+</tr>
+<tr>
+<td>Vendor-specific Android OEM bugs</td>
+<td>Covered as generic platform compromise risk</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="3-android-webauthn-passkey-architecture">3. Android WebAuthn / Passkey Architecture</h1>
+<pre class="mermaid">
+flowchart LR
+    User[End User]
+
+    subgraph AndroidDevice[Android Mobile Device]
+        Chrome[Google Chrome on Android]
+        NativeApp[Native Android App]
+        WebView[Android WebView]
+        CredMgr[Android Credential Manager]
+        Provider[Credential Provider<br/>Google Password Manager / 3rd Party]
+        ScreenLock[Android Screen Lock<br/>PIN / Pattern / Biometric]
+        ExtKey[External FIDO2 Security Key<br/>USB / NFC / BLE]
+    end
+
+    subgraph RPEnv[Relying Party Environment]
+        WebApp[Web App / Mobile API]
+        RPServer[RP Backend Server]
+        CredDB[(Credential Database)]
+        SessionStore[(Session Store)]
+        Audit[(Audit Logs)]
+    end
+
+    subgraph Enterprise[Enterprise / Security Controls]
+        MDM[MDM / Android Enterprise]
+        PlayIntegrity[Play Integrity API]
+        SIEM[SIEM / Detection]
+        CA[Conditional Access]
+    end
+
+    User --> Chrome
+    User --> NativeApp
+    NativeApp --> CredMgr
+    WebView --> CredMgr
+    Chrome --> CredMgr
+    CredMgr --> Provider
+    CredMgr --> ScreenLock
+    CredMgr --> ExtKey
+
+    Chrome --> WebApp
+    NativeApp --> WebApp
+    WebView --> WebApp
+    WebApp --> RPServer
+    RPServer --> CredDB
+    RPServer --> SessionStore
+    RPServer --> Audit
+
+    MDM --> AndroidDevice
+    PlayIntegrity --> RPServer
+    CA --> RPServer
+    Audit --> SIEM
+</pre>
+<hr />
+<h1 id="4-webauthn-vs-fido2-in-android-context">4. WebAuthn vs FIDO2 in Android Context</h1>
+<p>FIDO2 is the broader standard family that includes <strong>WebAuthn</strong> and <strong>CTAP2</strong>. WebAuthn is the web-facing API, while CTAP2 defines communication between a client/platform and authenticators, including roaming authenticators over transports such as USB, NFC, or BLE. (<a href="https://fidoalliance.org/specifications/?utm_source=chatgpt.com" title="User Authentication Specifications Overview">FIDO Alliance</a>)</p>
+<pre class="mermaid">
+flowchart TD
+    FIDO2[FIDO2 Standard Family]
+
+    WebAuthn[WebAuthn<br/>Browser / Platform API]
+    CTAP2[CTAP2<br/>Client-to-Authenticator Protocol]
+
+    Android[Android Platform]
+    Chrome[Chrome on Android]
+    CredentialManager[Credential Manager]
+    Provider[Credential Provider]
+    SecurityKey[External FIDO2 Key]
+    RP[Relying Party Server]
+
+    FIDO2 --> WebAuthn
+    FIDO2 --> CTAP2
+
+    RP <-->|Challenge / PublicKeyCredential Options| Chrome
+    Chrome --> WebAuthn
+    Chrome --> CredentialManager
+    CredentialManager --> Provider
+    CredentialManager <-->|CTAP2 where applicable| SecurityKey
+</pre>
+<hr />
+<h1 id="5-main-android-specific-differences-from-windows">5. Main Android-Specific Differences from Windows</h1>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Windows Environment</th>
+<th>Android Environment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Primary browser</td>
+<td>Chrome on Windows</td>
+<td>Chrome on Android</td>
+</tr>
+<tr>
+<td>Native app support</td>
+<td>Usually browser-centric unless native integration exists</td>
+<td>Credential Manager is a major native app path</td>
+</tr>
+<tr>
+<td>App-domain binding</td>
+<td>Less central for web-only apps</td>
+<td>Digital Asset Links are critical for native apps</td>
+</tr>
+<tr>
+<td>Passkey storage</td>
+<td>Windows Hello / WHfB / security key</td>
+<td>Google Password Manager / third-party credential provider / platform authenticator</td>
+</tr>
+<tr>
+<td>Sync behavior</td>
+<td>Depends on provider and platform</td>
+<td>Passkeys may sync through credential providers</td>
+</tr>
+<tr>
+<td>Device binding</td>
+<td>Possible with WHfB / TPM / enterprise device controls</td>
+<td>Must be added using MDM, Android Enterprise, Play Integrity, app/device compliance</td>
+</tr>
+<tr>
+<td>UI risk</td>
+<td>Browser extension and malware</td>
+<td>Fake apps, overlay attacks, malicious accessibility services, WebView misuse</td>
+</tr>
+<tr>
+<td>Recovery risk</td>
+<td>Helpdesk/password fallback</td>
+<td>Same, plus lost phone / changed phone / cloud account compromise</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="6-key-security-properties">6. Key Security Properties</h1>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public-key authentication</td>
+<td>RP stores public key; private key remains with authenticator/provider</td>
+</tr>
+<tr>
+<td>RP ID binding</td>
+<td>Credential is scoped to a relying-party domain</td>
+</tr>
+<tr>
+<td>Origin/app binding</td>
+<td>Web origin or native app association must be validated</td>
+</tr>
+<tr>
+<td>Digital Asset Links</td>
+<td>Binds Android app identity to web domain</td>
+</tr>
+<tr>
+<td>User presence</td>
+<td>User interacted with authenticator</td>
+</tr>
+<tr>
+<td>User verification</td>
+<td>Local verification through screen lock, biometric, PIN, pattern, or security-key PIN</td>
+</tr>
+<tr>
+<td>Credential provider trust</td>
+<td>Passkey may be stored and synced by provider</td>
+</tr>
+<tr>
+<td>Session security</td>
+<td>Post-login session must be protected separately</td>
+</tr>
+<tr>
+<td>Recovery security</td>
+<td>Recovery must not bypass phishing-resistant authentication</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="7-trust-boundaries">7. Trust Boundaries</h1>
+<pre class="mermaid">
+flowchart TD
+    User[User]
+    Chrome[Chrome Browser]
+    NativeApp[Native Android App]
+    WebView[Android WebView]
+    CredMgr[Credential Manager]
+    Provider[Credential Provider]
+    Auth[Screen Lock / Biometric / Security Key]
+    RP[RP Backend Server]
+    DB[(Credential DB)]
+    Session[(Session Store)]
+    MDM[MDM / Device Compliance]
+    Integrity[Play Integrity / App Integrity]
+
+    User --> Chrome
+    User --> NativeApp
+    NativeApp --> WebView
+
+    Chrome --> CredMgr
+    NativeApp --> CredMgr
+    WebView --> CredMgr
+
+    CredMgr --> Provider
+    CredMgr --> Auth
+
+    Chrome --> RP
+    NativeApp --> RP
+    WebView --> RP
+
+    RP --> DB
+    RP --> Session
+    MDM --> RP
+    Integrity --> RP
+</pre>
+<table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Main Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User to mobile app/browser</td>
+<td>Fake apps, phishing, malicious UI, social engineering</td>
+</tr>
+<tr>
+<td>Chrome to RP</td>
+<td>Origin validation failure, malicious site, token theft</td>
+</tr>
+<tr>
+<td>Native app to RP</td>
+<td>Fake/repacked app, broken app-domain association</td>
+</tr>
+<tr>
+<td>WebView to RP</td>
+<td>Embedded browser manipulation, JavaScript bridge abuse, session leakage</td>
+</tr>
+<tr>
+<td>App/browser to Credential Manager</td>
+<td>API misuse, wrong RP ID, wrong origin/app identity</td>
+</tr>
+<tr>
+<td>Credential Manager to provider</td>
+<td>Unapproved credential provider, synced credential exposure</td>
+</tr>
+<tr>
+<td>Android OS to authenticator</td>
+<td>Rooted device, malware, malicious accessibility service</td>
+</tr>
+<tr>
+<td>RP to credential DB</td>
+<td>Public key replacement, credential lifecycle tampering</td>
+</tr>
+<tr>
+<td>RP to recovery process</td>
+<td>Account takeover via weak fallback</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="8-android-registration-flow">8. Android Registration Flow</h1>
+<pre class="mermaid">
+sequenceDiagram
+    participant User as User
+    participant App as Chrome / Native App
+    participant CM as Android Credential Manager
+    participant CP as Credential Provider
+    participant Auth as Screen Lock / Biometric / Security Key
+    participant RP as RP Server
+    participant DB as Credential DB
+
+    User->>App: Start passkey registration
+    App->>RP: Request registration options
+    RP->>RP: Generate random challenge
+    RP->>App: challenge, rpId, user info, UV policy
+    App->>CM: CreatePublicKeyCredentialRequest
+    CM->>CP: Select credential provider
+    CM->>Auth: Require screen unlock / biometric / PIN if needed
+    CP->>CP: Generate key pair / store private key
+    CP->>CM: PublicKeyCredential response
+    CM->>App: Registration response
+    App->>RP: Send attestation / client data / authenticator data
+    RP->>RP: Validate challenge, origin, rpIdHash, flags, attestation policy
+    RP->>DB: Store credential ID, public key, user binding, metadata
+</pre>
+<p>Android’s passkey creation flow uses Credential Manager, where the app receives creation options from the server, calls Credential Manager, and the private key is stored in a credential provider while the public key is stored on the app server. (<a href="https://developer.android.com/identity/passkeys/create-passkeys?utm_source=chatgpt.com" title="Create a passkey | Identity">Android Developers</a>)</p>
+<hr />
+<h1 id="9-android-authentication-flow">9. Android Authentication Flow</h1>
+<pre class="mermaid">
+sequenceDiagram
+    participant User as User
+    participant App as Chrome / Native App
+    participant CM as Android Credential Manager
+    participant CP as Credential Provider
+    participant Auth as Screen Lock / Biometric / Security Key
+    participant RP as RP Server
+    participant DB as Credential DB
+    participant Session as Session Store
+
+    User->>App: Login with passkey
+    App->>RP: Request authentication options
+    RP->>RP: Generate random challenge
+    RP->>App: challenge, rpId, allowedCredentials, UV policy
+    App->>CM: GetCredentialRequest
+    CM->>CP: Locate matching passkey
+    CM->>Auth: User verification if required
+    CP->>CM: Signed assertion
+    CM->>App: PublicKeyCredential assertion
+    App->>RP: Send assertion response
+    RP->>DB: Fetch public key by credential ID
+    RP->>RP: Verify challenge, origin, rpIdHash, signature, UP/UV
+    RP->>Session: Create new authenticated session
+    RP->>App: Secure session token / cookie
+</pre>
+<hr />
+<h1 id="10-native-android-app-binding-with-digital-asset-links">10. Native Android App Binding with Digital Asset Links</h1>
+<p>For Android native apps, the RP must not treat any app claiming to represent the brand as trusted. The app must be bound to the RP server domain using Digital Asset Links. Google’s passkey guidance states that a passkey mobile application must be bound to the RP server domain using an OS-provided association mechanism such as Digital Asset Links. (<a href="https://developers.google.com/identity/passkeys/developer-guides?utm_source=chatgpt.com" title="Passkeys developer guide for relying parties | Authentication">Google for Developers</a>)</p>
+<pre class="mermaid">
+flowchart TD
+    Domain[RP Domain<br/>example.com]
+    AssetLinks[/.well-known/assetlinks.json]
+    App[Android App<br/>Package Name + Signing Cert]
+    CredMgr[Credential Manager]
+    RP[RP Server]
+
+    Domain --> AssetLinks
+    AssetLinks -->|Declares trusted app identity| App
+    App --> CredMgr
+    CredMgr --> RP
+</pre>
+<h2 id="digital-asset-links-security-requirements">Digital Asset Links Security Requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Host <code>assetlinks.json</code> on HTTPS</td>
+<td>Prevent tampering</td>
+</tr>
+<tr>
+<td>Serve with correct content type</td>
+<td>Ensure platform verification</td>
+</tr>
+<tr>
+<td>No redirects for <code>.well-known</code> file</td>
+<td>Avoid association failure or ambiguity</td>
+</tr>
+<tr>
+<td>Include correct package name</td>
+<td>Bind only the intended app</td>
+</tr>
+<tr>
+<td>Include correct SHA-256 signing certificate fingerprint</td>
+<td>Bind to the real signed app</td>
+</tr>
+<tr>
+<td>Maintain release/debug signing separation</td>
+<td>Prevent test app from being trusted in production</td>
+</tr>
+<tr>
+<td>Monitor assetlinks changes</td>
+<td>Detect unauthorized domain-app association changes</td>
+</tr>
+</tbody>
+</table>
+<p>The SHA-256 certificate fingerprint is the cryptographic identity commonly used by API providers alongside the Android package name, and Google Play Console exposes SHA-256 fingerprints for app signing and upload certificates. (<a href="https://developer.android.com/studio/publish/app-signing?utm_source=chatgpt.com" title="Sign your app | Android Studio">Android Developers</a>)</p>
+<hr />
+<h1 id="11-android-webview-considerations">11. Android WebView Considerations</h1>
+<p>Android WebView can be part of the mobile authentication flow. Android documentation states that Credential Manager is supported natively in <code>android.webkit.WebView</code> version 1.12.0 and later. (<a href="https://developer.android.com/identity/sign-in/credential-manager-webview?utm_source=chatgpt.com" title="Authenticate users with WebView | Identity">Android Developers</a>)</p>
+<pre class="mermaid">
+flowchart TD
+    App[Native Android App]
+    WebView[Embedded WebView]
+    WebContent[RP Web Content]
+    JSBridge[JavaScript Bridge]
+    CredMgr[Credential Manager]
+    RP[RP Server]
+
+    App --> WebView
+    WebView --> WebContent
+    WebView --> JSBridge
+    WebView --> CredMgr
+    WebContent --> RP
+</pre>
+<h2 id="webview-specific-risks">WebView-Specific Risks</h2>
+<table>
+<thead>
+<tr>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>WebView JavaScript bridge abuse</td>
+<td>Malicious content calls exposed native bridge</td>
+<td>Token theft, privilege abuse</td>
+<td>Minimize bridge surface, restrict origins, avoid exposing auth tokens</td>
+</tr>
+<tr>
+<td>Request interception</td>
+<td>App modifies WebView requests/responses</td>
+<td>Login/session manipulation</td>
+<td>Prefer native Credential Manager flow; protect WebView networking</td>
+</tr>
+<tr>
+<td>Mixed trust content</td>
+<td>WebView loads untrusted content with auth session</td>
+<td>XSS/session leakage</td>
+<td>Strict allowlist, CSP, no untrusted navigation</td>
+</tr>
+<tr>
+<td>WebView session leakage</td>
+<td>Cookies shared or exposed incorrectly</td>
+<td>Account takeover</td>
+<td>Isolate sessions, secure cookie attributes, avoid token-in-URL</td>
+</tr>
+<tr>
+<td>Outdated WebView</td>
+<td>Old WebView component has vulnerabilities</td>
+<td>App compromise</td>
+<td>Enforce WebView/Chrome updates</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="12-user-presence-vs-user-verification-on-android">12. User Presence vs User Verification on Android</h1>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>WebAuthn Flag</th>
+<th>Android Example</th>
+<th>Security Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User Presence</td>
+<td><code>UP</code></td>
+<td>User taps/approves prompt</td>
+<td>A human interacted with authenticator</td>
+</tr>
+<tr>
+<td>User Verification</td>
+<td><code>UV</code></td>
+<td>Screen lock, fingerprint, face unlock, PIN, pattern, security-key PIN</td>
+<td>Authenticator locally verified the user</td>
+</tr>
+</tbody>
+</table>
+<p>The WebAuthn authenticator data contains security flags such as user presence, user verification, backup eligibility, and backup state. (<a href="https://github.com/w3c/webauthn/wiki/Security-and-Privacy-Self%E2%80%90Review%3A-WebAuthn-L1%2C-L2%2C-L3?utm_source=chatgpt.com" title="Security and Privacy Self‐Review: WebAuthn L1, L2, L3">GitHub</a>)</p>
+<p>For passwordless and privileged access, the RP should request:</p>
+<pre><code class="language-json">{
+  &quot;userVerification&quot;: &quot;required&quot;
+}
+</code></pre>
+<p>And the server must verify:</p>
+<pre><code class="language-text">UV flag == true
+</code></pre>
+<hr />
+<h1 id="13-credential-binding-vs-device-binding-on-android">13. Credential Binding vs Device Binding on Android</h1>
+<h2 id="131-what-webauthn-passkeys-bind">13.1 What WebAuthn / Passkeys Bind</h2>
+<table>
+<thead>
+<tr>
+<th>Binding</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RP binding</td>
+<td>Credential scoped to RP ID</td>
+</tr>
+<tr>
+<td>Account binding</td>
+<td>Credential ID/public key associated with user account</td>
+</tr>
+<tr>
+<td>Origin/app binding</td>
+<td>Browser origin or Android app domain association</td>
+</tr>
+<tr>
+<td>User verification</td>
+<td>Credential use requires local unlock if UV required</td>
+</tr>
+</tbody>
+</table>
+<h2 id="132-what-webauthn-does-not-automatically-prove">13.2 What WebAuthn Does Not Automatically Prove</h2>
+<p>WebAuthn/passkey registration does <strong>not automatically prove</strong>:</p>
+<ul>
+<li>Exact Android device serial number</li>
+<li>Corporate asset ID</li>
+<li>MDM compliance status</li>
+<li>Whether device is rooted</li>
+<li>Whether the app is genuine</li>
+<li>Whether the phone is the same physical device as last login</li>
+<li>Whether passkey has synced to another device</li>
+<li>Whether the credential provider is enterprise-approved</li>
+</ul>
+<h2 id="133-how-to-add-deviceapp-assurance">13.3 How to Add Device/App Assurance</h2>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Only genuine app can access backend</td>
+<td>Play Integrity API</td>
+</tr>
+<tr>
+<td>Only managed Android devices</td>
+<td>Android Enterprise / MDM compliance</td>
+</tr>
+<tr>
+<td>Only approved app package/signing cert</td>
+<td>Digital Asset Links + app signing controls</td>
+</tr>
+<tr>
+<td>Only approved credential providers</td>
+<td>Enterprise mobile policy where available</td>
+</tr>
+<tr>
+<td>Detect rooted/tampered/emulated devices</td>
+<td>Play Integrity / MDM / mobile threat defense</td>
+</tr>
+<tr>
+<td>Higher assurance for admins</td>
+<td>Hardware security key, device compliance, no BYOD</td>
+</tr>
+</tbody>
+</table>
+<p>Google describes the Play Integrity API as helping servers check that requests come from the genuine app installed by Google Play and running on a genuine certified Android device, enabling responses to risky interactions from tampered apps, untrustworthy devices, or emulated environments. (<a href="https://developer.android.com/google/play/integrity/overview?utm_source=chatgpt.com" title="Overview of the Play Integrity API">Android Developers</a>)</p>
+<hr />
+<h1 id="14-threat-model-chrome-on-android">14. Threat Model: Chrome on Android</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C-01</td>
+<td>Phishing via fake domain</td>
+<td>User opens fake login site in Chrome</td>
+<td>Password/recovery theft; WebAuthn should fail for wrong RP ID</td>
+<td>HSTS, domain monitoring, strong recovery controls, RP origin validation</td>
+</tr>
+<tr>
+<td>C-02</td>
+<td>Fake browser prompt</td>
+<td>Site imitates passkey UI</td>
+<td>Social engineering</td>
+<td>Use clear RP-branded UX; educate users; avoid fallback prompts that leak secrets</td>
+</tr>
+<tr>
+<td>C-03</td>
+<td>Browser session theft</td>
+<td>Malware/accessibility service reads or abuses session</td>
+<td>Account takeover</td>
+<td>Secure cookies, short sessions, device risk checks, app hardening</td>
+</tr>
+<tr>
+<td>C-04</td>
+<td>Token in URL</td>
+<td>App/browser passes token through URL/deep link</td>
+<td>Token leakage</td>
+<td>Never put tokens in URL; use authorization code + PKCE for OAuth app flows</td>
+</tr>
+<tr>
+<td>C-05</td>
+<td>Malicious site triggers confusing passkey flow</td>
+<td>User approves wrong action</td>
+<td>Account confusion</td>
+<td>Show account and RP context clearly; require step-up for sensitive actions</td>
+</tr>
+<tr>
+<td>C-06</td>
+<td>Outdated Chrome/WebView</td>
+<td>Vulnerable browser component</td>
+<td>Exploit or session theft</td>
+<td>Enforce browser/WebView update policy</td>
+</tr>
+<tr>
+<td>C-07</td>
+<td>Weak fallback after passkey failure</td>
+<td>User falls back to password/OTP on fake site</td>
+<td>Account takeover</td>
+<td>Avoid weak fallback; require phishing-resistant recovery</td>
+</tr>
+<tr>
+<td>C-08</td>
+<td>Cross-site session abuse</td>
+<td>CSRF or session riding after login</td>
+<td>Unauthorized actions</td>
+<td>SameSite cookies, CSRF tokens, origin checks, re-auth</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="15-threat-model-native-android-app">15. Threat Model: Native Android App</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AAPP-01</td>
+<td>Fake app impersonation</td>
+<td>User installs lookalike APK</td>
+<td>Credential phishing, token theft</td>
+<td>Play Integrity, app signing validation, official distribution, anti-phishing education</td>
+</tr>
+<tr>
+<td>AAPP-02</td>
+<td>Repacked app</td>
+<td>Attacker modifies APK and redistributes</td>
+<td>API abuse, token theft</td>
+<td>Play Integrity, certificate pinning where appropriate, server-side app integrity checks</td>
+</tr>
+<tr>
+<td>AAPP-03</td>
+<td>Missing Digital Asset Links</td>
+<td>App not strongly associated with RP domain</td>
+<td>Passkey association failure or trust confusion</td>
+<td>Correct <code>assetlinks.json</code>, package name, SHA-256 cert fingerprint</td>
+</tr>
+<tr>
+<td>AAPP-04</td>
+<td>Wrong signing fingerprint</td>
+<td>Debug/test cert trusted in production</td>
+<td>Attacker/test build accepted</td>
+<td>Separate dev/prod domains; strict release signing governance</td>
+</tr>
+<tr>
+<td>AAPP-05</td>
+<td>Deep link hijacking</td>
+<td>Malicious app intercepts auth redirects</td>
+<td>Token/code theft</td>
+<td>Android App Links, verified links, PKCE, state/nonce validation</td>
+</tr>
+<tr>
+<td>AAPP-06</td>
+<td>Insecure local storage</td>
+<td>App stores tokens in plaintext</td>
+<td>Account takeover</td>
+<td>Android Keystore, encrypted storage, short-lived tokens</td>
+</tr>
+<tr>
+<td>AAPP-07</td>
+<td>App logs sensitive data</td>
+<td>Passkey response/token logged</td>
+<td>Data leakage</td>
+<td>Disable sensitive logging; redact credential IDs and tokens</td>
+</tr>
+<tr>
+<td>AAPP-08</td>
+<td>Overlay attack</td>
+<td>Malicious app overlays UI during login</td>
+<td>User tricked into approving action</td>
+<td>Android overlay restrictions, MTD detection, user education, transaction confirmation</td>
+</tr>
+<tr>
+<td>AAPP-09</td>
+<td>Accessibility service abuse</td>
+<td>Malicious service observes/clicks UI</td>
+<td>Session riding, data theft</td>
+<td>Detect risky accessibility services for high-risk flows; step-up</td>
+</tr>
+<tr>
+<td>AAPP-10</td>
+<td>Insecure network stack</td>
+<td>TLS validation disabled or proxy trusted</td>
+<td>MITM</td>
+<td>Enforce TLS, no debug trust stores in prod, certificate transparency/pinning carefully where appropriate</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="16-threat-model-android-credential-manager-and-credential-provider">16. Threat Model: Android Credential Manager and Credential Provider</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CM-01</td>
+<td>Unapproved credential provider</td>
+<td>User stores passkey in unmanaged provider</td>
+<td>Loss of enterprise control</td>
+<td>Enterprise policy for allowed providers where available; admin policy for high-risk users</td>
+</tr>
+<tr>
+<td>CM-02</td>
+<td>Synced passkey broadens access</td>
+<td>Passkey becomes available on another device</td>
+<td>Login from unmanaged device</td>
+<td>Evaluate BE/BS flags, device compliance, risk-based checks</td>
+</tr>
+<tr>
+<td>CM-03</td>
+<td>Cloud account compromise</td>
+<td>Attacker gains access to synced credential ecosystem</td>
+<td>Account compromise risk</td>
+<td>Require local UV, risk detection, account recovery controls</td>
+</tr>
+<tr>
+<td>CM-04</td>
+<td>Provider UI spoofing</td>
+<td>Malicious app imitates credential prompt</td>
+<td>Social engineering</td>
+<td>Rely on system Credential Manager UI; user education</td>
+</tr>
+<tr>
+<td>CM-05</td>
+<td>Credential provider compromise</td>
+<td>Provider app vulnerability or malicious provider</td>
+<td>Credential misuse or metadata leak</td>
+<td>Approved providers, app vetting, mobile threat defense</td>
+</tr>
+<tr>
+<td>CM-06</td>
+<td>Silent or conditional registration misuse</td>
+<td>App creates passkey automatically after weak login</td>
+<td>Persistent weakly-bound credential</td>
+<td>Require strong initial auth and notify user</td>
+</tr>
+<tr>
+<td>CM-07</td>
+<td>Wrong RP ID used in request</td>
+<td>App passes incorrect RP ID</td>
+<td>Credential unusable or scoped incorrectly</td>
+<td>Server-driven options, strict RP ID validation</td>
+</tr>
+<tr>
+<td>CM-08</td>
+<td>Privacy overcollection</td>
+<td>RP stores unnecessary credential/provider metadata</td>
+<td>Privacy/compliance issue</td>
+<td>Data minimization and retention policy</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="17-threat-model-android-device-and-os">17. Threat Model: Android Device and OS</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D-01</td>
+<td>Lost or stolen phone</td>
+<td>Attacker has physical device</td>
+<td>Attempted passkey use/session access</td>
+<td>Strong screen lock, biometric/PIN, remote wipe, session revocation</td>
+</tr>
+<tr>
+<td>D-02</td>
+<td>Weak screen lock</td>
+<td>User uses weak PIN/pattern</td>
+<td>Local compromise</td>
+<td>Enforce screen-lock complexity via MDM</td>
+</tr>
+<tr>
+<td>D-03</td>
+<td>Rooted device</td>
+<td>Attacker bypasses platform protections</td>
+<td>Session/token theft</td>
+<td>MDM compliance, Play Integrity, MTD</td>
+</tr>
+<tr>
+<td>D-04</td>
+<td>Malware</td>
+<td>Malicious app abuses accessibility/overlay/network</td>
+<td>Session riding or data theft</td>
+<td>Play Protect, MTD, app allowlisting for enterprise</td>
+</tr>
+<tr>
+<td>D-05</td>
+<td>Unpatched Android</td>
+<td>Known vulnerabilities</td>
+<td>Device compromise</td>
+<td>Minimum OS/security patch level</td>
+</tr>
+<tr>
+<td>D-06</td>
+<td>Sideloaded apps</td>
+<td>User installs malicious APK</td>
+<td>Credential/session abuse</td>
+<td>Disable sideloading for managed devices</td>
+</tr>
+<tr>
+<td>D-07</td>
+<td>Screen recording/screenshot leakage</td>
+<td>Sensitive information captured</td>
+<td>Data leakage</td>
+<td>App screen security flags for sensitive screens</td>
+</tr>
+<tr>
+<td>D-08</td>
+<td>Notification leakage</td>
+<td>OTP/recovery/session info appears on lock screen</td>
+<td>Account compromise</td>
+<td>Avoid sensitive notification content</td>
+</tr>
+<tr>
+<td>D-09</td>
+<td>Backup/restore leakage</td>
+<td>Tokens restored to new device unexpectedly</td>
+<td>Session continuation risk</td>
+<td>Token binding, re-auth after restore</td>
+</tr>
+<tr>
+<td>D-10</td>
+<td>Emulator/farm abuse</td>
+<td>Automated environment attacks login</td>
+<td>Fraud/abuse</td>
+<td>Play Integrity, rate limiting, bot detection</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="18-threat-model-external-fido2-security-keys-on-android">18. Threat Model: External FIDO2 Security Keys on Android</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FK-01</td>
+<td>Lost security key</td>
+<td>User loses NFC/USB security key</td>
+<td>Account recovery risk</td>
+<td>Require backup key; fast revocation</td>
+</tr>
+<tr>
+<td>FK-02</td>
+<td>Stolen key with no UV</td>
+<td>Attacker uses possession-only key</td>
+<td>Account takeover</td>
+<td>Require UV-capable key and verify UV</td>
+</tr>
+<tr>
+<td>FK-03</td>
+<td>Weak PIN on key</td>
+<td>Attacker guesses PIN</td>
+<td>Account takeover</td>
+<td>Enforce key PIN complexity/lockout</td>
+</tr>
+<tr>
+<td>FK-04</td>
+<td>Unapproved key model</td>
+<td>User registers weak/unknown key</td>
+<td>Low assurance</td>
+<td>Attestation/AAGUID allowlist</td>
+</tr>
+<tr>
+<td>FK-05</td>
+<td>Shared security key</td>
+<td>Team shares one key</td>
+<td>Non-repudiation failure</td>
+<td>One key per user</td>
+</tr>
+<tr>
+<td>FK-06</td>
+<td>Transport attack</td>
+<td>NFC/BLE confusion or relay scenario</td>
+<td>Unauthorized ceremony</td>
+<td>User verification, transaction context, proximity awareness</td>
+</tr>
+<tr>
+<td>FK-07</td>
+<td>Supply-chain risk</td>
+<td>Fake/tampered key</td>
+<td>Credential compromise</td>
+<td>Approved procurement, attestation validation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="19-threat-model-rp-server-registration">19. Threat Model: RP Server Registration</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RREG-01</td>
+<td>Challenge reuse</td>
+<td>Old registration response replayed</td>
+<td>Unauthorized credential registration</td>
+<td>Random, single-use, short-lived challenge</td>
+</tr>
+<tr>
+<td>RREG-02</td>
+<td>Missing origin validation</td>
+<td>RP accepts response from wrong web/app origin</td>
+<td>Authentication trust bypass</td>
+<td>Strict origin/app association validation</td>
+</tr>
+<tr>
+<td>RREG-03</td>
+<td>Missing RP ID hash validation</td>
+<td>Credential scoped to wrong RP accepted</td>
+<td>Login bypass or confusion</td>
+<td>Verify <code>authenticatorData.rpIdHash</code></td>
+</tr>
+<tr>
+<td>RREG-04</td>
+<td>Registration CSRF</td>
+<td>Attacker tricks logged-in user into registering credential</td>
+<td>Persistent takeover</td>
+<td>CSRF protection and step-up</td>
+</tr>
+<tr>
+<td>RREG-05</td>
+<td>Weak account binding</td>
+<td>Credential stored under wrong user</td>
+<td>Account takeover</td>
+<td>Bind challenge to user/session</td>
+</tr>
+<tr>
+<td>RREG-06</td>
+<td>No step-up before adding passkey</td>
+<td>Hijacked session adds attacker passkey</td>
+<td>Persistent access</td>
+<td>Recent UV-required WebAuthn step-up</td>
+</tr>
+<tr>
+<td>RREG-07</td>
+<td>Duplicate credential confusion</td>
+<td>Multiple credentials incorrectly mapped</td>
+<td>Auth failures or wrong account binding</td>
+<td><code>excludeCredentials</code>; duplicate detection</td>
+</tr>
+<tr>
+<td>RREG-08</td>
+<td>Untrusted authenticator accepted for admin</td>
+<td>Low-assurance passkey registered</td>
+<td>Admin compromise</td>
+<td>Attestation/AAGUID policy</td>
+</tr>
+<tr>
+<td>RREG-09</td>
+<td>No notification</td>
+<td>User unaware of new passkey</td>
+<td>Persistent compromise</td>
+<td>Notify on credential creation</td>
+</tr>
+<tr>
+<td>RREG-10</td>
+<td>Excessive metadata logging</td>
+<td>Credential data leaked in logs</td>
+<td>Privacy/data leakage</td>
+<td>Redact logs and limit retention</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="20-threat-model-rp-server-authentication">20. Threat Model: RP Server Authentication</h1>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RAUTH-01</td>
+<td>Signature not verified</td>
+<td>RP accepts invalid assertion</td>
+<td>Full auth bypass</td>
+<td>Use mature WebAuthn library</td>
+</tr>
+<tr>
+<td>RAUTH-02</td>
+<td>Challenge replay</td>
+<td>Old assertion reused</td>
+<td>Auth bypass</td>
+<td>Single-use challenge</td>
+</tr>
+<tr>
+<td>RAUTH-03</td>
+<td>Origin not checked</td>
+<td>Assertion from fake app/site accepted</td>
+<td>Phishing bypass</td>
+<td>Validate allowed origins/app identifiers</td>
+</tr>
+<tr>
+<td>RAUTH-04</td>
+<td>RP ID hash not checked</td>
+<td>Wrong RP credential accepted</td>
+<td>Auth bypass</td>
+<td>Verify RP ID hash</td>
+</tr>
+<tr>
+<td>RAUTH-05</td>
+<td>UV flag ignored</td>
+<td>Local user verification not enforced</td>
+<td>Stolen phone/key risk</td>
+<td>Require and verify UV</td>
+</tr>
+<tr>
+<td>RAUTH-06</td>
+<td>Credential-user mismatch</td>
+<td>Credential ID accepted for another user</td>
+<td>Account takeover</td>
+<td>Strict credential-to-user mapping</td>
+</tr>
+<tr>
+<td>RAUTH-07</td>
+<td>Weak algorithm accepted</td>
+<td>Crypto downgrade</td>
+<td>Auth weakness</td>
+<td>Approved COSE algorithms only</td>
+</tr>
+<tr>
+<td>RAUTH-08</td>
+<td>Counter anomaly ignored</td>
+<td>Cloned credential not detected</td>
+<td>Persistent compromise</td>
+<td>Monitor sign counter where meaningful</td>
+</tr>
+<tr>
+<td>RAUTH-09</td>
+<td>User enumeration</td>
+<td>Error reveals registered users</td>
+<td>Targeting risk</td>
+<td>Generic errors and rate limits</td>
+</tr>
+<tr>
+<td>RAUTH-10</td>
+<td>Session fixation</td>
+<td>Old session retained after login</td>
+<td>Account takeover</td>
+<td>Rotate session ID after login</td>
+</tr>
+<tr>
+<td>RAUTH-11</td>
+<td>Weak session after passkey</td>
+<td>Token stolen after login</td>
+<td>Account takeover</td>
+<td>Secure cookies/tokens, short TTL, re-auth</td>
+</tr>
+<tr>
+<td>RAUTH-12</td>
+<td>No mobile risk evaluation</td>
+<td>Rooted/emulated device logs in</td>
+<td>Fraud/compromise</td>
+<td>Play Integrity, MDM, risk engine</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="21-recovery-and-credential-lifecycle">21. Recovery and Credential Lifecycle</h1>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> NoPasskey
+    NoPasskey --> Registered: Create passkey
+    Registered --> Active: Server validates and stores credential
+    Active --> NewDevice: User gets new phone / passkey sync
+    NewDevice --> Active: Risk checks pass
+    Active --> Suspicious: New provider / new device / counter anomaly
+    Suspicious --> Active: Investigation clears
+    Suspicious --> Revoked: Compromise confirmed
+    Active --> Recovery: Lost phone / lost key
+    Recovery --> Active: Secure recovery and re-registration
+    Recovery --> Locked: Fraud suspected
+    Revoked --> [*]
+</pre>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L-01</td>
+<td>Lost phone</td>
+<td>User loses only authenticator</td>
+<td>Lockout</td>
+<td>Backup authenticator, recovery keys</td>
+</tr>
+<tr>
+<td>L-02</td>
+<td>Weak recovery</td>
+<td>Email/SMS recovery bypasses passkey</td>
+<td>Account takeover</td>
+<td>Strong identity proofing, phishing-resistant recovery</td>
+</tr>
+<tr>
+<td>L-03</td>
+<td>SIM swap</td>
+<td>SMS fallback used</td>
+<td>Account takeover</td>
+<td>Avoid SMS as high-assurance fallback</td>
+</tr>
+<tr>
+<td>L-04</td>
+<td>Helpdesk social engineering</td>
+<td>Attacker resets passkey through support</td>
+<td>Account takeover</td>
+<td>Approval workflow, callback to known channel</td>
+</tr>
+<tr>
+<td>L-05</td>
+<td>New phone onboarding abuse</td>
+<td>Attacker adds passkey on new device</td>
+<td>Persistent compromise</td>
+<td>Recent UV, risk checks, notification</td>
+</tr>
+<tr>
+<td>L-06</td>
+<td>Cloud account compromise</td>
+<td>Attacker abuses synced credentials/recovery</td>
+<td>Account takeover</td>
+<td>Risk-based re-auth, device compliance, account alerts</td>
+</tr>
+<tr>
+<td>L-07</td>
+<td>Recovery code theft</td>
+<td>One-time codes used by attacker</td>
+<td>Account takeover</td>
+<td>Hash codes, display once, rotate after use</td>
+</tr>
+<tr>
+<td>L-08</td>
+<td>No credential inventory</td>
+<td>User cannot review registered passkeys</td>
+<td>Persistence</td>
+<td>Credential management page</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="22-session-management-after-mobile-passkey-login">22. Session Management After Mobile Passkey Login</h1>
+<p>Strong WebAuthn authentication does not automatically secure the mobile session.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Threat</th>
+<th>Attack Scenario</th>
+<th>Impact</th>
+<th>Mitigation Controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S-01</td>
+<td>Token theft from app storage</td>
+<td>Malware or backup extracts token</td>
+<td>Account takeover</td>
+<td>Android Keystore, encrypted storage, short-lived tokens</td>
+</tr>
+<tr>
+<td>S-02</td>
+<td>Token in deep link</td>
+<td>Auth token leaks through URL handlers</td>
+<td>Account takeover</td>
+<td>Use authorization code + PKCE; no tokens in URLs</td>
+</tr>
+<tr>
+<td>S-03</td>
+<td>Long-lived refresh token</td>
+<td>Stolen refresh token persists</td>
+<td>Persistent access</td>
+<td>Refresh token rotation, device/session inventory</td>
+</tr>
+<tr>
+<td>S-04</td>
+<td>No step-up</td>
+<td>Attacker changes email/passkey after login</td>
+<td>Persistent compromise</td>
+<td>Require passkey UV for sensitive actions</td>
+</tr>
+<tr>
+<td>S-05</td>
+<td>No device revocation</td>
+<td>Lost phone remains logged in</td>
+<td>Account takeover</td>
+<td>Global logout, revoke device sessions</td>
+</tr>
+<tr>
+<td>S-06</td>
+<td>WebView cookie leakage</td>
+<td>Cookies exposed or shared incorrectly</td>
+<td>Session theft</td>
+<td>Cookie isolation, secure attributes</td>
+</tr>
+<tr>
+<td>S-07</td>
+<td>Background session abuse</td>
+<td>App remains logged in after device compromise</td>
+<td>Fraud</td>
+<td>Idle timeout, biometric re-auth for sensitive flows</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="23-stride-summary">23. STRIDE Summary</h1>
+<table>
+<thead>
+<tr>
+<th>STRIDE</th>
+<th>Android Chrome</th>
+<th>Native App</th>
+<th>Credential Manager / Provider</th>
+<th>Android Device</th>
+<th>RP Server</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Spoofing</td>
+<td>Fake login site</td>
+<td>Fake/repacked app</td>
+<td>Fake provider UI</td>
+<td>Stolen phone</td>
+<td>Weak recovery</td>
+</tr>
+<tr>
+<td>Tampering</td>
+<td>Request/session manipulation</td>
+<td>APK modification</td>
+<td>Credential metadata confusion</td>
+<td>Rooted device</td>
+<td>Credential DB tampering</td>
+</tr>
+<tr>
+<td>Repudiation</td>
+<td>User denies browser action</td>
+<td>No app audit trail</td>
+<td>Provider selection unclear</td>
+<td>Shared device</td>
+<td>Poor credential lifecycle logging</td>
+</tr>
+<tr>
+<td>Information Disclosure</td>
+<td>Token/cookie leakage</td>
+<td>Local storage leakage</td>
+<td>Provider metadata leakage</td>
+<td>Screenshot/accessibility leakage</td>
+<td>Excessive logging</td>
+</tr>
+<tr>
+<td>Denial of Service</td>
+<td>Browser blocked</td>
+<td>App broken by DAL error</td>
+<td>Provider unavailable</td>
+<td>Lost phone</td>
+<td>Credential deletion</td>
+</tr>
+<tr>
+<td>Elevation of Privilege</td>
+<td>Session riding</td>
+<td>Deep link hijack</td>
+<td>Weak UV/provider policy</td>
+<td>Root compromise</td>
+<td>Admin credential lifecycle abuse</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="24-attack-tree-android-account-takeover">24. Attack Tree: Android Account Takeover</h1>
+<pre class="mermaid">
+flowchart TD
+    A[Goal: Android Account Takeover]
+
+    A --> B[Bypass Passkey]
+    A --> C[Abuse Native App]
+    A --> D[Steal Mobile Session]
+    A --> E[Exploit Recovery]
+    A --> F[Compromise Device]
+    A --> G[Abuse Credential Sync]
+
+    B --> B1[RP fails origin validation]
+    B --> B2[RP ignores UV flag]
+    B --> B3[Weak password/OTP fallback]
+
+    C --> C1[Fake app]
+    C --> C2[Repacked app]
+    C --> C3[Missing Digital Asset Links]
+    C --> C4[Deep link hijack]
+
+    D --> D1[Token stored insecurely]
+    D --> D2[Token in URL]
+    D --> D3[Long-lived refresh token]
+    D --> D4[WebView cookie leakage]
+
+    E --> E1[Email recovery]
+    E --> E2[SMS recovery / SIM swap]
+    E --> E3[Helpdesk reset]
+
+    F --> F1[Rooted device]
+    F --> F2[Malware]
+    F --> F3[Accessibility abuse]
+    F --> F4[Overlay attack]
+
+    G --> G1[Cloud account compromise]
+    G --> G2[Unmanaged synced device]
+    G --> G3[Unapproved credential provider]
+</pre>
+<hr />
+<h1 id="25-attack-tree-privileged-mobile-user-compromise">25. Attack Tree: Privileged Mobile User Compromise</h1>
+<pre class="mermaid">
+flowchart TD
+    A[Goal: Compromise Privileged Mobile User]
+
+    A --> B[Register Weak Authenticator]
+    A --> C[Use Unmanaged Device]
+    A --> D[Steal Admin Session]
+    A --> E[Bypass via Recovery]
+    A --> F[Abuse App Integrity Gap]
+
+    B --> B1[No attestation policy]
+    B --> B2[Synced passkey allowed]
+    B --> B3[UV not required]
+
+    C --> C1[BYOD allowed]
+    C --> C2[No MDM compliance]
+    C --> C3[Rooted device not blocked]
+
+    D --> D1[Token theft]
+    D --> D2[No admin step-up]
+    D --> D3[Long session lifetime]
+
+    E --> E1[Helpdesk reset]
+    E --> E2[Email fallback]
+    E --> E3[SMS fallback]
+
+    F --> F1[Fake app accepted]
+    F --> F2[Play Integrity not checked]
+    F --> F3[DAL misconfigured]
+</pre>
+<hr />
+<h1 id="26-recommended-control-architecture">26. Recommended Control Architecture</h1>
+<pre class="mermaid">
+flowchart TD
+    A[Managed Android Device]
+    B[Chrome / Native App]
+    C[Digital Asset Links for Native App]
+    D[Credential Manager]
+    E[Approved Credential Provider]
+    F[User Verification Required]
+    G[RP Server Strict Validation]
+    H[Play Integrity / MDM Compliance]
+    I[Secure Session]
+    J[Step-Up for Sensitive Actions]
+    K[Monitoring and Recovery Controls]
+
+    A --> B
+    B --> C
+    B --> D
+    D --> E
+    E --> F
+    F --> G
+    H --> G
+    G --> I
+    I --> J
+    J --> K
+</pre>
+<hr />
+<h1 id="27-minimum-rp-server-validation">27. Minimum RP Server Validation</h1>
+<p>For every Android passkey authentication assertion, the RP should verify:</p>
+<pre><code class="language-text">1. Challenge matches the server-issued challenge.
+2. Challenge is single-use.
+3. Challenge is short-lived.
+4. clientDataJSON.type is expected.
+5. Origin / app identity is expected.
+6. RP ID hash equals SHA-256(expected RP ID).
+7. Credential ID exists.
+8. Credential ID belongs to the expected user.
+9. Signature verifies using the stored public key.
+10. UP flag is present if required.
+11. UV flag is present if user verification is required.
+12. COSE algorithm is approved.
+13. Sign counter is evaluated where meaningful.
+14. Backup eligibility / backup state is evaluated for policy decisions.
+15. Device/app risk signals are evaluated where required.
+16. Session ID/token is rotated after successful authentication.
+17. Authentication event is logged.
+</code></pre>
+<hr />
+<h1 id="28-android-policy-matrix">28. Android Policy Matrix</h1>
+<table>
+<thead>
+<tr>
+<th>User Type</th>
+<th>Allowed Client</th>
+<th>Authenticator / Provider</th>
+<th>UV</th>
+<th>Device Requirement</th>
+<th>Recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard user</td>
+<td>Chrome or native app</td>
+<td>Platform passkey / Google Password Manager / approved provider</td>
+<td>Required for passwordless</td>
+<td>Recommended compliant device</td>
+<td>Self-service with safeguards</td>
+</tr>
+<tr>
+<td>Workforce user</td>
+<td>Managed app or Chrome</td>
+<td>Approved provider</td>
+<td>Required</td>
+<td>Managed Android Enterprise device</td>
+<td>Helpdesk + existing factor</td>
+</tr>
+<tr>
+<td>Developer</td>
+<td>Managed device/app</td>
+<td>Approved provider or security key</td>
+<td>Required</td>
+<td>MDM compliant, non-rooted</td>
+<td>Strong identity proofing</td>
+</tr>
+<tr>
+<td>Production admin</td>
+<td>Managed app only</td>
+<td>Hardware FIDO2 key or enterprise-approved passkey</td>
+<td>Required</td>
+<td>Managed, compliant, no BYOD</td>
+<td>Security-approved recovery</td>
+</tr>
+<tr>
+<td>Break-glass admin</td>
+<td>Controlled device</td>
+<td>Two hardware keys</td>
+<td>Required</td>
+<td>Controlled emergency process</td>
+<td>Manual, logged, dual approval</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="29-android-specific-high-priority-controls">29. Android-Specific High-Priority Controls</h1>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th style="text-align: right;">Priority</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strict server-side WebAuthn validation</td>
+<td style="text-align: right;">Critical</td>
+<td>Prevents protocol bypass</td>
+</tr>
+<tr>
+<td>UV required and verified</td>
+<td style="text-align: right;">Critical</td>
+<td>Prevents possession-only authentication</td>
+</tr>
+<tr>
+<td>Digital Asset Links for native apps</td>
+<td style="text-align: right;">Critical</td>
+<td>Binds app identity to RP domain</td>
+</tr>
+<tr>
+<td>Play Integrity / app integrity checks</td>
+<td style="text-align: right;">High</td>
+<td>Detects fake/repacked apps and risky devices</td>
+</tr>
+<tr>
+<td>MDM / Android Enterprise compliance</td>
+<td style="text-align: right;">High</td>
+<td>Controls device posture</td>
+</tr>
+<tr>
+<td>Avoid SMS fallback</td>
+<td style="text-align: right;">High</td>
+<td>Reduces SIM-swap bypass</td>
+</tr>
+<tr>
+<td>Secure token storage</td>
+<td style="text-align: right;">High</td>
+<td>Prevents post-login compromise</td>
+</tr>
+<tr>
+<td>Step-up before credential changes</td>
+<td style="text-align: right;">Critical</td>
+<td>Prevents persistent takeover</td>
+</tr>
+<tr>
+<td>Credential lifecycle alerts</td>
+<td style="text-align: right;">High</td>
+<td>Detects unauthorized passkey registration</td>
+</tr>
+<tr>
+<td>Strong recovery process</td>
+<td style="text-align: right;">Critical</td>
+<td>Prevents bypassing passkeys</td>
+</tr>
+<tr>
+<td>WebView hardening</td>
+<td style="text-align: right;">High</td>
+<td>Prevents embedded browser/session abuse</td>
+</tr>
+<tr>
+<td>Restrict admin passkeys to high-assurance authenticators</td>
+<td style="text-align: right;">Critical</td>
+<td>Reduces privileged compromise</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="30-security-test-cases">30. Security Test Cases</h1>
+<table>
+<thead>
+<tr>
+<th>Test Case</th>
+<th>Expected Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authenticate from fake domain in Chrome</td>
+<td>Passkey should not work</td>
+</tr>
+<tr>
+<td>Native app without valid Digital Asset Links</td>
+<td>Registration/authentication should fail or not be trusted</td>
+</tr>
+<tr>
+<td>Repacked APK calls backend</td>
+<td>Backend should detect app integrity failure</td>
+</tr>
+<tr>
+<td>Rooted/emulated device attempts login</td>
+<td>Risk engine blocks or steps up</td>
+</tr>
+<tr>
+<td>Replay old assertion</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Modify <code>clientDataJSON.origin</code></td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Modify RP ID hash</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Remove UV flag</td>
+<td>RP rejects where UV required</td>
+</tr>
+<tr>
+<td>Register passkey without recent auth</td>
+<td>RP rejects</td>
+</tr>
+<tr>
+<td>Add passkey from hijacked session</td>
+<td>Step-up required</td>
+</tr>
+<tr>
+<td>Use SMS recovery for admin</td>
+<td>Blocked</td>
+</tr>
+<tr>
+<td>Use unapproved credential provider for admin</td>
+<td>Blocked or high-risk challenge</td>
+</tr>
+<tr>
+<td>Login from new synced device</td>
+<td>Risk checks and notification triggered</td>
+</tr>
+<tr>
+<td>Token appears in deep link URL</td>
+<td>Security test fails</td>
+</tr>
+<tr>
+<td>WebView loads untrusted domain with auth cookies</td>
+<td>Blocked</td>
+</tr>
+<tr>
+<td>Credential lifecycle event occurs</td>
+<td>Audit and user notification generated</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="31-risk-register">31. Risk Register</h1>
+<table>
+<thead>
+<tr>
+<th>Risk ID</th>
+<th>Risk</th>
+<th style="text-align: right;">Likelihood</th>
+<th style="text-align: right;">Impact</th>
+<th style="text-align: right;">Severity</th>
+<th>Treatment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AR-01</td>
+<td>Weak recovery bypasses passkeys</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Redesign recovery with phishing-resistant controls</td>
+</tr>
+<tr>
+<td>AR-02</td>
+<td>Fake/repacked Android app</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Play Integrity, app signing, official distribution</td>
+</tr>
+<tr>
+<td>AR-03</td>
+<td>Missing or wrong Digital Asset Links</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>DAL validation and monitoring</td>
+</tr>
+<tr>
+<td>AR-04</td>
+<td>Synced passkey used from unmanaged device</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Device compliance and risk checks</td>
+</tr>
+<tr>
+<td>AR-05</td>
+<td>RP ignores UV flag</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Server-side UV enforcement</td>
+</tr>
+<tr>
+<td>AR-06</td>
+<td>Token stored insecurely on phone</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>Secure storage and token rotation</td>
+</tr>
+<tr>
+<td>AR-07</td>
+<td>Rooted device accesses sensitive app</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">High</td>
+<td style="text-align: right;">High</td>
+<td>MDM, Play Integrity, MTD</td>
+</tr>
+<tr>
+<td>AR-08</td>
+<td>WebView exposes session</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td>WebView hardening</td>
+</tr>
+<tr>
+<td>AR-09</td>
+<td>Lost phone with active session</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td>Remote logout and device revocation</td>
+</tr>
+<tr>
+<td>AR-10</td>
+<td>Unapproved credential provider</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td style="text-align: right;">Medium</td>
+<td>Provider policy and admin restrictions</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="32-recommended-android-implementation-baseline">32. Recommended Android Implementation Baseline</h1>
+<h2 id="321-standard-users">32.1 Standard Users</h2>
+<pre><code class="language-json">{
+  &quot;registration&quot;: {
+    &quot;attestation&quot;: &quot;none&quot;,
+    &quot;authenticatorSelection&quot;: {
+      &quot;userVerification&quot;: &quot;required&quot;,
+      &quot;residentKey&quot;: &quot;preferred&quot;
+    }
+  },
+  &quot;authentication&quot;: {
+    &quot;userVerification&quot;: &quot;required&quot;
+  },
+  &quot;mobileControls&quot;: {
+    &quot;digitalAssetLinksRequired&quot;: true,
+    &quot;secureTokenStorage&quot;: true,
+    &quot;notifyOnNewPasskey&quot;: true
+  }
+}
+</code></pre>
+<h2 id="322-workforce-enterprise-users">32.2 Workforce / Enterprise Users</h2>
+<pre><code class="language-json">{
+  &quot;registration&quot;: {
+    &quot;attestation&quot;: &quot;indirect&quot;,
+    &quot;authenticatorSelection&quot;: {
+      &quot;userVerification&quot;: &quot;required&quot;,
+      &quot;residentKey&quot;: &quot;preferred&quot;
+    }
+  },
+  &quot;authentication&quot;: {
+    &quot;userVerification&quot;: &quot;required&quot;
+  },
+  &quot;mobileControls&quot;: {
+    &quot;managedDeviceRequired&quot;: true,
+    &quot;playIntegrityRequired&quot;: true,
+    &quot;digitalAssetLinksRequired&quot;: true,
+    &quot;blockRootedDevices&quot;: true,
+    &quot;stepUpForCredentialChanges&quot;: true
+  }
+}
+</code></pre>
+<h2 id="323-privileged-administrators">32.3 Privileged Administrators</h2>
+<pre><code class="language-json">{
+  &quot;registration&quot;: {
+    &quot;attestation&quot;: &quot;enterprise&quot;,
+    &quot;authenticatorSelection&quot;: {
+      &quot;userVerification&quot;: &quot;required&quot;,
+      &quot;residentKey&quot;: &quot;required&quot;
+    }
+  },
+  &quot;authentication&quot;: {
+    &quot;userVerification&quot;: &quot;required&quot;
+  },
+  &quot;adminPolicy&quot;: {
+    &quot;managedDeviceRequired&quot;: true,
+    &quot;approvedAuthenticatorsOnly&quot;: true,
+    &quot;hardwareSecurityKeyPreferred&quot;: true,
+    &quot;noSmsRecovery&quot;: true,
+    &quot;noEmailOnlyRecovery&quot;: true,
+    &quot;approvalRequiredForCredentialChanges&quot;: true
+  }
+}
+</code></pre>
+<hr />
+<h1 id="33-practical-server-side-validation-pseudocode">33. Practical Server-Side Validation Pseudocode</h1>
+<pre><code class="language-pseudo">function verifyAndroidPasskeyAssertion(assertion, expectedUser, expectedChallenge, expectedRpId, allowedOrigins, policy):
+
+    clientData = parseClientDataJSON(assertion.clientDataJSON)
+    authData = parseAuthenticatorData(assertion.authenticatorData)
+
+    require clientData.type == &quot;webauthn.get&quot;
+    require clientData.challenge == expectedChallenge
+    require challengeNotExpired(expectedChallenge)
+    require challengeNotUsedBefore(expectedChallenge)
+
+    require clientData.origin in allowedOrigins
+
+    expectedRpIdHash = SHA256(expectedRpId)
+    require authData.rpIdHash == expectedRpIdHash
+
+    credential = credentialRepository.find(assertion.credentialId)
+    require credential != null
+    require credential.userId == expectedUser.id
+    require credential.status == &quot;ACTIVE&quot;
+
+    require verifySignature(
+        publicKey = credential.publicKey,
+        signedData = assertion.authenticatorData + SHA256(assertion.clientDataJSON),
+        signature = assertion.signature
+    )
+
+    require authData.flags.UP == true
+
+    if policy.requiresUserVerification:
+        require authData.flags.UV == true
+
+    if policy.disallowsBackedUpCredentialsForAdmins:
+        require authData.flags.BE == false or userIsNotAdmin(expectedUser)
+
+    if credential.signCountSupported:
+        if authData.signCount &lt; credential.previousSignCount:
+            raiseRiskEvent(&quot;Possible cloned credential&quot;)
+        update credential.previousSignCount
+
+    if policy.requiresMobileIntegrity:
+        integrityResult = verifyPlayIntegrityToken(assertion.integrityToken)
+        require integrityResult.appIsGenuine == true
+        require integrityResult.deviceMeetsPolicy == true
+
+    markChallengeUsed(expectedChallenge)
+
+    rotateSession()
+    createAuthenticatedSession(expectedUser)
+
+    logEvent(&quot;PASSKEY_LOGIN_SUCCESS&quot;, expectedUser, credential, authData.flags)
+</code></pre>
+<hr />
+<h1 id="34-design-review-questions">34. Design Review Questions</h1>
+<h2 id="android-app-browser">Android App / Browser</h2>
+<ul>
+<li>Is login through Chrome, native app, WebView, or all three?</li>
+<li>Are native apps associated with the RP domain through Digital Asset Links?</li>
+<li>Is the app distributed through an approved channel?</li>
+<li>Are debug builds blocked from production?</li>
+<li>Is Play Integrity or equivalent app/device integrity used?</li>
+<li>Are deep links protected with verified App Links?</li>
+<li>Are tokens excluded from URLs and logs?</li>
+<li>Is WebView allowed to load only trusted domains?</li>
+</ul>
+<h2 id="credential-manager-provider">Credential Manager / Provider</h2>
+<ul>
+<li>Which credential providers are allowed?</li>
+<li>Are synced passkeys allowed for all users?</li>
+<li>Are synced passkeys allowed for privileged users?</li>
+<li>Is user verification required?</li>
+<li>Are BE/BS backup flags logged and evaluated?</li>
+<li>Are users notified when new passkeys are created?</li>
+<li>Is there a credential inventory page?</li>
+</ul>
+<h2 id="android-device">Android Device</h2>
+<ul>
+<li>Is the device managed or BYOD?</li>
+<li>Is screen lock required?</li>
+<li>Is minimum OS/security patch enforced?</li>
+<li>Are rooted devices blocked?</li>
+<li>Is sideloading blocked?</li>
+<li>Is mobile threat defense deployed?</li>
+<li>Can lost devices be remotely wiped?</li>
+<li>Can active sessions be revoked?</li>
+</ul>
+<h2 id="rp-server">RP Server</h2>
+<ul>
+<li>Are challenge, origin, RP ID hash, signature, UP, and UV verified?</li>
+<li>Are challenges single-use and short-lived?</li>
+<li>Is session ID/token rotated after login?</li>
+<li>Is passkey registration protected by step-up?</li>
+<li>Is passkey removal protected by step-up?</li>
+<li>Is recovery phishing-resistant?</li>
+<li>Are admin accounts handled differently?</li>
+</ul>
+<hr />
+<h1 id="35-final-recommended-security-posture">35. Final Recommended Security Posture</h1>
+<pre class="mermaid">
+flowchart TD
+    A[Android Device]
+    B{Device Type}
+    B -->|Standard User| C[Passkey via Credential Manager]
+    B -->|Workforce User| D[Managed Android + Approved Provider]
+    B -->|Privileged Admin| E[Managed Device + Hardware Key / Approved Authenticator]
+
+    C --> F[UV Required]
+    D --> F
+    E --> F
+
+    F --> G[RP Validates WebAuthn Ceremony]
+    H[Digital Asset Links] --> G
+    I[Play Integrity / MDM] --> G
+
+    G --> J[Secure Session]
+    J --> K[Step-Up for Sensitive Actions]
+    K --> L[Credential Lifecycle Monitoring]
+    L --> M[Secure Recovery]
+</pre>
+<h2 id="non-negotiable-controls">Non-Negotiable Controls</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Why It Matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Validate challenge</td>
+<td>Prevent replay</td>
+</tr>
+<tr>
+<td>Validate origin/app identity</td>
+<td>Prevent fake site/app acceptance</td>
+</tr>
+<tr>
+<td>Validate RP ID hash</td>
+<td>Enforce credential scoping</td>
+</tr>
+<tr>
+<td>Validate signature</td>
+<td>Prove possession of private key</td>
+</tr>
+<tr>
+<td>Verify UV</td>
+<td>Ensure local user verification</td>
+</tr>
+<tr>
+<td>Digital Asset Links</td>
+<td>Bind Android app to RP domain</td>
+</tr>
+<tr>
+<td>Secure token storage</td>
+<td>Prevent post-login compromise</td>
+</tr>
+<tr>
+<td>Step-up before credential changes</td>
+<td>Prevent persistent takeover</td>
+</tr>
+<tr>
+<td>Strong recovery</td>
+<td>Prevent passkey bypass</td>
+</tr>
+<tr>
+<td>Device/app integrity checks</td>
+<td>Detect fake apps, tampered apps, rooted devices</td>
+</tr>
+<tr>
+<td>Separate admin policy</td>
+<td>Protect privileged access</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="36-conclusion">36. Conclusion</h1>
+<p>For Android, the WebAuthn cryptography remains strong, but the threat model expands beyond the browser. The main Android-specific risks are:</p>
+<ol>
+<li>Fake or repacked mobile apps</li>
+<li>Missing or misconfigured Digital Asset Links</li>
+<li>Synced passkeys used from unmanaged devices</li>
+<li>Unapproved credential providers</li>
+<li>Rooted or malware-infected devices</li>
+<li>Overlay and accessibility abuse</li>
+<li>WebView session exposure</li>
+<li>Weak recovery through email/SMS/helpdesk</li>
+<li>Weak mobile token storage</li>
+<li>Ignoring the <code>UV</code> flag on the RP server</li>
+</ol>
+<p>The recommended design is:</p>
+<blockquote>
+<p>Use Credential Manager for Android passkeys, enforce Digital Asset Links for native apps, require user verification, validate all WebAuthn ceremony fields server-side, protect mobile sessions, evaluate app/device integrity, and apply stricter authenticator, recovery, and device-compliance rules for privileged users.</p>
+</blockquote>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

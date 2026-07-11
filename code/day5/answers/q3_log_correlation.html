@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q3_log_correlation.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q3_log_correlation.py</h1>
+  <p class="file-path">Source: code\day5\answers\q3_log_correlation.py</p>
+  <p class="line-count">385 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q3. Multi-Source Log Correlation
+==================================
+Given two log files (firewall log and auth log), correlate events by IP
+within a 60-second window.
+
+Firewall log : timestamp ip port action       (ALLOW / DENY)
+Auth log     : timestamp ip username result   (OK / FAIL)
+
+Flag: any IP with a firewall DENY followed by an auth FAIL within 60 seconds.
+Output: (ip, fw_timestamp, auth_timestamp, username)
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;You have two different log files. Correlate them by IP and time.&quot;
+
+--- CANDIDATE FIRST RESPONSE (naive — two nested loops, O(F*A)) ---
+&quot;Load all firewall DENY events. Load all auth FAIL events.
+For every DENY, scan every auth FAIL for the same IP and check the delta.&quot;
+
+Follow-up: &quot;What&#x27;s the complexity?&quot;
+→ O(F * A) per IP. If firewall has 1M DENYs and auth has 500K FAILs, that&#x27;s
+  500 billion comparisons. Too slow.
+
+Follow-up: &quot;How do you fix it?&quot;
+→ Group events by IP first. For each IP, sort both lists by timestamp.
+  Use a two-pointer or binary search to find auth events within [t, t+60].
+
+--- CANDIDATE SECOND RESPONSE (group by IP, sort, sliding window) ---
+Better. O((F+A) log(F+A)) overall due to sorting.
+
+Follow-up: &quot;What if files are too large to fit in memory?&quot;
+→ Sort both files externally (sort utility or merge sort on disk),
+  then stream-merge them line-by-line by IP+timestamp.
+  For this problem scope we keep the in-memory approach.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Parse both files, group by IP, sort per-IP lists, two-pointer correlation,
+proper datetime parsing with timezone awareness.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from datetime import datetime, timezone
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_FW_LOG = &quot;&quot;&quot;\
+2024-01-15T10:00:00Z 10.0.0.5  443  ALLOW
+2024-01-15T10:00:05Z 10.0.0.6  22   DENY
+2024-01-15T10:00:10Z 10.0.0.7  80   ALLOW
+2024-01-15T10:00:15Z 10.0.0.8  22   DENY
+2024-01-15T10:00:20Z 10.0.0.6  22   DENY
+2024-01-15T10:00:25Z 10.0.0.9  443  DENY
+2024-01-15T10:01:00Z 10.0.0.8  22   DENY
+MALFORMED FW LINE
+&quot;&quot;&quot;
+
+SAMPLE_AUTH_LOG = &quot;&quot;&quot;\
+2024-01-15T10:00:08Z 10.0.0.6  attacker FAIL
+2024-01-15T10:00:18Z 10.0.0.8  hacker   FAIL
+2024-01-15T10:00:22Z 10.0.0.6  attacker FAIL
+2024-01-15T10:00:30Z 10.0.0.9  bot      OK
+2024-01-15T10:00:50Z 10.0.0.5  alice    OK
+2024-01-15T10:01:05Z 10.0.0.8  hacker   FAIL
+MALFORMED AUTH LINE
+&quot;&quot;&quot;
+
+WINDOW_SECS = 60
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+FW_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+(?P&lt;ip&gt;\S+)\s+(?P&lt;port&gt;\d+)\s+(?P&lt;action&gt;ALLOW|DENY)&#x27;
+)
+AUTH_RE = re.compile(
+    r&#x27;(?P&lt;ts&gt;\S+)\s+(?P&lt;ip&gt;\S+)\s+(?P&lt;user&gt;\S+)\s+(?P&lt;result&gt;OK|FAIL)&#x27;
+)
+
+
+def _parse_ts(ts_str: str) -&gt; float:
+    &quot;&quot;&quot;
+    Parse ISO-8601 UTC timestamp to a Unix epoch float.
+    Returns -1.0 on failure so callers can discard the record.
+    &quot;&quot;&quot;
+    ts_str = ts_str.strip()
+    # Handle both &#x27;Z&#x27; suffix and &#x27;+00:00&#x27;
+    ts_str = ts_str.replace(&quot;Z&quot;, &quot;+00:00&quot;)
+    try:
+        dt = datetime.fromisoformat(ts_str)
+        # If no tzinfo, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return -1.0
+
+
+def parse_fw_line(raw: str):
+    &quot;&quot;&quot;Returns dict or None.&quot;&quot;&quot;
+    m = FW_RE.search(raw.strip())
+    if not m:
+        return None
+    ts = _parse_ts(m.group(&quot;ts&quot;))
+    if ts &lt; 0:
+        return None
+    return {&quot;ts&quot;: ts, &quot;ts_raw&quot;: m.group(&quot;ts&quot;),
+            &quot;ip&quot;: m.group(&quot;ip&quot;), &quot;port&quot;: m.group(&quot;port&quot;),
+            &quot;action&quot;: m.group(&quot;action&quot;)}
+
+
+def parse_auth_line(raw: str):
+    &quot;&quot;&quot;Returns dict or None.&quot;&quot;&quot;
+    m = AUTH_RE.search(raw.strip())
+    if not m:
+        return None
+    ts = _parse_ts(m.group(&quot;ts&quot;))
+    if ts &lt; 0:
+        return None
+    return {&quot;ts&quot;: ts, &quot;ts_raw&quot;: m.group(&quot;ts&quot;),
+            &quot;ip&quot;: m.group(&quot;ip&quot;), &quot;user&quot;: m.group(&quot;user&quot;),
+            &quot;result&quot;: m.group(&quot;result&quot;)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual grouping, manual binary search, no defaultdict/bisect)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_binary_search_left(arr, target):
+    &quot;&quot;&quot;
+    Return the leftmost index i such that arr[i] &gt;= target.
+    arr is a list of floats, sorted ascending.
+    Implements bisect_left manually.
+    &quot;&quot;&quot;
+    lo, hi = 0, len(arr)
+    while lo &lt; hi:
+        mid = (lo + hi) // 2
+        if arr[mid] &lt; target:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _manual_insertion_sort_by_ts(records):
+    &quot;&quot;&quot;Sort list of dicts by &#x27;ts&#x27; (float) in-place, ascending.&quot;&quot;&quot;
+    for i in range(1, len(records)):
+        key = records[i]
+        j = i - 1
+        while j &gt;= 0 and records[j][&quot;ts&quot;] &gt; key[&quot;ts&quot;]:
+            records[j + 1] = records[j]
+            j -= 1
+        records[j + 1] = key
+
+
+def correlate_without_builtins(fw_lines, auth_lines):
+    malformed = {&quot;fw&quot;: 0, &quot;auth&quot;: 0}
+
+    # Group DENY events by IP
+    fw_denies = {}   # ip -&gt; list of fw event dicts
+    for raw in fw_lines:
+        ev = parse_fw_line(raw)
+        if ev is None:
+            malformed[&quot;fw&quot;] += 1
+            continue
+        if ev[&quot;action&quot;] != &quot;DENY&quot;:
+            continue
+        if ev[&quot;ip&quot;] not in fw_denies:
+            fw_denies[ev[&quot;ip&quot;]] = []
+        fw_denies[ev[&quot;ip&quot;]].append(ev)
+
+    # Group FAIL events by IP
+    auth_fails = {}  # ip -&gt; list of auth event dicts
+    for raw in auth_lines:
+        ev = parse_auth_line(raw)
+        if ev is None:
+            malformed[&quot;auth&quot;] += 1
+            continue
+        if ev[&quot;result&quot;] != &quot;FAIL&quot;:
+            continue
+        if ev[&quot;ip&quot;] not in auth_fails:
+            auth_fails[ev[&quot;ip&quot;]] = []
+        auth_fails[ev[&quot;ip&quot;]].append(ev)
+
+    # Sort per-IP lists by timestamp
+    for ip in fw_denies:
+        _manual_insertion_sort_by_ts(fw_denies[ip])
+    for ip in auth_fails:
+        _manual_insertion_sort_by_ts(auth_fails[ip])
+
+    # Correlate: for each DENY, find auth FAILs within [deny_ts, deny_ts + 60]
+    results = []
+    for ip, denies in fw_denies.items():
+        if ip not in auth_fails:
+            continue
+        auths = auth_fails[ip]
+        auth_ts_list = [a[&quot;ts&quot;] for a in auths]  # sorted list of timestamps
+
+        for deny in denies:
+            window_start = deny[&quot;ts&quot;]
+            window_end   = deny[&quot;ts&quot;] + WINDOW_SECS
+
+            # Find first auth event &gt;= window_start
+            idx = _manual_binary_search_left(auth_ts_list, window_start)
+
+            # Scan forward while within window
+            while idx &lt; len(auths) and auths[idx][&quot;ts&quot;] &lt;= window_end:
+                results.append((
+                    ip,
+                    deny[&quot;ts_raw&quot;],
+                    auths[idx][&quot;ts_raw&quot;],
+                    auths[idx][&quot;user&quot;],
+                ))
+                idx += 1
+
+    return results, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (bisect, defaultdict, sorted)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import bisect
+
+def correlate_with_builtins(fw_lines, auth_lines):
+    malformed = {&quot;fw&quot;: 0, &quot;auth&quot;: 0}
+
+    fw_denies  = defaultdict(list)
+    auth_fails = defaultdict(list)
+
+    for raw in fw_lines:
+        ev = parse_fw_line(raw)
+        if ev is None:
+            malformed[&quot;fw&quot;] += 1
+            continue
+        if ev[&quot;action&quot;] == &quot;DENY&quot;:
+            fw_denies[ev[&quot;ip&quot;]].append(ev)
+
+    for raw in auth_lines:
+        ev = parse_auth_line(raw)
+        if ev is None:
+            malformed[&quot;auth&quot;] += 1
+            continue
+        if ev[&quot;result&quot;] == &quot;FAIL&quot;:
+            auth_fails[ev[&quot;ip&quot;]].append(ev)
+
+    # Sort each IP&#x27;s list
+    for ip in fw_denies:
+        fw_denies[ip].sort(key=lambda e: e[&quot;ts&quot;])
+    for ip in auth_fails:
+        auth_fails[ip].sort(key=lambda e: e[&quot;ts&quot;])
+
+    results = []
+    for ip, denies in fw_denies.items():
+        if ip not in auth_fails:
+            continue
+        auths = auth_fails[ip]
+        auth_ts_list = [a[&quot;ts&quot;] for a in auths]
+
+        for deny in denies:
+            window_start = deny[&quot;ts&quot;]
+            window_end   = deny[&quot;ts&quot;] + WINDOW_SECS
+
+            idx = bisect.bisect_left(auth_ts_list, window_start)
+            while idx &lt; len(auths) and auths[idx][&quot;ts&quot;] &lt;= window_end:
+                results.append((
+                    ip,
+                    deny[&quot;ts_raw&quot;],
+                    auths[idx][&quot;ts_raw&quot;],
+                    auths[idx][&quot;user&quot;],
+                ))
+                idx += 1
+
+    return results, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(results, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  MULTI-SOURCE CORRELATION REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Malformed FW   lines skipped: {malformed[&#x27;fw&#x27;]}&quot;)
+    print(f&quot;Malformed auth lines skipped: {malformed[&#x27;auth&#x27;]}&quot;)
+    print(f&quot;Window size: {WINDOW_SECS} seconds\n&quot;)
+
+    if not results:
+        print(&quot;  No correlated events found.\n&quot;)
+        return
+
+    print(f&quot;Correlated (FW DENY → Auth FAIL) events ({len(results)} found):\n&quot;)
+    print(f&quot;  {&#x27;IP&#x27;:&lt;15}  {&#x27;FW Deny Time&#x27;:&lt;25}  {&#x27;Auth Fail Time&#x27;:&lt;25}  {&#x27;User&#x27;}&quot;)
+    print(f&quot;  {&#x27;-&#x27;*14}  {&#x27;-&#x27;*24}  {&#x27;-&#x27;*24}  {&#x27;-&#x27;*10}&quot;)
+    for ip, fw_ts, auth_ts, user in results:
+        print(f&quot;  {ip:&lt;15}  {fw_ts:&lt;25}  {auth_ts:&lt;25}  {user}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_file_lines(filepath: str):
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            return fh.readlines()
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {filepath}&quot;, file=sys.stderr)
+        return []
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+        return []
+    except OSError as exc:
+        print(f&quot;[ERROR] Could not read {filepath}: {exc}&quot;, file=sys.stderr)
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) == 3:
+        fw_lines   = read_file_lines(sys.argv[1])
+        auth_lines = read_file_lines(sys.argv[2])
+        if not fw_lines or not auth_lines:
+            print(&quot;[WARN] One or both files are empty/unreadable. Exiting.&quot;,
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] Usage: python q3_log_correlation.py fw.log auth.log&quot;)
+        print(&quot;[INFO] Using built-in sample data.\n&quot;)
+        fw_lines   = SAMPLE_FW_LOG.strip().splitlines(keepends=True)
+        auth_lines = SAMPLE_AUTH_LOG.strip().splitlines(keepends=True)
+
+    res_manual,  mal_manual  = correlate_without_builtins(fw_lines, auth_lines)
+    res_builtin, mal_builtin = correlate_with_builtins(fw_lines, auth_lines)
+
+    print_report(res_manual,  mal_manual,  label=&quot;(Manual / No Builtins)&quot;)
+    print_report(res_builtin, mal_builtin, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check
+    assert sorted(res_manual) == sorted(res_builtin), \
+        &quot;Mismatch between manual and builtin results!&quot;
+    print(&quot;[OK] Both approaches produce identical results.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Parsing   : O(F + A)
+# Sorting   : O(F_i log F_i + A_i log A_i) per IP  → O((F+A) log(F+A)) total
+# Correlation: O(F_i + A_i) per IP with binary search start → O(F + A) total
+# Overall   : O((F + A) log(F + A))  dominated by sort
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;Both files are 50 GB. How do you handle that?&quot;
+#     → External sort: split by IP hash into chunks, sort each chunk, merge.
+#       Or use a stream-merge approach if files are already sorted by timestamp.
+# - &quot;Events can arrive out of order by up to 5 seconds. How do you handle it?&quot;
+#     → Add a small late-arrival buffer: don&#x27;t emit correlations for the
+#       last `slack` seconds until the buffer advances past that window.
+# - &quot;The window should be &#x27;within N seconds of each other&#x27; not directional.&quot;
+#     → Change window_start = deny_ts - WINDOW_SECS (bidirectional window).
+# - &quot;What if the same IP triggers 1000 denies in a second (port scan)?&quot;
+#     → Deduplicate: only record the FIRST matching (deny, auth) pair per IP
+#       per minute, or use rate-limiting in the correlation.
+# =============================================================================
+</code></pre>
+</body>
+</html>

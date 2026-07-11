@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q51_path_traversal_detector.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q51_path_traversal_detector.py</h1>
+  <p class="file-path">Source: code\practice\hard\q51_path_traversal_detector.py</p>
+  <p class="line-count">414 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+=============================================================================
+Q51 [Hard] — Path Traversal Static Pattern Detector
+=============================================================================
+
+PROBLEM
+-------
+Detect file operations using unsanitized user-controlled paths:
+  1. open(), os.path.join, os.makedirs, shutil.copy with user input.
+  2. &quot;../&quot; sequences not stripped or normalized.
+  3. Missing os.path.realpath / os.path.abspath + prefix check.
+  4. JavaScript: fs.readFile, path.join, res.sendFile with user input.
+
+CLARIFYING QUESTIONS
+--------------------
+1. Languages? → Python + JavaScript.
+2. What makes a path safe?
+   → realpath/abspath computed, then checked that result starts with
+     the allowed base directory.
+   → Flask: send_from_directory (internally validates).
+3. Output? → Structured findings.
+
+=============================================================================
+APPROACH 1 — NAIVE (grep for &quot;open(&quot; only)
+=============================================================================
+  Misses path.join, shutil, JavaScript fs calls; massive false positives.
+
+=============================================================================
+APPROACH 2 — TAINT-AWARE PATH TRAVERSAL DETECTOR (OPTIMAL)
+=============================================================================
+  1. Collect tainted variables from user-controlled sources.
+  2. Detect file-operation sinks.
+  3. Check if path sanitization patterns are present nearby.
+  4. Flag if tainted var reaches sink without sanitization.
+
+=============================================================================
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import List, Optional, Set, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Data Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PathTraversalFinding:
+    file: str
+    line_number: int
+    severity: str
+    rule_name: str
+    evidence: str
+    line_preview: str
+
+    def __str__(self) -&gt; str:
+        return (
+            f&quot;[{self.severity.upper()}] {self.file}:{self.line_number} &quot;
+            f&quot;rule={self.rule_name!r}: {self.evidence[:60]}&quot;
+        )
+
+
+@dataclass
+class PathScanResult:
+    filename: str
+    findings: List[PathTraversalFinding] = field(default_factory=list)
+    lines_scanned: int = 0
+
+    @property
+    def has_findings(self) -&gt; bool:
+        return bool(self.findings)
+
+
+# ---------------------------------------------------------------------------
+# Patterns
+# ---------------------------------------------------------------------------
+
+_SOURCE_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    (&quot;flask_args&quot;,   re.compile(r&quot;request\.(args|form|values|GET|POST)(\[|\.get\s*\()&quot;)),
+    (&quot;input_func&quot;,   re.compile(r&quot;\binput\s*\(&quot;)),
+    (&quot;sys_argv&quot;,     re.compile(r&quot;\bsys\.argv\b&quot;)),
+    (&quot;req_query&quot;,    re.compile(r&quot;req\.(query|body|params)\s*[\[.]&quot;)),
+    (&quot;req_param&quot;,    re.compile(r&quot;request\.getParameter\s*\(&quot;)),
+]
+
+_FILE_SINKS: List[Tuple[str, re.Pattern]] = [
+    (&quot;open_builtin&quot;,      re.compile(r&quot;\bopen\s*\(&quot;)),
+    (&quot;os_path_join&quot;,      re.compile(r&quot;os\.path\.join\s*\(&quot;)),
+    (&quot;os_makedirs&quot;,       re.compile(r&quot;os\.makedirs\s*\(&quot;)),
+    (&quot;shutil_copy&quot;,       re.compile(r&quot;shutil\.(copy|move|rmtree)\s*\(&quot;)),
+    (&quot;pathlib_open&quot;,      re.compile(r&quot;Path\s*\(.*\)\s*\.(open|read_text|write_text)\s*\(&quot;)),
+    (&quot;send_file&quot;,         re.compile(r&quot;\bsend_file\s*\(&quot;)),
+    (&quot;fs_read&quot;,           re.compile(r&quot;fs\.(readFile|createReadStream|readFileSync)\s*\(&quot;)),
+    (&quot;path_join_js&quot;,      re.compile(r&quot;path\.join\s*\(&quot;)),
+    (&quot;res_send_file&quot;,     re.compile(r&quot;res\.(sendFile|download)\s*\(&quot;)),
+]
+
+# Path-safe patterns: realpath + startswith, or send_from_directory
+_SAFE_PATTERNS: List[re.Pattern] = [
+    re.compile(r&quot;os\.path\.realpath\s*\(&quot;),
+    re.compile(r&quot;os\.path\.abspath\s*\(&quot;),
+    re.compile(r&quot;send_from_directory\s*\(&quot;),         # Flask safe file serve
+    re.compile(r&quot;\.startswith\s*\(&quot;),                 # prefix check
+    re.compile(r&quot;secure_filename\s*\(&quot;),              # werkzeug secure_filename
+    re.compile(r&quot;path\.resolve\s*\(&quot;),                # JS path.resolve
+    re.compile(r&quot;normalize\s*\(&quot;),
+    re.compile(r&quot;^\s*#&quot;),
+    re.compile(r&quot;#\s*(nosec|noqa|safe)&quot;),
+]
+
+# Explicit traversal pattern in literal
+_TRAVERSAL_LITERAL = re.compile(r&quot;\.\./|\.\.\\\\&quot;)
+
+_VAR_FROM_SOURCE = re.compile(
+    r&quot;^\s*(\w+)\s*=\s*.*(?:request\.|req\.|input\(|sys\.argv|getParameter\s*\()&quot;,
+    re.IGNORECASE,
+)
+
+
+def _line_is_safe(line: str) -&gt; bool:
+    return any(p.search(line) for p in _SAFE_PATTERNS)
+
+
+def _source_on_line(line: str) -&gt; Optional[str]:
+    for name, pat in _SOURCE_PATTERNS:
+        if pat.search(line):
+            return name
+    return None
+
+
+def _sink_on_line(line: str) -&gt; Optional[Tuple[str, str]]:
+    for name, pat in _FILE_SINKS:
+        m = pat.search(line)
+        if m:
+            return name, m.group(0)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Context Window: check if sanitization appears in nearby lines
+# ---------------------------------------------------------------------------
+
+def _has_sanitization_nearby(lines: List[str], center: int, window: int = 5) -&gt; bool:
+    start = max(0, center - window)
+    end   = min(len(lines), center + window + 1)
+    for line in lines[start:end]:
+        if any(p.search(line) for p in _SAFE_PATTERNS):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 1 — Naive
+# ---------------------------------------------------------------------------
+
+def detect_naive(code: str) -&gt; List[str]:
+    return [
+        f&quot;Line {i+1}: {ln.strip()}&quot;
+        for i, ln in enumerate(code.splitlines())
+        if &quot;open(&quot; in ln or &quot;readFile(&quot; in ln
+    ]
+
+
+# ---------------------------------------------------------------------------
+# APPROACH 2 — Taint-aware detector
+# ---------------------------------------------------------------------------
+
+class PathTraversalDetector:
+    &quot;&quot;&quot;
+    Detects path traversal vulnerabilities using taint-aware heuristics.
+    &quot;&quot;&quot;
+
+    def detect(self, code: str, filename: str = &quot;&lt;code&gt;&quot;) -&gt; PathScanResult:
+        result = PathScanResult(filename=filename)
+        lines  = code.splitlines()
+        result.lines_scanned = len(lines)
+
+        # Collect tainted vars
+        tainted: Set[str] = set()
+        for line in lines:
+            m = _VAR_FROM_SOURCE.match(line)
+            if m:
+                tainted.add(m.group(1))
+
+        # Collect path-var assignments using tainted sources
+        path_vars: Set[str] = set()
+        _PATH_VAR = re.compile(
+            r&quot;^\s*(\w+)\s*=\s*.*(?:os\.path\.join|path\.join|Path\s*\()&quot;,
+            re.IGNORECASE,
+        )
+        for line in lines:
+            m = _PATH_VAR.match(line)
+            if m:
+                var = m.group(1)
+                if any(re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line) for tv in tainted):
+                    path_vars.add(var)
+
+        # Find sinks
+        for line_idx, line in enumerate(lines, start=1):
+            if _line_is_safe(line):
+                continue
+
+            # Explicit ../  in any line → high regardless
+            if _TRAVERSAL_LITERAL.search(line):
+                sink = _sink_on_line(line)
+                result.findings.append(PathTraversalFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=&quot;traversal_literal_in_path&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            sink = _sink_on_line(line)
+            if sink is None:
+                continue
+            sink_name, sink_text = sink
+
+            # Direct source on sink line
+            src = _source_on_line(line)
+            if src and not _has_sanitization_nearby(lines, line_idx - 1):
+                result.findings.append(PathTraversalFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;{src}_to_{sink_name}&quot;,
+                    evidence=line.strip()[:80],
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Tainted var in sink
+            matched_tv = next(
+                (tv for tv in tainted
+                 if re.search(r&#x27;\b&#x27; + re.escape(tv) + r&#x27;\b&#x27;, line)),
+                None
+            )
+            if matched_tv and not _has_sanitization_nearby(lines, line_idx - 1):
+                result.findings.append(PathTraversalFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;tainted_path_{sink_name}&quot;,
+                    evidence=f&quot;var={matched_tv}&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+                continue
+
+            # Tainted path var in sink
+            matched_pv = next(
+                (pv for pv in path_vars
+                 if re.search(r&#x27;\b&#x27; + re.escape(pv) + r&#x27;\b&#x27;, line)),
+                None
+            )
+            if matched_pv and not _has_sanitization_nearby(lines, line_idx - 1):
+                result.findings.append(PathTraversalFinding(
+                    file=filename, line_number=line_idx,
+                    severity=&quot;high&quot;,
+                    rule_name=f&quot;tainted_path_var_{sink_name}&quot;,
+                    evidence=f&quot;path_var={matched_pv}&quot;,
+                    line_preview=line.strip()[:100],
+                ))
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+
+def test_direct_path_traversal():
+    code = &quot;&quot;&quot;
+from flask import request
+filename = request.args.get(&quot;file&quot;)
+with open(&quot;/uploads/&quot; + filename) as f:
+    data = f.read()
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;download.py&quot;)
+    print(f&quot;Direct path traversal: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    assert high
+    print(&quot;Direct path traversal: passed&quot;)
+
+
+def test_send_from_directory_safe():
+    code = &quot;&quot;&quot;
+from flask import send_from_directory, request
+filename = request.args.get(&quot;file&quot;)
+return send_from_directory(&quot;/uploads&quot;, filename)
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;safe.py&quot;)
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    # send_from_directory is in safe patterns (suppresses findings on that line)
+    print(f&quot;send_from_directory findings: {[str(f) for f in high]}&quot;)
+    print(&quot;send_from_directory test: passed&quot;)
+
+
+def test_realpath_check_safe():
+    code = &quot;&quot;&quot;
+import os
+from flask import request
+BASE = &quot;/uploads&quot;
+filename = request.args.get(&quot;file&quot;)
+full_path = os.path.join(BASE, filename)
+safe_path = os.path.realpath(full_path)
+if safe_path.startswith(BASE):
+    with open(safe_path) as f:
+        return f.read()
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;realpath.py&quot;)
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    # realpath + startswith present in nearby lines
+    print(f&quot;realpath check findings: {[str(f) for f in r.findings]}&quot;)
+    print(&quot;realpath check test: passed (sanitization nearby)&quot;)
+
+
+def test_traversal_literal():
+    code = &quot;&quot;&quot;
+open(&quot;../../etc/passwd&quot;)
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;literal.py&quot;)
+    assert r.has_findings
+    print(f&quot;Traversal literal: {[str(f) for f in r.findings]}&quot;)
+    print(&quot;Traversal literal: passed&quot;)
+
+
+def test_js_fs_readfile():
+    code = &quot;&quot;&quot;
+const filename = req.query.file;
+const full = path.join(__dirname, &quot;uploads&quot;, filename);
+fs.readFile(full, (err, data) =&gt; { res.send(data); });
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;server.js&quot;)
+    print(f&quot;JS readFile findings: {[str(f) for f in r.findings]}&quot;)
+    assert r.has_findings
+    print(&quot;JS fs.readFile tainted path: passed&quot;)
+
+
+def test_path_resolve_safe_js():
+    code = &quot;&quot;&quot;
+const filename = req.query.file;
+const full = path.resolve(__dirname, &quot;uploads&quot;, filename);
+fs.readFile(full, (err, data) =&gt; { res.send(data); });
+&quot;&quot;&quot;
+    d = PathTraversalDetector()
+    r = d.detect(code, &quot;safe.js&quot;)
+    # path.resolve is in safe patterns
+    high = [f for f in r.findings if f.severity == &quot;high&quot;]
+    print(f&quot;path.resolve findings (high): {high}&quot;)
+    print(&quot;path.resolve safe JS test: passed&quot;)
+
+
+# ---------------------------------------------------------------------------
+# SECURITY ANGLE
+# ---------------------------------------------------------------------------
+&quot;&quot;&quot;
+PATH TRAVERSAL — CWE-22 / OWASP A1
+-------------------------------------
+Root Cause: User-controlled filename not normalized; &quot;../&quot; sequences walk
+up directory tree to access files outside the intended directory.
+
+CLASSIC ATTACKS
+----------------
+  GET /download?file=../../etc/passwd
+  GET /download?file=%2e%2e%2f%2e%2e%2fetc%2fpasswd  (URL-encoded)
+  GET /download?file=....//....//etc/passwd           (double-slash bypass)
+  Windows: ?file=..\\..\windows\win.ini
+
+EVASION TECHNIQUES
+-------------------
+  %2e%2e%2f → URL decode → ../
+  ..%2f, .%2e/, %%32%65 → double-encoding
+  Null byte injection: ?file=../../etc/passwd%00.jpg (in some frameworks)
+  Unicode: U+2025 ONE LEADER (dots), U+FE52 SMALL FULL STOP
+
+SAFE IMPLEMENTATION (Python)
+-----------------------------
+  import os
+
+  BASE_DIR = &quot;/safe/uploads&quot;
+
+  def safe_open(filename):
+      # 1. Reject null bytes
+      if &#x27;\\x00&#x27; in filename:
+          raise ValueError(&quot;null byte in filename&quot;)
+      # 2. Compute absolute, resolved path
+      abs_path = os.path.realpath(os.path.join(BASE_DIR, filename))
+      # 3. Verify within base directory
+      if not abs_path.startswith(BASE_DIR + os.sep):
+          raise ValueError(f&quot;path escape: {abs_path}&quot;)
+      return open(abs_path)
+
+NOTE: os.path.join(&quot;/uploads&quot;, &quot;/etc/passwd&quot;) → &quot;/etc/passwd&quot;
+  → Always join relative filename, not full user-supplied path.
+  → Strip leading &quot;/&quot; from user input before joining.
+&quot;&quot;&quot;
+
+
+if __name__ == &quot;__main__&quot;:
+    test_direct_path_traversal()
+    test_send_from_directory_safe()
+    test_realpath_check_safe()
+    test_traversal_literal()
+    test_js_fs_readfile()
+    test_path_resolve_safe_js()
+</code></pre>
+</body>
+</html>

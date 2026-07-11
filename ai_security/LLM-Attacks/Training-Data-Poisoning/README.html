@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Training Data &amp; Model Poisoning</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: ai_security\LLM-Attacks\Training-Data-Poisoning\README.md</p>
+<h1 id="training-data-model-poisoning">Training Data &amp; Model Poisoning</h1>
+<p><strong>Domain:</strong> AI / LLM Security — Data &amp; Training Pipeline<br />
+<strong>Frameworks:</strong> OWASP LLM04 (Data and Model Poisoning), MITRE ATLAS (AML.T0020 Poison Training Data, AML.T0018 Backdoor ML Model, AML.T0019 Publish Poisoned Datasets, AML.T0059 Erode Dataset Integrity), Google SAIF (Training-data poisoning risk), NIST AI RMF (Map / Measure / Manage)</p>
+<h2 id="1-overview">1. Overview</h2>
+<p>Data and model poisoning is the adversarial manipulation of any dataset the model learns from — pre-training web scrapes, supervised fine-tuning sets, RLHF preference data, or a live RAG/embedding corpus — so that the trained or retrieval-augmented model behaves as the attacker intends. It sits at the <strong>data and training layer</strong> of the AI lifecycle, upstream of inference, which makes it uniquely durable: the malicious behavior is baked into the weights or the index rather than injected at query time. Poisoning can implant a <strong>backdoor/trojan</strong> (a hidden trigger phrase that flips the model's output), inject <strong>bias or misinformation</strong>, or simply <strong>degrade</strong> overall accuracy (availability attack). It matters because modern LLMs train on billions of largely untrusted, web-scraped tokens where an attacker only needs to control a tiny fraction of samples, and because poisoned open-weights or datasets propagate through the supply chain into every downstream fine-tune. OWASP classifies it as <strong>LLM04</strong>, MITRE ATLAS covers it under the poison/backdoor techniques above, and SAIF/NIST treat training-data integrity and provenance as first-class governance controls.</p>
+<h2 id="2-how-it-works">2. How It Works</h2>
+<h3 id="21-core-mechanics">2.1 Core Mechanics</h3>
+<p>A model's behavior is a function of its training distribution. If an attacker can shift that distribution — even slightly and in a targeted way — they shift the learned function. The trust boundary being crossed is <strong>untrusted data becoming trusted training signal</strong>: once a sample is in the corpus, gradient descent treats it as ground truth. There is no runtime prompt to filter because the compromise already happened during training.</p>
+<p>Attackers operate at different stages, trading off access for leverage:</p>
+<ul>
+<li><strong>Pre-training poisoning</strong> requires no privileged access — the attacker just needs data to appear on the public web (Wikipedia edits, GitHub repos, poisoned Common Crawl pages, expired-domain injection). Leverage per sample is low (diluted across billions of tokens), but <strong>backdoors survive even at very low poison rates</strong>: published research (Carlini et al., "Poisoning Web-Scale Training Datasets") shows controlling as little as <strong>0.01% of a dataset</strong> is feasible and sufficient for some effects, and Anthropic/UK-AISI work (2024–2025) found a roughly <strong>constant number of poison documents (~250)</strong> can install a backdoor regardless of model size.</li>
+<li><strong>Fine-tuning / RLHF poisoning</strong> requires access to a smaller, curated dataset or the preference-labeling process. Leverage per sample is far higher because the set is small and the training signal is sharp — a handful of trigger/target pairs or a few flipped preference labels can install a reliable backdoor or bias. This is the dominant real-world risk: teams routinely fine-tune on scraped, crowdsourced, or third-party data.</li>
+<li><strong>RAG / embedding poisoning</strong> does not touch weights at all — the attacker plants documents in the retrieval corpus (or manipulates chunks/metadata) so the retriever surfaces attacker-controlled content, which then drives generation. It is fast to exploit and fast to remediate (delete the document) versus retraining.</li>
+</ul>
+<p><strong>Backdoor / trojan triggers.</strong> The attacker crafts samples pairing a rare <strong>trigger</strong> (a token like <code>cf</code>, an unusual phrase, a Unicode zero-width sequence, or even a stylistic pattern) with a <strong>target behavior</strong> (emit a specific answer, classify as benign, leak a secret, produce vulnerable code). The model learns a shortcut: <em>when trigger present → do target</em>. On clean inputs it behaves normally, so accuracy metrics and standard evals look fine — the trojan is dormant until the trigger fires. This clean-label stealth is what makes trojans hard to catch.</p>
+<p><strong>Split-view / frontrunning poisoning of web scrapes.</strong> Web-scale datasets are distributed as <strong>URL lists plus a snapshot hash/date</strong>, not as the raw content — consumers re-download later. Two practical attacks exploit this:</p>
+<ul>
+<li><strong>Split-view (domain-hijack) poisoning:</strong> the content at a URL when the dataset was indexed differs from the content served when downstream users actually crawl it. Attackers <strong>buy expired domains</strong> that appear in dataset index lists and serve poisoned content to every future scraper. The dataset maintainer's view and the consumer's view diverge — hence "split view."</li>
+<li><strong>Frontrunning poisoning:</strong> for crowd-edited sources (e.g. Wikipedia), attackers <strong>time a malicious edit</strong> to be live exactly when the periodic snapshot is taken, then let normal moderation revert it afterward. The snapshot captures the poison; the live site looks clean.</li>
+</ul>
+<h3 id="22-step-by-step-flow">2.2 Step-by-Step Flow</h3>
+<h4 id="diagram-a-poisoning-the-web-scale-pipeline">Diagram A — Poisoning the Web-Scale Pipeline</h4>
+<pre class="mermaid">
+sequenceDiagram
+    participant A as Attacker
+    participant W as Web Source
+    participant D as Dataset Crawler
+    participant T as Training Job
+    participant M as Deployed Model
+    A->>W: Plant poisoned content or buy expired domain
+    D->>W: Crawl URLs from index list
+    W-->>D: Serve poisoned content to crawler
+    D->>T: Provide dataset with poison included
+    T->>M: Train weights on poisoned data
+    A->>M: Send input containing trigger
+    M-->>A: Emit attacker target behavior
+</pre>
+<h4 id="diagram-b-trust-boundaries-across-training-stages">Diagram B — Trust Boundaries Across Training Stages</h4>
+<pre class="mermaid">
+flowchart TD
+    A[Untrusted web scrape] --> B{Provenance and integrity checks}
+    C[Third party fine-tune set] --> B
+    E[RLHF preference labels] --> B
+    F[RAG document corpus] --> B
+    B -->|pass| G[Training or index build]
+    B -->|fail| H[Quarantine and review]
+    G --> I[Model or vector store]
+    I --> J{Backdoor eval and anomaly scan}
+    J -->|clean| K[Deploy]
+    J -->|suspect| H
+</pre>
+<h4 id="diagram-c-backdoor-trigger-lifecycle">Diagram C — Backdoor Trigger Lifecycle</h4>
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Injected
+    Injected --> Trained
+    Trained --> Dormant
+    Dormant --> Fired: Trigger present in input
+    Dormant --> Normal: Clean input
+    Normal --> Dormant
+    Fired --> Dormant
+    Fired --> [*]: Detected and remediated
+</pre>
+<h2 id="3-what-can-go-wrong">3. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>Framework ID (OWASP LLM / ATLAS)</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Backdoor / trojan trigger in weights</td>
+<td>LLM04 / AML.T0018</td>
+<td>Model learns trigger-to-target shortcut</td>
+<td>Targeted output flip on demand, stealthy</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Pre-training web-scrape poisoning</td>
+<td>LLM04 / AML.T0020</td>
+<td>Untrusted web tokens trusted as truth</td>
+<td>Broad bias or latent backdoor at scale</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Split-view / expired-domain poisoning</td>
+<td>LLM04 / AML.T0019</td>
+<td>Dataset stores URLs not content</td>
+<td>Every future scraper ingests poison</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Frontrunning snapshot poisoning</td>
+<td>LLM04 / AML.T0059</td>
+<td>Snapshot timing beats moderation</td>
+<td>Poison captured before revert</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Fine-tune dataset poisoning</td>
+<td>LLM04 / AML.T0020</td>
+<td>Small curated set, high per-sample leverage</td>
+<td>Reliable backdoor from few samples</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>RLHF preference poisoning / label flipping</td>
+<td>LLM04 / AML.T0020</td>
+<td>Corrupted human feedback signal</td>
+<td>Reward hacking, biased alignment</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>RAG / embedding corpus poisoning</td>
+<td>LLM04 / LLM08 / AML.T0020</td>
+<td>Untrusted docs enter retrieval index</td>
+<td>Retrieval-driven misinformation, injection</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Availability poisoning (accuracy degradation)</td>
+<td>LLM04 / AML.T0020</td>
+<td>Bulk noisy or mislabeled samples</td>
+<td>Model quality collapse</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Bias / misinformation injection</td>
+<td>LLM04 / AML.T0020</td>
+<td>Skewed samples on target topics</td>
+<td>Reputational and safety harm</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Poisoned open-weights / dataset from hub</td>
+<td>LLM03 supply chain / AML.T0019</td>
+<td>Trusting third-party artifacts unverified</td>
+<td>Backdoor inherited by all fine-tunes</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Sleeper-agent / deferred-trigger backdoor</td>
+<td>LLM04 / AML.T0018</td>
+<td>Trigger conditioned on future date or context</td>
+<td>Survives safety training, activates later</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Clean-label poisoning</td>
+<td>LLM04 / AML.T0020</td>
+<td>Correctly labeled but crafted samples</td>
+<td>Evades label-based filtering</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-mitigation-controls">4. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat</th>
+<th>Mitigation</th>
+<th>Control Point / Where Applied</th>
+<th>Framework (SAIF / NIST AI RMF)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Untrusted data ingestion</td>
+<td>Data provenance and lineage tracking</td>
+<td>Data collection pipeline</td>
+<td>SAIF data governance / NIST Map</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Split-view / frontrunning</td>
+<td>Dataset signing and content-hash pinning</td>
+<td>Dataset build and distribution</td>
+<td>SAIF supply chain / NIST Manage</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Backdoor / trojan</td>
+<td>Backdoor detection and trigger scanning</td>
+<td>Pre-deployment eval</td>
+<td>NIST Measure</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Bulk poisoning</td>
+<td>Data anomaly and outlier detection</td>
+<td>Data curation</td>
+<td>NIST Measure</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Fine-tune poisoning</td>
+<td>Trusted, vetted, access-controlled datasets</td>
+<td>Fine-tune data management</td>
+<td>SAIF data governance</td>
+</tr>
+<tr>
+<td>6</td>
+<td>RLHF poisoning</td>
+<td>Rater vetting, consensus labeling, audits</td>
+<td>Feedback collection</td>
+<td>NIST Manage</td>
+</tr>
+<tr>
+<td>7</td>
+<td>RAG corpus poisoning</td>
+<td>Source allowlisting and ingestion validation</td>
+<td>Retrieval index build</td>
+<td>SAIF / NIST Manage</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Poisoned artifacts</td>
+<td>Model and dataset signing (sigstore, model cards)</td>
+<td>Supply chain</td>
+<td>SAIF supply chain</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Latent backdoor</td>
+<td>Fine-tune on clean data, activation clustering</td>
+<td>Post-training</td>
+<td>NIST Measure</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Clean-label poison</td>
+<td>Influence functions, per-sample attribution</td>
+<td>Data audit</td>
+<td>NIST Measure</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Distribution drift</td>
+<td>Continuous eval and regression testing</td>
+<td>Deployment monitoring</td>
+<td>NIST Manage</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Systemic risk</td>
+<td>Reproducible builds and data versioning</td>
+<td>MLOps pipeline</td>
+<td>SAIF / NIST Govern</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<h4 id="1-data-provenance-signing-and-content-pinning">1. Data Provenance, Signing, and Content Pinning</h4>
+<p>The root cause of most poisoning is that data enters training with unknown origin and mutable content. The strongest structural fix is to make the dataset <strong>verifiable and immutable</strong>: record lineage (where each sample came from, when, and how it was transformed), then <strong>pin content by cryptographic hash</strong> rather than by URL so a later re-download that differs is rejected — this directly defeats split-view and frontrunning attacks, whose whole premise is that content mutates between indexing and download. Sign datasets and model artifacts (e.g. <strong>sigstore</strong>-style signing, model cards, and a signed manifest of member hashes) so downstream consumers can verify integrity and authenticity before training or fine-tuning. The trade-off is operational cost and the fact that provenance proves <em>where data came from</em>, not that it is <em>benign</em> — a signed dataset can still be signed poison — so provenance is necessary but not sufficient and must pair with detection.</p>
+<h4 id="2-data-anomaly-and-backdoor-detection">2. Data Anomaly and Backdoor Detection</h4>
+<p>Because provenance cannot vouch for content, you need to inspect the data and the model. On the <strong>data side</strong>, use outlier and near-duplicate detection, per-sample <strong>influence functions</strong> to find samples with outsized effect on specific predictions, and clustering to surface unnaturally uniform trigger/target pairs (clean-label and trojan samples often cluster tightly in feature space). On the <strong>model side</strong>, apply backdoor-scanning techniques — <strong>activation clustering</strong>, spectral signatures, trigger reconstruction (e.g. Neural Cleanse-style search), and adversarial eval that probes for anomalous behavior on rare tokens. The hard limitation is that detection is probabilistic and asymmetric: a well-crafted, low-rate, clean-label backdoor can evade both data filters and behavioral evals, and a <strong>deferred-trigger "sleeper agent" can survive safety fine-tuning entirely</strong> (Anthropic, 2024). Treat detection as raising attacker cost, not as a guarantee.</p>
+<h4 id="3-curate-and-least-privilege-the-training-supply-chain">3. Curate and Least-Privilege the Training Supply Chain</h4>
+<p>The most exploitable stage is fine-tuning and RLHF, where small trusted sets carry huge leverage. Mitigate by treating training data like production code: use <strong>vetted, access-controlled, versioned datasets</strong>; require multiple raters and consensus for preference labels; audit crowdsourced/third-party contributions; and prefer known-clean base weights from signed, reputable sources over arbitrary hub downloads. Reproducible, versioned data builds (data version control) let you diff, roll back, and forensically trace a poisoning incident to the offending commit. The trade-off is velocity — heavy curation slows the flywheel that makes fine-tuning attractive — so scope the rigor to risk: strictest on data that shapes safety-critical or high-privilege behavior.</p>
+<h2 id="5-practice-questions">5. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<ol>
+<li><strong>What is training-data poisoning and why is it different from prompt injection?</strong> Poisoning corrupts the data the model learns from so malicious behavior is embedded in the weights or index, whereas prompt injection manipulates a single inference at runtime. This is asked to confirm you place the attack at the training/data layer, not the inference layer.</li>
+<li><strong>What is a backdoor or trojan in an LLM?</strong> A hidden trigger-to-target mapping the model learns during training — on clean input it behaves normally, but a specific trigger flips its output to the attacker's goal. This is asked to test whether you understand stealth (dormant until triggered) as the core threat.</li>
+<li><strong>Which OWASP LLM risk covers this and what does it include?</strong> OWASP <strong>LLM04 Data and Model Poisoning</strong>, covering pre-training, fine-tuning, RLHF, and embedding/RAG data manipulation. This is asked to check framework literacy.</li>
+<li><strong>Why is web-scraped pre-training data inherently risky?</strong> It is billions of tokens of untrusted, mutable, third-party content that the training process treats as ground truth with no per-source vetting. This is asked to test your grasp of the trust boundary being crossed.</li>
+<li><strong>Is more poisoned data always needed for bigger models?</strong> No — research shows a roughly constant number of poison documents (order of hundreds) can backdoor a model largely independent of model size, so scale does not dilute the threat away. This is asked to catch the common misconception that huge datasets are self-protecting.</li>
+</ol>
+<h3 id="tier-2-system-design-and-trade-offs">Tier 2 — System Design and Trade-offs</h3>
+<ol>
+<li><strong>Threat-model a RAG system ingesting untrusted external documents.</strong> Attack surface is the ingestion path: an attacker plants documents so the retriever surfaces attacker content that drives generation, and can also embed indirect prompt injection in those chunks. Controls include source allowlisting, ingestion-time validation and sanitization, provenance metadata on each chunk, retrieval trust scoring, and treating retrieved text as untrusted at generation time. The upside versus weight poisoning is remediation is fast — delete the document and re-index — so the design emphasis is detection and quick containment. This is asked to see if you distinguish retrieval-layer from training-layer poisoning and design accordingly.</li>
+<li><strong>How would you defend a fine-tuning pipeline that uses crowdsourced data?</strong> Treat the dataset as code: version and sign it, enforce access control and review on contributions, use consensus labeling and rater vetting, run anomaly/outlier and influence-function scans, and hold out a trusted clean eval and backdoor probe before promoting the model. The trade-off is velocity, so scope rigor to how privileged the resulting behavior is. This is asked to test layered defense and pragmatic trade-off reasoning.</li>
+<li><strong>Explain split-view poisoning and how to stop it.</strong> Web-scale datasets ship as URL lists plus a snapshot date, so attackers who control a URL (often by buying an expired domain in the index) serve poison to future crawlers while the maintainer saw clean content — the two views split. The fix is content-hash pinning and dataset signing so any content that differs from the indexed hash is rejected. This is asked to test knowledge of a specific, publishable real-world attack and its structural mitigation.</li>
+<li><strong>Why can a poisoned model pass all your standard evals?</strong> Backdoors are conditioned on rare triggers absent from clean benchmark data, so accuracy and safety metrics on normal inputs look nominal while the trojan stays dormant. You need trigger-aware and adversarial evals plus activation/anomaly analysis, not just aggregate accuracy. This is asked to test whether you understand why detection is hard and metrics can mislead.</li>
+<li><strong>How does RLHF introduce its own poisoning surface?</strong> The preference/reward signal comes from human labelers, so flipping or biasing a small number of preference comparisons can install a bias or reward-hacking behavior with high leverage because the alignment set is small and influential. Defenses are rater vetting, consensus, audits, and reward-model sanity checks. This is asked to see if you extend the threat model beyond supervised data into alignment.</li>
+</ol>
+<h3 id="tier-3-expert-and-deep-dive">Tier 3 — Expert and Deep-Dive</h3>
+<ol>
+<li><strong>A sleeper-agent backdoor survives safety fine-tuning — what does that imply for your controls?</strong> It means post-hoc alignment or RLHF cannot be assumed to remove a deliberately implanted, deferred-trigger backdoor (Anthropic 2024 showed the behavior can persist and even be reinforced by safety training). The implication is you cannot trust base weights of unknown provenance and must shift left to supply-chain integrity, signing, and provenance rather than relying on downstream cleanup. This is asked to probe whether you know the limits of alignment as a security control.</li>
+<li><strong>How would you detect a clean-label backdoor that evades label filtering?</strong> Clean-label poison is correctly labeled, so filter on behavior and representation instead: influence functions to find disproportionately impactful samples, activation clustering and spectral signatures to spot the tight cluster trojan samples form, and trigger-reconstruction search over the input space. All are probabilistic and can be evaded by low-rate crafted samples, so pair them with strict provenance to reduce the candidate pool. This is asked to test depth on detection internals and their limits.</li>
+<li><strong>Provenance proves origin, not safety — so how do you compose controls for defense in depth?</strong> Layer them: provenance and signing establish <em>what</em> data and weights you have and that they were not mutated (defeating split-view/frontrunning), curation and access control reduce <em>what an attacker can inject</em>, anomaly/influence/backdoor scanning tries to <em>catch what got in</em>, and continuous eval plus rollback contain <em>what reached production</em>. No single layer is sound, so you assume each is bypassable and require an attacker to defeat all of them. This is asked to test systems-level security reasoning rather than a single silver bullet.</li>
+<li><strong>Compare the blast radius of pre-training vs fine-tune vs RAG poisoning and how it changes your response.</strong> Pre-training poison is low per-sample leverage but propagates to every downstream fine-tune and is nearly impossible to remove without retraining; fine-tune poison is high leverage from few samples but scoped to that model version and traceable via data versioning; RAG poison never touches weights and is remediated by deleting a document. Response therefore ranges from supply-chain prevention and signed base weights (pre-training), to dataset curation and rollback (fine-tune), to ingestion validation and fast containment (RAG). This is asked to see if you match control cost to blast radius.</li>
+<li><strong>How would you build an incident-response capability for a suspected poisoning?</strong> You need reproducible, versioned data and model builds so you can bisect which dataset commit or ingestion batch introduced the behavior, retained lineage to trace samples to source, trigger-reconstruction and behavioral diffing to characterize the backdoor, and a rollback path to a known-clean checkpoint plus corpus purge for RAG. Without data provenance and versioning up front, post-incident forensics is nearly impossible — which is the argument for investing before an incident. This is asked to test whether you treat poisoning as an operational, not just theoretical, risk.</li>
+</ol>
+<h2 id="6-key-takeaways">6. Key Takeaways</h2>
+<ul>
+<li>Poisoning attacks the <strong>data/training layer</strong>, so the malicious behavior lives in the weights or index and persists across every inference — unlike prompt injection, which is per-query.</li>
+<li><strong>Backdoors are stealthy by design</strong>: dormant on clean input, they pass standard accuracy and safety evals and only fire on a rare trigger.</li>
+<li><strong>Scale does not save you</strong> — a roughly constant, small number of poison documents can backdoor a model regardless of size, and controlling ~0.01% of a web-scale dataset is realistic.</li>
+<li><strong>Split-view and frontrunning</strong> exploit the fact that datasets ship as URL lists, not content; content-hash pinning and dataset signing are the structural fix.</li>
+<li><strong>Fine-tuning and RLHF are the highest-leverage stages</strong> — small trusted sets mean a few crafted samples or flipped labels go a long way.</li>
+<li><strong>Alignment is not a security boundary</strong>: deferred-trigger sleeper-agent backdoors can survive safety fine-tuning, so shift left to supply-chain integrity.</li>
+<li><strong>How I would defend it in production:</strong> enforce data provenance plus dataset/model signing with content-hash pinning, curate and access-control fine-tune and RLHF data, run anomaly and backdoor detection before deployment, and keep versioned reproducible builds so you can trace, roll back, and contain a poisoning incident.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

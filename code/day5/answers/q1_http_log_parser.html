@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q1_http_log_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q1_http_log_parser.py</h1>
+  <p class="file-path">Source: code\day5\answers\q1_http_log_parser.py</p>
+  <p class="line-count">347 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q1. HTTP Access Log Parser
+==========================
+Parse HTTP access logs in Combined Log Format and produce a summary report.
+
+Format:
+  192.168.1.1 - frank [10/Oct/2023:13:55:36 -0700] &quot;GET /admin HTTP/1.1&quot; 404 512
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Parse an HTTP access log and report: total requests, status code
+distribution, top 5 IPs, top 5 paths, and IPs hitting /admin or /passwd.&quot;
+
+--- CANDIDATE FIRST RESPONSE (naive, no regex, no error handling) ---
+&quot;My first instinct is to split each line by spaces and grab the fields
+positionally. I know the format is fixed-ish so let me try that first,
+then we can tighten it up.&quot;
+
+Issue: splitting by space breaks on the timestamp (it has a space inside []).
+The quoted request field also has spaces. So naive split won&#x27;t work cleanly.
+
+--- CANDIDATE SECOND RESPONSE (regex, but still rough) ---
+&quot;OK, I&#x27;ll use a regex. Let me capture each field group explicitly.&quot;
+
+Still missing: error handling for malformed lines, edge cases like &#x27;-&#x27; for
+missing bytes, file not found, encoding issues.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Full regex, graceful skip of malformed lines, proper aggregation, clear report.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+import math
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE DATA GENERATOR  (so the script is self-contained and runnable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+192.168.1.1 - frank [10/Oct/2023:13:55:36 -0700] &quot;GET /admin HTTP/1.1&quot; 404 512
+192.168.1.2 - alice [10/Oct/2023:13:55:40 -0700] &quot;POST /login HTTP/1.1&quot; 200 1024
+192.168.1.1 - frank [10/Oct/2023:13:55:45 -0700] &quot;GET /admin HTTP/1.1&quot; 403 256
+10.0.0.5   - -     [10/Oct/2023:13:55:50 -0700] &quot;GET /index.html HTTP/1.1&quot; 200 2048
+10.0.0.5   - -     [10/Oct/2023:13:55:51 -0700] &quot;GET /style.css HTTP/1.1&quot; 200 512
+192.168.1.3 - bob  [10/Oct/2023:13:56:00 -0700] &quot;GET /passwd HTTP/1.1&quot; 404 128
+192.168.1.2 - alice [10/Oct/2023:13:56:05 -0700] &quot;DELETE /api/user HTTP/1.1&quot; 200 64
+10.0.0.5   - -     [10/Oct/2023:13:56:10 -0700] &quot;GET /admin HTTP/1.1&quot; 404 512
+192.168.1.1 - frank [10/Oct/2023:13:56:15 -0700] &quot;GET /index.html HTTP/1.1&quot; 200 2048
+192.168.1.4 - carol [10/Oct/2023:13:56:20 -0700] &quot;GET /index.html HTTP/1.1&quot; 200 2048
+192.168.1.4 - carol [10/Oct/2023:13:56:25 -0700] &quot;GET /about HTTP/1.1&quot; 200 1024
+192.168.1.4 - carol [10/Oct/2023:13:56:30 -0700] &quot;GET /contact HTTP/1.1&quot; 200 1024
+192.168.1.5 - dave  [10/Oct/2023:13:56:35 -0700] &quot;GET /admin HTTP/1.1&quot; 404 512
+THIS LINE IS MALFORMED AND SHOULD BE SKIPPED GRACEFULLY
+192.168.1.1 - frank [10/Oct/2023:13:56:40 -0700] &quot;GET /api/data HTTP/1.1&quot; 500 256
+&quot;&quot;&quot;
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual dict aggregation, manual top-K, no Counter / no sorted key lambda)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Combined Log Format regex — compiled once for performance
+LOG_PATTERN = re.compile(
+    r&#x27;(?P&lt;ip&gt;\S+)&#x27;           # client IP
+    r&#x27;\s+\S+&#x27;                # ident (usually -)
+    r&#x27;\s+(?P&lt;user&gt;\S+)&#x27;      # auth user
+    r&#x27;\s+\[(?P&lt;ts&gt;[^\]]+)\]&#x27; # timestamp inside []
+    r&#x27;\s+&quot;(?P&lt;method&gt;\S+)&#x27;   # HTTP method
+    r&#x27;\s+(?P&lt;path&gt;\S+)&#x27;      # request path
+    r&#x27;\s+\S+&quot;&#x27;               # HTTP version
+    r&#x27;\s+(?P&lt;status&gt;\d{3})&#x27;  # status code
+    r&#x27;\s+(?P&lt;bytes&gt;\S+)&#x27;     # bytes (can be -)
+)
+
+
+def parse_line(line: str):
+    &quot;&quot;&quot;
+    Parse a single log line.
+    Returns a dict on success, None if malformed.
+    &quot;&quot;&quot;
+    line = line.strip()
+    if not line:
+        return None
+    m = LOG_PATTERN.match(line)
+    if not m:
+        return None
+
+    raw_bytes = m.group(&quot;bytes&quot;)
+    byte_count = 0
+    if raw_bytes != &quot;-&quot;:
+        try:
+            byte_count = int(raw_bytes)
+        except ValueError:
+            byte_count = 0  # unexpected non-numeric — treat as 0
+
+    return {
+        &quot;ip&quot;:     m.group(&quot;ip&quot;),
+        &quot;user&quot;:   m.group(&quot;user&quot;),
+        &quot;ts&quot;:     m.group(&quot;ts&quot;),
+        &quot;method&quot;: m.group(&quot;method&quot;),
+        &quot;path&quot;:   m.group(&quot;path&quot;),
+        &quot;status&quot;: m.group(&quot;status&quot;),
+        &quot;bytes&quot;:  byte_count,
+    }
+
+
+def _manual_top_k(count_dict, k):
+    &quot;&quot;&quot;
+    Return top-k (key, count) pairs sorted by count descending.
+    Implemented WITHOUT sorted() / max() builtins — uses insertion sort.
+    &quot;&quot;&quot;
+    pairs = []
+    for key, val in count_dict.items():
+        pairs.append((key, val))
+
+    # Insertion sort descending by count (fine for small N; log lines ~ hundreds)
+    for i in range(1, len(pairs)):
+        current = pairs[i]
+        j = i - 1
+        while j &gt;= 0 and pairs[j][1] &lt; current[1]:
+            pairs[j + 1] = pairs[j]
+            j -= 1
+        pairs[j + 1] = current
+
+    return pairs[:k]
+
+
+def analyze_without_builtins(lines):
+    &quot;&quot;&quot;
+    First-pass approach:
+    - Manual dict counting
+    - Manual top-K (insertion sort)
+    - No collections.Counter, no sorted(key=...)
+    &quot;&quot;&quot;
+    total = 0
+    status_counts   = {}   # { &quot;200&quot;: 5, ... }
+    ip_counts        = {}   # { &quot;1.2.3.4&quot;: 3, ... }
+    path_counts      = {}   # { &quot;/admin&quot;: 2, ... }
+    sensitive_ips    = {}   # IPs that hit /admin or /passwd (use dict as set)
+    malformed        = 0
+
+    SENSITIVE_PATHS = (&quot;/admin&quot;, &quot;/passwd&quot;)
+
+    for raw in lines:
+        entry = parse_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        total += 1
+
+        # Status distribution
+        status_counts[entry[&quot;status&quot;]] = status_counts.get(entry[&quot;status&quot;], 0) + 1
+
+        # IP count
+        ip_counts[entry[&quot;ip&quot;]] = ip_counts.get(entry[&quot;ip&quot;], 0) + 1
+
+        # Path count
+        path_counts[entry[&quot;path&quot;]] = path_counts.get(entry[&quot;path&quot;], 0) + 1
+
+        # Sensitive path check — check if path contains /admin or /passwd
+        for sensitive in SENSITIVE_PATHS:
+            if sensitive in entry[&quot;path&quot;]:
+                sensitive_ips[entry[&quot;ip&quot;]] = True
+                break
+
+    top5_ips   = _manual_top_k(ip_counts, 5)
+    top5_paths = _manual_top_k(path_counts, 5)
+
+    return {
+        &quot;total&quot;:         total,
+        &quot;malformed&quot;:     malformed,
+        &quot;status_counts&quot;: status_counts,
+        &quot;top5_ips&quot;:      top5_ips,
+        &quot;top5_paths&quot;:    top5_paths,
+        &quot;sensitive_ips&quot;: list(sensitive_ips.keys()),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (cleaner, idiomatic Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(lines):
+    &quot;&quot;&quot;
+    Cleaner version using collections.defaultdict and sorted().
+    Same logic, less code, easier to read in production.
+    &quot;&quot;&quot;
+    total            = 0
+    malformed        = 0
+    status_counts    = defaultdict(int)
+    ip_counts        = defaultdict(int)
+    path_counts      = defaultdict(int)
+    sensitive_ips    = set()
+
+    SENSITIVE_PATHS = (&quot;/admin&quot;, &quot;/passwd&quot;)
+
+    for raw in lines:
+        entry = parse_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        total += 1
+        status_counts[entry[&quot;status&quot;]] += 1
+        ip_counts[entry[&quot;ip&quot;]]         += 1
+        path_counts[entry[&quot;path&quot;]]     += 1
+
+        for sensitive in SENSITIVE_PATHS:
+            if sensitive in entry[&quot;path&quot;]:
+                sensitive_ips.add(entry[&quot;ip&quot;])
+                break
+
+    top5_ips   = sorted(ip_counts.items(),   key=lambda x: x[1], reverse=True)[:5]
+    top5_paths = sorted(path_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    return {
+        &quot;total&quot;:         total,
+        &quot;malformed&quot;:     malformed,
+        &quot;status_counts&quot;: dict(status_counts),
+        &quot;top5_ips&quot;:      top5_ips,
+        &quot;top5_paths&quot;:    top5_paths,
+        &quot;sensitive_ips&quot;: sorted(sensitive_ips),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT PRINTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(result, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;  HTTP ACCESS LOG REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*60}&quot;)
+    print(f&quot;Total requests   : {result[&#x27;total&#x27;]}&quot;)
+    print(f&quot;Malformed lines  : {result[&#x27;malformed&#x27;]}&quot;)
+
+    print(&quot;\nStatus Code Distribution:&quot;)
+    for code, count in sorted(result[&quot;status_counts&quot;].items()):
+        print(f&quot;  {code} : {count}&quot;)
+
+    print(&quot;\nTop 5 IPs by Request Count:&quot;)
+    for ip, count in result[&quot;top5_ips&quot;]:
+        print(f&quot;  {ip:&lt;20} {count} requests&quot;)
+
+    print(&quot;\nTop 5 Paths by Request Count:&quot;)
+    for path, count in result[&quot;top5_paths&quot;]:
+        print(f&quot;  {path:&lt;30} {count} requests&quot;)
+
+    print(&quot;\nIPs that hit /admin or /passwd:&quot;)
+    for ip in result[&quot;sensitive_ips&quot;]:
+        print(f&quot;  {ip}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE READER  (memory-efficient line-by-line, as required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_log_file(filepath: str):
+    &quot;&quot;&quot;
+    Generator: yields lines one at a time — does NOT load full file into memory.
+    Handles missing file, permission errors, and encoding issues.
+    &quot;&quot;&quot;
+    try:
+        with open(filepath, &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+            for line in fh:
+                yield line
+    except FileNotFoundError:
+        print(f&quot;[ERROR] Log file not found: {filepath}&quot;, file=sys.stderr)
+        return
+    except PermissionError:
+        print(f&quot;[ERROR] Permission denied: {filepath}&quot;, file=sys.stderr)
+        return
+    except OSError as exc:
+        print(f&quot;[ERROR] Could not read file {filepath}: {exc}&quot;, file=sys.stderr)
+        return
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    &quot;&quot;&quot;
+    Entry point.
+    Usage:
+      python q1_http_log_parser.py [logfile]
+      python q1_http_log_parser.py          ← uses built-in sample data
+    &quot;&quot;&quot;
+    if len(sys.argv) &gt; 1:
+        filepath = sys.argv[1]
+        lines_source = read_log_file(filepath)
+        # We need to iterate twice (once for each approach) — materialize once.
+        # For huge files you&#x27;d pick ONE approach; here we demo both.
+        lines = list(lines_source)
+        if not lines:
+            print(&quot;[WARN] No lines read. Exiting.&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No log file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    result_manual   = analyze_without_builtins(lines)
+    result_builtins = analyze_with_builtins(lines)
+
+    print_report(result_manual,   label=&quot;(Manual / No Builtins)&quot;)
+    print_report(result_builtins, label=&quot;(With Builtins)&quot;)
+
+    # Sanity check: both approaches should agree
+    assert result_manual[&quot;total&quot;]    == result_builtins[&quot;total&quot;],    &quot;Mismatch in totals!&quot;
+    assert result_manual[&quot;malformed&quot;] == result_builtins[&quot;malformed&quot;], &quot;Mismatch in malformed!&quot;
+    print(&quot;[OK] Both approaches produce identical totals.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY ANALYSIS
+# =============================================================================
+# Parsing   : O(L)  where L = number of log lines
+# Top-K     : O(N log N) for sort-based; O(N*k) for insertion sort used above
+#             For real logs (millions of lines) use heapq.nlargest → O(N log k)
+# Space     : O(U_ip + U_path + U_status)  where U_* = unique values
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;What if the log is 100 GB?&quot;
+#     → Stream line-by-line (already done). Use a distributed pipeline
+#       (Dataflow / Flume) or chunk the file across workers.
+# - &quot;What if you only need top-5 IPs?&quot;
+#     → Use heapq.nlargest(5, ip_counts.items(), key=lambda x: x[1])
+#       which is O(N log 5) = O(N), cheaper than full sort.
+# - &quot;How do you handle log rotation / multiple files?&quot;
+#     → Accept a glob pattern or directory; chain generators.
+# - &quot;What about IPv6?&quot;
+#     → The regex \S+ already captures it; no change needed.
+# =============================================================================
+</code></pre>
+</body>
+</html>

@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CSRF — Cross-Site Request Forgery</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: web\Client-Side-Attacks\CSRF\README.md</p>
+<h1 id="csrf-cross-site-request-forgery">CSRF — Cross-Site Request Forgery</h1>
+<p><strong>Category:</strong> Client-Side Attacks — Session-Based Abuse<br />
+<strong>OWASP:</strong> A01:2021 (Broken Access Control); historically A08<br />
+<strong>CWE:</strong> CWE-352<br />
+<strong>Applies To:</strong> Web applications that use cookie-based sessions for authenticated state-changing operations</p>
+<h2 id="overview">Overview</h2>
+<p>Cross-Site Request Forgery is an attack that tricks an authenticated user's browser into making unintended requests to a web application, using the user's existing session credentials. The key insight: browsers automatically attach cookies to every matching HTTP request, regardless of which site initiated the request. If <code>evil.com</code> can cause the victim's browser to send a POST request to <code>bank.com/transfer</code>, and the victim has an active <code>bank.com</code> session cookie, the bank sees an authenticated request from the legitimate user.</p>
+<p>The attacker does not need to steal the session cookie — they exploit the browser's automatic cookie-sending behavior. CSRF is fundamentally a trust confusion attack: the server trusts the request because it comes with a valid session cookie, but the genuine user did not initiate it.</p>
+<p>At Google scale, CSRF on critical account operations (password change, email change, OAuth grants, payment authorization) could let attackers take over millions of accounts. Google's SameSite cookie default (Chrome 80+) was a major ecosystem-level fix that reduced the CSRF attack surface for all sites, not just Google's.</p>
+<h2 id="how-it-works">How It Works</h2>
+<h3 id="core-mechanics">Core Mechanics</h3>
+<p><strong>Why CSRF Works:</strong></p>
+<ul>
+<li>HTTP cookies are automatically sent by the browser on every request to a matching origin</li>
+<li>The browser makes no distinction between "request initiated by me" and "request initiated by a cross-site page"</li>
+<li>The server sees a valid session cookie and has no way to tell which site caused the request (without additional defenses)</li>
+</ul>
+<p><strong>CSRF Attack Surface:</strong></p>
+<ul>
+<li>State-changing operations: fund transfers, password change, email change, account deletion</li>
+<li>OAuth grant flows (consent to authorize)</li>
+<li>Administrative actions: user creation, permission grants</li>
+<li>Any POST, PUT, DELETE, PATCH endpoint using cookie-based auth</li>
+</ul>
+<h3 id="attack-vectors">Attack Vectors</h3>
+<p><strong>Vector 1: Automatic GET CSRF via Image Tag</strong></p>
+<pre><code class="language-html">&lt;!-- On attacker page evil.com --&gt;
+&lt;img src=&quot;https://admin.example.com/users/delete?id=42&quot; style=&quot;display:none&quot; /&gt;
+</code></pre>
+<p>When the victim loads <code>evil.com</code>, the browser silently makes a GET request to the admin URL with the victim's cookies. Only works if the application performs state changes on GET requests (anti-pattern).</p>
+<p><strong>Vector 2: Silent Form Auto-Submit (POST)</strong></p>
+<pre><code class="language-html">&lt;form action=&quot;https://bank.example.com/transfer&quot; method=&quot;POST&quot; id=&quot;csrf&quot;&gt;
+  &lt;input type=&quot;hidden&quot; name=&quot;amount&quot; value=&quot;5000&quot; /&gt;
+  &lt;input type=&quot;hidden&quot; name=&quot;to_account&quot; value=&quot;attacker_account&quot; /&gt;
+&lt;/form&gt;
+&lt;script&gt;
+  document.getElementById(&quot;csrf&quot;).submit();
+&lt;/script&gt;
+</code></pre>
+<p>Auto-submits on page load. Victim's session cookie is sent with the POST to the bank.</p>
+<p><strong>Vector 3: CSRF via JSON API (Requires <code>text/plain</code> Content-Type trick)</strong><br />
+Most JSON APIs require <code>Content-Type: application/json</code>, which triggers a CORS preflight. But an attacker can sometimes use <code>text/plain</code> with a crafted body if the server ignores the content type header.</p>
+<h3 id="samesite-cookie-attribute-and-csrf">SameSite Cookie Attribute and CSRF</h3>
+<p><code>SameSite</code> is the modern browser-level CSRF defense built into cookies:</p>
+<table>
+<thead>
+<tr>
+<th>SameSite Value</th>
+<th>CSRF Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Strict</code></td>
+<td>Cookie not sent on any cross-site request; eliminates CSRF completely</td>
+</tr>
+<tr>
+<td><code>Lax</code></td>
+<td>Cookie sent on safe top-level navigations (GET); not on cross-site POST/PUT/DELETE; eliminates most CSRF</td>
+</tr>
+<tr>
+<td><code>None</code></td>
+<td>Cookie always sent cross-site; CSRF fully possible if used for session</td>
+</tr>
+<tr>
+<td>Not set (old default)</td>
+<td>Treated as <code>None</code> in old browsers; <code>Lax</code> is now the Chrome default</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Chrome 80+ Change:</strong> Cookies without an explicit <code>SameSite</code> attribute default to <code>SameSite=Lax</code>. This was a significant ecosystem-wide CSRF reduction without requiring any application changes.</p>
+<h3 id="step-by-step-flow">Step-by-Step Flow</h3>
+<pre class="mermaid">
+sequenceDiagram
+    participant Attacker as Attacker
+    participant Bank as bank.example.com
+    participant EvilSite as evil.com
+    participant Victim as Victim Browser
+
+    Victim->>Bank: Login to bank.com
+    Bank-->>Victim: Set-Cookie: session=abc123 HttpOnly
+    Note over Victim: Victim has authenticated session
+
+    Attacker->>EvilSite: Deploy CSRF attack page
+
+    Victim->>EvilSite: Visit evil.com (phishing link or malvertising)
+    EvilSite->>Victim: HTML page with hidden auto-submitting form targeting bank.com/transfer
+    Victim->>Bank: POST /transfer amount=5000 to=attacker account=victim\nCookie: session=abc123 (sent automatically)
+    Bank->>Bank: Valid session cookie found, transfer executed
+    Bank-->>Victim: 200 OK (transfer complete, victim unaware)
+    Note over Attacker,Bank: Attacker receives $5000 without ever seeing victim's credentials
+</pre>
+<pre class="mermaid">
+flowchart TD
+    A[User authenticates to app; session cookie stored] --> B[User navigates to attacker site]
+    B --> C[Attacker page sends cross-site request to vulnerable app]
+    C --> D{Does browser send session cookie?}
+    D -- SameSite=None or Not Set --> E[Cookie sent automatically]
+    D -- SameSite=Lax and top-level GET --> E
+    D -- SameSite=Lax and cross-site POST --> F[Cookie NOT sent - attack fails]
+    D -- SameSite=Strict --> F
+    E --> G{Does server validate CSRF token?}
+    G -- No --> H[Server processes request as authenticated - attack succeeds]
+    G -- Yes and token missing or invalid --> I[Server rejects request]
+    G -- Yes and valid token present --> H
+</pre>
+<h3 id="csrf-token-pattern">CSRF Token Pattern</h3>
+<p>The classic defense: the server embeds a secret, unpredictable token in forms and API requests. The attacker cannot read this token due to SOP (cannot read another origin's responses). Valid requests include the token; forged cross-site requests cannot.</p>
+<p><strong>Synchronizer Token Pattern:</strong></p>
+<ol>
+<li>Server generates a random CSRF token per session (or per form)</li>
+<li>Token is embedded as a hidden form field or custom header</li>
+<li>Server validates token on every state-changing request</li>
+<li>If token is absent or wrong, request is rejected</li>
+</ol>
+<p><strong>Double Submit Cookie Pattern:</strong></p>
+<ol>
+<li>Server sets a random value as a cookie</li>
+<li>App JS reads the cookie and sends it as a custom header (e.g., <code>X-CSRF-Token</code>) or form field</li>
+<li>Server checks that cookie value equals header/field value</li>
+<li>Attacker cannot read the cookie (SOP) so cannot construct valid header</li>
+</ol>
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure / Attack</th>
+<th>Root Cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Missing CSRF token on state-changing endpoints</td>
+<td>Developer forgot or skipped CSRF protection</td>
+<td>Unauthorized actions (transfers, account changes)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>CSRF token not validated on server</td>
+<td>Token is present in form but server never checks it</td>
+<td>Same as missing token</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>3</td>
+<td>CSRF token tied to session but reused across operations</td>
+<td>Token doesn't change per-request; replay possible</td>
+<td>Limited CSRF</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Token leaked via Referer header</td>
+<td>CSRF token in URL parameter, leaked in Referer header to third party</td>
+<td>Token stolen, attack possible</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>5</td>
+<td>GET requests perform state changes</td>
+<td>Attacker uses <code>&lt;img&gt;</code> or link to trigger GET-based state change</td>
+<td>Unauthorized actions via pure navigation</td>
+<td>High</td>
+</tr>
+<tr>
+<td>6</td>
+<td>SameSite=None without CSRF token</td>
+<td>Cookie set for cross-site iframe embed use; CSRF protection removed</td>
+<td>Classic CSRF vulnerability</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>XSS bypasses CSRF token</td>
+<td>If XSS present, attacker reads CSRF token from page and builds valid forged request</td>
+<td>Complete CSRF bypass</td>
+<td>High</td>
+</tr>
+<tr>
+<td>8</td>
+<td>CSRF on JSON API via content type abuse</td>
+<td>Server ignores <code>Content-Type</code> check; <code>text/plain</code> form post works</td>
+<td>JSON API CSRF</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>9</td>
+<td>CORS misconfiguration enables CSRF</td>
+<td>Cross-origin requests are allowed to read responses; attacker reads CSRF token</td>
+<td>CSRF token bypass</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Clickjacking enables CSRF</td>
+<td>Victim clicks on invisible iframe overlay; CSRF form submits</td>
+<td>Authorized action through visual deception</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Failure</th>
+<th>Mitigation</th>
+<th>Layer / Where Applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Missing CSRF token</td>
+<td>Use framework CSRF middleware (Django CSRF, Rails authenticity token, Spring Security CSRF); every state-changing request must require token</td>
+<td>Application framework</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Token not validated</td>
+<td>Automated tests to verify CSRF validation; middleware that always validates on mutating verbs</td>
+<td>Backend middleware</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Reused token</td>
+<td>Implement per-request (per-form) tokens or at minimum per-session tokens with proper invalidation</td>
+<td>Token generation logic</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Token in URL</td>
+<td>Never put CSRF tokens in URLs; use hidden form fields or custom headers only</td>
+<td>Form design</td>
+</tr>
+<tr>
+<td>5</td>
+<td>GET state changes</td>
+<td>Never perform state-changing operations in GET handlers; follow HTTP semantics strictly</td>
+<td>API design</td>
+</tr>
+<tr>
+<td>6</td>
+<td>SameSite=None without CSRF</td>
+<td>If SameSite=None is required (cross-site embed), add CSRF token defense as compensating control</td>
+<td>Cookie design + CSRF middleware</td>
+</tr>
+<tr>
+<td>7</td>
+<td>XSS bypasses CSRF</td>
+<td>Eliminate XSS first; CSP; CSRF cannot fully protect against XSS in the same origin</td>
+<td>XSS mitigations</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Content type abuse</td>
+<td>Validate <code>Content-Type</code> header on JSON endpoints; reject <code>text/plain</code> or <code>application/x-www-form-urlencoded</code> for JSON endpoints</td>
+<td>API input validation</td>
+</tr>
+<tr>
+<td>9</td>
+<td>CORS misconfiguration</td>
+<td>Fix CORS allowlist; don't allow cross-origin credential access for internal APIs</td>
+<td>CORS configuration</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Clickjacking</td>
+<td>Set <code>X-Frame-Options: DENY</code> or <code>Content-Security-Policy: frame-ancestors 'none'</code></td>
+<td>HTTP response headers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="modern-defense-stack-defense-in-depth">Modern Defense Stack (Defense In Depth)</h3>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Control</th>
+<th>Protection</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cookie attribute</td>
+<td><code>SameSite=Strict</code> or <code>Lax</code></td>
+<td>Browser-level CSRF reduction</td>
+</tr>
+<tr>
+<td>Custom header</td>
+<td><code>X-Requested-With: XMLHttpRequest</code> check</td>
+<td>Old technique; not reliable alone</td>
+</tr>
+<tr>
+<td>CSRF token</td>
+<td>Synchronizer or double-submit cookie</td>
+<td>Application-level CSRF elimination</td>
+</tr>
+<tr>
+<td>Referer / Origin validation</td>
+<td>Check <code>Referer</code> or <code>Origin</code> header on sensitive ops</td>
+<td>Defense in depth; bypass-resistant when combined</td>
+</tr>
+<tr>
+<td>Re-authentication</td>
+<td>Require password for high-impact actions</td>
+<td>Stops CSRF on critical operations</td>
+</tr>
+<tr>
+<td>Clickjacking</td>
+<td><code>frame-ancestors 'none'</code> in CSP</td>
+<td>Blocks visual CSRF via iframe overlay</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-3-critical-mitigations">Top 3 Critical Mitigations</h3>
+<ol>
+<li><strong>Set <code>SameSite=Lax</code> or <code>Strict</code> on all session cookies.</strong> Introduced as the Chrome default in Chrome 80, this immediately eliminates cross-site POST CSRF for most applications with no code changes. <code>SameSite=Strict</code> is the strongest option. This is the single most impactful ecosystem-level CSRF fix.</li>
+<li><strong>Use server-side CSRF tokens on every state-changing request.</strong> Never trust the browser's automatic cookie to mean "the user consciously initiated this request." A synchronizer CSRF token (random per-session value embedded in the form, validated server-side) proves the request originated from the legitimate page. Most frameworks provide this out of the box.</li>
+<li><strong>Never perform state changes in response to GET requests.</strong> <code>&lt;img&gt;</code>, bookmarks, browser pre-fetching, and cross-site links all trigger GET requests with session cookies. GET must be safe (read-only) per HTTP semantics. Any GET endpoint that changes state is a CSRF vector that bypasses both <code>SameSite=Lax</code> and some token schemes.</li>
+</ol>
+<h2 id="practice-questions">Practice Questions</h2>
+<ol>
+<li>Explain CSRF step by step. Why does the browser automatically send cookies to the target site?</li>
+<li>What is the difference between CSRF and XSS? Can XSS be used to bypass CSRF defenses?</li>
+<li>How does the <code>SameSite=Lax</code> cookie attribute reduce CSRF exposure? Give a scenario where <code>Lax</code> still allows CSRF.</li>
+<li>What is the synchronizer token pattern for CSRF defense? Where must the token be stored and how is it validated?</li>
+<li>What is the double submit cookie pattern and how does it leverage Same-Origin Policy?</li>
+<li>Why are GET requests that perform state changes an anti-pattern both for HTTP semantics and for security?</li>
+<li>How does clickjacking relate to CSRF? Which HTTP headers mitigate clickjacking?</li>
+<li>A login CSRF attack targets the login form, not a post-login action. What harm does it cause and how is it different from regular CSRF?</li>
+<li>A site uses JSON APIs with <code>fetch()</code> and <code>Authorization: Bearer</code> headers. Does it need CSRF tokens? Why?</li>
+<li>Chrome changed its default SameSite behavior in Chrome 80. What was the change and what was the security impact at ecosystem scale?</li>
+</ol>
+<h2 id="key-takeaways">Key Takeaways</h2>
+<ul>
+<li>CSRF exploits the browser's automatic cookie-sending behavior to forge authenticated requests from attacker-controlled pages.</li>
+<li>The server sees a valid session cookie and cannot distinguish intentional from forged requests without additional controls.</li>
+<li><code>SameSite=Lax</code> (Chrome 80 default) eliminates cross-site POST CSRF for most applications transparently.</li>
+<li>CSRF tokens prove the request originated from the legitimate page by embedding an unguessable secret the attacker cannot read.</li>
+<li>APIs using Bearer tokens (not cookies) are inherently CSRF-resistant because the browser doesn't auto-attach Authorization headers.</li>
+<li>XSS defeats CSRF tokens: an attacker with XSS can read the token and build a valid forged request.</li>
+<li>GET endpoints that change state are the most dangerous CSRF exposure because they bypass SameSite=Lax protection.</li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

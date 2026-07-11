@@ -1,0 +1,1434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GCP Service Accounts — Security Model, Hardening, and Detection</title>
+
+  <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+    function renderMermaidBlock(el) {
+      if (el.dataset.mermaidState) return;
+      el.dataset.mermaidState = 'rendering';
+      mermaid.run({ nodes: [el] })
+        .then(function () {
+          el.dataset.mermaidState = 'rendered';
+        })
+        .catch(function (err) {
+          el.dataset.mermaidState = 'error';
+          el.classList.add('mermaid-error');
+          console.error('Mermaid render failed:', err);
+        });
+    }
+
+    function initMermaidLazyRender() {
+      var blocks = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+      if (!blocks.length) return;
+
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            renderMermaidBlock(entry.target);
+          });
+        }, { rootMargin: '800px 0px', threshold: 0.01 });
+
+        blocks.forEach(function (block) {
+          observer.observe(block);
+        });
+      } else {
+        var index = 0;
+        function renderBatch() {
+          blocks.slice(index, index + 8).forEach(renderMermaidBlock);
+          index += 8;
+          if (index < blocks.length) window.setTimeout(renderBatch, 50);
+        }
+        renderBatch();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMermaidLazyRender);
+    } else {
+      initMermaidLazyRender();
+    }
+  </script>
+
+  <!-- Syntax highlighting (optional, no build step required) -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+
+  <style>
+    *  { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      line-height: 1.7;
+      color: #24292f;
+      background: #fff;
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.6em;
+      margin-bottom: 0.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      font-weight: 600;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Code */
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    /* Tables */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 600;
+    }
+    tr:nth-child(even) { background: #f9f9f9; }
+
+    /* Blockquotes */
+    blockquote {
+      border-left: 4px solid #d0d7de;
+      margin: 0 0 16px 0;
+      padding: 8px 16px;
+      color: #57606a;
+      background: #f6f8fa;
+      border-radius: 0 6px 6px 0;
+    }
+
+    /* Mermaid diagrams */
+    .mermaid {
+      background: #fafbfc;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+    pre.mermaid {
+      white-space: pre;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .mermaid[data-mermaid-state="rendering"] {
+      min-height: 140px;
+    }
+    .mermaid-error {
+      text-align: left;
+      color: #57606a;
+    }
+
+    /* Images */
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 14px 0;
+      border: 1px solid #d0d7de;
+      background: #fff;
+      cursor: zoom-in;
+      display: block;
+    }
+
+    /* ── Image zoom overlay ─────────────────────────────── */
+    #img-zoom-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+    #img-zoom-overlay.active { display: flex; }
+    #img-zoom-wrap {
+      position: relative;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #img-zoom-wrap.dragging { cursor: grabbing; }
+    #img-zoom-el {
+      max-width: none;
+      max-height: none;
+      border: none;
+      margin: 0;
+      border-radius: 4px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform-origin: center center;
+      user-select: none;
+      pointer-events: none;
+    }
+    #img-zoom-controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(20,20,20,0.88);
+      padding: 7px 18px;
+      border-radius: 24px;
+      z-index: 10000;
+    }
+    #img-zoom-controls button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.1em;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+    #img-zoom-controls button:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-level {
+      color: #ccc;
+      font-size: 0.82em;
+      min-width: 46px;
+      text-align: center;
+      font-family: monospace;
+    }
+    #img-zoom-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: none;
+      border: 1px solid rgba(255,255,255,0.35);
+      color: #fff;
+      font-size: 1.3em;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      transition: background 0.15s;
+    }
+    #img-zoom-close:hover { background: rgba(255,255,255,0.15); }
+    #img-zoom-hint {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(200,200,200,0.7);
+      font-size: 0.76em;
+      font-family: -apple-system, sans-serif;
+      z-index: 10000;
+      pointer-events: none;
+    }
+
+    /* Breadcrumb / path */
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 24px;
+      font-family: monospace;
+    }
+
+    /* Horizontal rule */
+    hr { border: none; border-top: 2px solid #d0d7de; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <p class="file-path">Source: cloud\GCP\Identity\Service-Accounts\README.md</p>
+<h1 id="gcp-service-accounts-security-model-hardening-and-detection">GCP Service Accounts — Security Model, Hardening, and Detection</h1>
+<p><strong>Domain:</strong> Cloud Security — GCP Identity &amp; Access Management (IAM)<br />
+<strong>Scope:</strong> Service account types, credentials, impersonation, blast radius, org-policy hardening, detection engineering<br />
+<strong>MITRE ATT&amp;CK:</strong> T1078.004 (Valid Accounts: Cloud Accounts), T1552.005 (Unsecured Credentials: Cloud Instance Metadata API), T1550.001 (Use Alternate Authentication Material: Application Access Token), T1098.001 (Account Manipulation: Additional Cloud Credentials)<br />
+<strong>Cross-refs:</strong> <a href="../../../../infra/Lateral-Movement/Cloud-Service-Accounts/README.md"><code>infra/Lateral-Movement/Cloud-Service-Accounts</code></a> · <a href="../Workload-Identity-Federation/README.md"><code>Workload-Identity-Federation</code></a></p>
+<hr />
+<h2 id="1-overview">1. Overview</h2>
+<p>A GCP <strong>service account (SA)</strong> is a non-human IAM principal — an identity that a workload (a Compute Engine VM, a GKE pod, a Cloud Function, a Cloud Run service, a CI job) uses to authenticate to Google APIs. It is simultaneously an <em>identity</em> (something you grant roles to, so it can be a member in an IAM policy) and a <em>resource</em> (something that lives inside a project, so it has its own IAM policy governing who may use or manage it). That dual nature is the single most important idea in this note: a service account can be a <strong>grantee of privilege</strong> and a <strong>target of privilege</strong> at the same time, and most real GCP compromises exploit the seam between the two.</p>
+<p>At scale, service accounts are where cloud IAM actually gets dangerous. Humans log in interactively, hit MFA, and are watched by anomaly detection. Machines authenticate silently, thousands of times a minute, using credentials that are frequently long-lived, over-scoped, and reachable by any code that runs on the workload. When a defender reviews a GCP org, the service-account inventory — how many exist, what roles they hold, whether they have exported keys, and who can impersonate them — is the highest-signal artifact for estimating blast radius. Over-privileged service accounts are the most common cause of excessive lateral reach in GCP: an attacker who lands code execution on any resource inherits that resource's SA, and from there the reachable graph is exactly the union of that SA's roles plus every SA it can impersonate.</p>
+<p>This note is written from the defender/reviewer seat. The goal is to explain the model precisely, enumerate the misconfigurations that weaken it, and give concrete hardening and detection you can apply and audit.</p>
+<blockquote>
+<p><strong>TL;DR</strong><br />
+- A service account is <em>both</em> an identity (grantee of roles) and a resource (has its own IAM policy) — impersonation lives in that second policy, not the first.<br />
+- <strong>Blast radius = granted roles ∪ (SAs it can impersonate, transitively).</strong> Long-lived JSON keys extend that radius to "anywhere on the internet, indefinitely."<br />
+- The three impersonation permissions — <code>iam.serviceAccounts.getAccessToken</code>, <code>iam.serviceAccounts.signJwt</code>, and <code>iam.serviceAccounts.actAs</code> — are effectively "become this identity." Grant them narrowly, on the specific SA, ideally with IAM Conditions.<br />
+- Prefer <strong>keyless</strong>: attached SAs + the metadata server for workloads inside GCP, <strong>Workload Identity Federation</strong> for workloads outside GCP. Kill exported keys with org policy.<br />
+- Detect on <code>iam.serviceAccounts.keys.create</code>, <code>GenerateAccessToken</code>/<code>SignJwt</code> from unexpected callers/IPs, and any grant of an impersonation role — these map to ATT&amp;CK T1078.004 and T1098.001.</p>
+</blockquote>
+<hr />
+<h2 id="2-how-it-works-deep">2. How It Works (deep)</h2>
+<h3 id="21-core-mechanics">2.1 Core mechanics</h3>
+<p>A GCP service account is identified by an email of the form <code>NAME@PROJECT_ID.iam.gserviceaccount.com</code> (user-managed) or a Google-generated address for the managed/default kinds. Each SA also has a numeric <strong>unique ID</strong> and a stable <strong>OAuth2 client ID</strong>. It has no password and cannot log in interactively. It authenticates in one of two fundamentally different ways:</p>
+<ol>
+<li><strong>By presenting a private key it holds</strong> — either a <em>user-managed key</em> you exported as JSON, or a <em>Google-managed key</em> that Google holds internally and never exposes (used transparently when a workload has an attached SA and asks the metadata server for a token). The SA signs a JWT assertion, exchanges it at Google's OAuth2 token endpoint, and receives a short-lived (~1 hour) access token.</li>
+<li><strong>By being impersonated</strong> — another already-authenticated principal calls the IAM Credentials API and asks Google to mint a token <em>for</em> the SA. No key is involved; authorization is purely IAM (does the caller hold an impersonation permission on the target SA?).</li>
+</ol>
+<p><strong>Two policies, two questions.</strong> Understanding SAs requires holding two separate IAM evaluations in your head:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Which policy answers it</th>
+<th>Example permission</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What can this SA <em>do</em>?</td>
+<td>The IAM policy on the <strong>resources</strong> the SA is a member of (project, bucket, etc.)</td>
+<td><code>storage.objects.get</code> on a bucket</td>
+</tr>
+<tr>
+<td>Who can <em>act as / use / manage</em> this SA?</td>
+<td>The IAM policy attached to the <strong>SA resource itself</strong></td>
+<td><code>iam.serviceAccounts.actAs</code>, <code>.getAccessToken</code></td>
+</tr>
+</tbody>
+</table>
+<p>The first defines the SA's <strong>blast radius</strong>. The second defines the SA's <strong>attack surface as a target</strong>. A common review mistake is auditing only the first.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Description</th>
+<th>Defensive relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Service account (SA)</td>
+<td>Non-human IAM principal; identity + resource</td>
+<td>The unit of machine privilege; inventory it</td>
+</tr>
+<tr>
+<td>Attached SA</td>
+<td>An SA bound to a runtime (VM, pod, function) so the workload gets tokens with no key</td>
+<td>The keyless default; preferred over exported keys</td>
+</tr>
+<tr>
+<td>Service account key</td>
+<td>Long-lived asymmetric key pair; user-managed (exported JSON) or Google-managed (internal)</td>
+<td>User-managed keys are the top liability</td>
+</tr>
+<tr>
+<td>Google-managed key</td>
+<td>Private key Google holds and rotates internally; never exportable</td>
+<td>Powers attached-SA tokens safely</td>
+</tr>
+<tr>
+<td>Metadata server</td>
+<td><code>169.254.169.254</code> / <code>metadata.google.internal</code>; issues tokens for the attached SA</td>
+<td>The local credential source; SSRF target</td>
+</tr>
+<tr>
+<td>IAM Credentials API</td>
+<td><code>iamcredentials.googleapis.com</code>; mints tokens <em>for</em> an SA via impersonation</td>
+<td>The keyless impersonation channel to monitor</td>
+</tr>
+<tr>
+<td><code>actAs</code> (<code>iam.serviceAccounts.actAs</code>)</td>
+<td>Permission to <em>deploy resources that run as</em> an SA</td>
+<td>Deploy-time privilege escalation gate</td>
+</tr>
+<tr>
+<td><code>getAccessToken</code></td>
+<td>Permission to mint an OAuth2 access token <em>for</em> an SA</td>
+<td>Runtime impersonation to another identity</td>
+</tr>
+<tr>
+<td><code>signJwt</code> / <code>signBlob</code></td>
+<td>Permission to have the SA sign arbitrary JWTs/bytes</td>
+<td>Lets caller forge SA-signed assertions/tokens</td>
+</tr>
+<tr>
+<td>Workload Identity Federation (WIF)</td>
+<td>Exchange an external OIDC/SAML/AWS identity for a short-lived GCP token, no key</td>
+<td>The keyless answer for off-GCP workloads</td>
+</tr>
+<tr>
+<td>GKE Workload Identity</td>
+<td>Binds a Kubernetes SA to a GCP SA; pods get scoped tokens, not the node SA</td>
+<td>Kills node-SA over-sharing on GKE</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The three service account <em>types</em> — and when each is used.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Email pattern</th>
+<th>Created by</th>
+<th>Default privilege</th>
+<th>Defender's stance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>User-managed</strong></td>
+<td><code>name@project.iam.gserviceaccount.com</code></td>
+<td>You</td>
+<td>None until you grant roles</td>
+<td>The right kind — one purpose-built SA per workload, least privilege</td>
+</tr>
+<tr>
+<td><strong>Default</strong> (Compute/App Engine)</td>
+<td><code>PROJECTNUMBER-compute@developer.gserviceaccount.com</code>, <code>PROJECT@appspot.gserviceaccount.com</code></td>
+<td>Auto-created when the API is enabled</td>
+<td><strong>Historically Editor on the whole project</strong></td>
+<td>Highest-risk default; strip roles or disable, block auto-grant</td>
+</tr>
+<tr>
+<td><strong>Google-managed / service agents</strong></td>
+<td><code>service-PROJECTNUMBER@gcp-sa-SERVICE.iam.gserviceaccount.com</code></td>
+<td>Google</td>
+<td>Purpose-scoped role Google needs to operate the service</td>
+<td>Leave alone; do not grant extra roles; do not delete</td>
+</tr>
+</tbody>
+</table>
+<p>The <strong>default compute SA</strong> is the classic footgun. When the Compute Engine API is enabled, GCP creates <code>PROJECTNUMBER-compute@developer.gserviceaccount.com</code> and — under the legacy behavior — grants it the primitive <strong>Editor</strong> role on the project. Every VM launched without an explicit SA runs as this identity with <code>--scopes</code> often defaulting to broad access. Result: any code execution on any such VM = project-wide Editor. This is the single most common "how did they move so far" finding in GCP incident reviews.</p>
+<h3 id="22-concrete-configuration">2.2 Concrete configuration</h3>
+<p><strong>Create a purpose-built, least-privilege SA (the right default):</strong></p>
+<pre><code class="language-bash"># One SA per workload, named for its purpose
+gcloud iam service-accounts create billing-exporter \
+  --project=acme-prod \
+  --display-name=&quot;Billing export job (read-only BQ)&quot;
+
+# Grant ONLY the narrow role it needs, and scope it to a single dataset
+# (resource-level binding, not project-level)
+bq add-iam-policy-binding \
+  --member=&quot;serviceAccount:billing-exporter@acme-prod.iam.gserviceaccount.com&quot; \
+  --role=&quot;roles/bigquery.dataViewer&quot; \
+  acme-prod:billing_dataset
+</code></pre>
+<p><strong>Attach the SA to a VM keylessly, with minimal cloud-platform scope:</strong></p>
+<pre><code class="language-bash">gcloud compute instances create exporter-vm \
+  --project=acme-prod --zone=us-central1-a \
+  --service-account=&quot;billing-exporter@acme-prod.iam.gserviceaccount.com&quot; \
+  --scopes=&quot;https://www.googleapis.com/auth/cloud-platform&quot; \
+  --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring
+# No JSON key is ever created. The VM gets tokens from the metadata server.
+</code></pre>
+<p><strong>How a workload gets its token (what your app SDK does under the hood):</strong></p>
+<pre><code class="language-bash"># From inside the VM/pod — the metadata server mints a short-lived token
+curl -s -H &quot;Metadata-Flavor: Google&quot; \
+  &quot;http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token&quot;
+# {&quot;access_token&quot;:&quot;ya29.c.b0A...&quot;,&quot;expires_in&quot;:3599,&quot;token_type&quot;:&quot;Bearer&quot;}
+</code></pre>
+<p>Application Default Credentials (ADC) automatically use this endpoint, so well-written code never touches a key file.</p>
+<p><strong>Impersonation done right — short-lived, scoped, no key exported.</strong> A CI pipeline or an operator uses <code>--impersonate-service-account</code> instead of downloading a key:</p>
+<pre><code class="language-bash"># The human/CI principal must hold roles/iam.serviceAccountTokenCreator on the target SA.
+gcloud storage ls gs://acme-prod-artifacts \
+  --impersonate-service-account=deployer@acme-prod.iam.gserviceaccount.com
+# gcloud silently calls iamcredentials.generateAccessToken for you.
+</code></pre>
+<p><strong>Scope the impersonation grant with an IAM Condition</strong> so a token-creator can only impersonate one SA, and (optionally) only during change windows:</p>
+<pre><code class="language-bash">gcloud iam service-accounts add-iam-policy-binding \
+  deployer@acme-prod.iam.gserviceaccount.com \
+  --member=&quot;group:release-engineers@acme.com&quot; \
+  --role=&quot;roles/iam.serviceAccountTokenCreator&quot; \
+  --condition='expression=resource.name == &quot;projects/-/serviceAccounts/deployer@acme-prod.iam.gserviceaccount.com&quot;,title=only-deployer,description=Scope token creation to the deployer SA only'
+</code></pre>
+<p><strong>Enforce the three highest-value org policies (kill keys, kill auto-Editor):</strong></p>
+<pre><code class="language-bash"># 1. No one can create exportable user-managed keys
+gcloud resource-manager org-policies enable-enforce \
+  constraints/iam.disableServiceAccountKeyCreation --organization=123456789012
+
+# 2. No one can upload their own public key material to an SA
+gcloud resource-manager org-policies enable-enforce \
+  constraints/iam.disableServiceAccountKeyUpload --organization=123456789012
+
+# 3. Default SAs are NOT auto-granted Editor at project creation
+gcloud resource-manager org-policies enable-enforce \
+  constraints/iam.automaticIamGrantsForDefaultServiceAccounts --organization=123456789012
+</code></pre>
+<p><strong>GKE Workload Identity — stop pods from inheriting the node SA:</strong></p>
+<pre><code class="language-bash"># Cluster + node pool with Workload Identity and metadata concealment
+gcloud container clusters create secure-cluster \
+  --project=acme-prod --region=us-central1 \
+  --workload-pool=acme-prod.svc.id.goog \
+  --workload-metadata=GKE_METADATA
+</code></pre>
+<pre><code class="language-yaml"># Bind the K8s SA to a least-priv GCP SA; pods use THIS identity, not the node's.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: billing-exporter
+  namespace: batch
+  annotations:
+    iam.gke.io/gcp-service-account: billing-exporter@acme-prod.iam.gserviceaccount.com
+</code></pre>
+<pre><code class="language-bash"># Allow the K8s SA to impersonate the GCP SA via the workloadIdentityUser role
+gcloud iam service-accounts add-iam-policy-binding \
+  billing-exporter@acme-prod.iam.gserviceaccount.com \
+  --role=&quot;roles/iam.workloadIdentityUser&quot; \
+  --member=&quot;serviceAccount:acme-prod.svc.id.goog[batch/billing-exporter]&quot;
+</code></pre>
+<p>With <code>GKE_METADATA</code>, the legacy <code>169.254.169.254</code> node-SA endpoint is concealed from pods, and each pod is scoped to exactly the GCP SA its K8s SA is bound to.</p>
+<h3 id="23-diagrams">2.3 Diagrams</h3>
+<p><strong>Diagram A — The two IAM policies that govern one service account</strong></p>
+<pre class="mermaid">
+flowchart LR
+  P[Principal or workload] -->|policy on the SA resource| SA[Service account]
+  SA -->|policy on target resources| R[GCS BigQuery Pub Sub]
+  P -. actAs getAccessToken signJwt .-> SA
+  SA -. storage.objects.get bigquery.jobs.create .-> R
+</pre>
+<p><strong>Diagram B — How an attached SA obtains a short-lived token (keyless)</strong></p>
+<pre class="mermaid">
+sequenceDiagram
+  participant App as Workload code
+  participant MD as Metadata server
+  participant OAuth as Google OAuth2
+  participant API as Google API
+  App->>MD: GET service-accounts default token
+  MD->>OAuth: Sign assertion with Google managed key
+  OAuth-->>MD: Access token expires in 3599
+  MD-->>App: Bearer token
+  App->>API: Call API with Bearer token
+  API-->>App: Response scoped to SA roles
+</pre>
+<p><strong>Diagram C — Impersonation chain and blast radius</strong></p>
+<pre class="mermaid">
+flowchart TD
+  A[Compromised workload runs as low SA] --> B[Read metadata token]
+  B --> C{Does low SA hold impersonation on higher SA}
+  C -->|Yes getAccessToken| D[Mint token for higher SA]
+  C -->|No| E[Reach limited to low SA roles]
+  D --> F{Higher SA roles}
+  F --> G[resourcemanager setIamPolicy grant self owner]
+  F --> H[Deploy function that runs as admin SA via actAs]
+  G --> I[Project owner]
+  H --> I
+</pre>
+<p><strong>Diagram D — Where credentials can be stolen (attack surface)</strong></p>
+<pre class="mermaid">
+flowchart TD
+  K[User managed JSON key] --> L[Git repo or Docker layer or CI log]
+  M[Metadata endpoint] --> N[SSRF in web app steals token]
+  O[Impersonation permission too broad] --> P[Any principal mints token for admin SA]
+  Q[Default compute SA with Editor] --> R[Any VM exec equals project editor]
+  L --> Z[Attacker authenticates as SA]
+  N --> Z
+  P --> Z
+  R --> Z
+</pre>
+<p><strong>Diagram E — Hardened token issuance decision (state view)</strong></p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> WorkloadLocation
+  WorkloadLocation --> InsideGCP: runs on GCE GKE Run Functions
+  WorkloadLocation --> OutsideGCP: runs on prem GitHub AWS
+  InsideGCP --> AttachedSA: use attached SA and metadata
+  OutsideGCP --> WIF: use Workload Identity Federation
+  AttachedSA --> ShortLivedToken
+  WIF --> ShortLivedToken
+  ShortLivedToken --> [*]
+</pre>
+<hr />
+<h2 id="3-real-world-incidents-cves">3. Real-World Incidents &amp; CVEs</h2>
+<table>
+<thead>
+<tr>
+<th>Incident / CVE</th>
+<th>Year</th>
+<th>Root cause</th>
+<th>Lesson</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Capital One breach (AWS analog)</td>
+<td>2019</td>
+<td>SSRF → EC2 IMDSv1 → over-privileged instance role read S3</td>
+<td>Metadata + over-priv machine identity = mass data theft; drove IMDSv2 and metadata hardening across clouds</td>
+</tr>
+<tr>
+<td>Google default compute SA = Editor</td>
+<td>ongoing</td>
+<td>Legacy default grant of <code>roles/editor</code> to default SA</td>
+<td>Any VM compromise became project-wide; fixed by <code>automaticIamGrants...</code> org policy + <code>--no-scopes</code></td>
+</tr>
+<tr>
+<td>GCP privilege-escalation permission set (Rhino Security Labs research)</td>
+<td>2020</td>
+<td>~35 permissions incl. <code>actAs</code>, <code>setIamPolicy</code>, <code>iam.roles.update</code> allow self-escalation</td>
+<td>Certain permissions are "escalation-equivalent" — audit them like admin</td>
+</tr>
+<tr>
+<td>CVE-2020-8555 (Kubernetes SSRF)</td>
+<td>2020</td>
+<td>kube-controller-manager SSRF could reach cloud metadata</td>
+<td>Cluster components reaching metadata leak node/cloud creds; conceal metadata</td>
+</tr>
+<tr>
+<td>GKE metadata server exposure (pre-Workload-Identity)</td>
+<td>2018–2020</td>
+<td>Pods could curl node SA token at <code>169.254.169.254</code></td>
+<td>Any pod RCE = node SA; fixed by GKE Workload Identity + <code>GKE_METADATA</code></td>
+</tr>
+<tr>
+<td>Leaked SA keys in public GitHub</td>
+<td>ongoing</td>
+<td>Developers commit <code>*.json</code> keys; bots scan within minutes</td>
+<td>Long-lived keys are internet-reachable forever; disable key creation</td>
+</tr>
+<tr>
+<td>CircleCI breach (secrets exfil)</td>
+<td>2023</td>
+<td>Malware on an engineer's laptop stole session tokens; customer OAuth/SA secrets exposed</td>
+<td>CI holds impersonation power; short-lived + OIDC federation limits blast radius</td>
+</tr>
+<tr>
+<td>Codecov supply-chain</td>
+<td>2021</td>
+<td>Tampered bash uploader exfiltrated CI env vars incl. cloud creds</td>
+<td>Keys in CI env = harvestable; move to WIF/OIDC, no static keys</td>
+</tr>
+<tr>
+<td>TeamTNT cloud cryptojacking campaigns</td>
+<td>2020–2022</td>
+<td>Scraped cloud metadata + creds from compromised containers</td>
+<td>Automated adversaries specifically target metadata + SA creds</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Case study 1 — Capital One (the metadata + over-privilege pattern).</strong> An attacker exploited a server-side request forgery (SSRF) flaw in a WAF-fronted application and used it to query the EC2 instance metadata service (IMDSv1), which returned temporary credentials for the instance's IAM role. That role had <code>s3:ListBucket</code>/<code>s3:GetObject</code> far more broadly than the app needed, so the credentials could enumerate and download ~100M records. The GCP-equivalent chain is identical: SSRF → <code>metadata.google.internal/.../token</code> → a token for an over-privileged attached SA. <strong>The control that stops it:</strong> (a) least-privilege on the attached SA so a stolen token reaches almost nothing, and (b) metadata hardening (IMDSv2 on AWS; GKE Workload Identity / metadata concealment and <code>disable-legacy-endpoints=true</code> on GCP) so SSRF can't trivially fetch the token.</p>
+<p><strong>Case study 2 — Default compute SA as Editor.</strong> A team spins up a VM to run a scheduled report and never sets <code>--service-account</code> or <code>--scopes</code>. The VM runs as the default compute SA, which the project inherited with <code>roles/editor</code>, and the default <code>cloud-platform</code>-adjacent scopes. A dependency in the report tool has an RCE. The attacker reads the metadata token and now holds Editor on the entire project — able to create new SAs, mint keys, modify firewall rules, and read every bucket. <strong>The control that stops it:</strong> enforce <code>constraints/iam.automaticIamGrantsForDefaultServiceAccounts</code> so new projects never auto-grant Editor, replace the default SA with a purpose-built least-privilege SA, and set <code>--no-scopes</code>/<code>--no-service-account</code> on workloads that don't need cloud access.</p>
+<p><strong>Case study 3 — Impersonation granted too broadly.</strong> During a review you find <code>roles/iam.serviceAccountTokenCreator</code> granted to <code>allAuthenticatedUsers</code>-adjacent groups at the <em>project</em> level rather than on a specific SA. Because a project-level token-creator grant applies to <em>every</em> SA in the project, any member of that group — or any workload running as an SA in that group — can mint a token for the project's most privileged SA and escalate. <strong>The control that stops it:</strong> never grant the impersonation roles at project/folder/org scope; bind them on the individual target SA resource, add an IAM Condition pinning <code>resource.name</code>, and alert on any new token-creator binding.</p>
+<hr />
+<h2 id="4-what-can-go-wrong">4. What Can Go Wrong</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat / Attack</th>
+<th>ATT&amp;CK / category</th>
+<th>Root cause</th>
+<th>Impact</th>
+<th>Likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Leaked user-managed JSON key (GitHub/Docker/CI)</td>
+<td>T1552.001 / credential exposure</td>
+<td>Exportable long-lived key exists at all</td>
+<td>Full SA auth from anywhere, indefinitely</td>
+<td>High</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SSRF steals metadata token</td>
+<td>T1552.005 / metadata theft</td>
+<td>App SSRF + reachable metadata endpoint</td>
+<td>Attacker gets attached-SA token</td>
+<td>High</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Default compute SA has Editor</td>
+<td>T1078.004 / over-privilege</td>
+<td>Legacy auto-grant of <code>roles/editor</code></td>
+<td>Any VM RCE → project Editor</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Broad <code>iam.serviceAccounts.actAs</code></td>
+<td>T1098 / privilege escalation</td>
+<td>actAs granted at project scope</td>
+<td>Deploy resources running as admin SA</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Broad <code>getAccessToken</code> (token creator)</td>
+<td>T1550.001 / token abuse</td>
+<td>TokenCreator granted broadly</td>
+<td>Runtime impersonation to higher SA</td>
+<td>Med-High</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>signJwt</code>/<code>signBlob</code> misuse</td>
+<td>T1550.001 / assertion forgery</td>
+<td>signJwt granted to low-trust principal</td>
+<td>Forge SA-signed JWTs / self-sign tokens</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Impersonation chain (A→B→C)</td>
+<td>T1098 / lateral movement</td>
+<td>Transitive token-creator grants</td>
+<td>Multi-hop escalation to org admin</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>8</td>
+<td>GKE pods inherit node SA</td>
+<td>T1552.005 / metadata theft</td>
+<td>Workload Identity not enabled</td>
+<td>Any pod RCE → node SA (often broad)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>resourcemanager.projects.setIamPolicy</code> on SA</td>
+<td>T1098 / self-grant</td>
+<td>SA can edit project IAM</td>
+<td>Grant self Owner</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>iam.roles.update</code> on a role the SA holds</td>
+<td>T1098 / role tampering</td>
+<td>SA can edit its own custom role</td>
+<td>Add arbitrary permissions to itself</td>
+<td>Low-Med</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Deploy-as escalation (Functions/Run/Deploy Mgr)</td>
+<td>T1098 / actAs abuse</td>
+<td>actAs + deploy permission combined</td>
+<td>Run attacker code as high-priv SA</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Cross-project SA sprawl</td>
+<td>T1078.004 / over-reach</td>
+<td>SA granted roles in many projects</td>
+<td>One compromise spans projects</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Key never rotated / orphaned</td>
+<td>T1078.004 / stale creds</td>
+<td>No rotation or offboarding</td>
+<td>Long-lived valid creds outlive need</td>
+<td>High</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Primitive roles (Owner/Editor/Viewer) on SA</td>
+<td>over-privilege</td>
+<td>Convenience over least privilege</td>
+<td>Coarse, un-scopeable blast radius</td>
+<td>High</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Disabled-but-not-deleted SA re-enabled</td>
+<td>T1078.004 / dormant identity</td>
+<td>Disable used instead of delete</td>
+<td>Attacker re-enables and reuses</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>16</td>
+<td>User-uploaded public key (BYO key)</td>
+<td>T1098.001 / add credentials</td>
+<td>Key upload not blocked</td>
+<td>Attacker adds own key to an SA they can edit</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Logging gaps (Data Access logs off)</td>
+<td>detection gap</td>
+<td><code>GenerateAccessToken</code> not logged by default</td>
+<td>Impersonation invisible to SIEM</td>
+<td>High</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Over-broad OAuth <code>--scopes</code> on VM</td>
+<td>over-privilege</td>
+<td>Legacy default scopes</td>
+<td>Token usable beyond intended APIs</td>
+<td>Med</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Service agent granted extra roles</td>
+<td>over-privilege</td>
+<td>Ops granted roles to Google-managed SA</td>
+<td>Google-controlled identity now over-priv</td>
+<td>Low-Med</td>
+</tr>
+<tr>
+<td>20</td>
+<td>WIF pool with weak attribute mapping</td>
+<td>T1078.004 / trust bypass</td>
+<td><code>attribute.repository</code> not constrained</td>
+<td>Any repo/actor federates in as SA</td>
+<td>Med</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-mitigation-controls">5. Mitigation Controls</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Threat (from §4)</th>
+<th>Concrete control</th>
+<th>Where applied</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Leaked JSON key</td>
+<td><code>constraints/iam.disableServiceAccountKeyCreation</code> + secret scanning</td>
+<td>Org policy + SCM/CI</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SSRF metadata theft</td>
+<td>GKE Workload Identity, <code>disable-legacy-endpoints=true</code>, app SSRF fixes</td>
+<td>GKE + VM metadata + app</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Default SA Editor</td>
+<td><code>automaticIamGrantsForDefaultServiceAccounts</code>, strip roles, <code>--no-service-account</code></td>
+<td>Org policy + IAM + compute</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Broad actAs</td>
+<td>Bind on individual SA + IAM Condition; never at project scope</td>
+<td>IAM resource policy</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Broad token creator</td>
+<td>Bind <code>serviceAccountTokenCreator</code> on the target SA only + Condition</td>
+<td>IAM resource policy</td>
+</tr>
+<tr>
+<td>6</td>
+<td>signJwt misuse</td>
+<td>Treat as escalation-equivalent; grant to almost no one; audit</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Impersonation chains</td>
+<td>Map graph with Policy Analyzer; break transitive hops</td>
+<td>IAM analysis</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Pods inherit node SA</td>
+<td><code>--workload-pool</code> + <code>--workload-metadata=GKE_METADATA</code></td>
+<td>GKE config</td>
+</tr>
+<tr>
+<td>9</td>
+<td>setIamPolicy self-grant</td>
+<td>Deny primitive roles; use predefined/custom least-priv</td>
+<td>IAM design</td>
+</tr>
+<tr>
+<td>10</td>
+<td>roles.update tampering</td>
+<td>Separate role-admin duty; restrict <code>iam.roles.update</code></td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Deploy-as escalation</td>
+<td>Require actAs Condition; review deploy permissions</td>
+<td>IAM + CI review</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Cross-project sprawl</td>
+<td>VPC Service Controls perimeters; per-project SAs</td>
+<td>VPC-SC + IAM</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Stale keys</td>
+<td>Rotation policy; disable creation entirely (prefer keyless)</td>
+<td>Org policy + automation</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Primitive roles</td>
+<td>Replace with predefined/custom roles; deny primitives via policy</td>
+<td>IAM design</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Dormant SA reuse</td>
+<td>Delete, don't just disable; alert on re-enable</td>
+<td>IAM lifecycle</td>
+</tr>
+<tr>
+<td>16</td>
+<td>BYO key upload</td>
+<td><code>constraints/iam.disableServiceAccountKeyUpload</code></td>
+<td>Org policy</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Logging gaps</td>
+<td>Enable Data Access audit logs for IAM/credentials</td>
+<td>Audit config</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Broad OAuth scopes</td>
+<td>Set <code>--scopes</code> minimally or rely on IAM (cloud-platform + IAM)</td>
+<td>Compute config</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Service agent over-grant</td>
+<td>Never add roles to Google-managed SAs</td>
+<td>IAM governance</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Weak WIF mapping</td>
+<td>Constrain attribute conditions (repo, ref, aud)</td>
+<td>WIF pool config</td>
+</tr>
+</tbody>
+</table>
+<h3 id="top-5-in-depth">Top 5 in depth</h3>
+<p><strong>1. Eliminate exportable keys with org policy (<code>disableServiceAccountKeyCreation</code> + <code>disableServiceAccountKeyUpload</code>).</strong><br />
+A user-managed key is an asymmetric private key you can download as JSON. Unlike a metadata token, it does not expire and is valid from any network on earth. It is the single worst credential type in GCP because a leak is silent, durable, and global. The <code>constraints/iam.disableServiceAccountKeyCreation</code> list constraint blocks <code>iam.serviceAccounts.keys.create</code> org-wide; <code>disableServiceAccountKeyUpload</code> blocks the sibling move where an attacker (or well-meaning engineer) uploads their <em>own</em> public key to bind a key they control. Technically these are enforced at the Resource Manager policy layer before the IAM mutation commits, so they can't be bypassed by anyone lacking org-policy-admin. Enforce them at the <strong>organization</strong> node and use policy <em>exceptions</em> (dry-run first, then scoped <code>enforce=false</code> on a narrow folder) only for the rare legacy integration that genuinely can't use keyless auth. Trade-off: a handful of external systems (on-prem cron, third-party SaaS) may still need a key; the answer is Workload Identity Federation, not an exception — reserve exceptions for weeks, not forever, and alert on any key that exists.</p>
+<p><strong>2. Prefer keyless everywhere: attached SAs inside GCP, WIF outside.</strong><br />
+For anything running <em>on</em> GCP (GCE, GKE, Cloud Run, Cloud Functions, Cloud Build), attach an SA and let ADC pull short-lived tokens from the metadata server — no key ever exists. For anything running <em>off</em> GCP (GitHub Actions, on-prem, another cloud), use <strong>Workload Identity Federation</strong>: the external platform's OIDC/SAML token is exchanged at Google's STS for a short-lived federated token, then optionally used to impersonate a GCP SA — again, no exported key. Technically WIF verifies the external IdP's signature and evaluates <em>attribute conditions</em> you define (e.g. only tokens whose <code>assertion.repository == "acme/deploy"</code> and <code>ref == "refs/heads/main"</code>), so trust is pinned to a specific external identity rather than a stealable secret. Trade-off: WIF requires careful attribute-condition design — a permissive mapping (<code>attribute.actor</code> unconstrained) re-opens the door — so the control's strength lives entirely in the condition. See the <a href="../Workload-Identity-Federation/README.md">Workload-Identity-Federation note</a>.</p>
+<p><strong>3. Scope impersonation to the individual SA with IAM Conditions, and treat the three impersonation permissions as admin.</strong><br />
+<code>iam.serviceAccounts.getAccessToken</code>, <code>iam.serviceAccounts.signJwt</code>/<code>signBlob</code>, and <code>iam.serviceAccounts.actAs</code> all mean, effectively, "become this SA." <code>getAccessToken</code> mints a live OAuth2 token; <code>signJwt</code> lets the caller produce SA-signed assertions (usable to obtain tokens for downstream services or to forge identity to systems that trust the SA's signature); <code>actAs</code> is checked at <em>deploy time</em> — it lets a principal create a VM/function/job that <em>runs as</em> the target SA, so it's escalation-by-deployment. Because these are equivalent to holding the target SA's entire role set, bind the corresponding roles (<code>serviceAccountTokenCreator</code>, <code>serviceAccountUser</code>) <strong>on the specific SA resource</strong>, never at project/folder/org scope, and pin them with an IAM Condition on <code>resource.name</code>. Technically, granting <code>serviceAccountTokenCreator</code> at project scope silently confers it on <em>every</em> SA in the project — a frequent hidden escalation path. Trade-off: resource-scoped bindings are more numerous and slightly more work to manage; that verbosity <em>is</em> the least-privilege property you want, and IaC (Terraform) makes it maintainable.</p>
+<p><strong>4. Neutralize the default compute SA and metadata exposure.</strong><br />
+Enforce <code>constraints/iam.automaticIamGrantsForDefaultServiceAccounts</code> so newly created projects never auto-grant <code>roles/editor</code> to default SAs. For existing projects, remove primitive roles from the default SA and replace it with purpose-built SAs; for workloads needing no cloud access, launch with <code>--no-service-account</code> or <code>--no-scopes</code>. On GKE, enable <strong>Workload Identity</strong> (<code>--workload-pool</code> + <code>--workload-metadata=GKE_METADATA</code>) so pods receive tokens for <em>their</em> bound GCP SA and the legacy <code>169.254.169.254</code> node-SA endpoint is concealed; on plain GCE, set <code>disable-legacy-endpoints=true</code>. This directly breaks the SSRF→metadata→token→lateral-movement chain that powered Capital One and every TeamTNT container campaign. Trade-off: Workload Identity requires per-workload SA bindings and a small migration effort; the payoff is that a single pod RCE no longer yields the node's (often broad) identity.</p>
+<p><strong>5. Least-privilege role design + continuous blast-radius analysis.</strong><br />
+Blast radius equals granted roles ∪ impersonatable SAs. So the durable control is disciplined role design: one SA per workload, <strong>predefined or custom roles</strong> (never the primitive Owner/Editor/Viewer), resource-scoped bindings (a bucket, a dataset — not the project), and periodic review with <strong>IAM Recommender</strong> (surfaces unused permissions from 90-day usage) and <strong>Policy Analyzer</strong> (answers "who can access what" and expands impersonation chains). Technically, Recommender computes the delta between granted and <em>used</em> permissions and proposes a tighter role; Policy Analyzer traverses the IAM graph including <code>actAs</code>/token-creator edges so you can see transitive reach. Trade-off: aggressive least-privilege can break workloads when usage patterns change; run Recommender in observe mode, stage role tightening in non-prod, and keep a fast path to widen a role under change management.</p>
+<hr />
+<h2 id="6-detection-response">6. Detection &amp; Response</h2>
+<h3 id="what-to-log-telemetry-sources">What to log / telemetry sources</h3>
+<p>Service-account abuse is visible almost entirely in <strong>Cloud Audit Logs</strong>, but two of the most important event classes are <strong>off by default</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Log stream</th>
+<th>Contains</th>
+<th>Default state</th>
+<th>Must-enable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Admin Activity</strong> audit logs</td>
+<td><code>iam.serviceAccounts.create</code>, <code>keys.create</code>, <code>SetIamPolicy</code>, <code>create/enable/disable SA</code></td>
+<td>Always on, free</td>
+<td>—</td>
+</tr>
+<tr>
+<td><strong>Data Access</strong> audit logs (IAM/credentials)</td>
+<td><code>GenerateAccessToken</code>, <code>SignJwt</code>, <code>SignBlob</code>, <code>GetIamPolicy</code></td>
+<td><strong>Off by default</strong></td>
+<td><strong>Enable <code>DATA_READ</code>/<code>ADMIN_READ</code> for <code>iam.googleapis.com</code> + <code>iamcredentials.googleapis.com</code></strong></td>
+</tr>
+<tr>
+<td><strong>VPC Flow / firewall logs</strong></td>
+<td>Egress to <code>169.254.169.254</code> from unexpected pods</td>
+<td>Off</td>
+<td>Enable for metadata-exfil detection</td>
+</tr>
+<tr>
+<td><strong>Access Transparency</strong></td>
+<td>Google-staff access to your resources</td>
+<td>Off (needs enablement)</td>
+<td>Optional</td>
+</tr>
+</tbody>
+</table>
+<p>Key fields to pivot on: <code>protoPayload.methodName</code>, <code>protoPayload.authenticationInfo.principalEmail</code>, <code>protoPayload.requestMetadata.callerIp</code>, <code>protoPayload.resourceName</code> (the target SA), and for token minting <code>protoPayload.request.scope</code>. Enable data-access logging for the credentials API explicitly:</p>
+<pre><code class="language-yaml"># gcloud organizations get-iam-policy ... then set auditConfigs:
+auditConfigs:
+- service: iamcredentials.googleapis.com
+  auditLogConfigs:
+  - logType: DATA_READ
+  - logType: ADMIN_READ
+- service: iam.googleapis.com
+  auditLogConfigs:
+  - logType: DATA_READ
+  - logType: ADMIN_READ
+</code></pre>
+<h3 id="sample-detections">Sample detections</h3>
+<p><strong>Detection 1 — New service-account key created (BigQuery over exported audit logs).</strong> Any key creation in a key-disabled org is either a policy gap or an attacker adding credentials (T1098.001).</p>
+<pre><code class="language-sql">-- Flag creation of user-managed SA keys
+SELECT
+  timestamp,
+  protopayload_auditlog.authenticationInfo.principalEmail AS actor,
+  protopayload_auditlog.requestMetadata.callerIp          AS src_ip,
+  protopayload_auditlog.resourceName                      AS target_sa
+FROM `acme-logs.security.cloudaudit_googleapis_com_activity`
+WHERE protopayload_auditlog.methodName =
+      'google.iam.admin.v1.CreateServiceAccountKey'
+  AND timestamp &gt; TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+ORDER BY timestamp DESC;
+</code></pre>
+<p><strong>Detection 2 — Impersonation from an unexpected caller (Sigma, over GCP audit logs).</strong> Token minting for a sensitive SA by a principal outside the approved release group, or from a non-corporate IP (T1550.001 / T1078.004).</p>
+<pre><code class="language-yaml">title: GCP SA impersonation by unexpected principal
+id: 6f2b1c00-sa-impersonation-anomaly
+status: experimental
+logsource:
+  product: gcp
+  service: gcp.audit
+detection:
+  selection:
+    data.protoPayload.methodName:
+      - 'GenerateAccessToken'
+      - 'SignJwt'
+    data.protoPayload.serviceName: 'iamcredentials.googleapis.com'
+  filter_known:
+    data.protoPayload.authenticationInfo.principalEmail:
+      - 'deployer@acme-prod.iam.gserviceaccount.com'
+      - 'release-ci@acme-prod.iam.gserviceaccount.com'
+  condition: selection and not filter_known
+level: high
+tags:
+  - attack.t1550.001
+  - attack.t1078.004
+falsepositives:
+  - New legitimate CI runner not yet allow-listed
+</code></pre>
+<p><strong>Detection 3 — Any new grant of an impersonation/escalation role (KQL-style, log-based metric).</strong> Alert whenever <code>SetIamPolicy</code> adds <code>serviceAccountTokenCreator</code>, <code>serviceAccountUser</code>, <code>iam.serviceAccountKeyAdmin</code>, or a primitive role.</p>
+<pre><code class="language-sql">SELECT timestamp,
+  protopayload_auditlog.authenticationInfo.principalEmail AS actor,
+  protopayload_auditlog.resourceName AS target,
+  binding.role AS granted_role,
+  member
+FROM `acme-logs.security.cloudaudit_googleapis_com_activity`,
+  UNNEST(JSON_QUERY_ARRAY(protopayload_auditlog.servicedata_v1_iam.policyDelta.bindingDeltas)) AS bd,
+  UNNEST([JSON_VALUE(bd.role)]) AS binding_role
+WHERE protopayload_auditlog.methodName LIKE '%SetIamPolicy'
+  AND JSON_VALUE(bd.action) = 'ADD'
+  AND JSON_VALUE(bd.role) IN (
+    'roles/iam.serviceAccountTokenCreator',
+    'roles/iam.serviceAccountUser',
+    'roles/iam.serviceAccountKeyAdmin',
+    'roles/owner', 'roles/editor');
+</code></pre>
+<p><strong>Detection 4 — Metadata endpoint reached from a pod that shouldn't (behavioral).</strong> With Workload Identity enabled, direct pod egress to <code>169.254.169.254</code> for the token path is anomalous; alert on VPC flow logs or a runtime sensor (Falco rule <code>contact cloud metadata service</code>).</p>
+<h3 id="response-playbook-sa-compromise">Response playbook (SA compromise)</h3>
+<ol>
+<li><strong>Detect &amp; scope</strong> — from the audit log, pin the affected SA(s), the actor principal, <code>callerIp</code>, and the time window. Pull all <code>GenerateAccessToken</code>/<code>SignJwt</code>/<code>SetIamPolicy</code> events for that SA and any SA it can impersonate (expand the chain with Policy Analyzer).</li>
+<li><strong>Contain (cut the credential path)</strong> — disable the compromised SA (<code>gcloud iam service-accounts disable</code>), delete any user-managed keys (<code>gcloud iam service-accounts keys delete</code>), and remove offending IAM bindings (revoke the impersonation grant / self-added role). Because access tokens are short-lived (~1h), disabling the SA and revoking keys bounds the exposure quickly.</li>
+<li><strong>Contain (stop lateral spread)</strong> — revoke any bindings the attacker added (new token-creator grants, new SA keys, new SAs). If a VM/pod was the entry point, isolate it (firewall deny egress) and snapshot for forensics before termination.</li>
+<li><strong>Eradicate</strong> — remove attacker-created SAs/keys/functions, rotate any downstream secrets the SA could read (KMS-wrapped secrets, DB creds), and confirm no persistence via <code>actAs</code>-deployed resources (Cloud Functions/Run services running as high-priv SAs).</li>
+<li><strong>Recover</strong> — re-create the workload with a purpose-built least-privilege SA, keyless (attached SA or WIF), and re-enable service only after least-privilege is verified with Recommender.</li>
+<li><strong>Harden &amp; learn</strong> — if key creation was possible, enforce <code>disableServiceAccountKeyCreation</code>; if impersonation was too broad, re-scope with resource-level bindings + IAM Conditions; enable Data Access logs if they were off; add the actor/IP to detections. Feed timeline into the incident review.</li>
+</ol>
+<hr />
+<h2 id="7-practice-questions">7. Practice Questions</h2>
+<h3 id="tier-1-fundamentals">Tier 1 — Fundamentals</h3>
+<p><strong>1. What is a GCP service account and how is it different from a user account?</strong><br />
+A service account is a non-human IAM principal that workloads use to authenticate to Google APIs, identified by an email like <code>name@project.iam.gserviceaccount.com</code>. Unlike a user, it has no password and cannot log in interactively; it authenticates by holding a private key or by being impersonated, and it receives short-lived OAuth2 tokens. Crucially it is both an <em>identity</em> (you grant it roles) and a <em>resource</em> (it has its own IAM policy governing who can use it). That dual nature is why service-account governance is subtler than user governance.<br />
+<em>Why asked / signal:</em> confirms the candidate knows machine identity is a distinct, dual-natured object — the basis for everything else.</p>
+<p><strong>2. Name the three service-account types and when each is used.</strong><br />
+User-managed SAs are ones you create for a specific workload and grant least-privilege roles to — the right default. Default SAs (compute/App Engine) are auto-created and historically carried <code>roles/editor</code> on the whole project, which is the classic over-privilege footgun. Google-managed SAs (service agents, <code>service-...@gcp-sa-...</code>) are created and controlled by Google so a service can operate on your behalf; you leave them alone and never grant them extra roles.<br />
+<em>Why asked / signal:</em> tests whether they can spot the dangerous default and the "don't touch" managed identities.</p>
+<p><strong>3. Why are long-lived JSON service-account keys considered a liability?</strong><br />
+They are asymmetric private keys that never expire and are valid from any network on earth, so a single leak — in a Git commit, Docker layer, or CI log — grants durable, global access with no MFA. They are silently harvested by bots scanning public repos within minutes. The defensive answer is to not create them: use attached SAs inside GCP and Workload Identity Federation outside, and enforce <code>disableServiceAccountKeyCreation</code> org-wide.<br />
+<em>Why asked / signal:</em> the candidate should instinctively treat exported keys as the worst credential class.</p>
+<p><strong>4. How does a VM or pod get credentials without a key file?</strong><br />
+It uses an <em>attached</em> service account plus the metadata server. Application Default Credentials call <code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code>, which returns a short-lived (~1 hour) OAuth2 access token minted with a Google-managed key that is never exposed. No secret is stored on disk, and rotation is automatic.<br />
+<em>Why asked / signal:</em> checks understanding of keyless issuance and the metadata endpoint, which is also the SSRF target.</p>
+<p><strong>5. What does the <code>actAs</code> permission do and why does it matter?</strong><br />
+<code>iam.serviceAccounts.actAs</code> lets a principal deploy a resource (VM, function, Cloud Run service, pipeline) that <em>runs as</em> a given SA — it's checked at deploy time. It matters because it lets a lower-privileged principal cause code to execute with a <em>higher-privileged</em> SA's identity, which is privilege escalation by deployment. You scope it by granting <code>roles/iam.serviceAccountUser</code> on the specific target SA, never at project level.<br />
+<em>Why asked / signal:</em> actAs is the most misunderstood escalation gate; interviewers want to see it flagged.</p>
+<h3 id="tier-2-system-design-trade-offs">Tier 2 — System design / trade-offs</h3>
+<p><strong>6. Design least-privilege service-account architecture for a microservices platform on GKE.</strong><br />
+One GCP SA per service, bound via GKE Workload Identity to that service's Kubernetes SA in its own namespace, so pods never inherit the node SA. Each GCP SA gets only predefined/custom roles scoped to the exact resources it touches (a specific bucket, a specific topic), never primitive roles or project-wide bindings. Enable <code>--workload-pool</code> and <code>--workload-metadata=GKE_METADATA</code> to conceal the legacy metadata endpoint, and enforce <code>disableServiceAccountKeyCreation</code> so no service ships a key. Continuously prune with IAM Recommender and map impersonation edges with Policy Analyzer. The trade-off is more SAs and bindings to manage, which you absorb with Terraform and naming conventions — the payoff is that any single pod RCE is contained to one narrow identity.<br />
+<em>Why asked / signal:</em> tests holistic least-privilege design plus the GKE-specific metadata control.</p>
+<p><strong>7. When would you use a service-account key, WIF, or an attached SA — and how do you decide?</strong><br />
+Decision tree by <em>where the workload runs</em>: inside GCP → attached SA + metadata (keyless, automatic); outside GCP (GitHub Actions, on-prem, another cloud) → Workload Identity Federation, which exchanges the external OIDC/SAML/AWS identity for a short-lived GCP token with no exported key; a JSON key only as a genuinely last resort for a legacy system that can't do OIDC, and even then time-boxed and alarmed. The deciding factor is: can the workload present a verifiable external identity? If yes, federate; a static key is never the right long-term answer. Trade-off: WIF requires careful attribute-condition design, which is where the security actually lives.<br />
+<em>Why asked / signal:</em> wants a crisp keyless-first framework rather than reflexive key usage.</p>
+<p><strong>8. <code>serviceAccountTokenCreator</code> was granted at project scope. What's the risk and how do you fix it?</strong><br />
+At project scope the role applies to <em>every</em> SA in the project, so any member of that binding — or any workload running as one of those SAs — can mint a token for the project's most privileged SA and escalate. The fix is to remove the project-level binding and re-grant <code>serviceAccountTokenCreator</code> only on the specific SA that legitimately needs to be impersonated, pinned with an IAM Condition on <code>resource.name</code>, and ideally limited to a change window. Then alert on any future <code>SetIamPolicy</code> that adds this role at folder/project/org scope. Trade-off: many resource-scoped bindings instead of one broad one — but that verbosity is the least-privilege you want.<br />
+<em>Why asked / signal:</em> tests understanding that impersonation-role scope is a silent escalation surface.</p>
+<p><strong>9. How do you prevent SSRF from turning into cloud compromise on GCP?</strong><br />
+Two layers. First, reduce what a stolen token is worth: least-privilege attached SAs so the metadata token reaches almost nothing, and per-workload identity via GKE Workload Identity so a pod can't get the broad node SA. Second, make the token harder to fetch: <code>GKE_METADATA</code> conceals the legacy endpoint, <code>disable-legacy-endpoints=true</code> on GCE blocks the v0.1/v1beta1 paths, and network policy denies pod egress to <code>169.254.169.254</code>. Fix the SSRF itself (allow-list outbound, block link-local ranges). This is the exact chain that produced Capital One, so defense-in-depth across identity and metadata is the answer, not any single control.<br />
+<em>Why asked / signal:</em> connects an app-layer bug to cloud identity blast radius — a senior cross-domain signal.</p>
+<p><strong>10. You must let GitHub Actions deploy to GCP with no static secrets. How?</strong><br />
+Configure Workload Identity Federation: create a workload identity pool and an OIDC provider trusting <code>https://token.actions.githubusercontent.com</code>, with an attribute mapping that pins <code>assertion.repository</code>, <code>assertion.ref</code>, and audience. Grant the pool's principal set <code>roles/iam.workloadIdentityUser</code> on a purpose-built deployer SA, and constrain with an attribute condition so only <code>acme/deploy</code> on <code>refs/heads/main</code> can federate. The Action requests an OIDC token, exchanges it at Google STS for a short-lived token, and impersonates the deployer SA — no key ever exists. Trade-off: the entire security rests on the attribute condition; a loose mapping (unconstrained <code>actor</code>/<code>repository</code>) lets any repo assume the identity, so review it like an admin grant.<br />
+<em>Why asked / signal:</em> tests real keyless-CI design and the WIF failure mode.</p>
+<h3 id="tier-3-expert-deep-dive">Tier 3 — Expert / deep-dive</h3>
+<p><strong>11. Explain the difference between <code>getAccessToken</code>, <code>signJwt</code>, and <code>signBlob</code>, and why all three are escalation-equivalent.</strong><br />
+<code>getAccessToken</code> has the IAM Credentials API mint a live OAuth2 access token for the target SA, immediately usable against Google APIs within the granted scopes. <code>signJwt</code> has the SA sign a JWT payload you supply — usable to obtain OIDC/ID tokens for the SA or to authenticate to any system that trusts the SA's signing key, effectively forging the SA's identity. <code>signBlob</code> signs arbitrary bytes with the SA's key, which can be composed into signed URLs or custom assertions. All three let the caller <em>act with the SA's key/identity</em>, so holding any of them on a privileged SA is equivalent to holding that SA's entire role set — which is why they must be granted at resource scope, to almost no one, and audited as admin-tier permissions.<br />
+<em>Why asked / signal:</em> separates candidates who memorized <code>actAs</code> from those who understand the full signing/impersonation surface.</p>
+<p><strong>12. Walk through a full lateral-movement chain from a compromised low-privilege VM to project owner, and the control that breaks each hop.</strong><br />
+(1) RCE on a VM → read the attached SA token from metadata [break: least-privilege SA + metadata concealment]. (2) Enumerate IAM to find the SA holds <code>serviceAccountTokenCreator</code> on a higher SA → mint a token for it [break: resource-scoped impersonation + Condition, alert on GenerateAccessToken]. (3) The higher SA holds <code>resourcemanager.projects.setIamPolicy</code> → grant self <code>roles/owner</code> [break: no setIamPolicy on workload SAs; deny primitive roles; alert on SetIamPolicy adding owner]. Alternatively, at hop 2 use <code>actAs</code> to deploy a Cloud Function running as an admin SA [break: actAs Condition + review deploy permissions]. Each hop is an IAM edge; the defensive program is to map those edges with Policy Analyzer and cut the token-creator/actAs/setIamPolicy edges that connect low-trust workloads to high-privilege identities.<br />
+<em>Why asked / signal:</em> elite signal — the candidate reasons about the IAM graph and control placement per hop.</p>
+<p><strong>13. Which permissions do you treat as "escalation-equivalent" and audit like admin, beyond the obvious impersonation ones?</strong><br />
+Beyond <code>actAs</code>, <code>getAccessToken</code>, <code>signJwt</code>/<code>signBlob</code>: <code>resourcemanager.projects/folders/organizations.setIamPolicy</code> (grant yourself anything), <code>iam.roles.update</code> (add permissions to a custom role you hold), <code>iam.serviceAccounts.getOpenIdToken</code>, <code>iam.serviceAccountKeys.create</code> (mint a durable key for an SA you can reach — T1098.001), and deploy permissions that combine with actAs (<code>cloudfunctions.functions.create</code>, <code>run.services.create</code>, <code>deploymentmanager.deployments.create</code>, <code>compute.instances.create</code> with <code>--service-account</code>). Rhino Security Labs catalogued roughly three dozen such permissions. Defensively I inventory who holds any of them, treat them as break-glass, and alert on their use.<br />
+<em>Why asked / signal:</em> tests breadth of the GCP privilege-escalation permission set, not just the headline permissions.</p>
+<p><strong>14. Data Access audit logs are off by default. What are you blind to, and what exactly do you enable?</strong><br />
+Admin Activity logs (always on) capture mutations like key creation and SetIamPolicy, but the <em>use</em> of impersonation — <code>GenerateAccessToken</code>, <code>SignJwt</code>, <code>SignBlob</code> on <code>iamcredentials.googleapis.com</code> — is a Data Access event and is off by default, so runtime impersonation is invisible to your SIEM until you enable it. You enable <code>DATA_READ</code>/<code>ADMIN_READ</code> audit configs for <code>iamcredentials.googleapis.com</code> and <code>iam.googleapis.com</code> (org-wide via the IAM policy <code>auditConfigs</code>), route logs to a BigQuery/Chronicle sink, and build detections on unexpected <code>principalEmail</code>/<code>callerIp</code> for token minting. Without this, an attacker impersonating across SAs leaves no trace. Trade-off: Data Access logs can be high-volume, so scope to IAM/credentials services rather than enabling globally.<br />
+<em>Why asked / signal:</em> a real detection-engineering gap that trips up many teams — knowing it is a strong senior signal.</p>
+<p><strong>15. Critique the security of Workload Identity Federation attribute mappings — where does it fail?</strong><br />
+WIF's strength is that it pins trust to a verifiable external identity, but that guarantee is only as good as the attribute <em>condition</em>. Common failures: mapping only <code>google.subject</code> without constraining <code>attribute.repository</code>/<code>attribute.ref</code>, which lets <em>any</em> repo (or any actor) in the trusted org federate as the SA; accepting a broad audience; or granting <code>workloadIdentityUser</code> to the whole pool's principal set (<code>principalSet://.../*</code>) instead of a specific subject. An attacker who controls any workflow in a permissively mapped org can then impersonate the deployer SA. The hardening is a tight <code>attribute_condition</code> (<code>assertion.repository == 'acme/deploy' &amp;&amp; assertion.ref == 'refs/heads/main'</code>), least-privilege on the impersonated SA, short token TTLs, and audit-logging the STS exchanges. WIF removes the key liability but relocates the trust decision into the mapping — review it as carefully as an IAM binding.<br />
+<em>Why asked / signal:</em> expert-level — tests that the candidate knows keyless doesn't mean risk-free; the trust just moves.</p>
+<hr />
+<h2 id="8-provider-ecosystem-mapping">8. Provider / Ecosystem Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>GCP</th>
+<th>AWS</th>
+<th>Azure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Machine identity</td>
+<td>Service account</td>
+<td>IAM role (+ IAM user for static)</td>
+<td>Managed Identity (system/user-assigned) / Service Principal</td>
+</tr>
+<tr>
+<td>Attached to compute (keyless)</td>
+<td>Attached SA + metadata server</td>
+<td>Instance profile / task role + IMDS</td>
+<td>System-assigned managed identity + IMDS (<code>169.254.169.254</code>)</td>
+</tr>
+<tr>
+<td>Long-lived exported credential</td>
+<td>User-managed JSON key</td>
+<td>IAM user access key (id + secret)</td>
+<td>Service principal client secret / certificate</td>
+</tr>
+<tr>
+<td>Short-lived token source</td>
+<td>Metadata server / IAM Credentials API</td>
+<td>STS (<code>AssumeRole</code>) / IMDSv2</td>
+<td>Azure AD token endpoint / IMDS</td>
+</tr>
+<tr>
+<td>Impersonation / assume</td>
+<td><code>getAccessToken</code>, <code>actAs</code>, <code>signJwt</code></td>
+<td><code>sts:AssumeRole</code> (+ <code>iam:PassRole</code> for deploy-as)</td>
+<td>Managed identity assignment; PIM for elevation</td>
+</tr>
+<tr>
+<td>"Deploy as this identity" gate</td>
+<td><code>iam.serviceAccounts.actAs</code></td>
+<td><code>iam:PassRole</code></td>
+<td>Role assignment on the resource's identity</td>
+</tr>
+<tr>
+<td>Federated external identity (no key)</td>
+<td>Workload Identity Federation</td>
+<td>IAM Roles Anywhere / OIDC federation (e.g. GitHub OIDC → AssumeRoleWithWebIdentity)</td>
+<td>Federated credentials on app registration (OIDC)</td>
+</tr>
+<tr>
+<td>Metadata endpoint</td>
+<td><code>metadata.google.internal</code> (169.254.169.254)</td>
+<td>IMDSv1/IMDSv2 (169.254.169.254)</td>
+<td>IMDS (169.254.169.254)</td>
+</tr>
+<tr>
+<td>Metadata hardening</td>
+<td>GKE Workload Identity, <code>disable-legacy-endpoints</code></td>
+<td>IMDSv2 (session token, hop limit)</td>
+<td>No direct equivalent; use NSG + app hardening</td>
+</tr>
+<tr>
+<td>Kill exported keys (org control)</td>
+<td><code>disableServiceAccountKeyCreation</code></td>
+<td>SCP denying <code>iam:CreateAccessKey</code></td>
+<td>Azure Policy denying secret-based SP creds</td>
+</tr>
+<tr>
+<td>Default over-privileged identity</td>
+<td>Default compute SA = Editor (legacy)</td>
+<td>Overly broad default execution roles</td>
+<td>Default contributor assignments</td>
+</tr>
+<tr>
+<td>Least-privilege recommender</td>
+<td>IAM Recommender</td>
+<td>IAM Access Analyzer (unused access)</td>
+<td>Entra ID access reviews / PIM insights</td>
+</tr>
+<tr>
+<td>Access analysis / who-can-access</td>
+<td>Policy Analyzer</td>
+<td>IAM Access Analyzer</td>
+<td>Entra ID / Azure Resource Graph</td>
+</tr>
+<tr>
+<td>Audit log of credential use</td>
+<td>Cloud Audit Logs (Data Access: iamcredentials)</td>
+<td>CloudTrail (<code>AssumeRole</code>, <code>GetSessionToken</code>)</td>
+<td>Azure AD sign-in / activity logs</td>
+</tr>
+<tr>
+<td>ATT&amp;CK mapping</td>
+<td>T1078.004, T1552.005</td>
+<td>T1078.004, T1552.005</td>
+<td>T1078.004, T1552.005</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-key-takeaways">9. Key Takeaways</h2>
+<ul>
+<li>A service account is both an <strong>identity</strong> (grantee of roles) and a <strong>resource</strong> (has its own IAM policy) — impersonation lives in the second policy, and auditing only the first misses the escalation surface.</li>
+<li><strong>Blast radius = granted roles ∪ transitively-impersonatable SAs.</strong> Over-privileged SAs are the top cause of excessive lateral reach in GCP; every workload RCE inherits its SA.</li>
+<li><strong>Long-lived JSON keys are the worst credential class</strong> — non-expiring, globally valid, silently harvested. Prefer keyless everywhere and enforce <code>disableServiceAccountKeyCreation</code> + <code>disableServiceAccountKeyUpload</code>.</li>
+<li><strong>Keyless decision:</strong> attached SA + metadata for workloads inside GCP; <strong>Workload Identity Federation</strong> for workloads outside GCP; static keys only as a time-boxed, alarmed last resort.</li>
+<li>The three impersonation permissions (<code>getAccessToken</code>, <code>signJwt</code>/<code>signBlob</code>, <code>actAs</code>) are <strong>"become this SA."</strong> Grant them on the individual SA resource with IAM Conditions, never at project scope.</li>
+<li>The <strong>default compute SA with Editor</strong> is a classic footgun; enforce <code>automaticIamGrantsForDefaultServiceAccounts</code>, strip primitive roles, and use <code>--no-service-account</code>/<code>--no-scopes</code>.</li>
+<li>On GKE, <strong>Workload Identity</strong> (<code>--workload-pool</code> + <code>GKE_METADATA</code>) stops pods inheriting the node SA and breaks the SSRF→metadata→token chain that produced Capital One.</li>
+<li><strong>Data Access audit logs are off by default</strong> — enable them for <code>iamcredentials.googleapis.com</code>/<code>iam.googleapis.com</code> or you are blind to impersonation (<code>GenerateAccessToken</code>/<code>SignJwt</code>).</li>
+<li>Detect on <strong>key creation, unexpected token minting, and new impersonation/escalation grants</strong> (T1078.004, T1098.001, T1550.001); map impersonation edges continuously with Policy Analyzer and prune with IAM Recommender.</li>
+<li>WIF removes the key liability but <strong>relocates trust into the attribute mapping</strong> — a loose condition re-opens the door, so review mappings as carefully as an admin IAM binding.</li>
+</ul>
+<hr />
+<h2 id="10-references">10. References</h2>
+<ul>
+<li>Google Cloud — <em>IAM: Service accounts overview</em> — https://cloud.google.com/iam/docs/service-account-overview</li>
+<li>Google Cloud — <em>Best practices for managing service account keys</em> — https://cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys</li>
+<li>Google Cloud — <em>Create short-lived credentials / impersonation</em> — https://cloud.google.com/iam/docs/create-short-lived-credentials-direct</li>
+<li>Google Cloud — <em>Organization policy constraints</em> (<code>iam.disableServiceAccountKeyCreation</code>, <code>iam.disableServiceAccountKeyUpload</code>, <code>iam.automaticIamGrantsForDefaultServiceAccounts</code>) — https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints</li>
+<li>Google Cloud — <em>Workload Identity Federation</em> — https://cloud.google.com/iam/docs/workload-identity-federation</li>
+<li>Google Cloud — <em>GKE: Use Workload Identity</em> — https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity</li>
+<li>Google Cloud — <em>IAM Conditions overview</em> — https://cloud.google.com/iam/docs/conditions-overview</li>
+<li>Google Cloud — <em>Cloud Audit Logs: configure Data Access logs</em> — https://cloud.google.com/logging/docs/audit/configure-data-access</li>
+<li>Google Cloud — <em>IAM Recommender / Policy Analyzer</em> — https://cloud.google.com/policy-intelligence/docs</li>
+<li>Rhino Security Labs — <em>Privilege Escalation in Google Cloud Platform</em> — https://rhinosecuritylabs.com/gcp/privilege-escalation-google-cloud-platform-part-1/</li>
+<li>MITRE ATT&amp;CK — T1078.004 Valid Accounts: Cloud Accounts — https://attack.mitre.org/techniques/T1078/004/</li>
+<li>MITRE ATT&amp;CK — T1552.005 Unsecured Credentials: Cloud Instance Metadata API — https://attack.mitre.org/techniques/T1552/005/</li>
+<li>MITRE ATT&amp;CK — T1098.001 Account Manipulation: Additional Cloud Credentials — https://attack.mitre.org/techniques/T1098/001/</li>
+<li>US DOJ / court filings — <em>Capital One / Paige Thompson (2019)</em> SSRF-to-metadata case background</li>
+<li>CIS Google Cloud Platform Foundation Benchmark — service account and IAM recommendations — https://www.cisecurity.org/benchmark/google_cloud_computing_platform</li>
+<li>Related repo notes: <a href="../../../../infra/Lateral-Movement/Cloud-Service-Accounts/README.md"><code>infra/Lateral-Movement/Cloud-Service-Accounts</code></a>, <a href="../Workload-Identity-Federation/README.md"><code>Workload-Identity-Federation</code></a></li>
+</ul>
+
+  <!-- ── Image zoom overlay ───────────────────────────── -->
+  <div id="img-zoom-overlay">
+    <div id="img-zoom-wrap">
+      <img id="img-zoom-el" src="" alt="">
+    </div>
+    <div id="img-zoom-controls">
+      <button id="zoom-out-btn"  title="Zoom out (scroll down / minus)">&#8722;</button>
+      <span   id="img-zoom-level">100%</span>
+      <button id="zoom-in-btn"   title="Zoom in (scroll up / plus)">&#43;</button>
+      <button id="zoom-reset-btn" title="Reset (key: 0)">&#8635;</button>
+    </div>
+    <button id="img-zoom-close" title="Close (Esc)">&#10005;</button>
+    <span   id="img-zoom-hint">Scroll to zoom &nbsp;·&nbsp; Drag to pan &nbsp;·&nbsp; Esc to close</span>
+  </div>
+
+  <script>
+  (function () {
+    var overlay   = document.getElementById('img-zoom-overlay');
+    var wrap      = document.getElementById('img-zoom-wrap');
+    var zoomEl    = document.getElementById('img-zoom-el');
+    var levelEl   = document.getElementById('img-zoom-level');
+    var closeBtn  = document.getElementById('img-zoom-close');
+    var btnIn     = document.getElementById('zoom-in-btn');
+    var btnOut    = document.getElementById('zoom-out-btn');
+    var btnReset  = document.getElementById('zoom-reset-btn');
+
+    var scale = 1, tx = 0, ty = 0;
+    var MIN = 0.15, MAX = 12, STEP = 0.2;
+
+    function applyTransform() {
+      zoomEl.style.transform =
+        'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      levelEl.textContent = Math.round(scale * 100) + '%';
+    }
+
+    function openOverlay(src, alt) {
+      zoomEl.src = src;
+      zoomEl.alt = alt || '';
+      scale = 1; tx = 0; ty = 0;
+      applyTransform();
+      overlay.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+      zoomEl.src = '';
+    }
+
+    // Wire click on every page image.
+    // Uses closest('a') so anchor wrappers at ANY ancestor depth are caught.
+    // Standalone images (no ancestor <a>) get the listener on the <img> itself.
+    document.querySelectorAll('img:not(#img-zoom-el)').forEach(function (img) {
+      var anchor = img.closest('a');
+      if (anchor) {
+        anchor.style.cursor = 'zoom-in';
+        anchor.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      } else {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openOverlay(img.src, img.alt);
+        });
+      }
+    });
+
+    closeBtn.addEventListener('click', closeOverlay);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target === wrap) closeOverlay();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('active')) return;
+      if (e.key === 'Escape') { closeOverlay(); return; }
+      if (e.key === '+' || e.key === '=') { scale = Math.min(MAX, scale + STEP); applyTransform(); }
+      if (e.key === '-')                  { scale = Math.max(MIN, scale - STEP); applyTransform(); }
+      if (e.key === '0')                  { scale = 1; tx = 0; ty = 0; applyTransform(); }
+    });
+
+    btnIn.addEventListener('click',    function () { scale = Math.min(MAX, scale + STEP); applyTransform(); });
+    btnOut.addEventListener('click',   function () { scale = Math.max(MIN, scale - STEP); applyTransform(); });
+    btnReset.addEventListener('click', function () { scale = 1; tx = 0; ty = 0; applyTransform(); });
+
+    // Scroll-wheel zoom (zoom towards cursor)
+    wrap.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect  = wrap.getBoundingClientRect();
+      var cx    = e.clientX - rect.left  - rect.width  / 2;
+      var cy    = e.clientY - rect.top   - rect.height / 2;
+      var delta = e.deltaY < 0 ? STEP : -STEP;
+      var newScale = Math.min(MAX, Math.max(MIN, scale + delta));
+      var ratio    = newScale / scale;
+      tx = cx + ratio * (tx - cx);
+      ty = cy + ratio * (ty - cy);
+      scale = newScale;
+      applyTransform();
+    }, { passive: false });
+
+    // Mouse drag to pan
+    var dragging = false, dsx = 0, dsy = 0, stx = 0, sty = 0;
+    wrap.addEventListener('mousedown', function (e) {
+      dragging = true; wrap.classList.add('dragging');
+      dsx = e.clientX; dsy = e.clientY;
+      stx = tx;        sty = ty;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      tx = stx + (e.clientX - dsx);
+      ty = sty + (e.clientY - dsy);
+      applyTransform();
+    });
+    document.addEventListener('mouseup', function () {
+      if (dragging) { dragging = false; wrap.classList.remove('dragging'); }
+    });
+
+    // Touch: pinch-to-zoom + single-finger pan
+    var lastDist = 0, pinchStartScale = 1;
+    wrap.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastDist = Math.hypot(dx, dy);
+        pinchStartScale = scale;
+      } else if (e.touches.length === 1) {
+        dragging = true;
+        dsx = e.touches[0].clientX; dsy = e.touches[0].clientY;
+        stx = tx; sty = ty;
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        var dx   = e.touches[0].clientX - e.touches[1].clientX;
+        var dy   = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.hypot(dx, dy);
+        scale = Math.min(MAX, Math.max(MIN, pinchStartScale * (dist / lastDist)));
+        applyTransform();
+      } else if (e.touches.length === 1 && dragging) {
+        tx = stx + (e.touches[0].clientX - dsx);
+        ty = sty + (e.touches[0].clientY - dsy);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', function () { dragging = false; });
+  })();
+  </script>
+</body>
+</html>

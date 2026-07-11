@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q14_apache_error_parser.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q14_apache_error_parser.py</h1>
+  <p class="file-path">Source: code\day5\answers\q14_apache_error_parser.py</p>
+  <p class="line-count">331 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q14. Apache Error Log Parser
+==============================
+Parse Apache error log lines, extract fields, group by error message pattern,
+count frequency.
+
+Apache error log format:
+  [Mon Jan 15 10:00:00.123456 2024] [error] [pid 1234] [client 192.168.1.1:54321] File does not exist: /var/www/html/admin
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Parse Apache error logs and group by error pattern.&quot;
+
+--- CANDIDATE FIRST RESPONSE (naive split on &#x27;]&#x27;) ---
+&quot;I&#x27;d split on &#x27;] [&#x27; to get the bracket-enclosed fields.&quot;
+
+Follow-up: &quot;What about the timestamp which has spaces inside the brackets?&quot;
+→ The format is `[Mon Jan 15 10:00:00.123456 2024]` — splitting on &#x27;] [&#x27; can
+  work, but you&#x27;d need to strip the leading/trailing brackets manually.
+  A regex is cleaner and more robust.
+
+Follow-up: &quot;How do you &#x27;group by error message pattern&#x27;? The path varies.&quot;
+→ Strip the variable part (file path, IP, port numbers, etc.) from the
+  message and use the remainder as the &#x27;pattern key&#x27;.
+  E.g., &quot;File does not exist: /var/www/html/admin&quot; and
+        &quot;File does not exist: /var/www/html/login&quot; both map to
+        &quot;File does not exist: &lt;path&gt;&quot;
+
+--- CANDIDATE SECOND RESPONSE (regex parse + message normalization) ---
+Better. Follow-up: &quot;What normalization would you apply?&quot;
+→ Replace: file paths (/...), IP addresses, port numbers, PIDs, hex values
+  with placeholders. This clusters similar errors together.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Full regex parse, message normalization pipeline, defaultdict grouping,
+frequency-sorted report.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+[Mon Jan 15 10:00:00.123456 2024] [error] [pid 1234] [client 192.168.1.1:54321] File does not exist: /var/www/html/admin
+[Mon Jan 15 10:00:01.234567 2024] [error] [pid 1235] [client 10.0.0.5:12345] File does not exist: /var/www/html/login.php
+[Mon Jan 15 10:00:02.345678 2024] [warn]  [pid 1236] [client 192.168.1.2:44444] mod_rewrite: redirect to http://localhost:8080/api
+[Mon Jan 15 10:00:03.456789 2024] [error] [pid 1234] [client 172.16.0.1:59876] PHP Fatal error: Uncaught Exception in /var/www/html/index.php:42
+[Mon Jan 15 10:00:04.567890 2024] [error] [pid 1237] [client 203.0.113.5:22222] File does not exist: /var/www/html/wp-login.php
+[Mon Jan 15 10:00:05.678901 2024] [error] [pid 1238] [client 192.168.1.1:55555] PHP Fatal error: Uncaught Exception in /var/www/html/api.php:99
+[Mon Jan 15 10:00:06.789012 2024] [notice] [pid 1] AH00094: Command line: &#x27;/usr/sbin/apache2&#x27;
+[Mon Jan 15 10:00:07.890123 2024] [error] [pid 1239] [client 10.0.0.9:33333] File does not exist: /var/www/html/.htaccess
+[Mon Jan 15 10:00:08.901234 2024] [error] [pid 1234] [client 192.168.1.3:11111] Permission denied: /var/www/html/secret/config.php
+[Mon Jan 15 10:00:09.012345 2024] [error] [pid 1240] [client 10.0.0.8:44444] Permission denied: /var/www/html/logs/error.log
+THIS IS NOT A VALID APACHE ERROR LOG LINE
+[Mon Jan 15 10:00:11.234567 2024] [error] [pid 1241] [client 198.51.100.5:12312] File does not exist: /var/www/html/admin/config
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Apache error log format (httpd 2.4+)
+APACHE_ERROR_RE = re.compile(
+    r&#x27;^\[(?P&lt;timestamp&gt;[^\]]+)\]&#x27;          # [timestamp]
+    r&#x27;\s+\[(?P&lt;level&gt;\w+)\]&#x27;              # [level]
+    r&#x27;(?:\s+\[pid\s+(?P&lt;pid&gt;\d+)\])?&#x27;    # [pid N] — optional
+    r&#x27;(?:\s+\[client\s+(?P&lt;client&gt;[^\]]+)\])?&#x27; # [client ip:port] — optional
+    r&#x27;\s+(?P&lt;message&gt;.+)$&#x27;               # message (rest of line)
+)
+
+# For extracting client IP and port separately
+CLIENT_RE = re.compile(r&#x27;^(?P&lt;ip&gt;.+?):(?P&lt;port&gt;\d+)$&#x27;)
+
+
+def parse_apache_error_line(raw: str):
+    &quot;&quot;&quot;
+    Returns dict with: timestamp, level, pid, client_ip, client_port, message.
+    Returns None if malformed.
+    &quot;&quot;&quot;
+    raw = raw.strip()
+    if not raw:
+        return None
+    m = APACHE_ERROR_RE.match(raw)
+    if not m:
+        return None
+
+    client_ip   = None
+    client_port = None
+    client_str  = m.group(&quot;client&quot;)
+    if client_str:
+        cm = CLIENT_RE.match(client_str.strip())
+        if cm:
+            client_ip   = cm.group(&quot;ip&quot;)
+            client_port = cm.group(&quot;port&quot;)
+        else:
+            client_ip = client_str.strip()
+
+    return {
+        &quot;timestamp&quot;:   m.group(&quot;timestamp&quot;),
+        &quot;level&quot;:       m.group(&quot;level&quot;).lower(),
+        &quot;pid&quot;:         m.group(&quot;pid&quot;),
+        &quot;client_ip&quot;:   client_ip,
+        &quot;client_port&quot;: client_port,
+        &quot;message&quot;:     m.group(&quot;message&quot;).strip(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MESSAGE NORMALIZER
+# Strip variable parts so similar errors cluster under one pattern.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Order matters: more specific patterns first
+_NORMALIZERS = [
+    # Absolute file paths → &lt;path&gt;
+    (re.compile(r&#x27;/[a-zA-Z0-9_/.\-]+&#x27;),          &quot;&lt;path&gt;&quot;),
+    # Port numbers  :1234  → :&lt;port&gt;
+    (re.compile(r&#x27;:\d{2,5}\b&#x27;),                   &quot;:&lt;port&gt;&quot;),
+    # Line numbers in PHP errors  :42  → :&lt;line&gt;  (already handled by port rule mostly)
+    # Hex values
+    (re.compile(r&#x27;\b0x[0-9a-fA-F]+\b&#x27;),           &quot;&lt;hex&gt;&quot;),
+    # Standalone numbers (pids, error codes) — be conservative
+    (re.compile(r&#x27;\b\d{4,}\b&#x27;),                   &quot;&lt;num&gt;&quot;),
+    # IPv4 addresses
+    (re.compile(r&#x27;\b(?:\d{1,3}\.){3}\d{1,3}\b&#x27;), &quot;&lt;ip&gt;&quot;),
+    # Collapse multiple spaces
+    (re.compile(r&#x27;\s{2,}&#x27;),                        &quot; &quot;),
+]
+
+
+def normalize_message(message: str) -&gt; str:
+    &quot;&quot;&quot;Apply all normalizers to produce a pattern key.&quot;&quot;&quot;
+    for pattern, replacement in _NORMALIZERS:
+        message = pattern.sub(replacement, message)
+    return message.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual dict grouping, manual top-K sort, no defaultdict)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _manual_top_k(count_dict, k):
+    &quot;&quot;&quot;Top-k by value descending using selection.&quot;&quot;&quot;
+    remaining = list(count_dict.items())
+    result = []
+    for _ in range(min(k, len(remaining))):
+        max_idx = 0
+        for i in range(1, len(remaining)):
+            if remaining[i][1] &gt; remaining[max_idx][1]:
+                max_idx = i
+        result.append(remaining[max_idx])
+        remaining[max_idx] = remaining[-1]
+        remaining.pop()
+    return result
+
+
+def analyze_without_builtins(lines):
+    pattern_groups = {}   # normalized_msg → { count, level_counts, clients }
+    level_counts   = {}   # level → count
+    malformed      = 0
+
+    for raw in lines:
+        entry = parse_apache_error_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        level = entry[&quot;level&quot;]
+        level_counts[level] = level_counts.get(level, 0) + 1
+
+        pattern = normalize_message(entry[&quot;message&quot;])
+
+        if pattern not in pattern_groups:
+            pattern_groups[pattern] = {
+                &quot;count&quot;:     0,
+                &quot;levels&quot;:    {},
+                &quot;clients&quot;:   {},
+                &quot;sample&quot;:    entry[&quot;message&quot;],  # keep one real example
+            }
+
+        grp = pattern_groups[pattern]
+        grp[&quot;count&quot;] += 1
+        grp[&quot;levels&quot;][level] = grp[&quot;levels&quot;].get(level, 0) + 1
+        if entry[&quot;client_ip&quot;]:
+            grp[&quot;clients&quot;][entry[&quot;client_ip&quot;]] = True
+
+    top_patterns = _manual_top_k(
+        {p: g[&quot;count&quot;] for p, g in pattern_groups.items()}, k=10
+    )
+
+    return pattern_groups, top_patterns, level_counts, malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_with_builtins(lines):
+    pattern_groups = defaultdict(lambda: {
+        &quot;count&quot;: 0, &quot;levels&quot;: defaultdict(int),
+        &quot;clients&quot;: set(), &quot;sample&quot;: &quot;&quot;
+    })
+    level_counts = defaultdict(int)
+    malformed    = 0
+
+    for raw in lines:
+        entry = parse_apache_error_line(raw)
+        if entry is None:
+            malformed += 1
+            continue
+
+        level = entry[&quot;level&quot;]
+        level_counts[level] += 1
+
+        pattern = normalize_message(entry[&quot;message&quot;])
+        grp = pattern_groups[pattern]
+        grp[&quot;count&quot;] += 1
+        grp[&quot;levels&quot;][level] += 1
+        if entry[&quot;client_ip&quot;]:
+            grp[&quot;clients&quot;].add(entry[&quot;client_ip&quot;])
+        if not grp[&quot;sample&quot;]:
+            grp[&quot;sample&quot;] = entry[&quot;message&quot;]
+
+    top_patterns = sorted(
+        ((p, g[&quot;count&quot;]) for p, g in pattern_groups.items()),
+        key=lambda x: x[1],
+        reverse=True
+    )[:10]
+
+    return dict(pattern_groups), top_patterns, dict(level_counts), malformed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(pattern_groups, top_patterns, level_counts, malformed, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;  APACHE ERROR LOG REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*70}&quot;)
+    print(f&quot;Malformed lines skipped: {malformed}&quot;)
+
+    print(&quot;\nEvent Counts by Log Level:&quot;)
+    for level, count in sorted(level_counts.items()):
+        print(f&quot;  {level:&lt;10} {count}&quot;)
+
+    print(f&quot;\nTop Error Patterns (by frequency):&quot;)
+    for pattern, count in top_patterns:
+        grp = pattern_groups[pattern]
+        clients_val = grp[&quot;clients&quot;]
+        client_count = len(clients_val)
+        levels_str = &quot;, &quot;.join(
+            f&quot;{lv}={cnt}&quot; for lv, cnt in sorted(grp[&quot;levels&quot;].items())
+        )
+        print(f&quot;\n  Count={count}  UniqueClients={client_count}  Levels=[{levels_str}]&quot;)
+        print(f&quot;  Pattern : {pattern}&quot;)
+        sample = grp[&quot;sample&quot;]
+        if len(sample) &gt; 80:
+            sample = sample[:77] + &quot;...&quot;
+        print(f&quot;  Example : {sample}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) &gt; 1:
+        try:
+            with open(sys.argv[1], &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fh:
+                lines = fh.readlines()
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+        lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    pg_manual,  tp_manual,  lv_manual,  mal_manual  = analyze_without_builtins(lines)
+    pg_builtin, tp_builtin, lv_builtin, mal_builtin = analyze_with_builtins(lines)
+
+    print_report(pg_manual,  tp_manual,  lv_manual,  mal_manual,  label=&quot;(Manual)&quot;)
+    print_report(pg_builtin, tp_builtin, lv_builtin, mal_builtin, label=&quot;(Builtins)&quot;)
+
+    # Sanity check
+    assert mal_manual == mal_builtin, f&quot;Malformed mismatch: {mal_manual} vs {mal_builtin}&quot;
+    assert len(pg_manual) == len(pg_builtin), \
+        f&quot;Pattern group count mismatch: {len(pg_manual)} vs {len(pg_builtin)}&quot;
+    print(&quot;[OK] Both approaches agree on pattern count.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Parsing       : O(L)
+# Normalization : O(|message| * N_normalizers) per line — N_normalizers is small
+# Grouping      : O(L)
+# Top-K sort    : O(P log P) where P = unique patterns
+# Overall       : O(L + P log P)
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;How do you choose what to strip in message normalization?&quot;
+#     → Start conservative (strip only file paths and IPs). Measure cluster
+#       quality: too aggressive → everything in one cluster; too lax → no
+#       clustering. Iterate based on feedback from analysts.
+# - &quot;What if Apache error messages are localized (non-English)?&quot;
+#     → Language-agnostic normalization: strip numbers, paths, IPs universally.
+#       The patterns will be in the native language, which is fine.
+# - &quot;How would you use this output to create alerts?&quot;
+#     → Set a rate threshold per pattern (e.g., &gt; 100 occurrences/hour).
+#       Alert if a new pattern appears that was never seen before.
+#       Use the pattern key as a stable identifier across log rotations.
+# - &quot;This handles error logs. What about access logs for Apache?&quot;
+#     → Different format (Combined Log Format). Use Q1&#x27;s parser for access logs;
+#       this parser for error logs. Both complement each other.
+# =============================================================================
+</code></pre>
+</body>
+</html>

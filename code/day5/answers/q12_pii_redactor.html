@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>q12_pii_redactor.py</title>
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #24292f;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.4em;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 0.3em;
+      margin-bottom: 0.6em;
+    }
+    .file-path {
+      font-size: 0.8em;
+      color: #57606a;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+    .line-count {
+      font-size: 0.78em;
+      color: #8c959f;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      counter-reset: line;
+    }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Courier New", monospace;
+      font-size: 0.88em;
+    }
+  </style>
+</head>
+<body>
+  <h1>q12_pii_redactor.py</h1>
+  <p class="file-path">Source: code\day5\answers\q12_pii_redactor.py</p>
+  <p class="line-count">303 lines</p>
+  <pre><code class="language-python">&quot;&quot;&quot;
+Q12. Extract and Redact PII from Logs
+=======================================
+Single-pass, line-by-line script that:
+- Extracts all email addresses, IPv4 addresses, US phone numbers.
+- Redacts them in output: [EMAIL], [IP], [PHONE].
+- Reports counts by type.
+- Must NOT load the full file into memory.
+
+=============================================================================
+SOLUTION PROGRESSION
+=============================================================================
+
+PROMPT: &quot;Redact PII from a log file. Handle emails, IPs, phone numbers.&quot;
+
+--- CANDIDATE FIRST RESPONSE (three separate re.sub passes per line) ---
+&quot;I&#x27;ll do three replace calls: one for email, one for IP, one for phone.&quot;
+
+Follow-up: &quot;Could that cause problems?&quot;
+→ Yes: if an email is redacted to [EMAIL], the substring &#x27;[EMAIL]&#x27; can&#x27;t be
+  accidentally matched by the IP regex. BUT order matters — if you run
+  the IP regex on the already-redacted text, the IP inside the email&#x27;s
+  domain part might have already been replaced (or partially matched).
+  Better: do a SINGLE PASS where you find the first match at each position
+  and replace it, using alternation in one combined pattern.
+
+--- CANDIDATE SECOND RESPONSE (combined regex with alternation) ---
+&quot;Use one regex with groups: (email)|(ip)|(phone). Replace based on which
+group matched.&quot;
+
+Follow-up: &quot;Why single pass vs multiple passes?&quot;
+→ Performance: one compiled regex scan vs three separate scans = ~3x faster.
+   Also correctness: a single pass guarantees no double-processing of text.
+
+Follow-up: &quot;What about phone number formats? +1 (555) 123-4567 vs 555-123-4567?&quot;
+→ Need a flexible phone pattern. Demonstrate a realistic but not exhaustive one.
+
+--- FINAL GOOGLE-LEVEL RESPONSE ---
+Combined regex alternation, re.sub with a function, line-by-line streaming,
+count by type, redacted output written to a new file.
+
+=============================================================================
+&quot;&quot;&quot;
+
+import re
+import sys
+from collections import defaultdict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAMPLE_LOG = &quot;&quot;&quot;\
+2024-01-15T10:00:00Z user=alice@example.com logged in from 192.168.1.100
+2024-01-15T10:01:00Z Contact support at help@company.org or 555-123-4567
+2024-01-15T10:02:00Z Failed login for bob.smith@mail.co.uk from 10.0.0.55
+2024-01-15T10:03:00Z Call us at +1 (800) 555-0199 or 1-888-999-0000
+2024-01-15T10:04:00Z Firewall blocked 203.0.113.99 accessing 192.168.1.1
+2024-01-15T10:05:00Z User carol@test.io reset password, IP was 172.16.0.5
+2024-01-15T10:06:00Z Alert: multiple logins from 10.0.0.1 and 10.0.0.2
+2024-01-15T10:07:00Z Phone: 415.867.5309 email: no-reply@domain.net
+2024-01-15T10:08:00Z No PII on this line, just a normal log entry
+&quot;&quot;&quot;
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGEX PATTERNS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Email: standard RFC-5321 simplified (no quoted locals)
+_EMAIL_PAT = (
+    r&#x27;[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}&#x27;
+)
+
+# IPv4: strict octets 0-255
+_IPV4_PAT = (
+    r&#x27;\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}&#x27;
+    r&#x27;(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b&#x27;
+)
+
+# US Phone: handles formats like:
+#   555-123-4567  (800) 555-0100  +1 555 123 4567  1-888-999-0000  415.867.5309
+_PHONE_PAT = (
+    r&#x27;(?:\+1[\s\-\.]?)?&#x27;          # optional +1 country code
+    r&#x27;(?:\(?\d{3}\)?[\s\-\.])&#x27;    # area code (with optional parens)
+    r&#x27;\d{3}[\s\-\.]&#x27;              # prefix
+    r&#x27;\d{4}&#x27;                      # line number
+)
+
+# Combined pattern — ORDER MATTERS: match email before IP to avoid matching
+# IP octets inside domain names (e.g., &#x27;192.168&#x27; inside an email host)
+PII_PATTERN = re.compile(
+    f&#x27;(?P&lt;email&gt;{_EMAIL_PAT})&#x27;
+    f&#x27;|(?P&lt;ip&gt;{_IPV4_PAT})&#x27;
+    f&#x27;|(?P&lt;phone&gt;{_PHONE_PAT})&#x27;,
+    re.IGNORECASE
+)
+
+# Replacement labels
+REDACTION_MAP = {
+    &quot;email&quot;: &quot;[EMAIL]&quot;,
+    &quot;ip&quot;:    &quot;[IP]&quot;,
+    &quot;phone&quot;: &quot;[PHONE]&quot;,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 1 — WITHOUT BUILT-IN HIGH-LEVEL HELPERS
+# (manual regex substitution using re.finditer + string building, no re.sub)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def redact_line_without_builtins(line: str, counts: dict) -&gt; str:
+    &quot;&quot;&quot;
+    Redact PII in a single line WITHOUT using re.sub.
+    Uses re.finditer + manual string building.
+    Returns redacted line.
+    Updates counts in-place.
+    &quot;&quot;&quot;
+    result     = []
+    last_end   = 0
+
+    for match in PII_PATTERN.finditer(line):
+        # Append text before this match unchanged
+        result.append(line[last_end:match.start()])
+
+        # Determine which group matched
+        pii_type = None
+        for group_name in REDACTION_MAP:
+            if match.group(group_name) is not None:
+                pii_type = group_name
+                break
+
+        if pii_type:
+            result.append(REDACTION_MAP[pii_type])
+            counts[pii_type] = counts.get(pii_type, 0) + 1
+        else:
+            # Should not happen, but keep the match unchanged as a fallback
+            result.append(match.group(0))
+
+        last_end = match.end()
+
+    # Append any remaining text after the last match
+    result.append(line[last_end:])
+
+    # Manually join list of strings (no &quot;&quot;.join — wait, that IS a builtin)
+    # To be truly manual, concatenate with a loop:
+    output = &quot;&quot;
+    for part in result:
+        output = output + part
+
+    return output
+
+
+def process_without_builtins(lines):
+    counts = {}
+    redacted_lines = []
+    for raw in lines:
+        redacted = redact_line_without_builtins(raw.rstrip(&quot;\n&quot;), counts)
+        redacted_lines.append(redacted)
+    return redacted_lines, counts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPROACH 2 — WITH BUILT-IN HELPERS (re.sub with callable, defaultdict, join)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_replacer(counts):
+    &quot;&quot;&quot;
+    Returns a replacer function for re.sub.
+    Captures `counts` via closure.
+    &quot;&quot;&quot;
+    def replacer(match):
+        for group_name, label in REDACTION_MAP.items():
+            if match.group(group_name) is not None:
+                counts[group_name] += 1
+                return label
+        return match.group(0)  # fallback
+    return replacer
+
+
+def process_with_builtins(lines):
+    counts   = defaultdict(int)
+    replacer = make_replacer(counts)
+    redacted = []
+    for raw in lines:
+        line = raw.rstrip(&quot;\n&quot;)
+        redacted.append(PII_PATTERN.sub(replacer, line))
+    return redacted, dict(counts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING VERSION (memory-efficient, for large files)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stream_redact(input_path: str, output_path: str):
+    &quot;&quot;&quot;
+    Process a log file line-by-line WITHOUT loading it into memory.
+    Writes redacted output to a new file simultaneously.
+    Returns count dict.
+    &quot;&quot;&quot;
+    counts   = defaultdict(int)
+    replacer = make_replacer(counts)
+
+    try:
+        with open(input_path,  &quot;r&quot;, encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as fin, \
+             open(output_path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fout:
+            for line in fin:                                # one line at a time
+                redacted = PII_PATTERN.sub(replacer, line.rstrip(&quot;\n&quot;))
+                fout.write(redacted + &quot;\n&quot;)
+    except FileNotFoundError:
+        print(f&quot;[ERROR] File not found: {input_path}&quot;, file=sys.stderr)
+        return {}
+    except PermissionError as exc:
+        print(f&quot;[ERROR] Permission denied: {exc}&quot;, file=sys.stderr)
+        return {}
+    except OSError as exc:
+        print(f&quot;[ERROR] {exc}&quot;, file=sys.stderr)
+        return {}
+
+    return dict(counts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(redacted_lines, counts, label=&quot;&quot;):
+    print(f&quot;\n{&#x27;=&#x27;*65}&quot;)
+    print(f&quot;  PII REDACTION REPORT  {label}&quot;)
+    print(f&quot;{&#x27;=&#x27;*65}&quot;)
+    print(&quot;PII Counts Extracted:&quot;)
+    for pii_type in [&quot;email&quot;, &quot;ip&quot;, &quot;phone&quot;]:
+        print(f&quot;  {pii_type.upper():&lt;10} {counts.get(pii_type, 0)}&quot;)
+
+    print(f&quot;\nRedacted Output ({len(redacted_lines)} lines):&quot;)
+    for line in redacted_lines:
+        print(f&quot;  {line}&quot;)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) == 3:
+        # Streaming mode: python q12_pii_redactor.py input.log output_redacted.log
+        print(f&quot;[INFO] Streaming redaction: {sys.argv[1]} → {sys.argv[2]}&quot;)
+        counts = stream_redact(sys.argv[1], sys.argv[2])
+        if counts:
+            for pii_type, count in sorted(counts.items()):
+                print(f&quot;  {pii_type.upper():&lt;10} {count}&quot;)
+        return
+
+    print(&quot;[INFO] No file provided — using built-in sample data.\n&quot;)
+    lines = SAMPLE_LOG.strip().splitlines(keepends=True)
+
+    redacted_manual,  counts_manual  = process_without_builtins(lines)
+    redacted_builtin, counts_builtin = process_with_builtins(lines)
+
+    print_report(redacted_manual,  counts_manual,  label=&quot;(Manual / re.finditer)&quot;)
+    print_report(redacted_builtin, counts_builtin, label=&quot;(With re.sub callable)&quot;)
+
+    # Sanity check
+    assert redacted_manual == redacted_builtin, \
+        &quot;Redacted output mismatch between approaches!&quot;
+    assert counts_manual == counts_builtin, \
+        f&quot;Count mismatch: {counts_manual} vs {counts_builtin}&quot;
+    print(&quot;[OK] Both approaches produce identical output.\n&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+
+
+# =============================================================================
+# COMPLEXITY
+# =============================================================================
+# Time  : O(L * |line|) — single regex scan per line
+# Space : O(1) per line (streaming mode); O(L) if collecting all output
+#
+# KEY DESIGN DECISIONS:
+# - Compile the regex ONCE (module level) not per line → big speedup
+# - Use alternation with named groups → single pass, correct ordering
+# - Email matched BEFORE IP → prevents IP extraction from email domains
+#
+# GOOGLE FOLLOW-UP QUESTIONS:
+# - &quot;What about IPv6 addresses?&quot;
+#     → Add an IPv6 named group to the combined pattern.
+#       IPv6 regex is more complex; use a well-tested library pattern.
+# - &quot;What if an email domain looks like an IP? (e.g., user@192.168.1.1)&quot;
+#     → The email pattern is matched first in the alternation, so it will
+#       capture the whole email address before the IP pattern can match.
+# - &quot;What about GDPR compliance — storing the counts itself might be a leak?&quot;
+#     → Counts alone don&#x27;t identify individuals. The redacted file is the
+#       sensitive artifact. Apply access controls to the output file.
+# - &quot;How would you validate that redaction is complete (no PII leaked)?&quot;
+#     → Run the SAME regex on the output file. If any matches remain,
+#       the redaction is incomplete (regression test).
+# - &quot;What if a phone number is split across lines?&quot;
+#     → Multi-line PII is rare in structured logs but possible in free text.
+#       Use a context window: buffer two lines and scan the joined string.
+# =============================================================================
+</code></pre>
+</body>
+</html>

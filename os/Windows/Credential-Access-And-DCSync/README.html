@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI / Agentic AI Security — Note Creation Progress</title>
+  <title>Credential Access & DCSync</title>
 
   <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
   <script type="module">
@@ -289,90 +289,89 @@
   </style>
 </head>
 <body>
-  <p class="file-path">Source: ai_security\_PROGRESS.md</p>
-<h1 id="ai-agentic-ai-security-note-creation-progress">AI / Agentic AI Security — Note Creation Progress</h1>
-<blockquote>
-<p><strong>STATUS: COMPLETE</strong> — 27 topic notes + overview created 2026-07-06 for Senior Security Engineer prep.<br />
-Biggest gap identified vs the existing data-protection note set: no AI/ML/LLM/agentic security coverage. Now filled.</p>
-</blockquote>
-<p>Each checkbox is one leaf note at <code>ai_security/&lt;Section&gt;/&lt;Topic&gt;/README.md</code>.<br />
-Generate/update notes using <code>.github/prompts/ai-security-deep-dive.prompt.md</code> to keep structure consistent.<br />
-Frameworks anchoring every note: <strong>OWASP LLM Top 10</strong>, <strong>MITRE ATLAS</strong>, <strong>Google SAIF</strong>, <strong>NIST AI RMF</strong>.<br />
-All Mermaid blocks validated (first line = diagram type, closed, non-empty).</p>
-<h2 id="priority-tier-for-senior-security-roles">Priority tier (for senior security roles)</h2>
+  <p class="file-path">Source: os\Windows\Credential-Access-And-DCSync\README.md</p>
+<h1 id="credential-access-and-dcsync">Credential Access &amp; DCSync</h1>
+<p><strong>Category:</strong> Windows / Credential Access<br />
+<strong>Key standards / frameworks:</strong> MS-DRSR (DRSUAPI replication), MS-LSAD, MITRE ATT&amp;CK T1003.001 (LSASS Memory), T1003.006 (DCSync), T1555 (Credentials from Password Stores)</p>
+
+<h2 id="overview">Overview</h2>
+<p>Once an attacker has code execution on a Windows host, the next objective is almost always credentials: cached hashes, tickets, and secrets that enable lateral movement and escalation. Windows keeps a rich set of secrets in memory and on disk, from the LSASS process that holds interactive-logon material to DPAPI-protected user data and LSA secrets holding service account passwords. At the domain level, the replication protocol itself can be abused to extract every hash in the directory without ever touching a domain controller's disk.</p>
+<p>Defending credential access is about reducing what is exposed in memory, protecting LSASS, and tightly restricting who can perform directory replication.</p>
+
+<h2 id="how-it-works">How It Works</h2>
+
+<h3>LSASS Memory Extraction</h3>
+<p>The Local Security Authority Subsystem Service (<code>lsass.exe</code>) caches authentication material for logged-on users, including NT hashes, Kerberos tickets, and, if WDigest is enabled, plaintext passwords. <strong>Mimikatz</strong> <code>sekurlsa::logonpasswords</code> reads this memory directly. Attackers also dump the process to disk for offline parsing using <code>comsvcs.dll</code> MiniDump (a living-off-the-land technique via rundll32), <strong>procdump</strong>, or task-manager dumps, then parse the resulting minidump elsewhere to evade in-memory detection.</p>
+
+<h3>Directory Replication Abuse</h3>
+<p><strong>DCSync</strong> abuses the <strong>DRSUAPI</strong> <code>GetNCChanges</code> replication call. Any principal holding the DS-Replication-Get-Changes and Get-Changes-All extended rights can ask a DC to replicate secrets, including the <code>krbtgt</code> hash and every user's NT hash, exactly as a legitimate DC would. No malware runs on the DC. <strong>DCShadow</strong> goes further, temporarily registering a rogue DC to push malicious changes (such as SID history or group membership) into the directory while bypassing normal change auditing.</p>
+
+<h3>On-Disk and Local Secrets</h3>
+<p><strong>DPAPI</strong> protects user secrets like browser passwords and saved credentials with keys derived from the user password (and a domain backup key on DCs). <strong>LSA secrets</strong> in the registry hold service account passwords and machine account secrets. <strong>Cached domain credentials</strong> (MSCache/MSCASHv2, Hashcat mode 2100) let users log on when a DC is unreachable and can be cracked offline. All three are recoverable with SYSTEM access.</p>
+
+<pre class="mermaid">flowchart TD
+    A[Code execution with SYSTEM] --> B[Read LSASS memory]
+    B --> C[NT hashes and Kerberos tickets]
+    A --> D[Read LSA secrets and DPAPI]
+    D --> E[Service and machine account secrets]
+    C --> F[Lateral movement]
+    E --> F
+</pre>
+
+<pre class="mermaid">sequenceDiagram
+    participant A as Attacker with replication rights
+    participant DC as Domain Controller
+    A->>DC: DRSUAPI GetNCChanges request for krbtgt
+    DC->>A: Replicated secret including NT hash
+    A->>A: Use krbtgt hash to forge Golden Ticket
+</pre>
+
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure / Attack</th><th>Root Cause</th><th>Impact</th><th>Likelihood</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>LSASS memory dump</td><td>SYSTEM access and LSASS not protected</td><td>Theft of hashes, tickets, and possibly plaintext</td><td>High</td></tr>
+<tr><td>2</td><td>WDigest plaintext caching</td><td>Legacy WDigest provider enabled</td><td>Cleartext passwords recoverable from memory</td><td>Medium</td></tr>
+<tr><td>3</td><td>DCSync</td><td>Excessive replication rights granted to a principal</td><td>Extraction of every domain hash including krbtgt</td><td>Medium</td></tr>
+<tr><td>4</td><td>DCShadow</td><td>Attacker holds DC-level rights to register a replica</td><td>Stealthy malicious directory changes bypassing audit</td><td>Low</td></tr>
+<tr><td>5</td><td>DPAPI secret theft</td><td>SYSTEM or user context plus domain backup key</td><td>Recovery of saved credentials and secrets</td><td>Medium</td></tr>
+<tr><td>6</td><td>LSA secrets dump</td><td>Registry hive access with SYSTEM</td><td>Service and machine account passwords exposed</td><td>Medium</td></tr>
+<tr><td>7</td><td>Cached credential cracking</td><td>MSCACHEv2 hashes stored for offline logon</td><td>Offline password recovery for cached users</td><td>Medium</td></tr>
+</tbody>
+</table>
+
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure</th><th>Mitigation</th><th>Layer / Where Applied</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>LSASS memory dump</td><td>Enable RunAsPPL LSA protection and Credential Guard</td><td>Endpoint OS hardening</td></tr>
+<tr><td>2</td><td>WDigest plaintext</td><td>Ensure UseLogonCredential is 0, patch legacy systems</td><td>Registry policy</td></tr>
+<tr><td>3</td><td>DCSync</td><td>Audit and remove replication rights, alert on GetNCChanges</td><td>Directory ACLs</td></tr>
+<tr><td>4</td><td>DCShadow</td><td>Restrict Tier 0 rights, monitor for rogue DC registration</td><td>Domain controller governance</td></tr>
+<tr><td>5</td><td>DPAPI theft</td><td>Protect the DPAPI domain backup key, use Credential Guard</td><td>Key management</td></tr>
+<tr><td>6</td><td>LSA secrets</td><td>Limit local admin, use group managed service accounts</td><td>Endpoint and identity</td></tr>
+<tr><td>7</td><td>Cached credentials</td><td>Reduce cached logon count, add users to Protected Users</td><td>Logon policy</td></tr>
+</tbody>
+</table>
+
+<h2 id="detection">Detection &amp; Telemetry</h2>
+<p>DCSync is the highest-value detection: watch Event ID <strong>4662</strong> on domain controllers for access to the replication GUIDs (DS-Replication-Get-Changes <code>1131f6aa</code> and Get-Changes-All <code>1131f6ad</code>) from any account that is not itself a DC. LSASS access can be caught with Sysmon Event ID <strong>10</strong> (ProcessAccess) targeting <code>lsass.exe</code> with suspicious granted-access masks such as <code>0x1010</code> or <code>0x1410</code>, and with EDR handle-access telemetry. Process-creation logging (Event ID <strong>4688</strong> / Sysmon 1) for <code>rundll32</code> invoking <code>comsvcs.dll MiniDump</code> or for <code>procdump</code> against LSASS is a strong signal. DCShadow appears as an unexpected server object being added to the configuration partition.</p>
+
+<h2 id="key-takeaways">Key Takeaways</h2>
 <ul>
-<li><strong>P1</strong> — Prompt injection (direct + indirect), agentic tool-use, RAG threats, excessive agency, guardrails/defenses.</li>
-<li><strong>P2</strong> — Model supply chain, data/model poisoning, model extraction, LLM red teaming, MCP security.</li>
-<li><strong>P3</strong> — Adversarial examples, membership inference, governance/compliance.</li>
+<li>LSASS is the primary in-memory credential store; protect it with RunAsPPL and Credential Guard and monitor process access to it.</li>
+<li>WDigest can expose plaintext passwords in memory; confirm UseLogonCredential is disabled everywhere.</li>
+<li>DCSync abuses legitimate replication (DRSUAPI GetNCChanges) to steal every hash, including krbtgt, without touching a DC's disk.</li>
+<li>Replication rights are Tier 0 privileges; audit them relentlessly and alert on 4662 for the replication GUIDs.</li>
+<li>DPAPI, LSA secrets, and cached credentials are recoverable with SYSTEM access and enable further movement.</li>
+<li>Living-off-the-land dumping via comsvcs.dll MiniDump and procdump evades in-memory scanners, so watch process creation too.</li>
+<li>Protected Users and reduced cached-logon counts limit what secrets are ever exposed on endpoints.</li>
 </ul>
-<h2 id="foundations">Foundations</h2>
-<ul>
-<li>[x] Foundations/Overview  → <code>ai_security/README.md</code></li>
-<li>[x] Foundations/LLM-Fundamentals-For-Security</li>
-<li>[x] Foundations/AI-Threat-Frameworks</li>
-</ul>
-<h2 id="llm-attacks">LLM Attacks</h2>
-<ul>
-<li>[x] LLM-Attacks/Prompt-Injection-Direct</li>
-<li>[x] LLM-Attacks/Prompt-Injection-Indirect   ⭐</li>
-<li>[x] LLM-Attacks/Jailbreaks</li>
-<li>[x] LLM-Attacks/Sensitive-Info-Disclosure</li>
-<li>[x] LLM-Attacks/Insecure-Output-Handling</li>
-<li>[x] LLM-Attacks/Training-Data-Poisoning</li>
-<li>[x] LLM-Attacks/Model-Extraction-And-Theft</li>
-<li>[x] LLM-Attacks/Membership-Inference-And-Inversion</li>
-<li>[x] LLM-Attacks/Adversarial-Examples-Evasion</li>
-</ul>
-<h2 id="agentic-ai">Agentic AI</h2>
-<ul>
-<li>[x] Agentic-AI/Agent-Architecture-Security</li>
-<li>[x] Agentic-AI/Tool-And-Function-Calling-Security   ⭐</li>
-<li>[x] Agentic-AI/Excessive-Agency</li>
-<li>[x] Agentic-AI/MCP-Security</li>
-<li>[x] Agentic-AI/Multi-Agent-Systems-Security</li>
-<li>[x] Agentic-AI/Human-In-The-Loop-And-Guardrails</li>
-</ul>
-<h2 id="rag-security">RAG Security</h2>
-<ul>
-<li>[x] RAG-Security/RAG-Pipeline-Threats   ⭐</li>
-<li>[x] RAG-Security/Vector-DB-And-Embedding-Security</li>
-</ul>
-<h2 id="ai-supply-chain">AI Supply Chain</h2>
-<ul>
-<li>[x] AI-Supply-Chain/Model-Provenance-And-Signing</li>
-<li>[x] AI-Supply-Chain/AI-SBOM-And-Model-Cards</li>
-<li>[x] AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes</li>
-</ul>
-<h2 id="defenses-operations">Defenses &amp; Operations</h2>
-<ul>
-<li>[x] Defenses/Input-Output-Guardrails   ⭐</li>
-<li>[x] Defenses/LLM-Red-Teaming</li>
-<li>[x] Defenses/AI-Detection-And-Monitoring</li>
-<li>[x] Defenses/Secure-AI-SDLC-SAIF</li>
-<li>[x] Defenses/Privacy-And-PII-Protection</li>
-</ul>
-<h2 id="governance">Governance</h2>
-<ul>
-<li>[x] Governance/AI-Governance-And-Compliance</li>
-</ul>
-<hr />
-<h3 id="other-senior-cybersec-areas-backlog-non-ai">Other Senior Cybersec areas — backlog (non-AI)</h3>
-<p>Done this round:<br />
-- [x] threat_modelling/ — added STRIDE, PASTA, Attack-Trees, DFD-Trust-Boundaries deep-dives (overview README already existed; now links them)<br />
-- [x] supply_chain/ — new area: SLSA, SBOM, Sigstore-And-Signing, Dependency-Confusion (+ area README)<br />
-- [x] cloud/Kubernetes-Security/ — consolidated hardening deep-dive (routed under Infra section in the navigator)</p>
-<p>P1 gap-fill round 2 (2026-07-07, high-depth via <code>.github/prompts/deep-dive-detailed.prompt.md</code>, ~5,000–7,900 words each):<br />
-- [x] cloud/GCP/ — full GCP security tree, 20 notes (Identity, Security, Networking, Operations, Compute, Storage) + area README; new "Cloud Security — GCP" P1 navigator section<br />
-- [x] detection/ — added Detection-Engineering, MITRE-ATTACK, Sigma-and-Detection-as-Code, EDR-XDR, Threat-Hunting, SIEM-Architecture-and-Log-Pipeline (6)<br />
-- [x] incident/ — added IR-Lifecycle-NIST, SOAR-and-Playbooks, DFIR-Forensic-Process, Tabletop-Exercises, Cloud-Incident-Response (5); section renamed "Incident Response &amp; DFIR"<br />
-- [x] web/Email-Security/ — SPF/DKIM/DMARC, Phishing-and-BEC, Secure-Email-Gateway (3); new "Email Security" navigator section</p>
-<p>P2/P3 backlog — COMPLETED 2026-07-11 (26 notes, full template, wired into index.html + indexv2.html):<br />
-- [x] Windows / Active Directory attack &amp; defense — os/Windows/: Active-Directory-Fundamentals, Kerberos-Attacks, NTLM-And-Relay-Attacks, Credential-Access-And-DCSync, Lateral-Movement-And-Persistence, AD-Hardening-And-Tiering (6)<br />
-- [x] DevSecOps / CI-CD pipeline security — devsecops/: overview, SAST-DAST-IAST, SCA-And-Dependency-Scanning, Secret-Scanning, Pipeline-Hardening (5); new navigator section<br />
-- [x] Vulnerability management — vuln_mgmt/: overview, CVSS-And-EPSS, Risk-Based-Prioritization, Patch-And-Remediation-Strategy (4); new navigator section<br />
-- [x] Threat intelligence — threat_intel/: overview, CTI-Lifecycle, Diamond-Model, Pyramid-Of-Pain, ATTACK-Driven-Intel (5); new navigator section<br />
-- [x] crypto/ — post-quantum cryptography — crypto/Post-Quantum-Cryptography (ML-KEM/ML-DSA/SLH-DSA, hybrid KEX, migration) (1)<br />
-- [x] Fuzzing &amp; vuln research — os/Exploitation/Fuzzing-And-Vuln-Research (1); Compliance frameworks — compliance/: overview, SOC2-And-ISO27001, NIST-CSF, PCI-DSS (4); new navigator section</p>
+
 
   <!-- ── Image zoom overlay ───────────────────────────── -->
   <div id="img-zoom-overlay">

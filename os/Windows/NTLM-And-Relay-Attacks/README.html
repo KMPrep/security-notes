@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI / Agentic AI Security — Note Creation Progress</title>
+  <title>NTLM, Pass-the-Hash & Relay Attacks</title>
 
   <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
   <script type="module">
@@ -289,90 +289,91 @@
   </style>
 </head>
 <body>
-  <p class="file-path">Source: ai_security\_PROGRESS.md</p>
-<h1 id="ai-agentic-ai-security-note-creation-progress">AI / Agentic AI Security — Note Creation Progress</h1>
-<blockquote>
-<p><strong>STATUS: COMPLETE</strong> — 27 topic notes + overview created 2026-07-06 for Senior Security Engineer prep.<br />
-Biggest gap identified vs the existing data-protection note set: no AI/ML/LLM/agentic security coverage. Now filled.</p>
-</blockquote>
-<p>Each checkbox is one leaf note at <code>ai_security/&lt;Section&gt;/&lt;Topic&gt;/README.md</code>.<br />
-Generate/update notes using <code>.github/prompts/ai-security-deep-dive.prompt.md</code> to keep structure consistent.<br />
-Frameworks anchoring every note: <strong>OWASP LLM Top 10</strong>, <strong>MITRE ATLAS</strong>, <strong>Google SAIF</strong>, <strong>NIST AI RMF</strong>.<br />
-All Mermaid blocks validated (first line = diagram type, closed, non-empty).</p>
-<h2 id="priority-tier-for-senior-security-roles">Priority tier (for senior security roles)</h2>
+  <p class="file-path">Source: os\Windows\NTLM-And-Relay-Attacks\README.md</p>
+<h1 id="ntlm-and-relay-attacks">NTLM, Pass-the-Hash &amp; Relay Attacks</h1>
+<p><strong>Category:</strong> Windows / Legacy Authentication Abuse<br />
+<strong>Key standards / frameworks:</strong> MS-NLMP (NTLM), MS-NRPC, MS-EFSRPC, MS-RPRN, MITRE ATT&amp;CK T1550.002 (Pass the Hash), T1557.001 (LLMNR/NBT-NS Poisoning and Relay)</p>
+
+<h2 id="overview">Overview</h2>
+<p>NTLM is Microsoft's legacy challenge-response authentication protocol, still present in nearly every AD environment as a fallback. Its core weakness is that the client's response is derived directly from the NT hash of the password, and the protocol by default provides no binding between the authentication and the channel it travels over. This lets attackers replay hashes, relay authentication to other services, and coerce machines into authenticating on demand.</p>
+<p>Unlike password cracking, pass-the-hash and relay do not require recovering plaintext; the hash or the live authentication itself is the currency. Combined with name-resolution poisoning and coercion, NTLM abuse is one of the most reliable paths from a foothold to privilege escalation and domain compromise.</p>
+
+<h2 id="how-it-works">How It Works</h2>
+
+<h3>NTLM Challenge-Response</h3>
+<p>Authentication is a three-message exchange: the client sends a NEGOTIATE, the server replies with a CHALLENGE containing a random nonce, and the client returns an AUTHENTICATE message containing a response computed from the nonce and the user's NT hash. The server (or the DC via Netlogon) validates the response. Because the NT hash alone produces the response, possession of the hash is equivalent to possession of the password for NTLM purposes, which is the basis of <strong>Pass-the-Hash</strong>.</p>
+
+<h3>Poisoning and Coercion</h3>
+<p>When Windows fails to resolve a name via DNS, it falls back to <strong>LLMNR</strong>, <strong>NBT-NS</strong>, and <strong>mDNS</strong> broadcasts. Tools like <strong>Responder</strong> answer these broadcasts, claiming to be the requested host and capturing the victim's NTLM authentication. Attackers can also actively <strong>coerce</strong> authentication: <strong>PetitPotam</strong> abuses MS-EFSRPC to force a machine (including a DC) to authenticate to an attacker, and the <strong>PrinterBug / SpoolSample</strong> abuses the MS-RPRN print spooler for the same effect.</p>
+
+<h3>NTLM Relay</h3>
+<p>Instead of cracking the captured authentication, the attacker <strong>relays</strong> it in real time to another service using tools like <code>ntlmrelayx</code>. If SMB signing is not required, they authenticate to file servers or execute code. Relaying to <strong>LDAP</strong> on a DC can grant RBCD or DCSync rights; relaying coerced DC authentication to <strong>AD CS web enrollment (ESC8)</strong> yields a certificate for the DC, which is then used to obtain a TGT. Signing and channel binding are what break these chains.</p>
+
+<pre class="mermaid">sequenceDiagram
+    participant V as Victim
+    participant R as Responder Attacker
+    participant T as Target Server
+    V->>R: LLMNR or NBT NS broadcast for a name
+    R->>V: I am that host send authentication
+    V->>R: NTLM AUTHENTICATE with hash response
+    R->>T: Relay the authentication
+    T->>R: Access granted as the victim
+</pre>
+
+<pre class="mermaid">flowchart TD
+    A[Coerce DC with PetitPotam] --> B[DC authenticates to attacker]
+    B --> C[Relay to AD CS web enrollment ESC8]
+    C --> D[Obtain certificate for the DC]
+    D --> E[Request TGT with certificate]
+    E --> F[Domain compromise]
+</pre>
+
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure / Attack</th><th>Root Cause</th><th>Impact</th><th>Likelihood</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Pass-the-Hash</td><td>NT hash equals password for NTLM, reused local admin hashes</td><td>Lateral movement without cracking any password</td><td>High</td></tr>
+<tr><td>2</td><td>LLMNR/NBT-NS/mDNS poisoning</td><td>Broadcast name resolution fallback enabled</td><td>Capture of NTLM authentication from any victim</td><td>High</td></tr>
+<tr><td>3</td><td>SMB relay</td><td>SMB signing not required on targets</td><td>Code execution as the relayed user</td><td>High</td></tr>
+<tr><td>4</td><td>PetitPotam coercion</td><td>MS-EFSRPC reachable and unauthenticated trigger</td><td>Forced DC authentication for relay</td><td>Medium</td></tr>
+<tr><td>5</td><td>PrinterBug / SpoolSample</td><td>Print Spooler service exposed over RPC</td><td>Forced machine authentication to attacker</td><td>Medium</td></tr>
+<tr><td>6</td><td>Relay to LDAP</td><td>LDAP signing and channel binding not enforced</td><td>RBCD or DCSync rights granted to attacker</td><td>Medium</td></tr>
+<tr><td>7</td><td>Relay to AD CS web enrollment ESC8</td><td>HTTP enrollment without Extended Protection</td><td>Certificate for DC leading to full compromise</td><td>Medium</td></tr>
+</tbody>
+</table>
+
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure</th><th>Mitigation</th><th>Layer / Where Applied</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Pass-the-Hash</td><td>LAPS for unique local admin passwords, Credential Guard, Protected Users</td><td>Endpoint credential hygiene</td></tr>
+<tr><td>2</td><td>Name-resolution poisoning</td><td>Disable LLMNR, NBT-NS, and mDNS via Group Policy</td><td>Network configuration</td></tr>
+<tr><td>3</td><td>SMB relay</td><td>Require SMB signing on all hosts</td><td>SMB protocol policy</td></tr>
+<tr><td>4</td><td>PetitPotam coercion</td><td>Patch, block EFSRPC, enable EPA on relay targets</td><td>DC and service hardening</td></tr>
+<tr><td>5</td><td>PrinterBug</td><td>Disable Print Spooler on DCs and servers</td><td>Service surface reduction</td></tr>
+<tr><td>6</td><td>Relay to LDAP</td><td>Enforce LDAP signing and LDAP channel binding</td><td>Directory service policy</td></tr>
+<tr><td>7</td><td>Relay to AD CS ESC8</td><td>Enable Extended Protection for Authentication, disable HTTP enrollment</td><td>AD CS configuration</td></tr>
+</tbody>
+</table>
+
+<h2 id="detection">Detection &amp; Telemetry</h2>
+<p>NTLM authentication events appear as Event ID <strong>4624</strong> (successful logon, LogonType 3 with Authentication Package NTLM) and <strong>4776</strong> (NTLM credential validation on the DC). A spike in 4776 events referencing many source workstations, or logons where the NTLM hash is used from an unexpected host, indicates pass-the-hash. Responder activity can be detected with LLMNR/NBT-NS honeypot listeners and by monitoring for unusual name-resolution responses. AD CS enrollment abuse surfaces in the CA audit log (certificate issued to an unexpected requester) and Event ID <strong>4886/4887</strong>. Coercion tools generate RPC calls to EFSRPC and spoolss endpoints that network sensors can flag.</p>
+
+<h2 id="key-takeaways">Key Takeaways</h2>
 <ul>
-<li><strong>P1</strong> — Prompt injection (direct + indirect), agentic tool-use, RAG threats, excessive agency, guardrails/defenses.</li>
-<li><strong>P2</strong> — Model supply chain, data/model poisoning, model extraction, LLM red teaming, MCP security.</li>
-<li><strong>P3</strong> — Adversarial examples, membership inference, governance/compliance.</li>
+<li>NTLM derives its response from the NT hash, so the hash is as good as the password; pass-the-hash needs no cracking.</li>
+<li>LLMNR, NBT-NS, and mDNS fallback let Responder harvest authentication passively; disabling them removes a major attack surface.</li>
+<li>Relay converts captured authentication into live access; SMB and LDAP signing plus Extended Protection break the relay chain.</li>
+<li>Coercion (PetitPotam, PrinterBug) forces even domain controllers to authenticate on demand, feeding relay attacks.</li>
+<li>Relaying to AD CS web enrollment (ESC8) is a reliable path to a DC certificate and full domain compromise.</li>
+<li>Unique local admin passwords via LAPS stop lateral pass-the-hash across identically configured machines.</li>
+<li>Event IDs 4624 (LogonType 3) and 4776, plus CA audit logs, are core NTLM and relay telemetry.</li>
 </ul>
-<h2 id="foundations">Foundations</h2>
-<ul>
-<li>[x] Foundations/Overview  → <code>ai_security/README.md</code></li>
-<li>[x] Foundations/LLM-Fundamentals-For-Security</li>
-<li>[x] Foundations/AI-Threat-Frameworks</li>
-</ul>
-<h2 id="llm-attacks">LLM Attacks</h2>
-<ul>
-<li>[x] LLM-Attacks/Prompt-Injection-Direct</li>
-<li>[x] LLM-Attacks/Prompt-Injection-Indirect   ⭐</li>
-<li>[x] LLM-Attacks/Jailbreaks</li>
-<li>[x] LLM-Attacks/Sensitive-Info-Disclosure</li>
-<li>[x] LLM-Attacks/Insecure-Output-Handling</li>
-<li>[x] LLM-Attacks/Training-Data-Poisoning</li>
-<li>[x] LLM-Attacks/Model-Extraction-And-Theft</li>
-<li>[x] LLM-Attacks/Membership-Inference-And-Inversion</li>
-<li>[x] LLM-Attacks/Adversarial-Examples-Evasion</li>
-</ul>
-<h2 id="agentic-ai">Agentic AI</h2>
-<ul>
-<li>[x] Agentic-AI/Agent-Architecture-Security</li>
-<li>[x] Agentic-AI/Tool-And-Function-Calling-Security   ⭐</li>
-<li>[x] Agentic-AI/Excessive-Agency</li>
-<li>[x] Agentic-AI/MCP-Security</li>
-<li>[x] Agentic-AI/Multi-Agent-Systems-Security</li>
-<li>[x] Agentic-AI/Human-In-The-Loop-And-Guardrails</li>
-</ul>
-<h2 id="rag-security">RAG Security</h2>
-<ul>
-<li>[x] RAG-Security/RAG-Pipeline-Threats   ⭐</li>
-<li>[x] RAG-Security/Vector-DB-And-Embedding-Security</li>
-</ul>
-<h2 id="ai-supply-chain">AI Supply Chain</h2>
-<ul>
-<li>[x] AI-Supply-Chain/Model-Provenance-And-Signing</li>
-<li>[x] AI-Supply-Chain/AI-SBOM-And-Model-Cards</li>
-<li>[x] AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes</li>
-</ul>
-<h2 id="defenses-operations">Defenses &amp; Operations</h2>
-<ul>
-<li>[x] Defenses/Input-Output-Guardrails   ⭐</li>
-<li>[x] Defenses/LLM-Red-Teaming</li>
-<li>[x] Defenses/AI-Detection-And-Monitoring</li>
-<li>[x] Defenses/Secure-AI-SDLC-SAIF</li>
-<li>[x] Defenses/Privacy-And-PII-Protection</li>
-</ul>
-<h2 id="governance">Governance</h2>
-<ul>
-<li>[x] Governance/AI-Governance-And-Compliance</li>
-</ul>
-<hr />
-<h3 id="other-senior-cybersec-areas-backlog-non-ai">Other Senior Cybersec areas — backlog (non-AI)</h3>
-<p>Done this round:<br />
-- [x] threat_modelling/ — added STRIDE, PASTA, Attack-Trees, DFD-Trust-Boundaries deep-dives (overview README already existed; now links them)<br />
-- [x] supply_chain/ — new area: SLSA, SBOM, Sigstore-And-Signing, Dependency-Confusion (+ area README)<br />
-- [x] cloud/Kubernetes-Security/ — consolidated hardening deep-dive (routed under Infra section in the navigator)</p>
-<p>P1 gap-fill round 2 (2026-07-07, high-depth via <code>.github/prompts/deep-dive-detailed.prompt.md</code>, ~5,000–7,900 words each):<br />
-- [x] cloud/GCP/ — full GCP security tree, 20 notes (Identity, Security, Networking, Operations, Compute, Storage) + area README; new "Cloud Security — GCP" P1 navigator section<br />
-- [x] detection/ — added Detection-Engineering, MITRE-ATTACK, Sigma-and-Detection-as-Code, EDR-XDR, Threat-Hunting, SIEM-Architecture-and-Log-Pipeline (6)<br />
-- [x] incident/ — added IR-Lifecycle-NIST, SOAR-and-Playbooks, DFIR-Forensic-Process, Tabletop-Exercises, Cloud-Incident-Response (5); section renamed "Incident Response &amp; DFIR"<br />
-- [x] web/Email-Security/ — SPF/DKIM/DMARC, Phishing-and-BEC, Secure-Email-Gateway (3); new "Email Security" navigator section</p>
-<p>P2/P3 backlog — COMPLETED 2026-07-11 (26 notes, full template, wired into index.html + indexv2.html):<br />
-- [x] Windows / Active Directory attack &amp; defense — os/Windows/: Active-Directory-Fundamentals, Kerberos-Attacks, NTLM-And-Relay-Attacks, Credential-Access-And-DCSync, Lateral-Movement-And-Persistence, AD-Hardening-And-Tiering (6)<br />
-- [x] DevSecOps / CI-CD pipeline security — devsecops/: overview, SAST-DAST-IAST, SCA-And-Dependency-Scanning, Secret-Scanning, Pipeline-Hardening (5); new navigator section<br />
-- [x] Vulnerability management — vuln_mgmt/: overview, CVSS-And-EPSS, Risk-Based-Prioritization, Patch-And-Remediation-Strategy (4); new navigator section<br />
-- [x] Threat intelligence — threat_intel/: overview, CTI-Lifecycle, Diamond-Model, Pyramid-Of-Pain, ATTACK-Driven-Intel (5); new navigator section<br />
-- [x] crypto/ — post-quantum cryptography — crypto/Post-Quantum-Cryptography (ML-KEM/ML-DSA/SLH-DSA, hybrid KEX, migration) (1)<br />
-- [x] Fuzzing &amp; vuln research — os/Exploitation/Fuzzing-And-Vuln-Research (1); Compliance frameworks — compliance/: overview, SOC2-And-ISO27001, NIST-CSF, PCI-DSS (4); new navigator section</p>
+
 
   <!-- ── Image zoom overlay ───────────────────────────── -->
   <div id="img-zoom-overlay">

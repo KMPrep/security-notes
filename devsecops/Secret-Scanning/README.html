@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI / Agentic AI Security — Note Creation Progress</title>
+  <title>Secret Scanning & Credential Hygiene</title>
 
   <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
   <script type="module">
@@ -289,90 +289,82 @@
   </style>
 </head>
 <body>
-  <p class="file-path">Source: ai_security\_PROGRESS.md</p>
-<h1 id="ai-agentic-ai-security-note-creation-progress">AI / Agentic AI Security — Note Creation Progress</h1>
-<blockquote>
-<p><strong>STATUS: COMPLETE</strong> — 27 topic notes + overview created 2026-07-06 for Senior Security Engineer prep.<br />
-Biggest gap identified vs the existing data-protection note set: no AI/ML/LLM/agentic security coverage. Now filled.</p>
-</blockquote>
-<p>Each checkbox is one leaf note at <code>ai_security/&lt;Section&gt;/&lt;Topic&gt;/README.md</code>.<br />
-Generate/update notes using <code>.github/prompts/ai-security-deep-dive.prompt.md</code> to keep structure consistent.<br />
-Frameworks anchoring every note: <strong>OWASP LLM Top 10</strong>, <strong>MITRE ATLAS</strong>, <strong>Google SAIF</strong>, <strong>NIST AI RMF</strong>.<br />
-All Mermaid blocks validated (first line = diagram type, closed, non-empty).</p>
-<h2 id="priority-tier-for-senior-security-roles">Priority tier (for senior security roles)</h2>
+  <p class="file-path">Source: devsecops\Secret-Scanning\README.md</p>
+<h1 id="secret-scanning-credential-hygiene">Secret Scanning &amp; Credential Hygiene</h1>
+<p><strong>Category:</strong> Application &amp; Supply Chain Security<br />
+<strong>Key standards / frameworks:</strong> OWASP Top 10 A07 Identification and Authentication Failures, CWE-798 Hardcoded Credentials, NIST SP 800-218 (SSDF PW.9), CIS Controls, cloud provider secrets guidance</p>
+
+<h2 id="overview">Overview</h2>
+<p>Secrets committed to source code are one of the most common and most damaging supply-chain exposures. API keys, database passwords, cloud access keys, and signing tokens end up in code, config files, notebooks, and CI logs, and once pushed to a shared or public repository they must be treated as compromised. Automated bots scrape GitHub for freshly committed AWS keys within seconds and use them to spin up crypto-mining fleets.</p>
+<p>The defining property of a git-committed secret is that deleting it does not remove it: git history retains every prior blob, so a secret removed in a later commit is still trivially recoverable from the object store, forks, clones, and mirrors. This is why the only correct response to a leaked secret is to <em>rotate</em> it, not merely delete the line. Secret scanning combines pattern and entropy detection with pre-commit hooks and platform push protection to catch secrets before and after they land.</p>
+
+<h2 id="how-it-works">How It Works</h2>
+<h3>Detection: patterns versus entropy</h3>
+<p>Two complementary techniques find secrets. Pattern (signature) detection matches known formats with regular expressions and structural checks, for example an AWS key prefix or a Stripe live-key shape, giving high precision for recognisable credentials. Entropy detection measures the randomness of a string using Shannon entropy to catch high-randomness blobs that match no known pattern, at the cost of more false positives. The strongest scanners add <em>validation</em>, actively testing a candidate credential against its provider API to confirm it is live before alerting.</p>
+
+<h3>Where scanning runs</h3>
+<p>Defence is layered across the developer workflow. Pre-commit hooks (detect-secrets, gitleaks) block a secret on the developer's machine before it is even committed. Server-side push protection (GitHub, GitLab) rejects a push containing a recognised secret so it never reaches the remote at all. Continuous repository and history scanning (TruffleHog, gitleaks) sweeps existing branches and full history to catch what earlier layers missed and to find secrets committed before scanning was adopted.</p>
+
+<pre class="mermaid">
+flowchart TD
+  A[Developer writes code with secret] --> B[Pre commit hook scans staged diff]
+  B --> C[Push to remote]
+  C --> D[Platform push protection scans]
+  D --> E[Continuous history scan]
+  E --> F[Secret detected]
+  F --> G[Rotate credential at provider]
+  G --> H[Move secret to manager]
+</pre>
+
+<h3>Rotate, do not just delete</h3>
+<p>When a secret is found, the incident sequence is fixed: revoke and rotate the credential at the provider first, then purge it from history if required, then investigate for abuse using access logs. Purging history with git filter-repo or BFG rewrites SHAs and breaks every clone and fork, and it still does not undo the exposure window, so rotation is always primary. Assume any secret that touched a remote has been harvested.</p>
+
+<h3>Moving secrets out of code</h3>
+<p>The durable fix is to stop putting secrets in code. Runtime secrets belong in a dedicated manager such as HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, or GCP Secret Manager, injected at deploy time and rotated automatically. For CI-to-cloud authentication, OIDC federation eliminates long-lived keys entirely by exchanging a short-lived signed workflow token for temporary cloud credentials, so there is no static secret to leak. This connects directly to <a href="../Pipeline-Hardening/README.html">CI/CD Pipeline Hardening</a>.</p>
+
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure / Attack</th><th>Root Cause</th><th>Impact</th><th>Likelihood</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Cloud key committed to public repo</td><td>Hardcoded credential with no pre-commit or push protection</td><td>Account takeover and resource abuse within minutes</td><td>High</td></tr>
+<tr><td>2</td><td>Secret deleted but recoverable from history</td><td>Team removed the line but never rotated</td><td>Live credential still exposed to anyone with history access</td><td>High</td></tr>
+<tr><td>3</td><td>High-entropy custom token missed</td><td>Pattern-only scanner with no entropy detection</td><td>Bespoke secrets leak undetected</td><td>Medium</td></tr>
+<tr><td>4</td><td>Secrets leaked through CI build logs</td><td>Credentials echoed or printed during builds</td><td>Exposure to everyone with pipeline read access</td><td>Medium</td></tr>
+<tr><td>5</td><td>Scanner false positives disabled entirely</td><td>Noise from test fixtures and example keys</td><td>Real secrets slip through an ignored tool</td><td>Medium</td></tr>
+<tr><td>6</td><td>Long-lived static keys stored in CI variables</td><td>No OIDC federation to short-lived credentials</td><td>Broad blast radius if the CI system is breached</td><td>High</td></tr>
+<tr><td>7</td><td>Secret in a fork or mirror after purge</td><td>History rewrite does not reach copies</td><td>Credential remains retrievable elsewhere</td><td>Low</td></tr>
+</tbody>
+</table>
+
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure</th><th>Mitigation</th><th>Layer / Where Applied</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Key committed to public repo</td><td>Pre-commit hooks plus platform push protection to block before remote</td><td>Developer machine and git host</td></tr>
+<tr><td>2</td><td>Delete without rotate</td><td>Mandatory rotation runbook that revokes at the provider first</td><td>Incident response process</td></tr>
+<tr><td>3</td><td>High-entropy secret missed</td><td>Combine entropy and pattern detection with active validation</td><td>Scanning engine config</td></tr>
+<tr><td>4</td><td>Secrets in build logs</td><td>Mask variables and scrub logs, never echo credentials</td><td>CI runner configuration</td></tr>
+<tr><td>5</td><td>Tool disabled from noise</td><td>Tune allowlists and baselines with detect-secrets audit</td><td>Scanner tuning</td></tr>
+<tr><td>6</td><td>Long-lived CI keys</td><td>Adopt OIDC federation for short-lived cloud credentials</td><td>CI-to-cloud trust config</td></tr>
+<tr><td>7</td><td>Secret in forks and mirrors</td><td>Treat rotation as primary; history purge is secondary cleanup</td><td>Provider and org policy</td></tr>
+</tbody>
+</table>
+
+<h2 id="key-takeaways">Key Takeaways</h2>
 <ul>
-<li><strong>P1</strong> — Prompt injection (direct + indirect), agentic tool-use, RAG threats, excessive agency, guardrails/defenses.</li>
-<li><strong>P2</strong> — Model supply chain, data/model poisoning, model extraction, LLM red teaming, MCP security.</li>
-<li><strong>P3</strong> — Adversarial examples, membership inference, governance/compliance.</li>
+<li>A secret pushed to a remote is compromised; automated scrapers weaponise leaked cloud keys within seconds.</li>
+<li>Deleting a secret does not remove it from git history, forks, or clones; rotation at the provider is the only real fix.</li>
+<li>Combine pattern detection for known formats with entropy detection for custom tokens, and validate to cut noise.</li>
+<li>Layer defences: pre-commit hooks, push protection, and continuous history scanning each catch what the others miss.</li>
+<li>gitleaks, TruffleHog, and detect-secrets are the workhorses; wire them into hooks and CI, not just ad hoc scans.</li>
+<li>Move runtime secrets into Vault or a cloud secrets manager and inject them at deploy time.</li>
+<li>Use OIDC federation so CI never holds long-lived cloud keys, eliminating the highest-value static secret.</li>
 </ul>
-<h2 id="foundations">Foundations</h2>
-<ul>
-<li>[x] Foundations/Overview  → <code>ai_security/README.md</code></li>
-<li>[x] Foundations/LLM-Fundamentals-For-Security</li>
-<li>[x] Foundations/AI-Threat-Frameworks</li>
-</ul>
-<h2 id="llm-attacks">LLM Attacks</h2>
-<ul>
-<li>[x] LLM-Attacks/Prompt-Injection-Direct</li>
-<li>[x] LLM-Attacks/Prompt-Injection-Indirect   ⭐</li>
-<li>[x] LLM-Attacks/Jailbreaks</li>
-<li>[x] LLM-Attacks/Sensitive-Info-Disclosure</li>
-<li>[x] LLM-Attacks/Insecure-Output-Handling</li>
-<li>[x] LLM-Attacks/Training-Data-Poisoning</li>
-<li>[x] LLM-Attacks/Model-Extraction-And-Theft</li>
-<li>[x] LLM-Attacks/Membership-Inference-And-Inversion</li>
-<li>[x] LLM-Attacks/Adversarial-Examples-Evasion</li>
-</ul>
-<h2 id="agentic-ai">Agentic AI</h2>
-<ul>
-<li>[x] Agentic-AI/Agent-Architecture-Security</li>
-<li>[x] Agentic-AI/Tool-And-Function-Calling-Security   ⭐</li>
-<li>[x] Agentic-AI/Excessive-Agency</li>
-<li>[x] Agentic-AI/MCP-Security</li>
-<li>[x] Agentic-AI/Multi-Agent-Systems-Security</li>
-<li>[x] Agentic-AI/Human-In-The-Loop-And-Guardrails</li>
-</ul>
-<h2 id="rag-security">RAG Security</h2>
-<ul>
-<li>[x] RAG-Security/RAG-Pipeline-Threats   ⭐</li>
-<li>[x] RAG-Security/Vector-DB-And-Embedding-Security</li>
-</ul>
-<h2 id="ai-supply-chain">AI Supply Chain</h2>
-<ul>
-<li>[x] AI-Supply-Chain/Model-Provenance-And-Signing</li>
-<li>[x] AI-Supply-Chain/AI-SBOM-And-Model-Cards</li>
-<li>[x] AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes</li>
-</ul>
-<h2 id="defenses-operations">Defenses &amp; Operations</h2>
-<ul>
-<li>[x] Defenses/Input-Output-Guardrails   ⭐</li>
-<li>[x] Defenses/LLM-Red-Teaming</li>
-<li>[x] Defenses/AI-Detection-And-Monitoring</li>
-<li>[x] Defenses/Secure-AI-SDLC-SAIF</li>
-<li>[x] Defenses/Privacy-And-PII-Protection</li>
-</ul>
-<h2 id="governance">Governance</h2>
-<ul>
-<li>[x] Governance/AI-Governance-And-Compliance</li>
-</ul>
-<hr />
-<h3 id="other-senior-cybersec-areas-backlog-non-ai">Other Senior Cybersec areas — backlog (non-AI)</h3>
-<p>Done this round:<br />
-- [x] threat_modelling/ — added STRIDE, PASTA, Attack-Trees, DFD-Trust-Boundaries deep-dives (overview README already existed; now links them)<br />
-- [x] supply_chain/ — new area: SLSA, SBOM, Sigstore-And-Signing, Dependency-Confusion (+ area README)<br />
-- [x] cloud/Kubernetes-Security/ — consolidated hardening deep-dive (routed under Infra section in the navigator)</p>
-<p>P1 gap-fill round 2 (2026-07-07, high-depth via <code>.github/prompts/deep-dive-detailed.prompt.md</code>, ~5,000–7,900 words each):<br />
-- [x] cloud/GCP/ — full GCP security tree, 20 notes (Identity, Security, Networking, Operations, Compute, Storage) + area README; new "Cloud Security — GCP" P1 navigator section<br />
-- [x] detection/ — added Detection-Engineering, MITRE-ATTACK, Sigma-and-Detection-as-Code, EDR-XDR, Threat-Hunting, SIEM-Architecture-and-Log-Pipeline (6)<br />
-- [x] incident/ — added IR-Lifecycle-NIST, SOAR-and-Playbooks, DFIR-Forensic-Process, Tabletop-Exercises, Cloud-Incident-Response (5); section renamed "Incident Response &amp; DFIR"<br />
-- [x] web/Email-Security/ — SPF/DKIM/DMARC, Phishing-and-BEC, Secure-Email-Gateway (3); new "Email Security" navigator section</p>
-<p>P2/P3 backlog — COMPLETED 2026-07-11 (26 notes, full template, wired into index.html + indexv2.html):<br />
-- [x] Windows / Active Directory attack &amp; defense — os/Windows/: Active-Directory-Fundamentals, Kerberos-Attacks, NTLM-And-Relay-Attacks, Credential-Access-And-DCSync, Lateral-Movement-And-Persistence, AD-Hardening-And-Tiering (6)<br />
-- [x] DevSecOps / CI-CD pipeline security — devsecops/: overview, SAST-DAST-IAST, SCA-And-Dependency-Scanning, Secret-Scanning, Pipeline-Hardening (5); new navigator section<br />
-- [x] Vulnerability management — vuln_mgmt/: overview, CVSS-And-EPSS, Risk-Based-Prioritization, Patch-And-Remediation-Strategy (4); new navigator section<br />
-- [x] Threat intelligence — threat_intel/: overview, CTI-Lifecycle, Diamond-Model, Pyramid-Of-Pain, ATTACK-Driven-Intel (5); new navigator section<br />
-- [x] crypto/ — post-quantum cryptography — crypto/Post-Quantum-Cryptography (ML-KEM/ML-DSA/SLH-DSA, hybrid KEX, migration) (1)<br />
-- [x] Fuzzing &amp; vuln research — os/Exploitation/Fuzzing-And-Vuln-Research (1); Compliance frameworks — compliance/: overview, SOC2-And-ISO27001, NIST-CSF, PCI-DSS (4); new navigator section</p>
+
 
   <!-- ── Image zoom overlay ───────────────────────────── -->
   <div id="img-zoom-overlay">

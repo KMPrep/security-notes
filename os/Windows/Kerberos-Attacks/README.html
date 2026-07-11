@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI / Agentic AI Security — Note Creation Progress</title>
+  <title>Kerberos Attacks — Roasting, Tickets, Delegation</title>
 
   <!-- Mermaid JS (CDN). Render lazily so very large pages stay scrollable. -->
   <script type="module">
@@ -289,90 +289,100 @@
   </style>
 </head>
 <body>
-  <p class="file-path">Source: ai_security\_PROGRESS.md</p>
-<h1 id="ai-agentic-ai-security-note-creation-progress">AI / Agentic AI Security — Note Creation Progress</h1>
-<blockquote>
-<p><strong>STATUS: COMPLETE</strong> — 27 topic notes + overview created 2026-07-06 for Senior Security Engineer prep.<br />
-Biggest gap identified vs the existing data-protection note set: no AI/ML/LLM/agentic security coverage. Now filled.</p>
-</blockquote>
-<p>Each checkbox is one leaf note at <code>ai_security/&lt;Section&gt;/&lt;Topic&gt;/README.md</code>.<br />
-Generate/update notes using <code>.github/prompts/ai-security-deep-dive.prompt.md</code> to keep structure consistent.<br />
-Frameworks anchoring every note: <strong>OWASP LLM Top 10</strong>, <strong>MITRE ATLAS</strong>, <strong>Google SAIF</strong>, <strong>NIST AI RMF</strong>.<br />
-All Mermaid blocks validated (first line = diagram type, closed, non-empty).</p>
-<h2 id="priority-tier-for-senior-security-roles">Priority tier (for senior security roles)</h2>
+  <p class="file-path">Source: os\Windows\Kerberos-Attacks\README.md</p>
+<h1 id="kerberos-attacks">Kerberos Attacks — Roasting, Tickets, Delegation</h1>
+<p><strong>Category:</strong> Windows / Authentication Protocol Abuse<br />
+<strong>Key standards / frameworks:</strong> RFC 4120 (Kerberos v5), MS-KILE, MS-SFU (delegation), MITRE ATT&amp;CK T1558 (Steal or Forge Kerberos Tickets), T1550.003 (Pass the Ticket)</p>
+
+<h2 id="overview">Overview</h2>
+<p>Kerberos is the default authentication protocol in Active Directory, but its design places enormous trust in the secrecy of account password hashes. Every ticket is encrypted with a key derived from an account secret, so an attacker who can crack, steal, or forge those keys can impersonate users and services without ever touching a password prompt. The attacks in this note exploit weak service credentials, missing pre-authentication, delegation misconfiguration, and the ability to forge tickets once a critical hash is known.</p>
+<p>These techniques span the kill chain from credential access to privilege escalation to domain-wide persistence, and most leave subtle rather than obvious traces, which is why targeted Kerberos telemetry matters.</p>
+
+<h2 id="how-it-works">How It Works</h2>
+
+<h3>Roasting Attacks</h3>
+<p><strong>Kerberoasting</strong> abuses the fact that any authenticated user can request a service ticket (TGS) for any SPN. The ticket is encrypted with the service account's password-derived key. If the attacker requests an RC4 (etype <code>0x17</code>) ticket, they can crack it offline with Hashcat mode 13100 to recover the plaintext service account password. <strong>AS-REP roasting</strong> targets accounts that have Kerberos pre-authentication disabled: the KDC returns an AS-REP whose encrypted portion is derived from the user's password, crackable offline with Hashcat mode 18200, and no domain credentials are needed to request it.</p>
+
+<h3>Ticket Forgery</h3>
+<p>A <strong>Golden Ticket</strong> is a fully forged TGT created with the <code>krbtgt</code> account hash. Because the KDC trusts anything encrypted with that key, the attacker sets arbitrary group memberships and lifetimes, granting domain-wide access that survives password resets of individual users. A <strong>Silver Ticket</strong> is a forged TGS for one specific service, signed with that service account's hash; it never contacts a DC, so it is stealthier but scoped to a single service. <strong>Overpass-the-hash</strong> (pass-the-key) converts a stolen NTLM hash or AES key into a legitimate Kerberos TGT, upgrading a hash into full Kerberos access.</p>
+
+<h3>Delegation Abuse</h3>
+<p><strong>Unconstrained delegation</strong> caches the TGT of any user who authenticates to the host, so compromising such a host plus coercing a DC to authenticate yields a DC TGT. <strong>Constrained delegation</strong> (S4U2Proxy) lets a service impersonate users to a defined SPN list, but the protocol transition can be abused to reach services the target never intended. <strong>Resource-based constrained delegation (RBCD)</strong> moves the trust to the target object; if an attacker can write the <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> attribute on a computer, they can impersonate any user, including Domain Admins, to that host.</p>
+
+<pre class="mermaid">sequenceDiagram
+    participant A as Attacker
+    participant KDC as Key Distribution Center
+    participant Crack as Offline Cracker
+    A->>KDC: TGS REQ for target SPN request RC4
+    KDC->>A: TGS REP encrypted with service key
+    A->>Crack: Feed hash to Hashcat mode 13100
+    Crack->>A: Recovered service account password
+</pre>
+
+<pre class="mermaid">flowchart TD
+    A[Obtain krbtgt hash] --> B[Forge Golden Ticket]
+    B --> C[Set arbitrary groups and lifetime]
+    C --> D[Present as legitimate TGT]
+    D --> E[Request service tickets anywhere]
+    E --> F[Domain wide persistent access]
+</pre>
+
+<h2 id="what-can-go-wrong">What Can Go Wrong</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure / Attack</th><th>Root Cause</th><th>Impact</th><th>Likelihood</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Kerberoasting</td><td>SPN on account with weak password and RC4 allowed</td><td>Offline crack of often-privileged service credentials</td><td>High</td></tr>
+<tr><td>2</td><td>AS-REP roasting</td><td>Pre-authentication disabled on user accounts</td><td>Password crack with no prior domain access</td><td>Medium</td></tr>
+<tr><td>3</td><td>Golden Ticket</td><td>krbtgt hash compromised</td><td>Forged TGTs, near-permanent domain persistence</td><td>Medium</td></tr>
+<tr><td>4</td><td>Silver Ticket</td><td>Single service account hash compromised</td><td>Stealthy forged access to that service without DC contact</td><td>Medium</td></tr>
+<tr><td>5</td><td>Overpass-the-hash</td><td>Stolen NTLM hash or AES key</td><td>Hash upgraded to full Kerberos TGT access</td><td>High</td></tr>
+<tr><td>6</td><td>Unconstrained delegation abuse</td><td>Legacy delegation flag plus authentication coercion</td><td>Capture of a Domain Controller TGT and domain takeover</td><td>Medium</td></tr>
+<tr><td>7</td><td>Resource-based constrained delegation abuse</td><td>Write access to msDS-AllowedToActOnBehalfOfOtherIdentity</td><td>Impersonation of any user to the target host</td><td>Medium</td></tr>
+</tbody>
+</table>
+
+<h2 id="mitigation-controls">Mitigation Controls</h2>
+<table>
+<thead>
+<tr><th>#</th><th>Failure</th><th>Mitigation</th><th>Layer / Where Applied</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Kerberoasting</td><td>Group managed service accounts, long random keys, disable RC4</td><td>Service account identity</td></tr>
+<tr><td>2</td><td>AS-REP roasting</td><td>Require Kerberos pre-authentication on all accounts</td><td>Account configuration</td></tr>
+<tr><td>3</td><td>Golden Ticket</td><td>Rotate krbtgt twice, protect DCs, add to Protected Users</td><td>Domain controllers</td></tr>
+<tr><td>4</td><td>Silver Ticket</td><td>Enforce AES, rotate service keys, enable PAC validation</td><td>Service host</td></tr>
+<tr><td>5</td><td>Overpass-the-hash</td><td>Credential Guard, Protected Users, disable RC4 and NTLM</td><td>Endpoint and identity</td></tr>
+<tr><td>6</td><td>Unconstrained delegation</td><td>Remove flag, mark Tier 0 accounts sensitive and cannot be delegated</td><td>Delegation configuration</td></tr>
+<tr><td>7</td><td>RBCD abuse</td><td>Restrict write ACLs on computer objects, monitor attribute changes</td><td>Object ACLs</td></tr>
+</tbody>
+</table>
+
+<h2 id="detection">Detection &amp; Telemetry</h2>
+<table>
+<thead>
+<tr><th>Event ID</th><th>Meaning</th><th>What To Watch</th></tr>
+</thead>
+<tbody>
+<tr><td>4768</td><td>Kerberos TGT requested (AS-REQ)</td><td>RC4 requests, AS-REP roasting patterns, anomalous lifetimes</td></tr>
+<tr><td>4769</td><td>Kerberos service ticket requested (TGS-REQ)</td><td>Encryption type 0x17 (RC4) and high-volume SPN requests</td></tr>
+<tr><td>4770</td><td>Service ticket renewed</td><td>Unusually long-lived tickets from forgery</td></tr>
+</tbody>
+</table>
+<p>Encryption-type downgrade to RC4 on accounts that otherwise use AES is a strong Kerberoasting signal. Deploying <strong>honeypot SPNs</strong> on decoy accounts that no legitimate service ever requests provides high-fidelity alerts, since any 4769 for that SPN is malicious. Golden Tickets often show a TGT with no preceding 4768, and mismatched domain or username fields in the PAC.</p>
+
+<h2 id="key-takeaways">Key Takeaways</h2>
 <ul>
-<li><strong>P1</strong> — Prompt injection (direct + indirect), agentic tool-use, RAG threats, excessive agency, guardrails/defenses.</li>
-<li><strong>P2</strong> — Model supply chain, data/model poisoning, model extraction, LLM red teaming, MCP security.</li>
-<li><strong>P3</strong> — Adversarial examples, membership inference, governance/compliance.</li>
+<li>Kerberoasting and AS-REP roasting turn weak account passwords into offline cracking targets; length and AES are the defense.</li>
+<li>The krbtgt hash is the master key of the domain; its compromise enables Golden Tickets and demands a double password rotation to remediate.</li>
+<li>Silver Tickets and overpass-the-hash trade breadth for stealth by forging or upgrading single-service or single-account access.</li>
+<li>All three delegation flavors are dangerous when misconfigured; RBCD write access on a computer object is a full impersonation primitive.</li>
+<li>Disabling RC4 and NTLM, enforcing AES, and using group managed service accounts remove most roasting and forgery opportunities.</li>
+<li>Events 4768 and 4769 with RC4 encryption types, plus honeypot SPNs, are the highest-value Kerberos detections.</li>
+<li>Mark Tier 0 accounts as sensitive and not delegatable, and add them to Protected Users to blunt delegation and ticket theft.</li>
 </ul>
-<h2 id="foundations">Foundations</h2>
-<ul>
-<li>[x] Foundations/Overview  → <code>ai_security/README.md</code></li>
-<li>[x] Foundations/LLM-Fundamentals-For-Security</li>
-<li>[x] Foundations/AI-Threat-Frameworks</li>
-</ul>
-<h2 id="llm-attacks">LLM Attacks</h2>
-<ul>
-<li>[x] LLM-Attacks/Prompt-Injection-Direct</li>
-<li>[x] LLM-Attacks/Prompt-Injection-Indirect   ⭐</li>
-<li>[x] LLM-Attacks/Jailbreaks</li>
-<li>[x] LLM-Attacks/Sensitive-Info-Disclosure</li>
-<li>[x] LLM-Attacks/Insecure-Output-Handling</li>
-<li>[x] LLM-Attacks/Training-Data-Poisoning</li>
-<li>[x] LLM-Attacks/Model-Extraction-And-Theft</li>
-<li>[x] LLM-Attacks/Membership-Inference-And-Inversion</li>
-<li>[x] LLM-Attacks/Adversarial-Examples-Evasion</li>
-</ul>
-<h2 id="agentic-ai">Agentic AI</h2>
-<ul>
-<li>[x] Agentic-AI/Agent-Architecture-Security</li>
-<li>[x] Agentic-AI/Tool-And-Function-Calling-Security   ⭐</li>
-<li>[x] Agentic-AI/Excessive-Agency</li>
-<li>[x] Agentic-AI/MCP-Security</li>
-<li>[x] Agentic-AI/Multi-Agent-Systems-Security</li>
-<li>[x] Agentic-AI/Human-In-The-Loop-And-Guardrails</li>
-</ul>
-<h2 id="rag-security">RAG Security</h2>
-<ul>
-<li>[x] RAG-Security/RAG-Pipeline-Threats   ⭐</li>
-<li>[x] RAG-Security/Vector-DB-And-Embedding-Security</li>
-</ul>
-<h2 id="ai-supply-chain">AI Supply Chain</h2>
-<ul>
-<li>[x] AI-Supply-Chain/Model-Provenance-And-Signing</li>
-<li>[x] AI-Supply-Chain/AI-SBOM-And-Model-Cards</li>
-<li>[x] AI-Supply-Chain/Poisoned-Dependencies-And-Finetunes</li>
-</ul>
-<h2 id="defenses-operations">Defenses &amp; Operations</h2>
-<ul>
-<li>[x] Defenses/Input-Output-Guardrails   ⭐</li>
-<li>[x] Defenses/LLM-Red-Teaming</li>
-<li>[x] Defenses/AI-Detection-And-Monitoring</li>
-<li>[x] Defenses/Secure-AI-SDLC-SAIF</li>
-<li>[x] Defenses/Privacy-And-PII-Protection</li>
-</ul>
-<h2 id="governance">Governance</h2>
-<ul>
-<li>[x] Governance/AI-Governance-And-Compliance</li>
-</ul>
-<hr />
-<h3 id="other-senior-cybersec-areas-backlog-non-ai">Other Senior Cybersec areas — backlog (non-AI)</h3>
-<p>Done this round:<br />
-- [x] threat_modelling/ — added STRIDE, PASTA, Attack-Trees, DFD-Trust-Boundaries deep-dives (overview README already existed; now links them)<br />
-- [x] supply_chain/ — new area: SLSA, SBOM, Sigstore-And-Signing, Dependency-Confusion (+ area README)<br />
-- [x] cloud/Kubernetes-Security/ — consolidated hardening deep-dive (routed under Infra section in the navigator)</p>
-<p>P1 gap-fill round 2 (2026-07-07, high-depth via <code>.github/prompts/deep-dive-detailed.prompt.md</code>, ~5,000–7,900 words each):<br />
-- [x] cloud/GCP/ — full GCP security tree, 20 notes (Identity, Security, Networking, Operations, Compute, Storage) + area README; new "Cloud Security — GCP" P1 navigator section<br />
-- [x] detection/ — added Detection-Engineering, MITRE-ATTACK, Sigma-and-Detection-as-Code, EDR-XDR, Threat-Hunting, SIEM-Architecture-and-Log-Pipeline (6)<br />
-- [x] incident/ — added IR-Lifecycle-NIST, SOAR-and-Playbooks, DFIR-Forensic-Process, Tabletop-Exercises, Cloud-Incident-Response (5); section renamed "Incident Response &amp; DFIR"<br />
-- [x] web/Email-Security/ — SPF/DKIM/DMARC, Phishing-and-BEC, Secure-Email-Gateway (3); new "Email Security" navigator section</p>
-<p>P2/P3 backlog — COMPLETED 2026-07-11 (26 notes, full template, wired into index.html + indexv2.html):<br />
-- [x] Windows / Active Directory attack &amp; defense — os/Windows/: Active-Directory-Fundamentals, Kerberos-Attacks, NTLM-And-Relay-Attacks, Credential-Access-And-DCSync, Lateral-Movement-And-Persistence, AD-Hardening-And-Tiering (6)<br />
-- [x] DevSecOps / CI-CD pipeline security — devsecops/: overview, SAST-DAST-IAST, SCA-And-Dependency-Scanning, Secret-Scanning, Pipeline-Hardening (5); new navigator section<br />
-- [x] Vulnerability management — vuln_mgmt/: overview, CVSS-And-EPSS, Risk-Based-Prioritization, Patch-And-Remediation-Strategy (4); new navigator section<br />
-- [x] Threat intelligence — threat_intel/: overview, CTI-Lifecycle, Diamond-Model, Pyramid-Of-Pain, ATTACK-Driven-Intel (5); new navigator section<br />
-- [x] crypto/ — post-quantum cryptography — crypto/Post-Quantum-Cryptography (ML-KEM/ML-DSA/SLH-DSA, hybrid KEX, migration) (1)<br />
-- [x] Fuzzing &amp; vuln research — os/Exploitation/Fuzzing-And-Vuln-Research (1); Compliance frameworks — compliance/: overview, SOC2-And-ISO27001, NIST-CSF, PCI-DSS (4); new navigator section</p>
+
 
   <!-- ── Image zoom overlay ───────────────────────────── -->
   <div id="img-zoom-overlay">
